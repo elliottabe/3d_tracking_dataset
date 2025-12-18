@@ -211,3 +211,5 @@ __marimo__/
 .github/
 .vscode/
 .claude/
+*.csv
+*.h5
