@@ -1,24 +1,28 @@
 name: 3d_tracking
 channels:
   - conda-forge
-  - menpo
 dependencies:
   - python=3.12
+  - pip
+
+  # core scientific stack
   - numpy
-  - matplotlib
   - pandas
-  - pip
+  - matplotlib
+
+  # dev / notebooks
   - black
-  - glew
-  - mesalib
-  - mesa-libgl-cos6-x86_64
-  - glfw3
   - ipykernel
+
+  # graphics / windowing
+  - glfw
+  - glew
+
+  # media
   - ffmpeg
-  - pip
+
   - pip:
       - hydra-core
-      - jax[cuda12]
       - h5py
       - natsort
       - nvidia-ml-py3
@@ -31,6 +35,8 @@ dependencies:
       - mujoco-mjx
       - ipywidgets
       - uv
-variables:             # Set MuJoCo environment variables
-  MUJOCO_GL: egl
-  PYOPENGL_PLATFORM: egl
+      - "jax[cpu]"
+
+variables:
+  # On macOS, GLFW is the usual working backend for MuJoCo rendering.
+  MUJOCO_GL: glfw
