@@ -482,7 +482,7 @@
                     <geom name="abdomen_7_collision" class="collision" size="0.0262" pos="-3.83e-05 0.0134 -0.0108" type="sphere"/>
                     <geom name="abdomen_7_lower" pos="0.000731 -0.0464 -0.174" quat="0.649012 0.276005 -0.276005 0.653012" material="lower" mesh="abdomen_7_lower"/>
                     <site name="abdomen_7_site" pos="0 0.025 -0.015" size="0.005" rgba="1 1 1 1"/>
-                    <site name="tracking[Abd_tip]" pos="0 0.035 0" size="0.005" rgba="1 1 0 1"/>
+                    <site name="tracking[Abd_tip]" pos="0 0.035 0" size="0.005" rgba="1 0 0 1"/>
                   </body>
                 </body>
               </body>
