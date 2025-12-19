@@ -81,7 +81,7 @@
           <geom type="box" rgba="0 0 0 0"/>
         </default>
         <default class="wing-fluid">
-          <geom type="ellipsoid" group="3" material="fluid" mass="0" fluidshape="ellipsoid" fluidcoef="0.00128 3.3207 0.4123 3.1670 1" />
+          <geom type="ellipsoid" group="3" fluidshape="ellipsoid" fluidcoef="0.00128 3.3207 0.4123 3.167 1" material="fluid"/>
         </default>
       </default>
       <default class="abdomen">
@@ -207,6 +207,7 @@
     <material name="blue" shininess="0.6" rgba="0.2 0.3 1 1"/>
     <material name="pink" rgba="0.6 0.3 1 1"/>
     <material name="groundplane" texture="groundplane" texuniform="true" texrepeat="5 5" reflectance="0.2"/>
+    <material name="fluid" rgba="0.46 0.07 0.07 1"/>
     <mesh name="head" file="assets/head_body.obj"/>
     <mesh name="head_red" file="assets/head_red.obj"/>
     <mesh name="head_ocelli" file="assets/head_ocelli.obj"/>
@@ -293,23 +294,59 @@
     <mesh name="coxa_T3_left" file="assets/coxa_T3_left_body.obj"/>
     <mesh name="coxa_T3_right" file="assets/coxa_T3_right_body.obj"/>
     <hfield name="hfield" size="5 5 0.25 0.1" file="assets/hfield.png"/>
-    <material name="fluid" rgba="0.46 0.07 0.07 1" />
   </asset>
 
   <worldbody>
-    <site name="aligned[Antenna_Base]" pos="0 0 0" size="0.005" group="3" rgba="1 0 0 1"/>
-    <site name="aligned[WingL_Base]" pos="0 0 0" size="0.005" group="3" rgba="0 0 1 1"/>
-    <site name="aligned[WingL_V12]" pos="0 0 0" size="0.005" group="3" rgba="0 0 1 1"/>
-    <site name="aligned[WingL_V13]" pos="0 0 0" size="0.005" group="3" rgba="0 0 1 1"/>
-    <site name="aligned[WingR_Base]" pos="0 0 0" size="0.005" group="3" rgba="0 0 1 1"/>
-    <site name="aligned[WingR_V12]" pos="0 0 0" size="0.005" group="3" rgba="0 0 1 1"/>
-    <site name="aligned[WingR_V13]" pos="0 0 0" size="0.005" group="3" rgba="0 0 1 1"/>
-    <site name="aligned[T1L_TaTip]" pos="0 0 0" size="0.005" group="3" rgba="0 1 0 1"/>
-    <site name="aligned[T1R_TaTip]" pos="0 0 0" size="0.005" group="3" rgba="0 1 0 1"/>
-    <site name="aligned[T2L_TaTip]" pos="0 0 0" size="0.005" group="3" rgba="0 1 0 1"/>
-    <site name="aligned[T2R_TaTip]" pos="0 0 0" size="0.005" group="3" rgba="0 1 0 1"/>
-    <site name="aligned[T3L_TaTip]" pos="0 0 0" size="0.005" group="3" rgba="0 1 0 1"/>
-    <site name="aligned[T3R_TaTip]" pos="0 0 0" size="0.005" group="3" rgba="0 1 0 1"/>
+    <site name="aligned[Antenna_Base]" pos="0 0 0" group="3" rgba="1 0 0 1"/>
+    <site name="aligned[WingL_base]" pos="0 0 0" group="3" rgba="0 0 1 1"/>
+    <site name="aligned[WingR_base]" pos="0 0 0" group="3" rgba="0 0 1 1"/>
+    <site name="aligned[T1L_TaTip]" pos="0 0 0" group="3" rgba="0 1 0 1"/>
+    <site name="aligned[T1R_TaTip]" pos="0 0 0" group="3" rgba="0 1 0 1"/>
+    <site name="aligned[T2L_TaTip]" pos="0 0 0" group="3" rgba="0 1 0 1"/>
+    <site name="aligned[T2R_TaTip]" pos="0 0 0" group="3" rgba="0 1 0 1"/>
+    <site name="aligned[T3L_TaTip]" pos="0 0 0" group="3" rgba="0 1 0 1"/>
+    <site name="aligned[T3R_TaTip]" pos="0 0 0" group="3" rgba="0 1 0 1"/>
+    <site name="aligned[Scutellum]" pos="0 0 0" group="3" rgba="0 1 0 1"/>
+    <site name="aligned[EyeL]" pos="0 0 0" group="3" rgba="0 1 0 1"/>
+    <site name="aligned[EyeR]" pos="0 0 0" group="3" rgba="0 1 0 1"/>
+    <site name="aligned[Abd_A4]" pos="0 0 0" group="3" rgba="0 1 0 1"/>
+    <site name="aligned[Abd_tip]" pos="0 0 0" group="3" rgba="0 1 0 1"/>
+    <site name="aligned[WingL_V12]" pos="0 0 0" group="3" rgba="0 0 1 1"/>
+    <site name="aligned[WingL_V13]" pos="0 0 0" group="3" rgba="0 0 1 1"/>
+    <site name="aligned[WingR_V12]" pos="0 0 0" group="3" rgba="0 0 1 1"/>
+    <site name="aligned[WingR_V13]" pos="0 0 0" group="3" rgba="0 0 1 1"/>
+    <site name="aligned[T1L_ThxCx]" pos="0 0 0" group="3" rgba="0 1 0 1"/>
+    <site name="aligned[T1L_Tro]" pos="0 0 0" group="3" rgba="0 1 0 1"/>
+    <site name="aligned[T1L_FeTi]" pos="0 0 0" group="3" rgba="0 1 0 1"/>
+    <site name="aligned[T1L_TiTa]" pos="0 0 0" group="3" rgba="0 1 0 1"/>
+    <site name="aligned[T1L_TaT1]" pos="0 0 0" group="3" rgba="0 1 0 1"/>
+    <site name="aligned[T1L_TaT3]" pos="0 0 0" group="3" rgba="0 1 0 1"/>
+    <site name="aligned[T1R_ThxCx]" pos="0 0 0" group="3" rgba="0 1 0 1"/>
+    <site name="aligned[T1R_Tro]" pos="0 0 0" group="3" rgba="0 1 0 1"/>
+    <site name="aligned[T1R_FeTi]" pos="0 0 0" group="3" rgba="0 1 0 1"/>
+    <site name="aligned[T1R_TiTa]" pos="0 0 0" group="3" rgba="0 1 0 1"/>
+    <site name="aligned[T1R_TaT1]" pos="0 0 0" group="3" rgba="0 1 0 1"/>
+    <site name="aligned[T1R_TaT3]" pos="0 0 0" group="3" rgba="0 1 0 1"/>
+    <site name="aligned[T2L_Tro]" pos="0 0 0" group="3" rgba="0 1 0 1"/>
+    <site name="aligned[T2L_FeTi]" pos="0 0 0" group="3" rgba="0 1 0 1"/>
+    <site name="aligned[T2L_TiTa]" pos="0 0 0" group="3" rgba="0 1 0 1"/>
+    <site name="aligned[T2L_TaT3]" pos="0 0 0" group="3" rgba="0 1 0 1"/>
+    <site name="aligned[T2L_TaT1]" pos="0 0 0" group="3" rgba="0 1 0 1"/>
+    <site name="aligned[T2R_Tro]" pos="0 0 0" group="3" rgba="0 1 0 1"/>
+    <site name="aligned[T2R_FeTi]" pos="0 0 0" group="3" rgba="0 1 0 1"/>
+    <site name="aligned[T2R_TiTa]" pos="0 0 0" group="3" rgba="0 1 0 1"/>
+    <site name="aligned[T2R_TaT3]" pos="0 0 0" group="3" rgba="0 1 0 1"/>
+    <site name="aligned[T2R_TaT1]" pos="0 0 0" group="3" rgba="0 1 0 1"/>
+    <site name="aligned[T3L_Tro]" pos="0 0 0" group="3" rgba="0 1 0 1"/>
+    <site name="aligned[T3L_FeTi]" pos="0 0 0" group="3" rgba="0 1 0 1"/>
+    <site name="aligned[T3L_TiTa]" pos="0 0 0" group="3" rgba="0 1 0 1"/>
+    <site name="aligned[T3L_TaT3]" pos="0 0 0" group="3" rgba="0 1 0 1"/>
+    <site name="aligned[T3L_TaT1]" pos="0 0 0" group="3" rgba="0 1 0 1"/>
+    <site name="aligned[T3R_Tro]" pos="0 0 0" group="3" rgba="0 1 0 1"/>
+    <site name="aligned[T3R_FeTi]" pos="0 0 0" group="3" rgba="0 1 0 1"/>
+    <site name="aligned[T3R_TiTa]" pos="0 0 0" group="3" rgba="0 1 0 1"/>
+    <site name="aligned[T3R_TaT3]" pos="0 0 0" group="3" rgba="0 1 0 1"/>
+    <site name="aligned[T3R_TaT1]" pos="0 0 0" group="3" rgba="0 1 0 1"/>
     <body name="thorax" childclass="body">
       <joint name="free" type="free" solreflimit="0.02" armature="0"/>
       <geom name="thorax" pos="-0.00791 0 -0.123" quat="0 0 0 -1" mass="0.00034" mesh="thorax"/>
@@ -319,6 +356,8 @@
       <site name="thorax" pos="0 0 0"/>
       <site name="hover_up_dir" pos="0 0 0.04" quat="0.915167 0 0.403074 0" size="0.005"/>
       <site name="tracking[Scutellum]" pos="0 0 0.02" size="0.005" rgba="1 0 0 1"/>
+      <site name="tracking[WingL_base]" pos="-0.00694 0.0432 0.0091" size="0.005" rgba="1 0 0 1"/>
+      <site name="tracking[WingR_base]" pos="-0.00694 -0.0432 0.0091" rgba="1 0 0 1"/>
       <camera name="track1" pos="0.6 0.6 0.22" quat="0.312189 0.221134 0.533323 0.754457" mode="trackcom"/>
       <camera name="track2" pos="0 -1.1 0.1" quat="0.707107 0.707107 0 0" mode="trackcom"/>
       <camera name="track3" pos="-0.9 -0.9 0.9" quat="0.820164 0.425085 -0.176035 -0.340068" mode="trackcom"/>
@@ -372,7 +411,6 @@
           <geom name="antenna_right_black" pos="-0.0153 -0.116 0.112" quat="-0.473882 0.634842 0.36391 0.489878" mass="0" material="black" mesh="antenna_right_black"/>
         </body>
       </body>
-      <site name="tracking[WingL_base]" pos="-0.00694 0.0432 0.0091" size="0.005" rgba="1 0 0 1"/>
       <body name="wing_left" childclass="wing" pos="-0.00694 0.0432 0.0091" quat="0.617147 -0.402096 -0.304072 -0.604144">
         <joint name="wing_yaw_left" class="yaw" pos="0 0 0" axis="0 0 1" springref="1.5"/>
         <joint name="wing_roll_left" class="roll" pos="0 0 0" axis="1 0 0" springref="0.7"/>
@@ -386,7 +424,6 @@
         <site name="tracking[WingL_V12]" pos="-0.005 -0.215 0.005" size="0.005" rgba="1 0 0 1"/>
         <site name="tracking[WingL_V13]" pos="0.02 -0.26 -0.02" size="0.005" rgba="1 0 0 1"/>
       </body>
-      <site name="tracking[WingR_base]" pos="-0.00694 -0.0432 0.0091" rgba="1 0 0 1"/>
       <body name="wing_right" childclass="wing" pos="-0.00694 -0.0432 0.0091" quat="-0.304072 0.604144 -0.617147 -0.402096">
         <joint name="wing_yaw_right" class="yaw" pos="0 0 0" axis="0 0 1" springref="1.5"/>
         <joint name="wing_roll_right" class="roll" pos="0 0 0" axis="1 0 0" springref="0.7"/>
@@ -486,6 +523,7 @@
                 <joint name="tarsus2_T1_left" class="extend_tarsus" pos="0 0 0" axis="1 0 0"/>
                 <geom name="tarsus2_T1_left" pos="0.00813 -0.0258 -0.118" quat="0.373037 0.231023 0.468046 -0.767076" mesh="tarsus_T1_2_left"/>
                 <geom name="tarsus2_T1_left_collision" class="collision" size="0.00159 0.00680591" pos="5.65e-05 0.0068 0.000278" quat="0.692515 0.721379 -0.00599381 0"/>
+                <site name="tracking[T1L_TaT1]" pos="0 0 0" size="0.005" rgba="1 0 0 1"/>
                 <body name="tarsus3_T1_left" pos="0.000113 0.0136 0.000556">
                   <joint name="tarsus3_T1_left" class="extend_tarsus" pos="0 0 0" axis="1 0 0"/>
                   <geom name="tarsus3_T1_left" pos="0.00802 -0.0394 -0.119" quat="-0.373037 -0.231023 -0.468046 0.767076" mesh="tarsus_T1_3_left"/>
@@ -536,6 +574,7 @@
                 <joint name="tarsus2_T1_right" class="extend_tarsus" pos="0 0 0" axis="1 0 0"/>
                 <geom name="tarsus2_T1_right" pos="0.0217 0.0179 0.118" quat="0.528967 -0.777951 -0.298981 -0.15999" mesh="tarsus_T1_2_right"/>
                 <geom name="tarsus2_T1_right_collision" class="collision" size="0.00159 0.00685206" pos="7.15e-05 -0.0068 -0.00084" quat="0.749197 -0.662311 -0.00696401 0"/>
+                <site name="tracking[T1R_TaT1]" pos="0 0 0" size="0.005" rgba="1 0 0 1"/>
                 <body name="tarsus3_T1_right" pos="0.000143 -0.0136 -0.00168">
                   <joint name="tarsus3_T1_right" class="extend_tarsus" pos="0 0 0" axis="1 0 0"/>
                   <geom name="tarsus3_T1_right" pos="0.0215 0.0316 0.12" quat="-0.528967 0.777951 0.298981 0.15999" mesh="tarsus_T1_3_right"/>
@@ -586,6 +625,7 @@
                 <joint name="tarsus2_T2_left" class="extend_tarsus" pos="0 0 0" axis="1 0 0"/>
                 <geom name="tarsus2_T2_left" pos="-0.0138 -0.0923 -0.104" quat="0.0774116 -0.0502075 0.342051 -0.93514" mesh="tarsus_T2_2_left"/>
                 <geom name="tarsus2_T2_left_collision" class="collision" size="0.00162 0.00890059" pos="1.21e-05 0.0089 0.0001015" quat="0.703063 0.711127 -0.000966812 0"/>
+                <site name="tracking[T2L_TaT1]" pos="0 0 0" size="0.005" rgba="1 0 0 1"/>
                 <body name="tarsus3_T2_left" pos="2.42e-05 0.0178 0.000203">
                   <joint name="tarsus3_T2_left" class="extend_tarsus" pos="0 0 0" axis="1 0 0"/>
                   <geom name="tarsus3_T2_left" pos="-0.0139 -0.11 -0.105" quat="-0.0774116 0.0502075 -0.342051 0.93514" mesh="tarsus_T2_3_left"/>
@@ -635,6 +675,7 @@
                 <joint name="tarsus2_T2_right" class="extend_tarsus" pos="0 0 0" axis="1 0 0"/>
                 <geom name="tarsus2_T2_right" pos="0.0132 0.0917 0.105" quat="0.344138 -0.934376 -0.0788317 0.0479193" mesh="tarsus_T2_2_right"/>
                 <geom name="tarsus2_T2_right_collision" class="collision" size="0.00162 0.00885432" pos="8.6e-06 -0.00885 -0.0002765" quat="0.718063 -0.695978 -0.000676318 0"/>
+                <site name="tracking[T2R_TaT1]" pos="0 0 0" size="0.005" rgba="1 0 0 1"/>
                 <body name="tarsus3_T2_right" pos="1.72e-05 -0.0177 -0.000553">
                   <joint name="tarsus3_T2_right" class="extend_tarsus" pos="0 0 0" axis="1 0 0"/>
                   <geom name="tarsus3_T2_right" pos="0.0132 0.109 0.105" quat="-0.344138 0.934376 0.0788317 -0.0479193" mesh="tarsus_T2_3_right"/>
@@ -684,6 +725,7 @@
                 <joint name="tarsus2_T3_left" class="extend_tarsus" pos="0 0 0" axis="1 0 0"/>
                 <geom name="tarsus2_T3_left" pos="-0.00915 -0.128 -0.11" quat="0.490129 0.138036 -0.251066 0.823217" mesh="tarsus_T3_2_left"/>
                 <geom name="tarsus2_T3_left_collision" class="collision" size="0.00168 0.00988171" pos="-3.985e-05 0.00985 0.00079" quat="0.678253 0.734822 0.00297286 0"/>
+                <site name="tracking[T3L_TaT1]" pos="0 0 0" size="0.005" rgba="1 0 0 1"/>
                 <body name="tarsus3_T3_left" pos="-7.97e-05 0.0197 0.00158">
                   <joint name="tarsus3_T3_left" class="extend_tarsus" pos="0 0 0" axis="1 0 0"/>
                   <geom name="tarsus3_T3_left" pos="-0.00907 -0.148 -0.112" quat="-0.490129 -0.138036 0.251066 -0.823217" mesh="tarsus_T3_3_left"/>
@@ -733,6 +775,7 @@
                 <joint name="tarsus2_T3_right" class="extend_tarsus" pos="0 0 0" axis="1 0 0"/>
                 <geom name="tarsus2_T3_right" pos="0.0087 0.128 0.111" quat="0.252072 -0.823235 0.49014 0.136039" mesh="tarsus_T3_2_right"/>
                 <geom name="tarsus2_T3_right_collision" class="collision" size="0.00168 0.00988166" pos="9.25e-05 -0.00985 -0.000785" quat="0.734656 -0.678409 -0.00637085 0"/>
+                <site name="tracking[T3R_TaT1]" pos="0 0 0" size="0.005" rgba="1 0 0 1"/>
                 <body name="tarsus3_T3_right" pos="0.000185 -0.0197 -0.00157">
                   <joint name="tarsus3_T3_right" class="extend_tarsus" pos="0 0 0" axis="1 0 0"/>
                   <geom name="tarsus3_T3_right" pos="0.00851 0.148 0.112" quat="-0.252072 0.823235 -0.49014 -0.136039" mesh="tarsus_T3_3_right"/>
