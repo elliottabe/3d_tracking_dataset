@@ -604,23 +604,22 @@
         <joint name="coxa_T2_left" class="extend_coxa_T2" pos="0 0 0" axis="1 0 0"/>
         <geom name="coxa_T2_left" pos="0.0287 0.0682 0.0404" quat="0.0722138 -0.126024 -0.917175 0.371071" mesh="coxa_T2_left"/>
         <geom name="coxa_T2_left_collision" class="collision" size="0.00788 0.007 0.0149" pos="0.000349 0.0143 -0.00216" quat="0.707107 -0.707107 0 0" type="ellipsoid"/>
-        <site name="tracking[T2L_Tro]" pos="0 0 0" size="0.005" rgba="1 0 0 1"/>
         <body name="femur_T2_left" pos="0 0.0281 0" quat="0 0 0.127971 0.991778">
           <joint name="femur_twist_T2_left" class="twist_femur_T2" pos="0 0 0" axis="0 1 0"/>
           <joint name="femur_T2_left" class="extend_femur_T2" pos="0 0 0" axis="1 0 0"/>
           <geom name="femur_T2_left" pos="-0.0287 -0.0285 0.0493" quat="0.250996 -0.956984 0.115998 -0.0878986" mesh="femur_T2_left"/>
           <geom name="femur_T2_left_collision" class="collision" size="0.00469 0.0381978" pos="0 0.040765 0.00219" quat="0.727095 0.686537 0 0"/>
-          <site name="tracking[T2L_FeTi]" pos="0 0 0" size="0.005" rgba="1 0 0 1"/>
+          <site name="tracking[T2L_Tro]" pos="0 0 0" size="0.005" rgba="1 0 0 1"/>
           <body name="tibia_T2_left" pos="0 0.083 0" quat="0.107037 0.083429 0.656228 -0.742258">
             <joint name="tibia_T2_left" class="extend_tibia_T2" pos="0 0 0" axis="1 0 0"/>
             <geom name="tibia_T2_left" pos="0.0202 -0.0418 0.116" quat="-0.088385 0.151974 0.869852 0.460922" mesh="tibia_T2_left"/>
             <geom name="tibia_T2_left_collision" class="collision" size="0.00352 0.0334115" pos="0 -0.0334 0.000875" quat="0.697786 -0.716306 0 0"/>
-            <site name="tracking[T2L_TiTa]" pos="0 0 0" size="0.005" rgba="1 0 0 1"/>
+            <site name="tracking[T2L_FeTi]" pos="0 0 0" size="0.005" rgba="1 0 0 1"/>
             <body name="tarsus_T2_left" pos="0 -0.0668 0.00175" quat="-0.148052 0.978341 -0.0216075 -0.14305">
               <joint name="tarsus_T2_left" class="extend_tarsus_T2" pos="0 0 0" axis="1 0 0"/>
               <geom name="tarsus_T2_left" pos="-0.0134 -0.0581 -0.103" quat="-0.0774116 0.0502075 -0.342051 0.93514" mesh="tarsus_T2_1_left"/>
               <geom name="tarsus_T2_left_collision" class="collision" size="0.00208 0.0171151" pos="0.0002355 0.0171 0.00068" quat="0.692917 0.720949 -0.00992885 0"/>
-              <site name="tracking[T2L_TaT3]" pos="0 0 0" size="0.005" rgba="1 0 0 1"/>
+              <site name="tracking[T2L_TiTa]" pos="0 0 0" size="0.005" rgba="1 0 0 1"/>
               <body name="tarsus2_T2_left" pos="0.000471 0.0342 0.00136">
                 <joint name="tarsus2_T2_left" class="extend_tarsus" pos="0 0 0" axis="1 0 0"/>
                 <geom name="tarsus2_T2_left" pos="-0.0138 -0.0923 -0.104" quat="0.0774116 -0.0502075 0.342051 -0.93514" mesh="tarsus_T2_2_left"/>
@@ -630,6 +629,7 @@
                   <joint name="tarsus3_T2_left" class="extend_tarsus" pos="0 0 0" axis="1 0 0"/>
                   <geom name="tarsus3_T2_left" pos="-0.0139 -0.11 -0.105" quat="-0.0774116 0.0502075 -0.342051 0.93514" mesh="tarsus_T2_3_left"/>
                   <geom name="tarsus3_T2_left_collision" class="collision" size="0.00149 0.00495717" pos="-1.555e-05 0.004955 0.000146" quat="0.696616 0.717441 0.0022515 0"/>
+                  <site name="tracking[T2L_TaT3]" pos="0 0 0" size="0.005" rgba="1 0 0 1"/>
                   <body name="tarsus4_T2_left" pos="-3.11e-05 0.00991 0.000292">
                     <joint name="tarsus4_T2_left" class="extend_tarsus" pos="0 0 0" axis="1 0 0"/>
                     <geom name="tarsus4_T2_left" pos="-0.0138 -0.12 -0.105" quat="0.0774116 -0.0502075 0.342051 -0.93514" mesh="tarsus_T2_4_left"/>
@@ -654,23 +654,22 @@
         <joint name="coxa_T2_right" class="extend_coxa_T2" pos="0 0 0" axis="1 0 0"/>
         <geom name="coxa_T2_right" pos="-0.0285 -0.0685 -0.0403" quat="-0.916076 0.374031 -0.0709059 0.12601" mesh="coxa_T2_right"/>
         <geom name="coxa_T2_right_collision" class="collision" size="0.00788 0.007 0.0149" pos="-0.000335 -0.0143 0.00206" quat="0.707107 0.707107 0 0" type="ellipsoid"/>
-        <site name="tracking[T2R_Tro]" pos="0 0 0" size="0.005" rgba="1 0 0 1"/>
         <body name="femur_T2_right" pos="0 -0.0282 0" quat="0 0 0.133998 0.990982">
           <joint name="femur_twist_T2_right" class="twist_femur_T2" pos="0 0 0" axis="0 1 0"/>
           <joint name="femur_T2_right" class="extend_femur_T2" pos="0 0 0" axis="1 0 0"/>
           <geom name="femur_T2_right" pos="0.0285 0.0282 -0.0496" quat="-0.115024 0.0871181 0.247051 -0.958199" mesh="femur_T2_right"/>
           <geom name="femur_T2_right_collision" class="collision" size="0.00469 0.0386471" pos="0 -0.041215 -0.00219" quat="0.68678 -0.726865 0 0"/>
-          <site name="tracking[T2R_FeTi]" pos="0 0 0" size="0.005" rgba="1 0 0 1"/>
+          <site name="tracking[T2R_Tro]" pos="0 0 0" size="0.005" rgba="1 0 0 1"/>
           <body name="tibia_T2_right" pos="0 -0.084 0" quat="0.0902385 0.103044 0.659281 -0.739315">
             <joint name="tibia_T2_right" class="extend_tibia_T2" pos="0 0 0" axis="1 0 0"/>
             <geom name="tibia_T2_right" pos="-0.0138 0.0423 -0.118" quat="-0.869879 -0.468935 -0.0639911 0.138981" mesh="tibia_T2_right"/>
             <geom name="tibia_T2_right_collision" class="collision" size="0.00353 0.0332615" pos="0 0.03325 -0.000875" quat="0.716347 0.697744 0 0"/>
-            <site name="tracking[T2R_TiTa]" pos="0 0 0" size="0.005" rgba="1 0 0 1"/>
+            <site name="tracking[T2R_FeTi]" pos="0 0 0" size="0.005" rgba="1 0 0 1"/>
             <body name="tarsus_T2_right" pos="0 0.0665 -0.00175" quat="0.150008 -0.982055 0.017201 0.113006">
               <joint name="tarsus_T2_right" class="extend_tarsus_T2" pos="0 0 0" axis="1 0 0"/>
               <geom name="tarsus_T2_right" pos="0.0128 0.0578 0.104" quat="-0.344136 0.934368 0.0789311 -0.0479189" mesh="tarsus_T2_1_right"/>
               <geom name="tarsus_T2_right_collision" class="collision" size="0.00208 0.0169588" pos="-0.0001835 -0.01695 -0.000515" quat="0.717763 -0.696247 0.00753754 0"/>
-              <site name="tracking[T2R_TaT3]" pos="0 0 0" size="0.005" rgba="1 0 0 1"/>
+              <site name="tracking[T2R_TiTa]" pos="0 0 0" size="0.005" rgba="1 0 0 1"/>
               <body name="tarsus2_T2_right" pos="-0.000367 -0.0339 -0.00103">
                 <joint name="tarsus2_T2_right" class="extend_tarsus" pos="0 0 0" axis="1 0 0"/>
                 <geom name="tarsus2_T2_right" pos="0.0132 0.0917 0.105" quat="0.344138 -0.934376 -0.0788317 0.0479193" mesh="tarsus_T2_2_right"/>
@@ -680,6 +679,7 @@
                   <joint name="tarsus3_T2_right" class="extend_tarsus" pos="0 0 0" axis="1 0 0"/>
                   <geom name="tarsus3_T2_right" pos="0.0132 0.109 0.105" quat="-0.344138 0.934376 0.0788317 -0.0479193" mesh="tarsus_T2_3_right"/>
                   <geom name="tarsus3_T2_right_collision" class="collision" size="0.00149 0.00494224" pos="2.535e-05 -0.00494 -0.0001465" quat="0.71751 -0.696539 -0.00357434 0"/>
+                  <site name="tracking[T2R_TaT3]" pos="0 0 0" size="0.005" rgba="1 0 0 1"/>
                   <body name="tarsus4_T2_right" pos="5.07e-05 -0.00988 -0.000293">
                     <joint name="tarsus4_T2_right" class="extend_tarsus" pos="0 0 0" axis="1 0 0"/>
                     <geom name="tarsus4_T2_right" pos="0.0132 0.119 0.106" quat="0.344138 -0.934376 -0.0788317 0.0479193" mesh="tarsus_T2_4_right"/>
@@ -704,23 +704,22 @@
         <joint name="coxa_T3_left" class="extend_coxa_T3" pos="0 0 0" axis="1 0 0"/>
         <geom name="coxa_T3_left" pos="0.0335 0.0507 -0.0666" quat="-0.498153 -0.0882271 0.529163 -0.681209" mesh="coxa_T3_left"/>
         <geom name="coxa_T3_left_collision" class="collision" size="0.007 0.00875 0.0166" pos="-0.00348 0.0116 -0.00687" quat="0.603112 -0.786145 -0.135025 0" type="ellipsoid"/>
-        <site name="tracking[T3L_Tro]" pos="0 0 0" size="0.005" rgba="1 0 0 1"/>
         <body name="femur_T3_left" pos="-0.00398 0.0232 -0.00668" quat="0 0 -0.66808 -0.744089">
           <joint name="femur_twist_T3_left" class="twist_femur_T3" pos="0 0 0" axis="0 1 0"/>
           <joint name="femur_T3_left" class="extend_femur_T3" pos="0 0 0" axis="1 0 0"/>
           <geom name="femur_T3_left" pos="-0.0375 -0.0625 0.0209" quat="0.153003 -0.849018 -0.398008 -0.312007" mesh="femur_T3_left"/>
           <geom name="femur_T3_left_collision" class="collision" size="0.00544 0.0370498" pos="-0.00263 0.039615 0.00219008" quat="0.727704 0.685891 0 0"/>
-          <site name="tracking[T3L_FeTi]" pos="0 0 0" size="0.005" rgba="1 0 0 1"/>
+          <site name="tracking[T3L_Tro]" pos="0 0 0" size="0.005" rgba="1 0 0 1"/>
           <body name="tibia_T3_left" pos="0 0.0779 1.6e-07" quat="-0.117044 -0.104039 -0.711266 0.685257">
             <joint name="tibia_T3_left" class="extend_tibia_T3" pos="0 0 0" axis="1 0 0"/>
             <geom name="tibia_T3_left" pos="0.0309 -0.0369 0.139" quat="-0.139988 0.378966 -0.769932 -0.493956" mesh="tibia_T3_left"/>
             <geom name="tibia_T3_left_collision" class="collision" size="0.00365 0.0344159" pos="0 -0.03725 -0.001625" quat="0.671541 -0.740967 0 0"/>
-            <site name="tracking[T3L_TiTa]" pos="0 0 0" size="0.005" rgba="1 0 0 1"/>
+            <site name="tracking[T3L_FeTi]" pos="0 0 0" size="0.005" rgba="1 0 0 1"/>
             <body name="tarsus_T3_left" pos="0 -0.0715 0.00175" quat="-0.229954 0.962806 -0.0329934 -0.137972">
               <joint name="tarsus_T3_left" class="extend_tarsus_T3" pos="0 0 0" axis="1 0 0"/>
               <geom name="tarsus_T3_left" pos="-0.00888 -0.0941 -0.109" quat="-0.490129 -0.138036 0.251066 -0.823217" mesh="tarsus_T3_1_left"/>
               <geom name="tarsus_T3_left_collision" class="collision" size="0.00234 0.0168583" pos="0.000135 0.01685 0.00051" quat="0.696329 0.7177 -0.00575012 0"/>
-              <site name="tracking[T3L_TaT3]" pos="0 0 0" size="0.005" rgba="1 0 0 1"/>
+              <site name="tracking[T3L_TiTa]" pos="0 0 0" size="0.005" rgba="1 0 0 1"/>
               <body name="tarsus2_T3_left" pos="0.00027 0.0337 0.00102">
                 <joint name="tarsus2_T3_left" class="extend_tarsus" pos="0 0 0" axis="1 0 0"/>
                 <geom name="tarsus2_T3_left" pos="-0.00915 -0.128 -0.11" quat="0.490129 0.138036 -0.251066 0.823217" mesh="tarsus_T3_2_left"/>
@@ -730,6 +729,7 @@
                   <joint name="tarsus3_T3_left" class="extend_tarsus" pos="0 0 0" axis="1 0 0"/>
                   <geom name="tarsus3_T3_left" pos="-0.00907 -0.148 -0.112" quat="-0.490129 -0.138036 0.251066 -0.823217" mesh="tarsus_T3_3_left"/>
                   <geom name="tarsus3_T3_left_collision" class="collision" size="0.00145 0.00555016" pos="4e-05 0.00555 -1.39e-05" quat="0.707992 0.706202 -0.00508975 0"/>
+                  <site name="tracking[T3L_TaT3]" pos="0 0 0" size="0.005" rgba="1 0 0 1"/>
                   <body name="tarsus4_T3_left" pos="8e-05 0.0111 -2.78e-05">
                     <joint name="tarsus4_T3_left" class="extend_tarsus" pos="0 0 0" axis="1 0 0"/>
                     <geom name="tarsus4_T3_left" pos="-0.00915 -0.159 -0.112" quat="0.490129 0.138036 -0.251066 0.823217" mesh="tarsus_T3_4_left"/>
@@ -754,23 +754,22 @@
         <joint name="coxa_T3_right" class="extend_coxa_T3" pos="0 0 0" axis="1 0 0"/>
         <geom name="coxa_T3_right" pos="-0.0344 -0.0507 0.0661" quat="0.533892 -0.672864 0.504898 0.0853828" mesh="coxa_T3_right"/>
         <geom name="coxa_T3_right_collision" class="collision" size="0.007 0.00875 0.0166" pos="0.00338 -0.0117 0.00678" quat="0.796965 0.595974 0.0982957 0" type="ellipsoid"/>
-        <site name="tracking[T3R_Tro]" pos="0 0 0" size="0.005" rgba="1 0 0 1"/>
         <body name="femur_T3_right" pos="0.00383 -0.0232 0.0066" quat="0 0 0.660695 0.750654">
           <joint name="femur_twist_T3_right" class="twist_femur_T3" pos="0 0 0" axis="0 1 0"/>
           <joint name="femur_T3_right" class="extend_femur_T3" pos="0 0 0" axis="1 0 0"/>
           <geom name="femur_T3_right" pos="0.0382 0.0625 -0.0196" quat="-0.397819 -0.321854 -0.151931 0.845616" mesh="femur_T3_right"/>
           <geom name="femur_T3_right_collision" class="collision" size="0.00544 0.0366505" pos="0.00263 -0.039215 -0.00218991" quat="0.685654 -0.727927 0 0"/>
-          <site name="tracking[T3R_FeTi]" pos="0 0 0" size="0.005" rgba="1 0 0 1"/>
+          <site name="tracking[T3R_Tro]" pos="0 0 0" size="0.005" rgba="1 0 0 1"/>
           <body name="tibia_T3_right" pos="0 -0.077 1.96e-07" quat="-0.121071 -0.111065 -0.708417 0.686404">
             <joint name="tibia_T3_right" class="extend_tibia_T3" pos="0 0 0" axis="1 0 0"/>
             <geom name="tibia_T3_right" pos="-0.0309 0.0355 -0.138" quat="-0.772183 -0.489116 0.136032 -0.382091" mesh="tibia_T3_right"/>
             <geom name="tibia_T3_right_collision" class="collision" size="0.00365 0.0347145" pos="0 0.03755 0.001625" quat="0.740683 0.671855 0 0"/>
-            <site name="tracking[T3R_TiTa]" pos="0 0 0" size="0.005" rgba="1 0 0 1"/>
+            <site name="tracking[T3R_FeTi]" pos="0 0 0" size="0.005" rgba="1 0 0 1"/>
             <body name="tarsus_T3_right" pos="0 0.0721 -0.00175" quat="0.222952 -0.964793 0.0312933 0.135971">
               <joint name="tarsus_T3_right" class="extend_tarsus_T3" pos="0 0 0" axis="1 0 0"/>
               <geom name="tarsus_T3_right" pos="0.00797 0.0941 0.109" quat="-0.252072 0.823235 -0.49014 -0.136039" mesh="tarsus_T3_1_right"/>
               <geom name="tarsus_T3_right_collision" class="collision" size="0.00234 0.0169149" pos="-0.000365 -0.0169 -0.00061" quat="0.719744 -0.694078 0.0149904 0"/>
-              <site name="tracking[T3R_TaT3]" pos="0 0 0" size="0.005" rgba="1 0 0 1"/>
+              <site name="tracking[T3R_TiTa]" pos="0 0 0" size="0.005" rgba="1 0 0 1"/>
               <body name="tarsus2_T3_right" pos="-0.00073 -0.0338 -0.00122">
                 <joint name="tarsus2_T3_right" class="extend_tarsus" pos="0 0 0" axis="1 0 0"/>
                 <geom name="tarsus2_T3_right" pos="0.0087 0.128 0.111" quat="0.252072 -0.823235 0.49014 0.136039" mesh="tarsus_T3_2_right"/>
@@ -780,6 +779,7 @@
                   <joint name="tarsus3_T3_right" class="extend_tarsus" pos="0 0 0" axis="1 0 0"/>
                   <geom name="tarsus3_T3_right" pos="0.00851 0.148 0.112" quat="-0.252072 0.823235 -0.49014 -0.136039" mesh="tarsus_T3_3_right"/>
                   <geom name="tarsus3_T3_right_collision" class="collision" size="0.00145 0.00550002" pos="9.9e-06 -0.0055 9.75e-06" quat="0.70648 -0.707732 -0.00127392 0"/>
+                  <site name="tracking[T3R_TaT3]" pos="0 0 0" size="0.005" rgba="1 0 0 1"/>
                   <body name="tarsus4_T3_right" pos="1.98e-05 -0.011 1.95e-05">
                     <joint name="tarsus4_T3_right" class="extend_tarsus" pos="0 0 0" axis="1 0 0"/>
                     <geom name="tarsus4_T3_right" pos="0.00849 0.159 0.112" quat="0.252072 -0.823235 0.49014 0.136039" mesh="tarsus_T3_4_right"/>
