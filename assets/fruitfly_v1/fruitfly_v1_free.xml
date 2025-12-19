@@ -355,9 +355,9 @@
       <geom name="thorax_black" pos="-0.00791 0 -0.123" quat="0 0 0 -1" mass="0" material="black" mesh="thorax_black"/>
       <site name="thorax" pos="0 0 0"/>
       <site name="hover_up_dir" pos="0 0 0.04" quat="0.915167 0 0.403074 0" size="0.005"/>
-      <site name="tracking[Scutellum]" pos="0 0 0.02" size="0.005" rgba="1 0 0 1"/>
+      <site name="tracking[Scutellum]" pos="-0.0475 0 0.0425" size="0.005" rgba="1 0 0 1"/>
       <site name="tracking[WingL_base]" pos="-0.00694 0.0432 0.0091" size="0.005" rgba="1 0 0 1"/>
-      <site name="tracking[WingR_base]" pos="-0.00694 -0.0432 0.0091" rgba="1 0 0 1"/>
+      <site name="tracking[WingR_base]" pos="-0.00694 -0.0432 0.0091" size="0.005" rgba="1 0 0 1"/>
       <camera name="track1" pos="0.6 0.6 0.22" quat="0.312189 0.221134 0.533323 0.754457" mode="trackcom"/>
       <camera name="track2" pos="0 -1.1 0.1" quat="0.707107 0.707107 0 0" mode="trackcom"/>
       <camera name="track3" pos="-0.9 -0.9 0.9" quat="0.820164 0.425085 -0.176035 -0.340068" mode="trackcom"/>
@@ -374,10 +374,10 @@
         <geom name="head_red" pos="4.11e-07 -0.0334 -0.132" quat="0.701738 0.0869676 0.0869676 -0.701738" material="red" mesh="head_red"/>
         <geom name="head_ocelli" pos="4.11e-07 -0.0334 -0.132" quat="0.701738 0.0869676 0.0869676 -0.701738" material="ocelli" mesh="head_ocelli"/>
         <geom name="head_black" pos="4.11e-07 -0.0334 -0.132" quat="0.701738 0.0869676 0.0869676 -0.701738" mass="0" material="black" mesh="head_black"/>
-        <site name="head" pos="0 0.0175 0.03" quat="0 0 0 1"/>
+        <!-- <site name="head" pos="0 0.0175 0.03" quat="0 0 0 1"/> -->
         <site name="tracking[Antenna_Base]" pos="0 0.035 0.01" size="0.005" rgba="1 0 0 1"/>
-        <site name="tracking[EyeL]" pos="-0.022 0.013 0" size="0.005" rgba="1 0 0 1"/>
-        <site name="tracking[EyeR]" pos="0.022 0.013 0" size="0.005" rgba="1 0 0 1"/>
+        <site name="tracking[EyeL]" pos="-0.03 0.0025 0.025" size="0.005" rgba="1 0 0 1"/>
+        <site name="tracking[EyeR]" pos="0.03 0.0025 0.025" size="0.005" rgba="1 0 0 1"/>
         <camera name="eye_right" pos="0.0219 0.0131 0" quat="0.473906 0.687863 -0.343932 -0.428915" fovy="140"/>
         <camera name="eye_left" pos="-0.0219 0.0131 0" quat="0.473906 0.687863 0.343932 0.428915" fovy="140"/>
         <body name="rostrum" pos="0 0.0368 -0.0235" quat="2.20085e-07 -1.21047e-07 0.192074 -0.98138">
@@ -461,7 +461,7 @@
               <geom name="abdomen_4" pos="0.000577 -0.0468 -0.146" quat="0.692624 0.136926 -0.137925 0.694623" mesh="abdomen_4"/>
               <geom name="abdomen_4_lower" pos="0.000577 -0.0468 -0.146" quat="0.692624 0.136926 -0.137925 0.694623" material="lower" mesh="abdomen_4_lower"/>
               <geom name="abdomen_4_collision" class="collision" size="0.0396 0.0176" pos="9.67e-05 0.015 -0.0192" quat="0.018604 -0.0235051 0.637138 0.770167" type="cylinder"/>
-              <site name="tracking[Abd_A4]" pos="0 0.015 0" size="0.005" rgba="1 0 0 1"/>
+              <site name="tracking[Abd_A4]" pos="0 0.015 0.025" size="0.005" rgba="1 0 0 1"/>
               <body name="abdomen_5" pos="0 0.0262 0" quat="0.999322 -0.0368119 -4.72152e-05 -0.000327105">
                 <joint name="abdomen_abduct_5" class="abduct_abdomen" pos="0 0 0" axis="0 0 1"/>
                 <joint name="abdomen_5" class="extend_abdomen" pos="0 0 0" axis="1 0 0"/>
@@ -482,7 +482,7 @@
                     <geom name="abdomen_7_collision" class="collision" size="0.0262" pos="-3.83e-05 0.0134 -0.0108" type="sphere"/>
                     <geom name="abdomen_7_lower" pos="0.000731 -0.0464 -0.174" quat="0.649012 0.276005 -0.276005 0.653012" material="lower" mesh="abdomen_7_lower"/>
                     <site name="abdomen_7_site" pos="0 0.025 -0.015" size="0.005" rgba="1 1 1 1"/>
-                    <site name="tracking[Abd_tip]" pos="0 0.02 0" size="0.005" rgba="1 0 0 1"/>
+                    <site name="tracking[Abd_tip]" pos="0 0.035 0" size="0.005" rgba="1 1 0 1"/>
                   </body>
                 </body>
               </body>
