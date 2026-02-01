@@ -81,9 +81,16 @@ def add_aligned_keypoint_sites_to_model(xml_path: str,
     # Color scheme for different body parts
     if color_coded:
         colors = {
-            'antenna': [1, 0, 0, 1],      # Red
-            'wing': [0, 0, 1, 1],         # Blue
-            'leg': [0, 1, 0, 1],          # Green
+            'antenna': [1.0, 0.0, 0.0, 1],      # Red
+            'eye': [1.0, 0.5, 0.0, 1],          # Orange (if eye nodes exist)
+            'wing_left': [0.0, 0.0, 1.0, 1],    # Blue
+            'wing_right': [0.0, 0.8, 1.0, 1],   # Cyan
+            'T1L': [0.0, 1.0, 0.0, 1],          # Green (front left)
+            'T1R': [0.5, 1.0, 0.0, 1],          # Lime (front right)
+            'T2L': [1.0, 1.0, 0.0, 1],          # Yellow (mid left)
+            'T2R': [1.0, 0.65, 0.0, 1],         # Orange (mid right)
+            'T3L': [0.8, 0.0, 0.8, 1],          # Purple (back left)
+            'T3R': [1.0, 0.0, 0.5, 1],          # Pink (back right)
         }
     else:
         # All green
@@ -93,12 +100,29 @@ def add_aligned_keypoint_sites_to_model(xml_path: str,
     for node_name, site_name in sites_to_add:
         # Determine color based on node name
         if color_coded:
-            if 'Antenna' in node_name:
+            # Check for specific body parts with detailed color coding
+            if 'Antenna' in node_name or 'antenna' in node_name.lower():
                 color = colors['antenna']
-            elif 'Wing' in node_name:
-                color = colors['wing']
-            else:  # Legs
-                color = colors['leg']
+            elif 'Eye' in node_name or 'eye' in node_name.lower():
+                color = colors['eye']
+            elif 'WingL' in node_name:
+                color = colors['wing_left']
+            elif 'WingR' in node_name:
+                color = colors['wing_right']
+            elif 'T1L' in node_name:
+                color = colors['T1L']
+            elif 'T1R' in node_name:
+                color = colors['T1R']
+            elif 'T2L' in node_name:
+                color = colors['T2L']
+            elif 'T2R' in node_name:
+                color = colors['T2R']
+            elif 'T3L' in node_name:
+                color = colors['T3L']
+            elif 'T3R' in node_name:
+                color = colors['T3R']
+            else:  # Fallback for any other parts
+                color = [0.5, 0.5, 0.5, 1]  # Gray
         else:
             color = colors['default']
 
@@ -172,6 +196,81 @@ def get_aligned_site_indices(mj_model: mujoco.MjModel,
             print(f"Warning: Could not find site {site_name}: {e}")
 
     return aligned_site_ids
+
+
+def set_aligned_site_colors(spec: mujoco.MjSpec, color_coded: bool = True) -> mujoco.MjSpec:
+    """
+    Set colors for aligned keypoint sites in a MuJoCo spec.
+    
+    This function modifies the RGBA colors of all 'aligned[*]' sites in the spec
+    based on body part (antenna, eyes, wings, legs).
+    
+    Args:
+        spec: MuJoCo spec object
+        color_coded: Whether to use different colors for different body parts
+                    If False, all sites will be green
+    
+    Returns:
+        Modified spec with updated site colors
+    """
+    # Define color scheme
+    if color_coded:
+        colors = {
+            'antenna': [1.0, 0.0, 0.0, 1],      # Red
+            'eye': [1.0, 0.5, 0.0, 1],          # Orange
+            'wing_left': [0.0, 0.0, 1.0, 1],    # Blue
+            'wing_right': [0.0, 0.8, 1.0, 1],   # Cyan
+            'T1L': [0.0, 1.0, 0.0, 1],          # Green (front left)
+            'T1R': [0.5, 1.0, 0.0, 1],          # Lime (front right)
+            'T2L': [1.0, 1.0, 0.0, 1],          # Yellow (mid left)
+            'T2R': [1.0, 0.65, 0.0, 1],         # Orange (mid right)
+            'T3L': [0.8, 0.0, 0.8, 1],          # Purple (back left)
+            'T3R': [1.0, 0.0, 0.5, 1],          # Pink (back right)
+            'default': [0.5, 0.5, 0.5, 1]       # Gray (fallback)
+        }
+    else:
+        colors = {'default': [0, 1, 0, 1]}
+    
+    # Find and update aligned sites
+    updated_count = 0
+    for site in spec.sites:
+        if 'aligned[' in site.name:
+            # Extract node name from 'aligned[NodeName]'
+            node_name = site.name.replace('aligned[', '').replace(']', '')
+            
+            # Determine color based on node name
+            if color_coded:
+                if 'Antenna' in node_name or 'antenna' in node_name.lower():
+                    color = colors['antenna']
+                elif 'Eye' in node_name or 'eye' in node_name.lower():
+                    color = colors['eye']
+                elif 'WingL' in node_name:
+                    color = colors['wing_left']
+                elif 'WingR' in node_name:
+                    color = colors['wing_right']
+                elif 'T1L' in node_name:
+                    color = colors['T1L']
+                elif 'T1R' in node_name:
+                    color = colors['T1R']
+                elif 'T2L' in node_name:
+                    color = colors['T2L']
+                elif 'T2R' in node_name:
+                    color = colors['T2R']
+                elif 'T3L' in node_name:
+                    color = colors['T3L']
+                elif 'T3R' in node_name:
+                    color = colors['T3R']
+                else:
+                    color = colors['default']
+            else:
+                color = colors['default']
+            
+            # Update site color
+            site.rgba = color
+            updated_count += 1
+    
+    print(f"✓ Updated colors for {updated_count} aligned sites")
+    return spec
 
 
 def remove_aligned_sites(xml_path: str,

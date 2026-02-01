@@ -39,6 +39,10 @@ sys.path.insert(0, str(project_root))
 try:
     import utils.io_dict_to_hdf5 as ioh5
     from utils.optimized_floor_alignment import jit_vectorized_procrustes_with_scaling
+    from utils.io import (
+        match_csv_to_skeleton,
+        reorder_keypoints_array,
+        reorder_skeleton_edges)
 except ModuleNotFoundError as e:
     print(f"Error: Could not import utilities. Make sure you're running from the project root.")
     print(f"Current directory: {Path.cwd()}")
@@ -47,103 +51,8 @@ except ModuleNotFoundError as e:
 
 
 # Helper functions (extracted from notebook workflow)
-def match_csv_to_skeleton(csv_names: List[str], skeleton_names: List[str]) -> Tuple[Dict, List[str]]:
-    """
-    Match CSV keypoint names to skeleton node names using exact and fuzzy matching.
-    
-    Returns:
-        matched: Dict mapping csv_name -> (skeleton_index, skeleton_name)
-        unmatched: List of unmatched CSV names
-    """
-    from difflib import SequenceMatcher
-    
-    def similarity(a: str, b: str) -> float:
-        return SequenceMatcher(None, a.lower(), b.lower()).ratio()
-    
-    matched = {}
-    unmatched = []
-    
-    for csv_name in csv_names:
-        # Try exact match first
-        if csv_name in skeleton_names:
-            idx = skeleton_names.index(csv_name)
-            matched[csv_name] = (idx, csv_name)
-            continue
-        
-        # Try fuzzy match
-        best_match = None
-        best_score = 0.0
-        
-        for skel_idx, skel_name in enumerate(skeleton_names):
-            score = similarity(csv_name, skel_name)
-            if score > best_score:
-                best_score = score
-                best_match = (skel_idx, skel_name)
-        
-        if best_score > 0.8:  # Threshold for fuzzy matching
-            matched[csv_name] = best_match
-        else:
-            unmatched.append(csv_name)
-    
-    return matched, unmatched
-
-
-def reorder_keypoints_array(kp_array: np.ndarray, 
-                             current_order: List[str], 
-                             target_order: List[str]) -> Tuple[np.ndarray, List[str]]:
-    """
-    Reorder keypoint array from current order to target order.
-    
-    Args:
-        kp_array: (T, N, 3) array
-        current_order: List of current node names
-        target_order: List of target node names
-    
-    Returns:
-        reordered_array: (T, N, 3) array in target order
-        reordered_names: Node names in target order
-    """
-    # Create mapping from name to current index
-    name_to_idx = {name: i for i, name in enumerate(current_order)}
-    
-    # Get indices in target order
-    reorder_indices = [name_to_idx[name] for name in target_order]
-    
-    # Reorder array
-    reordered_array = kp_array[:, reorder_indices, :]
-    
-    return reordered_array, target_order
-
-
-def reorder_skeleton_edges(edges: np.ndarray,
-                           current_order: List[str],
-                           target_order: List[str]) -> np.ndarray:
-    """
-    Reorder skeleton edges to match new node indices.
-    
-    Args:
-        edges: (E, 2) array of edge indices in current order
-        current_order: List of current node names
-        target_order: List of target node names
-    
-    Returns:
-        reordered_edges: (E, 2) array with updated indices
-    """
-    # Create mapping: old index -> new index
-    old_to_new = {}
-    for new_idx, name in enumerate(target_order):
-        old_idx = current_order.index(name)
-        old_to_new[old_idx] = new_idx
-    
-    # Remap edges
-    reordered_edges = []
-    for edge in edges:
-        start, end = edge
-        if start in old_to_new and end in old_to_new:
-            reordered_edges.append([old_to_new[start], old_to_new[end]])
-    
-    return np.array(reordered_edges)
-
+# Note: match_csv_to_skeleton, reorder_keypoints_array, and reorder_skeleton_edges
+# are now imported from utils.io
 
 def load_csv_data(csv_path: Path, frame_indices: Optional[np.ndarray] = None) -> Tuple[pd.DataFrame, List[str]]:
     """
@@ -225,8 +134,11 @@ def match_and_filter_skeleton(csv_kp_names: List[str],
     print("\nMatching CSV keypoints to skeleton nodes...")
     
     csv_to_skel_map, unmatched = match_csv_to_skeleton(csv_kp_names, skeleton['node_names'])
-    
-    print(f"Matched {len(csv_to_skel_map)}/{len(csv_kp_names)} keypoints")
+    print(f"\nMatched {len(csv_to_skel_map)}/{len(csv_kp_names)} CSV keypoints to skeleton nodes:")
+    for csv_name, (skel_idx, skel_name) in sorted(csv_to_skel_map.items(), key=lambda x: x[1][0]):
+        match_symbol = '✓' if csv_name == skel_name else '~'
+        print(f"  {match_symbol} CSV '{csv_name}' -> Skeleton[{skel_idx:2d}] '{skel_name}'")
+
     if unmatched:
         print(f"⚠ Unmatched: {unmatched}")
     
@@ -309,21 +221,28 @@ def match_to_mujoco_sites(filtered_node_names: List[str],
     spec = mujoco.MjSpec.from_file(str(xml_path))
     mj_model = spec.compile()
     
-    # Extract tracking site names
+    # Extract ALL site names and TRACKING site names separately
     all_site_names = [site.name for site in spec.sites]
-    mj_site_names_clean = [name.replace('tracking[', '').replace(']', '') for name in all_site_names]
     
-    print(f"Found {len(all_site_names)} sites in model")
+    # CRITICAL FIX: Only match against tracking sites, not aligned sites
+    tracking_site_names = [name for name in all_site_names if 'tracking[' in name]
+    tracking_names_clean = [name.replace('tracking[', '').replace(']', '') for name in tracking_site_names]
     
-    # Match skeleton nodes to sites
+    print(f"Found {len(all_site_names)} total sites in model ({len(tracking_site_names)} tracking sites)")
+    
+    # Match skeleton nodes to tracking sites
     skeleton_to_mujoco = {}
     matched_count = 0
     unmatched = []
     
     for node_name in filtered_node_names:
-        if node_name in mj_site_names_clean:
-            idx = mj_site_names_clean.index(node_name)
-            skeleton_to_mujoco[node_name] = idx
+        if node_name in tracking_names_clean:
+            # Find position in tracking list
+            tracking_idx = tracking_names_clean.index(node_name)
+            # Get the actual site index in the full model
+            actual_site_name = tracking_site_names[tracking_idx]
+            actual_site_idx = all_site_names.index(actual_site_name)
+            skeleton_to_mujoco[node_name] = actual_site_idx
             matched_count += 1
         else:
             unmatched.append(node_name)
@@ -389,50 +308,98 @@ def apply_procrustes_alignment(kp_array: np.ndarray,
                                 xml_node_names: List[str],
                                 skeleton_to_mujoco: Dict,
                                 exclude_indices: Optional[np.ndarray] = None,
-                                apply_scaling: bool = True) -> Tuple[np.ndarray, Dict]:
+                                apply_scaling: bool = True,
+                                preserve_translation: bool = True) -> Tuple[np.ndarray, Dict]:
     """
-    Apply Procrustes alignment to keypoint data.
+    Apply Procrustes scaling to match MuJoCo model's size.
+    
+    This function extracts the reference pose from the MuJoCo model at its rest
+    configuration and scales the keypoint data to match the model's dimensions.
+    
+    IMPORTANT: This preserves the original position and orientation of the data,
+    only adjusting the scale to match the model. This ensures:
+    - Keypoints maintain their original spatial relationships and motion dynamics
+    - Data is sized correctly to match the physical model dimensions
+    - Original global position and orientation are preserved for analysis
+    
+    The transformation parameters (rotation, scale, translation) are computed and
+    saved so the alignment can be inverted or reapplied if needed.
     
     Args:
         kp_array: Keypoint array (T, N, 3) in XML order
-        mj_model: MuJoCo model
+        mj_model: MuJoCo model (reference pose extracted from rest configuration)
         xml_node_names: Node names in XML order
         skeleton_to_mujoco: Mapping from node name to site index
         exclude_indices: Keypoint indices to exclude from alignment computation (e.g., wings, antenna)
-        apply_scaling: Whether to apply scaling
-    
+        apply_scaling: Whether to apply scaling (should be True for size matching)
+        preserve_translation: Whether to preserve original translation (position/orientation)
     Returns:
-        aligned_kp: Aligned keypoint array
-        alignment_info: Dictionary with alignment information
+        aligned_kp: Scaled keypoint array (T, N, 3) with original position/orientation
+        alignment_info: Dictionary with transformation parameters (rotation, scale, translation)
     """
     print(f"\nApplying Procrustes alignment (scaling={apply_scaling})...")
     
-    # Get reference pose from MuJoCo model
+    # Get reference pose from MuJoCo model's rest configuration
+    # This ensures keypoints are scaled and positioned to match the model
     mj_data = mujoco.MjData(mj_model)
-    mujoco.mj_forward(mj_model, mj_data)
+    mujoco.mj_forward(mj_model, mj_data)  # Compute positions at rest pose
     
-    site_subset = [skeleton_to_mujoco[name] for name in xml_node_names if name in skeleton_to_mujoco]
+    # Extract tracking site positions in the same order as keypoints
+    site_subset = []
+    missing_sites = []
+    for name in xml_node_names:
+        if name in skeleton_to_mujoco:
+            site_subset.append(skeleton_to_mujoco[name])
+        else:
+            missing_sites.append(name)
+    
+    if missing_sites:
+        print(f"⚠ WARNING: {len(missing_sites)} keypoints not found in skeleton_to_mujoco mapping:")
+        for name in missing_sites:
+            print(f"   - {name}")
+    
+    if len(site_subset) != len(xml_node_names):
+        raise ValueError(f"Reference pose extraction failed: expected {len(xml_node_names)} sites, got {len(site_subset)}")
+    
     ref_pose = mj_data.site_xpos[site_subset]
     
+    ref_center = np.mean(ref_pose, axis=0)
+    ref_span = np.max(ref_pose, axis=0) - np.min(ref_pose, axis=0)
     print(f"Reference pose shape: {ref_pose.shape}")
-    print(f"Reference origin: {ref_pose[0]}")
+    print(f"Reference center: {ref_center}")
+    print(f"Reference span: {ref_span}")
     
     # Convert to JAX arrays
     kp_jax = jnp.array(kp_array)
     ref_pose_jax = jnp.array(ref_pose)
-    
+
     # Apply alignment
     if exclude_indices is not None:
         print(f"Excluding {len(exclude_indices)} keypoints from alignment computation")
     
-    aligned_kp, procrustes_info = jit_vectorized_procrustes_with_scaling(
-        kp_jax,
-        ref_pose_jax,
-        use_clip_average=True,
-        exclude_indices=exclude_indices,
-        preserve_translation=True
-    )
-    
+    # Apply Procrustes scaling to match model size
+    # preserve_translation=True keeps original position/orientation (only scales)
+    # use_clip_average=True computes transformation from average pose (temporal consistency)
+    # NOTE: Pass data directly - Procrustes handles centering internally when preserve_translation=True
+    if preserve_translation:
+        aligned_kp, procrustes_info = jit_vectorized_procrustes_with_scaling(
+            kp_jax,
+            ref_pose_jax,
+            use_clip_average=True,
+            exclude_indices=exclude_indices,
+            preserve_translation=True  # Let Procrustes handle centering internally
+        )
+        
+        # Apply only the scale to original keypoints (Procrustes already computed correct scale)
+        aligned_kp = kp_jax * procrustes_info['scales'][:, None, None]  # Scale only
+    else: 
+        aligned_kp, procrustes_info = jit_vectorized_procrustes_with_scaling(
+            kp_jax,
+            ref_pose_jax,
+            use_clip_average=True,
+            exclude_indices=exclude_indices,
+            preserve_translation=False  # Allow full transformation (rotation, scale, translation)
+        )
     # Convert back to numpy
     aligned_kp = np.array(aligned_kp)
     
@@ -441,16 +408,130 @@ def apply_procrustes_alignment(kp_array: np.ndarray,
         'scales': float(procrustes_info['scales'][0]) if apply_scaling else 1.0,
         'rotation': np.array(procrustes_info['rotations'][0]),
         'translation': np.array(procrustes_info['translations'][0]),
-        'exclude_indices': exclude_indices.tolist() if exclude_indices is not None else None
     }
     
-    print(f"Alignment scale: {alignment_info['scales']:.4f}")
+    # Only add exclude_indices if it exists (avoid None in HDF5)
+    if exclude_indices is not None:
+        alignment_info['exclude_indices'] = exclude_indices.tolist()
     
-    # Apply scale to original data (if using scaling)
-    if apply_scaling:
-        kp_array = alignment_info['scales'] * kp_array
+    print(f"Scale factor applied: {alignment_info['scales']:.4f}")
     
-    return kp_array, alignment_info
+    # Check scaling quality
+    orig_center = np.mean(kp_array, axis=(0, 1))
+    scaled_center = np.mean(aligned_kp, axis=(0, 1))
+    data_span = np.max(aligned_kp[0], axis=0) - np.min(aligned_kp[0], axis=0)
+    scale_ratio = data_span / ref_span
+    print(f"Original data center: {orig_center}")
+    print(f"Scaled data center: {scaled_center} (should match original)")
+    print(f"Data/Model span ratio: {scale_ratio} (should be ~1.0)")
+    
+    # Return the scaled keypoints (original position/orientation preserved)
+    return aligned_kp, alignment_info
+
+
+def load_bouts_from_csv(bouts_csv_path: Path) -> List[Dict]:
+    """
+    Load bout information from CSV file.
+    
+    Expected CSV columns:
+        - bout_idx: Bout identifier
+        - start_frame: Start frame index
+        - end_frame: End frame index (inclusive)
+    
+    Args:
+        bouts_csv_path: Path to CSV file with bout information
+    
+    Returns:
+        List of dicts with keys: 'bout_idx', 'start_frame', 'end_frame'
+    """
+    print(f"\nLoading bout information from: {bouts_csv_path}")
+    
+    df = pd.read_csv(bouts_csv_path)
+    
+    # Check required columns
+    required_cols = ['bout_idx', 'start_frame', 'end_frame']
+    missing_cols = [col for col in required_cols if col not in df.columns]
+    if missing_cols:
+        raise ValueError(f"CSV missing required columns: {missing_cols}")
+    
+    # Convert to list of dicts
+    bouts = []
+    for _, row in df.iterrows():
+        bout_info = {
+            'bout_idx': int(row['bout_idx']),
+            'start_frame': int(row['start_frame']),
+            'end_frame': int(row['end_frame'])
+        }
+        bouts.append(bout_info)
+    
+    print(f"Loaded {len(bouts)} bouts")
+    print(f"  First bout: idx={bouts[0]['bout_idx']}, frames {bouts[0]['start_frame']}-{bouts[0]['end_frame']}")
+    if len(bouts) > 1:
+        print(f"  Last bout:  idx={bouts[-1]['bout_idx']}, frames {bouts[-1]['start_frame']}-{bouts[-1]['end_frame']}")
+    
+    return bouts
+
+
+def load_concatenated_bouts(csv_path: Path, 
+                            bouts: List[Dict],
+                            csv_kp_names: List[str],
+                            csv_to_filtered_idx: Dict,
+                            filtered_node_names: List[str]) -> Tuple[np.ndarray, List[Dict]]:
+    """
+    Load multiple bouts as a single concatenated array for efficient batch processing.
+    
+    Args:
+        csv_path: Path to CSV file with keypoint data
+        bouts: List of bout information dicts
+        csv_kp_names: List of CSV keypoint names
+        csv_to_filtered_idx: Mapping from CSV name to filtered skeleton index
+        filtered_node_names: List of filtered node names in order
+    
+    Returns:
+        concatenated_kp: Concatenated keypoint array (T_total, N, 3)
+        clip_info: List of dicts with 'bout_idx', 'start_idx', 'end_idx' for each bout
+    """
+    print(f"\nLoading {len(bouts)} bouts as concatenated array...")
+    
+    # Load full CSV once
+    df = pd.read_csv(csv_path, header=[0, 1])
+    df.columns = ['_'.join(col).strip() if isinstance(col, tuple) else col for col in df.columns.values]
+    xyz_columns = [col for col in df.columns if col.endswith(('_x', '_y', '_z'))]
+    kp_data = df[xyz_columns]
+    
+    # Create reordered column list (from reorder_csv_to_skeleton)
+    reordered_cols = [''] * len(filtered_node_names) * 3
+    for csv_name, new_idx in csv_to_filtered_idx.items():
+        reordered_cols[new_idx * 3] = f"{csv_name}_x"
+        reordered_cols[new_idx * 3 + 1] = f"{csv_name}_y"
+        reordered_cols[new_idx * 3 + 2] = f"{csv_name}_z"
+    
+    # Extract and concatenate bout data
+    bout_arrays = []
+    clip_info = []
+    current_idx = 0
+    
+    for bout in bouts:
+        frame_indices = np.arange(bout['start_frame'], bout['end_frame'])
+        bout_data = kp_data.iloc[frame_indices][reordered_cols]
+        bout_array = np.array(bout_data.values).reshape(-1, len(filtered_node_names), 3)
+        
+        bout_arrays.append(bout_array)
+        
+        clip_info.append({
+            'bout_idx': bout['bout_idx'],
+            'start_idx': current_idx,
+            'end_idx': current_idx + len(bout_array)
+        })
+        current_idx += len(bout_array)
+    
+    concatenated_kp = np.concatenate(bout_arrays, axis=0)
+    
+    print(f"Concatenated shape: {concatenated_kp.shape}")
+    print(f"  Total frames: {concatenated_kp.shape[0]}")
+    print(f"  Bouts: {len(bouts)}")
+    
+    return concatenated_kp, clip_info
 
 
 def save_to_hdf5(output_path: Path,
@@ -490,25 +571,286 @@ def save_to_hdf5(output_path: Path,
     print(f"  - skeleton_edges: {xml_edges.shape}")
 
 
+def process_single_bout(csv_path: Path,
+                        skeleton_path: Path,
+                        xml_path: Path,
+                        frame_start: Optional[int] = None,
+                        frame_end: Optional[int] = None,
+                        apply_alignment: bool = False,
+                        apply_scaling: bool = False,
+                        exclude_antenna: bool = False,
+                        exclude_wings: bool = False) -> Optional[Dict]:
+    """
+    Process a single bout of keypoint data.
+    
+    Args:
+        csv_path: Path to CSV file with keypoint data
+        skeleton_path: Path to skeleton JSON file
+        xml_path: Path to MuJoCo XML file
+        frame_start: Start frame index (None for all frames)
+        frame_end: End frame index (None for all frames)
+        apply_alignment: Whether to apply Procrustes alignment
+        apply_scaling: Whether to apply scaling during alignment
+        exclude_antenna: Whether to exclude antenna from alignment
+        exclude_wings: Whether to exclude wings from alignment
+    
+    Returns:
+        Dictionary with bout data if successful, None otherwise
+    """
+    try:
+        # 1. Load CSV data
+        frame_indices = None
+        if frame_start is not None and frame_end is not None:
+            frame_indices = np.arange(frame_start, frame_end)
+            print(f"\nExtracting frames {frame_start} to {frame_end}")
+        
+        kp_data_df, csv_kp_names = load_csv_data(csv_path, frame_indices)
+        
+        # 2. Load skeleton
+        skeleton, edges = load_skeleton(skeleton_path)
+        
+        # 3. Match and filter
+        filtered_node_names, filtered_edges, csv_to_filtered_idx = match_and_filter_skeleton(
+            csv_kp_names, skeleton, edges
+        )
+
+        # 4. Reorder CSV to skeleton order
+        kp_array = reorder_csv_to_skeleton(
+            kp_data_df, csv_kp_names, csv_to_filtered_idx, filtered_node_names
+        )
+        orig_kp_array = kp_array.copy()  # Keep original for reference
+        
+        # 5. Match to MuJoCo sites
+        skeleton_to_mujoco, mj_model, all_site_names = match_to_mujoco_sites(
+            filtered_node_names, xml_path
+        )
+        
+        # 6. Reorder to XML site order (REQUIRED FOR STAC)
+        kp_array_xml, xml_node_names, xml_edges = reorder_to_xml_site_order(
+            kp_array, filtered_node_names, filtered_edges, skeleton_to_mujoco
+        )
+        # IMPORTANT: Copy AFTER reordering so orig_keypoints are in same order as keypoints
+        orig_kp_xml = kp_array_xml.copy()
+        
+        # 7. Optional: Apply Procrustes alignment
+        alignment_info = None
+        if apply_alignment:
+            # Determine which keypoints to exclude from alignment
+            exclude_indices = []
+            if exclude_antenna:
+                # Antenna is typically index 0 after reordering
+                antenna_idx = [i for i, name in enumerate(xml_node_names) if 'Antenna' in name]
+                exclude_indices.extend(antenna_idx)
+            
+            if exclude_wings:
+                # Wing keypoints
+                wing_idx = [i for i, name in enumerate(xml_node_names) if 'Wing' in name]
+                exclude_indices.extend(wing_idx)
+            
+            exclude_arr = jnp.array(exclude_indices) if exclude_indices else None
+            
+            kp_array_xml, alignment_info = apply_procrustes_alignment(
+                kp_array_xml, mj_model, xml_node_names, skeleton_to_mujoco,
+                exclude_indices=exclude_arr, apply_scaling=apply_scaling, preserve_translation=True
+            )
+        
+        # 8. Build data dictionary
+        bout_data = {
+            'keypoints': kp_array_xml,
+            'orig_keypoints': orig_kp_xml,
+            'kp_names': xml_node_names,
+            'skeleton_edges': xml_edges,
+        }
+        
+        if alignment_info is not None:
+            bout_data['alignment_info'] = alignment_info
+        
+        print(f"✓ Processed bout data:")
+        print(f"  - keypoints: {kp_array_xml.shape}")
+        print(f"  - kp_names: {len(xml_node_names)}")
+        print(f"  - skeleton_edges: {xml_edges.shape}")
+        
+        return bout_data
+        
+    except Exception as e:
+        print(f"\n✖ Error processing bout: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
+
+def process_bouts_batch(csv_path: Path,
+                       skeleton_path: Path,
+                       xml_path: Path,
+                       bouts: List[Dict],
+                       apply_alignment: bool = False,
+                       apply_scaling: bool = False,
+                       exclude_antenna: bool = False,
+                       exclude_wings: bool = False) -> Optional[Dict]:
+    """
+    Efficiently process multiple bouts by loading skeleton/model once and 
+    processing all data as a concatenated array.
+    
+    This is much faster than processing each bout individually because:
+    - Skeleton and MuJoCo model loaded only once
+    - Matching/filtering operations done once
+    - JAX operations benefit from batch processing larger arrays
+    
+    Args:
+        csv_path: Path to CSV file with keypoint data
+        skeleton_path: Path to skeleton JSON file
+        xml_path: Path to MuJoCo XML file
+        bouts: List of bout information dicts
+        apply_alignment: Whether to apply Procrustes alignment
+        apply_scaling: Whether to apply scaling during alignment
+        exclude_antenna: Whether to exclude antenna from alignment
+        exclude_wings: Whether to exclude wings from alignment
+    
+    Returns:
+        Dictionary with all bout data keyed by 'bout_<idx>' if successful, None otherwise
+    """
+    try:
+        print("\n" + "="*80)
+        print("BATCH PREPROCESSING - LOADING COMMON DATA (done once)")
+        print("="*80)
+        
+        # 1. Load CSV and get keypoint names (just for matching)
+        print(f"\nLoading CSV header from: {csv_path}")
+        df_header = pd.read_csv(csv_path, header=[0, 1], nrows=0)
+        df_header.columns = ['_'.join(col).strip() if isinstance(col, tuple) else col 
+                            for col in df_header.columns.values]
+        xyz_columns = [col for col in df_header.columns if col.endswith(('_x', '_y', '_z'))]
+        csv_kp_names = [col[:-2] for col in xyz_columns if col.endswith('_x')]
+        print(f"Found {len(csv_kp_names)} keypoints in CSV")
+        
+        # 2. Load skeleton (once)
+        skeleton, edges = load_skeleton(skeleton_path)
+        
+        # 3. Match and filter (once)
+        filtered_node_names, filtered_edges, csv_to_filtered_idx = match_and_filter_skeleton(
+            csv_kp_names, skeleton, edges
+        )
+        
+        # 4. Load all bouts as concatenated array
+        concatenated_kp, clip_info = load_concatenated_bouts(
+            csv_path, bouts, csv_kp_names, csv_to_filtered_idx, filtered_node_names
+        )
+        orig_concatenated = concatenated_kp.copy()
+        
+        # 5. Match to MuJoCo sites (once)
+        skeleton_to_mujoco, mj_model, all_site_names = match_to_mujoco_sites(
+            filtered_node_names, xml_path
+        )
+        
+        # 6. Reorder to XML site order (once for all data)
+        print("\nReordering concatenated data to XML site order...")
+        kp_array_xml, xml_node_names, xml_edges = reorder_to_xml_site_order(
+            concatenated_kp, filtered_node_names, filtered_edges, skeleton_to_mujoco
+        )
+        # IMPORTANT: Copy AFTER reordering so orig_keypoints match keypoints order
+        orig_xml = kp_array_xml.copy()
+        
+        # 7. Determine which keypoints to exclude from alignment (do this once)
+        exclude_indices = []
+        if apply_alignment:
+            if exclude_antenna:
+                antenna_idx = [i for i, name in enumerate(xml_node_names) if 'Antenna' in name]
+                exclude_indices.extend(antenna_idx)
+                print(f"Excluding antenna keypoints: {antenna_idx}")
+            
+            if exclude_wings:
+                wing_idx = [i for i, name in enumerate(xml_node_names) if 'Wing' in name]
+                exclude_indices.extend(wing_idx)
+                print(f"Excluding wing keypoints: {wing_idx}")
+        
+        exclude_arr = jnp.array(exclude_indices) if exclude_indices else None
+        
+        # 8. Split back into individual bouts and apply alignment PER BOUT
+        print("\n" + "="*80)
+        print("PROCESSING INDIVIDUAL BOUTS WITH PER-BOUT ALIGNMENT")
+        print("="*80)
+        
+        all_bouts_dict = {}
+        for clip in clip_info:
+            bout_idx = clip['bout_idx']
+            start_idx = clip['start_idx']
+            end_idx = clip['end_idx']
+            
+            # Extract this bout's data
+            bout_kp = kp_array_xml[start_idx:end_idx]
+            bout_orig = orig_xml[start_idx:end_idx]
+            
+            # Apply Procrustes alignment PER BOUT (like the notebook does)
+            alignment_info = None
+            if apply_alignment:
+                print(f"\n  Processing bout_{bout_idx} ({bout_kp.shape[0]} frames)...")
+                aligned_bout_kp, alignment_info = apply_procrustes_alignment(
+                    bout_kp, mj_model, xml_node_names, skeleton_to_mujoco,
+                    exclude_indices=exclude_arr, apply_scaling=apply_scaling, preserve_translation=True
+                )
+            else:
+                aligned_bout_kp = bout_kp
+            
+            bout_data = {
+                'keypoints': aligned_bout_kp,
+                'orig_keypoints': bout_orig,
+                'kp_names': xml_node_names,
+                'skeleton_edges': xml_edges,
+            }
+            
+            if alignment_info is not None:
+                bout_data['alignment_info'] = alignment_info
+            
+            all_bouts_dict[f'bout_{bout_idx}'] = bout_data
+            
+            scale_str = f", scale={alignment_info['scales']:.6f}" if alignment_info else ""
+            print(f"  ✓ bout_{bout_idx}: {bout_data['keypoints'].shape[0]} frames{scale_str}")
+        
+        print(f"\n✓ Successfully split into {len(all_bouts_dict)} bouts")
+        
+        return all_bouts_dict
+        
+    except Exception as e:
+        print(f"\n✖ Error in batch processing: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
+
 def main():
-    parser = argparse.ArgumentParser(description='Preprocess keypoints for STAC IK')
-    parser.add_argument('--csv_path', type=str, required=True,
+    parser = argparse.ArgumentParser(
+        description='Preprocess keypoints for STAC IK',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Process single bout with frame range:
+  python preprocess_keypoints_for_ik.py \\
+      --csv_path data.csv --skeleton_path fly50.json --xml_path model.xml \\
+      --output_dir output/ --frame_start 100 --frame_end 300
+  
+  # Process multiple bouts from CSV:
+  python preprocess_keypoints_for_ik.py \\
+      --csv_path data.csv --skeleton_path fly50.json --xml_path model.xml \\
+      --output_dir output/ --bouts_csv walking_bouts_summary.csv
+        """)
+    parser.add_argument('--csv_path', type=str, default='/data2/users/eabe/datasets/Johnson_lab/free_walking/Predictions_3D_20260114-145343/data3D.csv',
                         help='Path to CSV file with keypoint data')
-    parser.add_argument('--skeleton_path', type=str, required=True,
+    parser.add_argument('--skeleton_path', type=str, default='data/fly50.json',
                         help='Path to skeleton JSON file (e.g., fly50.json)')
-    parser.add_argument('--xml_path', type=str, required=True,
+    parser.add_argument('--xml_path', type=str, default='assets/fruitfly_v1/fruitfly_v1_free.xml',
                         help='Path to MuJoCo XML file (e.g., fruitfly_v1_free.xml)')
-    parser.add_argument('--output_dir', type=str, required=True,
-                        help='Directory to save preprocessed data')
     parser.add_argument('--bout_name', type=str, default='preprocessed_bout',
-                        help='Name for output file (default: preprocessed_bout)')
+                        help='Name prefix for output files (default: preprocessed_bout)')
+    parser.add_argument('--bouts_csv', type=str, default='/data2/users/eabe/datasets/Johnson_lab/free_walking/Predictions_3D_20260114-145343/walking_bouts_summary.csv',
+                        help='CSV file with bout information (bout_idx, start_frame, end_frame). '
+                             'If provided, processes all bouts in CSV.')
     parser.add_argument('--frame_start', type=int, default=None,
-                        help='Start frame index for bout extraction')
+                        help='Start frame index for single bout extraction (ignored if --bouts_csv is used)')
     parser.add_argument('--frame_end', type=int, default=None,
-                        help='End frame index for bout extraction')
-    parser.add_argument('--apply_alignment', action='store_true',
+                        help='End frame index for single bout extraction (ignored if --bouts_csv is used)')
+    parser.add_argument('--apply_alignment', action='store_true', default=True,
                         help='Apply Procrustes alignment')
-    parser.add_argument('--apply_scaling', action='store_true',
+    parser.add_argument('--apply_scaling', action='store_true', default=True,
                         help='Apply scaling during alignment')
     parser.add_argument('--exclude_antenna', action='store_true',
                         help='Exclude antenna from alignment computation')
@@ -521,80 +863,97 @@ def main():
     csv_path = Path(args.csv_path)
     skeleton_path = Path(args.skeleton_path)
     xml_path = Path(args.xml_path)
-    output_dir = Path(args.output_dir)
+    output_dir = csv_path.parent
     output_dir.mkdir(parents=True, exist_ok=True)
     
     print("=" * 80)
     print("KEYPOINT PREPROCESSING FOR STAC IK")
     print("=" * 80)
     
-    # 1. Load CSV data
-    frame_indices = None
-    if args.frame_start is not None and args.frame_end is not None:
-        frame_indices = np.arange(args.frame_start, args.frame_end)
-        print(f"Extracting frames {args.frame_start} to {args.frame_end}")
-    
-    kp_data_df, csv_kp_names = load_csv_data(csv_path, frame_indices)
-    
-    # 2. Load skeleton
-    skeleton, edges = load_skeleton(skeleton_path)
-    
-    # 3. Match and filter
-    filtered_node_names, filtered_edges, csv_to_filtered_idx = match_and_filter_skeleton(
-        csv_kp_names, skeleton, edges
-    )
-    
-    # 4. Reorder CSV to skeleton order
-    kp_array = reorder_csv_to_skeleton(
-        kp_data_df, csv_kp_names, csv_to_filtered_idx, filtered_node_names
-    )
-    orig_kp_array = kp_array.copy()  # Keep original for reference
-    
-    # 5. Match to MuJoCo sites
-    skeleton_to_mujoco, mj_model, all_site_names = match_to_mujoco_sites(
-        filtered_node_names, xml_path
-    )
-    
-    # 6. Reorder to XML site order (REQUIRED FOR STAC)
-    kp_array_xml, xml_node_names, xml_edges = reorder_to_xml_site_order(
-        kp_array, filtered_node_names, filtered_edges, skeleton_to_mujoco
-    )
-    orig_kp_xml = orig_kp_array.copy()
-    
-    # 7. Optional: Apply Procrustes alignment
-    alignment_info = None
-    if args.apply_alignment:
-        # Determine which keypoints to exclude from alignment
-        exclude_indices = []
-        if args.exclude_antenna:
-            # Antenna is typically index 0 after reordering
-            antenna_idx = [i for i, name in enumerate(xml_node_names) if 'Antenna' in name]
-            exclude_indices.extend(antenna_idx)
+    # Determine processing mode: batch (from CSV) or single bout
+    if args.bouts_csv is not None:
+        # Batch processing mode - EFFICIENT VERSION
+        bouts_csv_path = Path(args.bouts_csv)
+        if not bouts_csv_path.exists():
+            print(f"❌ Error: Bouts CSV file not found: {bouts_csv_path}")
+            sys.exit(1)
         
-        if args.exclude_wings:
-            # Wing keypoints
-            wing_idx = [i for i, name in enumerate(xml_node_names) if 'Wing' in name]
-            exclude_indices.extend(wing_idx)
+        bouts = load_bouts_from_csv(bouts_csv_path)
         
-        exclude_arr = jnp.array(exclude_indices) if exclude_indices else None
+        print(f"\nProcessing {len(bouts)} bouts in EFFICIENT BATCH mode:")
+        print("  ✓ Loading skeleton/model once")
+        print("  ✓ Processing all frames together")
+        print("  ✓ Splitting back into individual bouts\n")
         
-        kp_array_xml, alignment_info = apply_procrustes_alignment(
-            kp_array_xml, mj_model, xml_node_names, skeleton_to_mujoco,
-            exclude_indices=exclude_arr, apply_scaling=args.apply_scaling
+        # Process all bouts efficiently in one go
+        all_bouts_dict = process_bouts_batch(
+            csv_path=csv_path,
+            skeleton_path=skeleton_path,
+            xml_path=xml_path,
+            bouts=bouts,
+            apply_alignment=args.apply_alignment,
+            apply_scaling=args.apply_scaling,
+            exclude_antenna=args.exclude_antenna,
+            exclude_wings=args.exclude_wings
         )
-    
-    # 8. Save to HDF5
-    output_path = output_dir / f"{args.bout_name}.h5"
-    save_to_hdf5(
-        output_path, kp_array_xml, orig_kp_xml, xml_node_names, xml_edges, alignment_info
-    )
-    
-    print("\n" + "=" * 80)
-    print("✓ PREPROCESSING COMPLETE")
-    print("=" * 80)
-    print(f"\nOutput saved to: {output_path}")
-    print(f"Keypoint order matches STAC config KP_NAMES")
-    print(f"Ready for STAC IK solver!")
+        
+        if all_bouts_dict is not None:
+            # Save all bouts as nested HDF5
+            output_path = output_dir / f"{args.bout_name}.h5"
+            print(f"\nSaving {len(all_bouts_dict)} bouts to: {output_path}")
+            ioh5.save(output_path, all_bouts_dict)
+            print(f"✓ Saved nested HDF5 with {len(all_bouts_dict)} bouts")
+            
+            # Summary
+            print("\n" + "=" * 80)
+            print("BATCH PREPROCESSING COMPLETE")
+            print("=" * 80)
+            print(f"\n✓ Successfully processed: {len(all_bouts_dict)}/{len(bouts)} bouts")
+            print(f"\nOutput saved to: {output_path}")
+            print(f"Structure: bout_<idx>/{{keypoints, orig_keypoints, kp_names, skeleton_edges}}")
+            print(f"Keypoint order matches STAC config KP_NAMES")
+            print(f"Ready for STAC IK solver!")
+        else:
+            print("\n❌ Batch preprocessing failed")
+            sys.exit(1)
+        
+    else:
+        # Single bout mode (original behavior)
+        if args.frame_start is None or args.frame_end is None:
+            print("\n⚠ Warning: Processing entire CSV (no frame range specified)")
+            print("   Use --frame_start and --frame_end to extract a specific bout")
+            print("   Or use --bouts_csv to process multiple bouts\n")
+        
+        bout_data = process_single_bout(
+            csv_path=csv_path,
+            skeleton_path=skeleton_path,
+            xml_path=xml_path,
+            frame_start=args.frame_start,
+            frame_end=args.frame_end,
+            apply_alignment=args.apply_alignment,
+            apply_scaling=args.apply_scaling,
+            exclude_antenna=args.exclude_antenna,
+            exclude_wings=args.exclude_wings
+        )
+        
+        if bout_data is not None:
+            # Wrap in nested dictionary for consistency
+            output_dict = {'bout_0': bout_data}
+            output_path = output_dir / f"{args.bout_name}.h5"
+            
+            print(f"\nSaving to: {output_path}")
+            ioh5.save(output_path, output_dict)
+            
+            print("\n" + "=" * 80)
+            print("✓ PREPROCESSING COMPLETE")
+            print("=" * 80)
+            print(f"\nOutput saved to: {output_path}")
+            print(f"Structure: bout_0/{{keypoints, orig_keypoints, kp_names, skeleton_edges}}")
+            print(f"Keypoint order matches STAC config KP_NAMES")
+            print(f"Ready for STAC IK solver!")
+        else:
+            print("\n❌ Preprocessing failed")
+            sys.exit(1)
 
 
 if __name__ == '__main__':

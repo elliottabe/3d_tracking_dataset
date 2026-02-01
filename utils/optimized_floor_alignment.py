@@ -73,16 +73,20 @@ def procrustes_align_jax_optimized_with_scaling(points, reference, exclude_indic
     points_all_centered = points - points_centroid  # Center using subset centroid
     points_all_scaled = points_all_centered * scale  # Scale all points
     
-    # Use conditional to choose centroid based on preserve_translation
-    # Keep original spatial position OR align to reference centroid
-    final_centroid = jax.lax.cond(
+    # When preserve_translation=True: only scale (no rotation)
+    # When preserve_translation=False: apply rotation + translation to reference frame
+    aligned_points = jax.lax.cond(
         preserve_translation,
-        lambda: points_centroid,  # Keep original position
-        lambda: ref_centroid      # Align to reference
+        lambda ps, pc: ps + pc,  # Only scale, keep original position
+        lambda ps, pc: (R @ ps.T).T + ref_centroid,  # Rotate + translate to reference
+        points_all_scaled, points_centroid
     )
-    aligned_points = (R @ points_all_scaled.T).T + final_centroid
-
-    translation = ref_centroid - points_centroid
+    
+    translation = jax.lax.cond(
+        preserve_translation,
+        lambda: jnp.zeros(3),  # No translation applied
+        lambda: ref_centroid - points_centroid  # Translation to reference
+    )
 
     return aligned_points, R, scale, translation
 
@@ -211,7 +215,8 @@ def vectorized_procrustes_alignment(kp_clip, ref_pose, allow_scaling=True, use_c
 
         # Apply the same transformation to all frames
         def apply_transform(frame):
-            points_centered = frame - jnp.mean(frame, axis=0)
+            frame_centroid = jnp.mean(frame, axis=0)
+            points_centered = frame - frame_centroid
             points_scaled = points_centered * scale
             aligned = (R @ points_scaled.T).T + jnp.mean(ref_pose, axis=0)
             return aligned
@@ -554,6 +559,7 @@ def batch_process_with_ground_contact(bout_dict, ref_pose,
         # Store results
         processed_bouts[bout_key] = {
             'aligned_kp': aligned_clip,
+            'scaled_kp': orig_kp*pipeline_info['scales'],
             'pipeline_info': pipeline_info
         }
 
