@@ -13,7 +13,7 @@ restore_checkpoint: ''
 defaults:
   - _self_
   # - anatomy: v1
-  - dataset: courtship
+  - dataset: free_walking
   - paths: workstation
   # - train: imitation
 

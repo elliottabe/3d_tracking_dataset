@@ -1,0 +1,4 @@
+name: free_walking
+env_name: free_walking
+version: analysis
+train: True

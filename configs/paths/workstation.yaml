@@ -7,4 +7,4 @@ save_dir: ${multirun_save_dir:${paths.base_dir},${run_id}}
 log_dir:  ${paths.save_dir}/logs/
 ckpt_dir: ${paths.save_dir}/ckpt/
 fig_dir:  ${paths.save_dir}/figures/
-data_dir: /data2/users/${paths.user}/datasets/Johnson_lab/${dataset.name}/
+data_dir: /data2/users/${paths.user}/datasets/Johnson_lab/${dataset.name}/${version}

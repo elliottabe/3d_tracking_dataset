@@ -458,7 +458,7 @@ def load_bouts_from_csv(bouts_csv_path: Path) -> List[Dict]:
     bouts = []
     for _, row in df.iterrows():
         bout_info = {
-            'bout_idx': int(row['bout_idx']),
+            'bout_idx': int(row['bout_idx']-1),
             'start_frame': int(row['start_frame']),
             'end_frame': int(row['end_frame'])
         }
