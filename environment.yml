@@ -1,10 +1,11 @@
 name: 3d_tracking
 channels:
+  - rapidsai
   - conda-forge
   - menpo
 dependencies:
   - python=3.12
-  - numpy
+  - numpy=2.2.6
   - matplotlib
   - pandas
   - pip
@@ -15,10 +16,13 @@ dependencies:
   - glfw3
   - ipykernel
   - ffmpeg
+  - rapids=25.12
+  - cuda-version>=12.2,<=12.9
+  - scikit-learn
+  - jax
   - pip
   - pip:
       - hydra-core
-      - jax[cuda12]
       - h5py
       - natsort
       - nvidia-ml-py3

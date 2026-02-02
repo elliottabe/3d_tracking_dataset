@@ -172,6 +172,9 @@ def reorganize_stac_by_bouts(
     for key in name_keys:
         bout_dict['info'][key] = stac_data[key]
     
+    # Store clip_lengths in 'info' for future reference
+    bout_dict['info']['clip_lengths'] = clip_lengths
+    
     # Compute frame ranges for each bout based on padding mode
     frame_ranges = []
     if is_padded:

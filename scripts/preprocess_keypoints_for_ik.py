@@ -32,7 +32,7 @@ import jax.numpy as jnp
 import mujoco
 
 # Add project root to path
-project_root = Path(__file__).parent.resolve()
+project_root = Path(__file__).parent.parent.resolve()
 sys.path.insert(0, str(project_root))
 
 # Import utilities
@@ -783,7 +783,7 @@ def process_bouts_batch(csv_path: Path,
             # Apply Procrustes alignment PER BOUT (like the notebook does)
             alignment_info = None
             if apply_alignment:
-                print(f"\n  Processing bout_{bout_idx} ({bout_kp.shape[0]} frames)...")
+                print(f"\n  Processing bout_{bout_idx:03d} ({bout_kp.shape[0]} frames)...")
                 aligned_bout_kp, alignment_info = apply_procrustes_alignment(
                     bout_kp, mj_model, xml_node_names, skeleton_to_mujoco,
                     exclude_indices=exclude_arr, apply_scaling=apply_scaling, preserve_translation=True
@@ -801,10 +801,10 @@ def process_bouts_batch(csv_path: Path,
             if alignment_info is not None:
                 bout_data['alignment_info'] = alignment_info
             
-            all_bouts_dict[f'bout_{bout_idx}'] = bout_data
+            all_bouts_dict[f'bout_{bout_idx:03d}'] = bout_data
             
             scale_str = f", scale={alignment_info['scales']:.6f}" if alignment_info else ""
-            print(f"  ✓ bout_{bout_idx}: {bout_data['keypoints'].shape[0]} frames{scale_str}")
+            print(f"  ✓ bout_{bout_idx:03d}: {bout_data['keypoints'].shape[0]} frames{scale_str}")
         
         print(f"\n✓ Successfully split into {len(all_bouts_dict)} bouts")
         

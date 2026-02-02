@@ -22,7 +22,7 @@ import mujoco
 from mujoco import mjx
 
 # Add project root to path
-project_root = Path(__file__).parent
+project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
 from utils import io_dict_to_hdf5 as ioh5
@@ -332,7 +332,7 @@ def main():
     
     # Define paths
     stac_path = data_path / 'Fruitfly_ik_V1_free.h5'
-    output_path = data_path / 'ik_output2.h5'
+    output_path = data_path / 'ik_output.h5'
     
     # Step 1: Load clip lengths
     clip_lengths = load_clip_lengths(data_path)
