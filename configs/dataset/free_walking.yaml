@@ -1,4 +1,10 @@
+# @package _global_.dataset
+
+defaults:
+  - preprocessing
+  - postprocessing
+
 name: free_walking
 env_name: free_walking
-version: analysis
+version: Predictions_3D_20260114-145343
 train: True

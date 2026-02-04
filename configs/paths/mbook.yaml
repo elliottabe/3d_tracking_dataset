@@ -8,3 +8,5 @@ log_dir:  ${paths.save_dir}/logs/
 ckpt_dir: ${paths.save_dir}/ckpt/
 fig_dir:  ${paths.save_dir}/figures/
 data_dir: /Users/${paths.user}/Research/data/biomech_model/Flybody/datasets/${version}/
+
+project_dir: /Users/${paths.user}/Research/MyRepos/

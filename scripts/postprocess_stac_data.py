@@ -7,10 +7,8 @@ Postprocess STAC output data:
 5. Save processed output
 
 Usage:
-    python postprocess_stac_data.py
-    
-Or with config overrides:
-    python postprocess_stac_data.py paths=workstation dataset=courtship
+    python postprocess_stac_data.py paths=workstation dataset=free_walking
+    python postprocess_stac_data.py paths=hyak dataset=courtship
 """
 
 import sys
@@ -20,6 +18,8 @@ import jax
 import jax.numpy as jnp
 import mujoco
 from mujoco import mjx
+import hydra
+from omegaconf import DictConfig, OmegaConf
 
 # Add project root to path
 project_root = Path(__file__).parent.parent
@@ -27,7 +27,7 @@ sys.path.insert(0, str(project_root))
 
 from utils import io_dict_to_hdf5 as ioh5
 from utils.stac_data_utils import reorganize_stac_by_bouts, print_bout_dict_structure
-from utils.path_utils import load_config_with_path_template
+from utils.path_utils import load_config_with_path_template, convert_dict_to_path
 from utils.io import load_stac_data
 
 
@@ -298,41 +298,45 @@ def reorganize_and_save(
     return bout_dict
 
 
-def main():
-    """Main postprocessing pipeline."""
+@hydra.main(version_base=None, config_path="../configs", config_name="config")
+def main(cfg: DictConfig):
+    """Main postprocessing pipeline using Hydra configuration."""
     
     print("\n" + "=" * 80)
     print("STAC DATA POSTPROCESSING PIPELINE")
     print("=" * 80)
+    print("\nConfiguration:")
+    print(OmegaConf.to_yaml(cfg))
     print()
     
-    # Load configuration
-    try:
-        cfg = load_config_with_path_template(
-            "configs/config.yaml",
-            paths_template="workstation"
-        )
-        data_path = Path(cfg.paths.data_dir)
-        flybody_path = Path(cfg.paths.flybody_path)
-        floor_path = Path(cfg.paths.floor_path)
-        
-        print(f"Configuration loaded:")
-        print(f"  Data directory: {data_path}")
-        print(f"  Flybody model: {flybody_path}")
-        print(f"  Floor model: {floor_path}")
-        print()
-        
-    except Exception as e:
-        print(f"Warning: Could not load config: {e}")
-        print("Using default paths...")
-        data_path = Path("/data2/users/eabe/datasets/Johnson_lab/free_walking/Predictions_3D_20260114-145343")
-        flybody_path = Path("assets/fruitfly_v1/fruitfly_v1_free.xml")
-        floor_path = Path("assets/fruitfly_v1/floor.xml")
-        print()
+    # Convert path strings to Path objects
+    cfg.paths = convert_dict_to_path(cfg.paths)
     
-    # Define paths
-    stac_path = data_path / 'Fruitfly_ik_V1_free.h5'
-    output_path = data_path / 'ik_output.h5'
+    # Resolve paths
+    data_path = cfg.paths.data_dir
+    flybody_path = Path(cfg.anatomy.mjcf_path)
+    floor_path = Path(cfg.anatomy.arena_path)
+    
+    print(f"Resolved paths:")
+    print(f"  Data directory: {data_path}")
+    print(f"  Flybody model: {flybody_path}")
+    print(f"  Floor model: {floor_path}")
+    print()
+    
+    # Define file paths from config
+    stac_filename = cfg.postprocessing.stac_output_file
+    preprocessed_filename = cfg.postprocessing.preprocessed_file
+    output_filename = cfg.postprocessing.output_file
+    
+    stac_path = data_path / stac_filename
+    preprocessed_path = data_path / preprocessed_filename
+    output_path = data_path / output_filename
+    
+    print(f"File paths:")
+    print(f"  STAC output: {stac_path}")
+    print(f"  Preprocessed data: {preprocessed_path}")
+    print(f"  Output: {output_path}")
+    print()
     
     # Step 1: Load clip lengths
     clip_lengths = load_clip_lengths(data_path)
@@ -346,7 +350,7 @@ def main():
         flybody_path=flybody_path,
         floor_path=floor_path,
         cfg_d=cfg_d,
-        verbose=True
+        verbose=cfg.postprocessing.verbose
     )
     
     # Add to stac_data
@@ -358,7 +362,7 @@ def main():
         stac_data=stac_data,
         clip_lengths=clip_lengths,
         output_path=output_path,
-        verbose=True
+        verbose=cfg.postprocessing.verbose
     )
     
     print("=" * 80)

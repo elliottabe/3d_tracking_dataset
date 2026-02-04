@@ -1,0 +1,31 @@
+# @package _global_.preprocessing
+
+# Preprocessing configuration for keypoint data
+# Usage: python preprocess_keypoints_for_ik.py paths=workstation dataset=free_walking anatomy=v1
+
+# Input/output paths (relative to dataset path or absolute)
+csv_path: 'data3D.csv'
+skeleton_path: 'data/fly50.json'
+xml_path: '${anatomy.mjcf_path}'  # Get from anatomy config
+
+# Bout configuration
+bout_name: 'preprocessed_bout_v2'
+bouts_csv: 'walking_bouts_summary.csv'  # CSV with bout info (bout_idx, start_frame, end_frame)
+
+# Single bout mode (ignored if bouts_csv is used)
+frame_start: null  # Start frame index (null for all frames)
+frame_end: null    # End frame index (null for all frames)
+
+# Alignment options
+apply_alignment: true
+apply_scaling: true
+preserve_translation: true  # Preserve original position/orientation (only scale)
+
+# Keypoint exclusion from alignment
+exclude_antenna: false
+exclude_wings: false
+
+# Antenna and wing keypoint indices (dataset-specific)
+# These should match the indices in the XML-ordered keypoints
+antenna_indices: [0]  # Default for courtship
+wing_indices: [6, 7, 8, 12]  # Default for courtship

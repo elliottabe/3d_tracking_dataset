@@ -10,17 +10,11 @@ This script:
 5. Saves preprocessed data to HDF5 format
 
 Usage:
-    python preprocess_keypoints_for_ik.py \
-        --csv_path /path/to/data3D.csv \
-        --skeleton_path data/fly50.json \
-        --xml_path assets/fruitfly_v1/fruitfly_v1_free.xml \
-        --output_dir /path/to/output \
-        --bout_name example_bout_0 \
-        --apply_alignment \
-        --apply_scaling
+    python preprocess_keypoints_for_ik.py paths=workstation dataset=free_walking
+    python preprocess_keypoints_for_ik.py paths=hyak dataset=courtship preprocessing.apply_alignment=false
+    python preprocess_keypoints_for_ik.py paths=workstation preprocessing.frame_start=100 preprocessing.frame_end=300
 """
 
-import argparse
 import json
 import sys
 from pathlib import Path
@@ -30,6 +24,8 @@ import numpy as np
 import pandas as pd
 import jax.numpy as jnp
 import mujoco
+import hydra
+from omegaconf import DictConfig, OmegaConf
 
 # Add project root to path
 project_root = Path(__file__).parent.parent.resolve()
@@ -38,6 +34,7 @@ sys.path.insert(0, str(project_root))
 # Import utilities
 try:
     import utils.io_dict_to_hdf5 as ioh5
+    from utils.path_utils import load_config_with_path_template, convert_dict_to_path
     from utils.optimized_floor_alignment import jit_vectorized_procrustes_with_scaling
     from utils.io import (
         match_csv_to_skeleton,
@@ -817,63 +814,57 @@ def process_bouts_batch(csv_path: Path,
         return None
 
 
-def main():
-    parser = argparse.ArgumentParser(
-        description='Preprocess keypoints for STAC IK',
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  # Process single bout with frame range:
-  python preprocess_keypoints_for_ik.py \\
-      --csv_path data.csv --skeleton_path fly50.json --xml_path model.xml \\
-      --output_dir output/ --frame_start 100 --frame_end 300
-  
-  # Process multiple bouts from CSV:
-  python preprocess_keypoints_for_ik.py \\
-      --csv_path data.csv --skeleton_path fly50.json --xml_path model.xml \\
-      --output_dir output/ --bouts_csv walking_bouts_summary.csv
-        """)
-    parser.add_argument('--csv_path', type=str, default='/data2/users/eabe/datasets/Johnson_lab/free_walking/Predictions_3D_20260114-145343/data3D.csv',
-                        help='Path to CSV file with keypoint data')
-    parser.add_argument('--skeleton_path', type=str, default='data/fly50.json',
-                        help='Path to skeleton JSON file (e.g., fly50.json)')
-    parser.add_argument('--xml_path', type=str, default='assets/fruitfly_v1/fruitfly_v1_free.xml',
-                        help='Path to MuJoCo XML file (e.g., fruitfly_v1_free.xml)')
-    parser.add_argument('--bout_name', type=str, default='preprocessed_bout',
-                        help='Name prefix for output files (default: preprocessed_bout)')
-    parser.add_argument('--bouts_csv', type=str, default='/data2/users/eabe/datasets/Johnson_lab/free_walking/Predictions_3D_20260114-145343/walking_bouts_summary.csv',
-                        help='CSV file with bout information (bout_idx, start_frame, end_frame). '
-                             'If provided, processes all bouts in CSV.')
-    parser.add_argument('--frame_start', type=int, default=None,
-                        help='Start frame index for single bout extraction (ignored if --bouts_csv is used)')
-    parser.add_argument('--frame_end', type=int, default=None,
-                        help='End frame index for single bout extraction (ignored if --bouts_csv is used)')
-    parser.add_argument('--apply_alignment', action='store_true', default=True,
-                        help='Apply Procrustes alignment')
-    parser.add_argument('--apply_scaling', action='store_true', default=True,
-                        help='Apply scaling during alignment')
-    parser.add_argument('--exclude_antenna', action='store_true',
-                        help='Exclude antenna from alignment computation')
-    parser.add_argument('--exclude_wings', action='store_true',
-                        help='Exclude wings from alignment computation')
+@hydra.main(version_base=None, config_path="../configs", config_name="config")
+def main(cfg: DictConfig):
+    """
+    Main preprocessing function using Hydra configuration.
     
-    args = parser.parse_args()
-    
-    # Convert paths
-    csv_path = Path(args.csv_path)
-    skeleton_path = Path(args.skeleton_path)
-    xml_path = Path(args.xml_path)
-    output_dir = csv_path.parent
-    output_dir.mkdir(parents=True, exist_ok=True)
-    
+    Usage:
+        python preprocess_keypoints_for_ik.py paths=workstation dataset=free_walking
+        python preprocess_keypoints_for_ik.py paths=hyak preprocessing.apply_alignment=false
+    """
+    # Print configuration
     print("=" * 80)
     print("KEYPOINT PREPROCESSING FOR STAC IK")
     print("=" * 80)
+    print("\nConfiguration:")
+    print(OmegaConf.to_yaml(cfg))
+    print()
+    
+    # Convert path strings to Path objects
+    cfg = convert_dict_to_path(cfg)
+    
+    # Resolve paths (handle both absolute and relative)
+    data_dir = Path(cfg.paths.data_dir)
+    csv_path = Path(cfg.preprocessing.csv_path)
+    if not csv_path.is_absolute():
+        csv_path = data_dir / csv_path
+    
+    skeleton_path = Path(cfg.preprocessing.skeleton_path)
+    if not skeleton_path.is_absolute():
+        skeleton_path = Path(project_root) / skeleton_path
+    
+    xml_path = Path(cfg.preprocessing.xml_path)
+    if not xml_path.is_absolute():
+        xml_path = Path(project_root) / xml_path
+    
+    output_dir = data_dir
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    print("Resolved paths:")
+    print(f"  CSV: {csv_path}")
+    print(f"  Skeleton: {skeleton_path}")
+    print(f"  XML: {xml_path}")
+    print(f"  Output dir: {output_dir}")
+    print()
     
     # Determine processing mode: batch (from CSV) or single bout
-    if args.bouts_csv is not None:
+    if cfg.preprocessing.bouts_csv is not None:
         # Batch processing mode - EFFICIENT VERSION
-        bouts_csv_path = Path(args.bouts_csv)
+        bouts_csv_path = Path(cfg.preprocessing.bouts_csv)
+        if not bouts_csv_path.is_absolute():
+            bouts_csv_path = data_dir / bouts_csv_path
+        
         if not bouts_csv_path.exists():
             print(f"❌ Error: Bouts CSV file not found: {bouts_csv_path}")
             sys.exit(1)
@@ -891,15 +882,15 @@ Examples:
             skeleton_path=skeleton_path,
             xml_path=xml_path,
             bouts=bouts,
-            apply_alignment=args.apply_alignment,
-            apply_scaling=args.apply_scaling,
-            exclude_antenna=args.exclude_antenna,
-            exclude_wings=args.exclude_wings
+            apply_alignment=cfg.preprocessing.apply_alignment,
+            apply_scaling=cfg.preprocessing.apply_scaling,
+            exclude_antenna=cfg.preprocessing.exclude_antenna,
+            exclude_wings=cfg.preprocessing.exclude_wings
         )
         
         if all_bouts_dict is not None:
             # Save all bouts as nested HDF5
-            output_path = output_dir / f"{args.bout_name}.h5"
+            output_path = output_dir / f"{cfg.preprocessing.bout_name}.h5"
             print(f"\nSaving {len(all_bouts_dict)} bouts to: {output_path}")
             ioh5.save(output_path, all_bouts_dict)
             print(f"✓ Saved nested HDF5 with {len(all_bouts_dict)} bouts")
@@ -919,27 +910,27 @@ Examples:
         
     else:
         # Single bout mode (original behavior)
-        if args.frame_start is None or args.frame_end is None:
+        if cfg.preprocessing.frame_start is None or cfg.preprocessing.frame_end is None:
             print("\n⚠ Warning: Processing entire CSV (no frame range specified)")
-            print("   Use --frame_start and --frame_end to extract a specific bout")
-            print("   Or use --bouts_csv to process multiple bouts\n")
+            print("   Use preprocessing.frame_start and preprocessing.frame_end to extract a specific bout")
+            print("   Or use preprocessing.bouts_csv to process multiple bouts\n")
         
         bout_data = process_single_bout(
             csv_path=csv_path,
             skeleton_path=skeleton_path,
             xml_path=xml_path,
-            frame_start=args.frame_start,
-            frame_end=args.frame_end,
-            apply_alignment=args.apply_alignment,
-            apply_scaling=args.apply_scaling,
-            exclude_antenna=args.exclude_antenna,
-            exclude_wings=args.exclude_wings
+            frame_start=cfg.preprocessing.frame_start,
+            frame_end=cfg.preprocessing.frame_end,
+            apply_alignment=cfg.preprocessing.apply_alignment,
+            apply_scaling=cfg.preprocessing.apply_scaling,
+            exclude_antenna=cfg.preprocessing.exclude_antenna,
+            exclude_wings=cfg.preprocessing.exclude_wings
         )
         
         if bout_data is not None:
             # Wrap in nested dictionary for consistency
             output_dict = {'bout_0': bout_data}
-            output_path = output_dir / f"{args.bout_name}.h5"
+            output_path = output_dir / f"{cfg.preprocessing.bout_name}.h5"
             
             print(f"\nSaving to: {output_path}")
             ioh5.save(output_path, output_dict)
