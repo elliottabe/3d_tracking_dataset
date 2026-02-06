@@ -1,0 +1,102 @@
+
+
+#==================== ANATOMY =====================#
+
+# used to access columns in the keypoint data
+bodyparts:
+- BODYPART1
+- BODYPART2
+- BODYPART3
+
+# determines the subset of bodyparts to use for modeling and the order in which they are represented
+use_bodyparts:
+- BODYPART1
+- BODYPART2
+- BODYPART3
+
+# used for visualization only
+skeleton:
+- - BODYPART1
+  - BODYPART2
+- - BODYPART2
+  - BODYPART3
+
+# used to initialize heading
+anterior_bodyparts:
+- BODYPART1
+
+# used to initialize heading
+posterior_bodyparts:
+- BODYPART3
+
+
+#==================== FITTING =====================#
+
+# upper bound of uniform noise added to the data during initial AR-HMM fitting; this is used to regularize the model
+added_noise_level: 0.1
+
+# number of frames used to fit the PCA model during initialization
+PCA_fitting_num_frames: 1000000
+
+# used to define outliers for interpolation when the model is initialized
+conf_threshold: 0.5
+
+
+#================== HYPER PARAMS ==================#
+
+# parameters to convert neural net likelihoods to error size priors
+error_estimator:
+  intercept: 0.25
+  slope: -0.5
+
+# keypoint observation hyperparameters
+obs_hypparams:
+  nu_s: 5
+  nu_sigma: 100000.0
+  sigmasq_0: 0.1
+  sigmasq_C: 0.1
+
+# autoregressive hyperparameters
+ar_hypparams:
+  K_0_scale: 10.0
+  S_0_scale: 0.01
+  latent_dim: 10
+  nlags: 3
+
+# transition hyperparameters
+trans_hypparams:
+  alpha: 5.7
+  gamma: 1000.0
+  kappa: 1000000.0
+  num_states: 100
+
+# centroid movement hyperparameters
+cen_hypparams:
+  sigmasq_loc: 0.5
+
+
+#===================== OTHER ======================#
+
+# suffix used to match videos to recording names; this can usually be left empty (see `util.find_matching_videos` for details)
+recording_name_suffix: ''
+
+# whether to print progress messages during fitting
+verbose: false
+
+# pseudocount used regularize neural network confidences
+conf_pseudocount: 0.001
+
+# directory with videos from which keypoints were derived (used for crowd movies)
+video_dir: ''
+
+# colormap used for visualization; see `matplotlib.cm.get_cmap` for options
+keypoint_colormap: autumn
+
+# whether to whiten principal components; used to initialize the latent pose trajectory `x`
+whiten: true
+
+# whether to keep the heading angle fixed; this should only be True if the pose is constrained to a narrow range of angles, e.g. a headfixed mouse.
+fix_heading: false
+
+# data are broken up into segments to parallelize fitting
+seg_length: 10000
