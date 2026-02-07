@@ -4,11 +4,11 @@
 # Usage: python postprocess_stac_data.py paths=workstation dataset=free_walking
 
 # Input files (relative to data_dir or absolute)
-stac_output_file: 'Fruitfly_ik_V2_free.h5'
-preprocessed_file: 'preprocessed_bout_v2.h5'
+stac_output_file: 'Fruitfly_ik_V1_free.h5'
+preprocessed_file: 'preprocessed_bout_v1.h5'
 
 # Output file
-output_file: 'ik_output_v2.h5'
+output_file: 'ik_output_v1.h5'
 
 # Verbose output
 verbose: true

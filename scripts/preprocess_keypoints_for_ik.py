@@ -832,7 +832,7 @@ def main(cfg: DictConfig):
     print()
     
     # Convert path strings to Path objects
-    cfg = convert_dict_to_path(cfg)
+    cfg.paths = convert_dict_to_path(cfg.paths)
     
     # Resolve paths (handle both absolute and relative)
     data_dir = Path(cfg.paths.data_dir)

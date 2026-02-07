@@ -1,8 +1,8 @@
 # @package _global_.anatomy
 
 # Anatomical structure for FruitflyV1 model
-mjcf_path: "${paths.body_model_dir}/fruitfly_body_models/fruitfly_v1/fruitfly_v1.xml" 
-arena_path: "${paths.body_model_dir}/fruitfly_body_models/fruitfly_v1/floor.xml" 
+mjcf_path: "${paths.body_model_dir}/fruitfly_v1/fruitfly_v1_free.xml" 
+arena_path: "${paths.body_model_dir}/fruitfly_v1/floor.xml" 
 
 end_eff_names:
   # V1 uses "claw" not "tarsal_claw"

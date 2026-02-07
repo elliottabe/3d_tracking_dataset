@@ -364,7 +364,7 @@ def load_config_with_path_template(config_path, paths_template=None, dataset=Non
     
     return cfg
 
-def create_fresh_config_with_paths(dataset, paths_template="workstation", version="debug", run_id="Testing", config_dir="../configs", verbose=True):
+def create_fresh_config_with_paths(dataset, paths_template="workstation", version="debug", run_id="Testing", config_dir="../configs", verbose=True, other_overrides=None):
     """
     Create a fresh config using Hydra with specified paths template.
     
@@ -401,6 +401,9 @@ def create_fresh_config_with_paths(dataset, paths_template="workstation", versio
             if paths_template:
                 overrides.append(f"paths={paths_template}")
             
+            # Add any other overrides provided
+            if other_overrides:
+                overrides.extend(other_overrides)
             if verbose:
                 print(f"   Hydra overrides: {overrides}")
             

@@ -1,8 +1,8 @@
 # @package _global_.anatomy
 
 # Anatomical structure for FruitflyV2 model
-mjcf_path: "${paths.body_model_dir}/fruitfly_body_models/fruitfly_v2.1/fruitfly_v2.1.xml" 
-arena_path: "${paths.body_model_dir}/fruitfly_body_models/fruitfly_v2.1/floor.xml" 
+mjcf_path: "${paths.body_model_dir}/fruitfly_v2.1/fruitfly_v2.1.xml" 
+arena_path: "${paths.body_model_dir}/fruitfly_v2.1/floor.xml" 
 
 end_eff_names:
   - tarsal_claw_T1_left
