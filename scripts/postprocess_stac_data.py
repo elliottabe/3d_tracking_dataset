@@ -130,155 +130,6 @@ def load_stac_output(stac_path: Path):
     return cfg_d, d, stac_data
 
 
-def compute_egocentric_site_positions(
-    mocap_qpos,
-    flybody_path: Path,
-    floor_path: Path,
-    cfg_d=None,
-    verbose: bool = True
-):
-    """
-    Compute egocentric site positions using JAX/MJX vectorized forward kinematics.
-    
-    Args:
-        mocap_qpos: Joint position trajectory (n_timesteps, n_qpos)
-        flybody_path: Path to fruitfly MuJoCo XML
-        floor_path: Path to floor MuJoCo XML
-        cfg_d: STAC config dictionary (to extract model path if available)
-        verbose: Print progress messages
-        
-    Returns:
-        site_pos: Egocentric site positions (n_timesteps, n_sites, 3)
-        site_names: List of site names
-    """
-    print("=" * 80)
-    print("COMPUTING EGOCENTRIC SITE POSITIONS")
-    print("=" * 80)
-    
-    # Compile models - use STAC model path if available
-    if verbose:
-        print("Compiling MuJoCo models...")
-    
-    # Try to use the model path from STAC config
-    if cfg_d and 'model' in cfg_d and 'model_path' in cfg_d.model:
-        stac_model_path = Path(cfg_d.model.model_path)
-        if stac_model_path.exists():
-            if verbose:
-                print(f"  Using STAC model: {stac_model_path}")
-            flybody_path = stac_model_path
-        else:
-            if verbose:
-                print(f"  STAC model not found, using default: {flybody_path}")
-    
-    spec = mujoco.MjSpec().from_file(flybody_path.as_posix())
-    floor_spec = mujoco.MjSpec().from_file(floor_path.as_posix())
-    spawn_frame = floor_spec.worldbody.add_frame(
-        pos=[0, 0, -.125],
-        quat=[1, 0, 0, 0],
-    )
-    spawn_body = spawn_frame.attach_body(spec.body("thorax"), "", suffix='_fly')
-    
-    # Get standard MuJoCo model for extracting site info
-    mj_model = floor_spec.compile()
-    
-    # Validate qpos dimensions match
-    expected_nq = mj_model.nq
-    actual_nq = mocap_qpos.shape[1]
-    if expected_nq != actual_nq:
-        raise ValueError(
-            f"qpos dimension mismatch!\n"
-            f"  Model expects: {expected_nq} DoFs\n"
-            f"  STAC data has: {actual_nq} DoFs\n"
-            f"  Model file: {flybody_path}\n"
-            f"  Hint: Make sure you're using the same model that STAC used for IK.\n"
-            f"  Check cfg_d.model.model_path in the STAC output."
-        )
-    
-    # Compile to MJX model for fast batched forward kinematics
-    mjx_model = mjx.put_model(mj_model)
-    
-    # Get site names and indices
-    site_names = [site.name for site in floor_spec.sites if 'tracking' in site.name]
-    _suffix = '_fly'
-    
-    # Find thorax body index
-    thorax_body_idx = mj_model.body(f"thorax{_suffix}").id
-    
-    # Find site indices
-    site_indices = jnp.array([floor_spec.site(site_name).id for site_name in site_names])
-    
-    if verbose:
-        print(f"✓ Models compiled")
-        print(f"  Processing {len(mocap_qpos)} timesteps with {len(site_names)} sites")
-        print(f"  Thorax body index: {thorax_body_idx}")
-        print(f"  Site indices: {site_indices}")
-    
-    # Define vectorized forward kinematics function
-    def compute_egocentric_sites(qpos):
-        """
-        Compute egocentric site positions for a single timestep.
-        
-        Args:
-            qpos: Joint positions for one timestep (n_qpos,)
-            
-        Returns:
-            egocentric_positions: Site positions in thorax frame (n_sites, 3)
-        """
-        # Create mjx data and set qpos
-        mjx_data = mjx.make_data(mjx_model)
-        mjx_data = mjx_data.replace(qpos=qpos)
-        
-        # Forward kinematics
-        mjx_data = mjx.forward(mjx_model, mjx_data)
-        
-        # Get thorax position and orientation
-        thorax_xpos = mjx_data.xpos[thorax_body_idx]  # (3,)
-        thorax_xmat = mjx_data.xmat[thorax_body_idx].reshape(3, 3)  # (3, 3)
-        
-        # Get site positions (global frame)
-        site_xpos = mjx_data.site_xpos[site_indices]  # (n_sites, 3)
-        
-        # Transform to egocentric (thorax-centered) coordinates
-        relative_pos = site_xpos - thorax_xpos[None, :]  # (n_sites, 3)
-        egocentric_pos = jnp.dot(relative_pos, thorax_xmat)  # (n_sites, 3)
-        
-        return egocentric_pos
-    
-    # Vectorize over time dimension and JIT compile
-    compute_egocentric_sites_vmap = jax.vmap(compute_egocentric_sites)
-    compute_egocentric_sites_jit = jax.jit(compute_egocentric_sites_vmap)
-    
-    # Convert qpos to JAX array if not already
-    qpos_traj = jnp.asarray(mocap_qpos)
-    
-    # Warm-up JIT compilation
-    if verbose:
-        print("\nJIT compiling...")
-    start = time.time()
-    _ = compute_egocentric_sites_jit(qpos_traj[:2])
-    _ = _.block_until_ready()
-    compile_time = time.time() - start
-    if verbose:
-        print(f"✓ Compilation time: {compile_time:.2f}s")
-    
-    # Run batched computation
-    if verbose:
-        print("\nComputing egocentric positions...")
-    start = time.time()
-    site_pos = compute_egocentric_sites_jit(qpos_traj)
-    site_pos = site_pos.block_until_ready()  # Wait for GPU computation
-    compute_time = time.time() - start
-    
-    if verbose:
-        print(f"✓ Computation time: {compute_time:.2f}s")
-        print(f"  Output shape: {site_pos.shape}")
-        print(f"  Estimated speedup vs loop: ~{len(qpos_traj) * 0.01 / compute_time:.1f}x")
-        print(f"  Sites: {site_names}")
-    print()
-    
-    return site_pos, site_names
-
-
 def reorganize_and_save(
     stac_data: dict,
     clip_lengths: list,
@@ -383,12 +234,14 @@ def process_bouts_batched(
     mjx_model: mjx.Model,
     mjx_data: mjx.Data,
     dt: float,
+    site_indices: jnp.ndarray = None,
+    thorax_body_idx: int = None,
     percentile: float = 5.0,
     target_z: float = -0.125,
     max_qvel: float = 20.0
 ) -> Dict[str, jnp.ndarray]:
     """
-    Process all bouts in parallel using vmap for floor adjustment and MJX.
+    Process all bouts in parallel using vmap for floor adjustment, MJX, and egocentric sites.
     
     Args:
         qpos_batch: Batched qpos (n_bouts, max_T, nq)
@@ -397,15 +250,21 @@ def process_bouts_batched(
         mjx_model: MJX model
         mjx_data: MJX data
         dt: Timestep
+        site_indices: Indices of tracking sites (optional, for egocentric computation)
+        thorax_body_idx: Index of thorax body (optional, for egocentric computation)
         percentile: Ground contact percentile
         target_z: Target floor height
         max_qvel: Max velocity
         
     Returns:
-        Dictionary with batched qpos, qvel, xpos, xquat
+        Dictionary with batched qpos, qvel, xpos, xquat, and optionally xpos_egocentric
     """
     # Define single-bout floor adjustment
     def adjust_single_bout(qpos, xpos):
+        # Skip floor adjustment if no end effectors provided
+        if len(end_eff_indices) == 0:
+            return qpos
+        
         # Extract end effector z-positions
         end_eff_z = xpos[:, end_eff_indices, 2]  # (T, n_end_eff)
         
@@ -439,18 +298,43 @@ def process_bouts_batched(
         
         return qpos_full, qvel_full, ref_clip.body_positions, ref_clip.body_quaternions
     
+    # Define single-timestep egocentric computation
+    def compute_egocentric_sites_single(qpos):
+        mjx_data_temp = mjx.make_data(mjx_model)
+        mjx_data_temp = mjx_data_temp.replace(qpos=qpos)
+        mjx_data_temp = mjx.forward(mjx_model, mjx_data_temp)
+        
+        thorax_xpos = mjx_data_temp.xpos[thorax_body_idx]
+        thorax_xmat = mjx_data_temp.xmat[thorax_body_idx].reshape(3, 3)
+        site_xpos = mjx_data_temp.site_xpos[site_indices]
+        
+        relative_pos = site_xpos - thorax_xpos[None, :]
+        egocentric_pos = jnp.dot(relative_pos, thorax_xmat)
+        
+        return egocentric_pos
+    
     # Vmap floor adjustment
     qpos_adjusted = jax.vmap(adjust_single_bout)(qpos_batch, xpos_batch)
     
     # Vmap MJX processing
     qpos_out, qvel_out, xpos_out, xquat_out = jax.vmap(process_single_bout)(qpos_adjusted)
     
-    return {
+    result = {
         'qpos': qpos_out,
         'qvel': qvel_out,
         'xpos': xpos_out,
         'xquat': xquat_out
     }
+    
+    # Optionally compute egocentric positions
+    if site_indices is not None and thorax_body_idx is not None:
+        # Vmap over timesteps then bouts
+        compute_egocentric_bout = jax.vmap(compute_egocentric_sites_single)
+        compute_egocentric_batched = jax.vmap(compute_egocentric_bout)
+        xpos_egocentric = compute_egocentric_batched(qpos_out)
+        result['xpos_egocentric'] = xpos_egocentric
+    
+    return result
 
 
 def process_all_bouts(
@@ -458,6 +342,9 @@ def process_all_bouts(
     cfg: DictConfig,
     mjx_model: mjx.Model,
     mjx_data: mjx.Data,
+    site_indices: jnp.ndarray = None,
+    thorax_body_idx: int = None,
+    site_names: List[str] = None,
     verbose: bool = True
 ) -> Dict:
     """
@@ -467,7 +354,8 @@ def process_all_bouts(
     1. Interpolate qpos, xpos, xquat, kp_data (if enabled)
     2. Adjust root z-position for floor contact (if enabled)
     3. Run MJX forward kinematics to compute qvel and updated xpos/xquat (if enabled)
-    4. Update bout dict with processed data
+    4. Compute egocentric site positions (if site_indices provided)
+    5. Update bout dict with processed data
     
     Original data gets suffix '_stac', final processed data has clean names.
     
@@ -476,6 +364,9 @@ def process_all_bouts(
         cfg: Hydra configuration
         mjx_model: Compiled MJX model
         mjx_data: MJX data structure
+        site_indices: Indices of tracking sites (optional, for egocentric)
+        thorax_body_idx: Index of thorax body (optional, for egocentric)
+        site_names: Names of tracking sites (optional, for egocentric)
         verbose: Print progress
         
     Returns:
@@ -556,9 +447,29 @@ def process_all_bouts(
                 if f'{key}_stac' in bout:
                     bout[key] = bout[f'{key}_stac']
         clip_lengths_new = clip_lengths_original
+        
+        # If floor/MJX processing will be done, pad to max length for batching
+        if floor_cfg.enabled or mjx_cfg.enabled:
+            max_clip_length = max(clip_lengths_original)
+            if verbose:
+                print(f"  Padding all bouts to max length for batched processing: {max_clip_length}...")
+            
+            for bout_idx, bout_key in enumerate(bout_keys):
+                bout = bout_dict[bout_key]
+                current_length = clip_lengths_original[bout_idx]
+                
+                if current_length < max_clip_length:
+                    for key in ['qpos', 'xpos', 'xquat', 'kp_data']:
+                        if key in bout:
+                            # Pad by repeating last frame
+                            n_pad = max_clip_length - current_length
+                            padding = np.tile(bout[key][-1:], (n_pad,) + (1,) * (len(bout[key].shape) - 1))
+                            bout[key] = np.concatenate([bout[key], padding], axis=0)
+            
+            clip_lengths_new = [max_clip_length] * len(bout_keys)
     
     # Step 3 & 4: Batched floor adjustment and MJX processing (if enabled)
-    if (floor_cfg.enabled or mjx_cfg.enabled) and interp_cfg.enabled:
+    if floor_cfg.enabled or mjx_cfg.enabled:
         if verbose:
             print(f"\nStacking {len(bout_keys)} bouts for batched processing...")
         
@@ -581,23 +492,43 @@ def process_all_bouts(
         ]
         
         if len(end_eff_indices) == 0:
-            print(f"  ⚠ Warning: No end effectors found matching {floor_cfg.end_effector_names}")
-            print(f"  Available names: {names_xpos[:10]}...")
+            if floor_cfg.enabled:
+                print(f"  ⚠ ERROR: No end effectors found matching {floor_cfg.end_effector_names}")
+                print(f"  Available body names: {names_xpos}")
+                print(f"  Floor alignment will be DISABLED due to missing end effectors!")
+                # Disable floor alignment if end effectors not found
+                floor_cfg_enabled = False
+            else:
+                floor_cfg_enabled = False
         else:
             if verbose:
-                print(f"  Found {len(end_eff_indices)} end effectors")
+                print(f"  Found {len(end_eff_indices)} end effectors: {[names_xpos[i] for i in end_eff_indices]}")
+            floor_cfg_enabled = floor_cfg.enabled
+        
+        # Check if egocentric computation will be included
+        if site_indices is not None and thorax_body_idx is not None:
+            if verbose:
+                print(f"  Including egocentric computation with {len(site_names)} sites")
         
         # Compute timestep
         dt = 1.0 / interp_cfg.target_hz if interp_cfg.enabled else 1.0 / interp_cfg.source_hz
         
         if verbose:
-            print(f"  JIT compiling batched processing (floor + MJX, dt={dt:.5f}s)...")
+            processing_stages = []
+            if floor_cfg_enabled and len(end_eff_indices) > 0:
+                processing_stages.append("floor")
+            if mjx_cfg.enabled:
+                processing_stages.append("MJX")
+            if site_indices is not None and thorax_body_idx is not None:
+                processing_stages.append("egocentric")
+            print(f"  JIT compiling batched processing ({' + '.join(processing_stages)}, dt={dt:.5f}s)...")
         
         # JIT compile the batched processing
         process_batched_jit = jax.jit(
             lambda qpos, xpos: process_bouts_batched(
                 qpos, xpos, end_eff_indices, mjx_model, mjx_data,
-                dt, floor_cfg.percentile, floor_cfg.target_z, mjx_cfg.max_qvel
+                dt, site_indices, thorax_body_idx,
+                floor_cfg.percentile, floor_cfg.target_z, mjx_cfg.max_qvel
             )
         )
         
@@ -617,6 +548,14 @@ def process_all_bouts(
         
         if verbose:
             print(f"  ✓ Processed {len(bout_keys)} bouts in {elapsed:.2f}s ({elapsed/len(bout_keys):.3f}s per bout)")
+            
+            # Show floor alignment verification if enabled
+            if floor_cfg_enabled and len(end_eff_indices) > 0:
+                # Check z-offset applied
+                z_before = float(jnp.mean(qpos_batch[:, :, 2]))
+                z_after = float(jnp.mean(processed['qpos'][:, :, 2]))
+                z_offset = z_after - z_before
+                print(f"  Floor alignment z-offset applied: {z_offset:.4f} (mean root z: {z_before:.4f} → {z_after:.4f})")
         
         # Unpack results back into bout_dict
         for bout_idx, bout_key in enumerate(bout_keys):
@@ -625,6 +564,14 @@ def process_all_bouts(
             bout['qvel'] = np.array(processed['qvel'][bout_idx])
             bout['xpos'] = np.array(processed['xpos'][bout_idx])
             bout['xquat'] = np.array(processed['xquat'][bout_idx])
+            
+            # Unpack egocentric positions if computed
+            if 'xpos_egocentric' in processed:
+                bout['xpos_egocentric'] = np.array(processed['xpos_egocentric'][bout_idx])
+        
+        # Store site names if egocentric was computed
+        if site_names is not None:
+            bout_dict['info']['site_names_egocentric'] = site_names
     
     # Update info with both old and new clip lengths
     bout_dict['info']['clip_lengths_original'] = clip_lengths_original
@@ -700,14 +647,17 @@ def main(cfg: DictConfig):
         clip_lengths=clip_lengths,
     )
     
-    if cfg.postprocessing.verbose:
-        print()
-        print_bout_dict_structure(bout_dict, show_values=False)
+    # if cfg.postprocessing.verbose:
+    #     print()
+    #     print_bout_dict_structure(bout_dict, show_values=False)
     print()
     
     # Step 4: Compile MJX model for processing (if enabled)
     mjx_model = None
     mjx_data = None
+    site_indices = None
+    thorax_body_idx = None
+    site_names = None
     
     if (cfg.postprocessing.interpolation.enabled or 
         cfg.postprocessing.floor_alignment.enabled or
@@ -718,7 +668,7 @@ def main(cfg: DictConfig):
         print("=" * 80)
         print("Compiling MuJoCo models...")
         
-        # Compile models (same pattern as compute_egocentric_site_positions)
+        # Compile models
         spec = mujoco.MjSpec().from_file(flybody_path.as_posix())
         floor_spec = mujoco.MjSpec().from_file(floor_path.as_posix())
         
@@ -744,6 +694,15 @@ def main(cfg: DictConfig):
         
         print(f"✓ Models compiled")
         print(f"  nq (DoFs): {mj_model.nq}")
+        
+        # Extract site information for egocentric computation (if enabled)
+        if cfg.postprocessing.get('egocentric_sites', {}).get('enabled', True):
+            site_names = [site.name for site in floor_spec.sites if 'tracking' in site.name]
+            _suffix = '_fly'
+            thorax_body_idx = mj_model.body(f"thorax{_suffix}").id
+            site_indices = jnp.array([floor_spec.site(site_name).id for site_name in site_names])
+            print(f"  Extracted {len(site_names)} tracking sites for egocentric computation")
+        
         print()
     
     # Step 5: Process all bouts (interpolation, floor adjustment, MJX)
@@ -756,6 +715,9 @@ def main(cfg: DictConfig):
             cfg,
             mjx_model,
             mjx_data,
+            site_indices=site_indices,
+            thorax_body_idx=thorax_body_idx,
+            site_names=site_names,
             verbose=cfg.postprocessing.verbose
         )
     
@@ -767,6 +729,11 @@ def main(cfg: DictConfig):
     ioh5.save(output_path, bout_dict)
     print(f"✓ Saved successfully")
     print(f"  File size: {output_path.stat().st_size / 1024 / 1024:.2f} MB")
+    
+    # Print summary of data keys
+    if cfg.postprocessing.verbose and bout_dict:
+        example_bout = bout_dict[sorted([k for k in bout_dict.keys() if k != 'info'])[0]]
+        print(f"\n  Data keys per bout: {list(example_bout.keys())}")
     print()
     
     print("=" * 80)

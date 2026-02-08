@@ -6,10 +6,10 @@ defaults:
 
 name: free_walking
 env_name: free_walking
-version: Predictions_3D_20260114-145343
+version: Data_analysis
 train: True
 
 concat:
-  input_pattern: 'ik_output_${anatomy.name}.h5'
-  output_file: 'ik_output_combined.h5'
+  input_pattern: 'ik_output_${anatomy.name}'
+  output_file: 'ik_output_combined'
   enable_jax: True

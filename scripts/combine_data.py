@@ -68,17 +68,19 @@ def main(cfg: DictConfig):
     base_dir = cfg.paths.data_dir.parent
 
     # Get concatenation config (with defaults)
-    input_pattern = cfg.dataset.get('concat', {}).get('input_pattern', 'ik_output_*.h5')
-    output_file = cfg.dataset.get('concat', {}).get('output_file', 'ik_output_combined.h5')
+    input_pattern = cfg.dataset.get('concat', {}).get('input_pattern', 'ik_output_*')
+    output_file = cfg.dataset.get('concat', {}).get('output_file', 'ik_output_combined')
+    output_file_interp = cfg.dataset.get('concat', {}).get('output_file_interpolated', 
+                                                           output_file.replace('.h5', '_interpolated.h5'))
     enable_jax = cfg.dataset.get('concat', {}).get('enable_jax', True)
 
     print(f"Data directory: {base_dir}")
-    print(f"Input pattern: {input_pattern}")
-    print(f"Output file: {output_file}")
+    print(f"Input pattern: {input_pattern}.h5")
+    print(f"Output file: {output_file}.h5")
     print()
 
     # Find all matching files
-    file_paths = [fp for fp in sorted(base_dir.rglob(input_pattern)) if 'combined' not in fp.name]
+    file_paths = [fp for fp in sorted(base_dir.rglob(f"{input_pattern}.h5")) if 'combined' not in fp.name]
 
 
     print(f"Found {len(file_paths)} files:")
@@ -96,16 +98,114 @@ def main(cfg: DictConfig):
     # Print structure
     # print_bout_dict_structure(combined_dict, show_values=False, max_depth=2)
 
-    # Save
-    output_path = cfg.paths.save_dir / output_file
+    # Create non-interpolated version by renaming _stac keys to clean keys
     print("\n" + "=" * 80)
-    print("SAVING COMBINED OUTPUT")
+    print("CREATING NON-INTERPOLATED VERSION")
     print("=" * 80)
-    print(f"Saving to: {output_path}")
-    ioh5.save(output_path, combined_dict)
+    
+    # Get clip_lengths_original for unpadding
+    clip_lengths_original = combined_dict.get('info', {}).get('clip_lengths_original', [])
+    bout_keys = sorted([k for k in combined_dict.keys() if k != 'info'])
+    
+    if clip_lengths_original is not None and len(clip_lengths_original) > 0:
+        print(f"Unpadding {len(bout_keys)} bouts to original lengths...")
+    
+    non_interp_dict = {}
+    for bout_idx, bout_key in enumerate(bout_keys):
+        bout_data = combined_dict[bout_key]
+        non_interp_dict[bout_key] = {}
+        
+        # Get original length for this bout (for unpadding)
+        orig_length = clip_lengths_original[bout_idx] if bout_idx < len(clip_lengths_original) else None
+        
+        for key, value in bout_data.items():
+            if key.endswith('_stac'):
+                # Rename _stac keys to clean keys (already at original length)
+                clean_key = key[:-5]  # Remove '_stac' suffix
+                non_interp_dict[bout_key][clean_key] = value
+            elif not any(f"{key}_stac" in bout_data for k in [key]):
+                # For keys without _stac counterpart, check if they need unpadding
+                if not any(f"{k}_stac" == key for k in bout_data.keys()):
+                    # If this is a trajectory array and we have original length, unpad it
+                    if orig_length is not None and isinstance(value, (np.ndarray, jnp.ndarray)) and len(value.shape) > 0 and value.shape[0] > orig_length:
+                        # Unpad by taking only the first orig_length frames
+                        if enable_jax and isinstance(value, jnp.ndarray):
+                            non_interp_dict[bout_key][key] = np.array(value[:orig_length])
+                        else:
+                            non_interp_dict[bout_key][key] = value[:orig_length]
+                    else:
+                        non_interp_dict[bout_key][key] = value
+    
+    # Handle info specially - only include clip_lengths_original as clip_lengths
+    non_interp_dict['info'] = {}
+    for key, value in combined_dict['info'].items():
+        if key == 'clip_lengths_original':
+            non_interp_dict['info']['clip_lengths'] = value
+        elif key not in ['clip_lengths', 'clip_lengths_interp_unpadded']:
+            non_interp_dict['info'][key] = value
+    
+    # Save non-interpolated version (base file)
+    output_path = cfg.paths.save_dir / f'{output_file}.h5'
+    print(f"Saving non-interpolated data to: {output_path}")
+    if 'info' in non_interp_dict and 'clip_lengths' in non_interp_dict['info']:
+        print(f"  Clip lengths (original, unpadded): {non_interp_dict['info']['clip_lengths']}")
+    ioh5.save(output_path, non_interp_dict)
     print(f"✓ Saved successfully")
     print(f"  File size: {output_path.stat().st_size / 1024 / 1024:.2f} MB")
     print()
+
+    # Save interpolated version (clean keys contain interpolated data)
+    output_path_interp = cfg.paths.save_dir / f'{output_file}_interp.h5'
+    print("=" * 80)
+    print("SAVING COMBINED OUTPUT - INTERPOLATED")
+    print("=" * 80)
+    
+    # Clean up interpolated dict to remove clip_lengths_original
+    # and optionally unpad to clip_lengths_interp_unpadded
+    clip_lengths_interp_unpadded = combined_dict.get('info', {}).get('clip_lengths_interp_unpadded', [])
+    
+    if clip_lengths_interp_unpadded is not None and len(clip_lengths_interp_unpadded) > 0:
+        print(f"Unpadding {len(bout_keys)} bouts to interpolated unpadded lengths...")
+    
+    interp_dict = {}
+    for bout_idx, bout_key in enumerate(bout_keys):
+        bout_data = combined_dict[bout_key]
+        interp_dict[bout_key] = {}
+        
+        # Get unpadded length for this bout (if available)
+        unpadded_length = clip_lengths_interp_unpadded[bout_idx] if bout_idx < len(clip_lengths_interp_unpadded) else None
+        
+        for key, value in bout_data.items():
+            # Skip _stac keys in interpolated version
+            if key.endswith('_stac'):
+                continue
+                
+            # Unpad trajectory arrays to their unpadded interpolated length
+            if unpadded_length is not None and isinstance(value, (np.ndarray, jnp.ndarray)) and len(value.shape) > 0 and value.shape[0] > unpadded_length:
+                if enable_jax and isinstance(value, jnp.ndarray):
+                    interp_dict[bout_key][key] = np.array(value[:unpadded_length])
+                else:
+                    interp_dict[bout_key][key] = value[:unpadded_length]
+            else:
+                interp_dict[bout_key][key] = value
+    
+    # Handle info specially - keep clip_lengths_interp_unpadded as clip_lengths, remove original
+    interp_dict['info'] = {}
+    for key, value in combined_dict['info'].items():
+        if key == 'clip_lengths_interp_unpadded':
+            interp_dict['info']['clip_lengths'] = value
+        elif key not in ['clip_lengths_original', 'clip_lengths']:
+            interp_dict['info'][key] = value
+    
+    print(f"Saving interpolated data to: {output_path_interp}")
+    if 'info' in interp_dict:
+        if 'clip_lengths' in interp_dict['info']:
+            print(f"  Clip lengths (interpolated, unpadded): {interp_dict['info']['clip_lengths']}")
+    ioh5.save(output_path_interp, interp_dict)
+    print(f"✓ Saved successfully")
+    print(f"  File size: {output_path_interp.stat().st_size / 1024 / 1024:.2f} MB")
+    print()
+
     cfg_temp = cfg.copy()
     cfg_temp.paths = convert_dict_to_string(cfg_temp.paths)
     OmegaConf.save(cfg_temp, cfg.paths.log_dir / "run_config.yaml")

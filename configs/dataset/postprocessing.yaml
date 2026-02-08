@@ -32,3 +32,7 @@ mjx_processing:
   enabled: true
   max_qvel: 2000.0         # Max velocity clipping (not currently used)
   compute_velocities: true
+
+# Egocentric site positions (body-frame coordinates)
+egocentric_sites:
+  enabled: true            # Compute site positions relative to thorax body frame
