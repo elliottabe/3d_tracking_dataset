@@ -12,3 +12,23 @@ output_file: 'ik_output_v1.h5'
 
 # Verbose output
 verbose: true
+
+# Interpolation settings
+interpolation:
+  enabled: true
+  source_hz: 800.0       # Original STAC framerate (dataset-specific)
+  target_hz: 1000.0      # Target framerate for MJX processing
+  method: 'cubic'        # scipy interpolation: 'linear', 'cubic', 'quintic'
+
+# Floor alignment settings  
+floor_alignment:
+  enabled: true
+  end_effector_names: ['claw_T1_left', 'claw_T1_right', 'claw_T2_left', 'claw_T2_right', 'claw_T3_left', 'claw_T3_right']
+  percentile: 5.0        # Percentile for ground contact detection
+  target_z: -0.125       # Target floor height
+
+# MJX processing settings
+mjx_processing:
+  enabled: true
+  max_qvel: 2000.0         # Max velocity clipping (not currently used)
+  compute_velocities: true

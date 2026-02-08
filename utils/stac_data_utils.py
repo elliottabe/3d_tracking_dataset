@@ -473,3 +473,278 @@ def print_bout_dict_structure(
             print(f"   - {bout_name}: {frame_str}, {len(array_keys)} arrays, {len(other_keys)} other")
     
     print("=" * 80)
+
+
+def interpolate_trajectory(
+    data: Union[np.ndarray, jnp.ndarray],
+    source_hz: float,
+    target_hz: float,
+    method: str = 'cubic',
+    pad_to_length: int = None
+) -> np.ndarray:
+    """
+    Interpolate trajectory data from source framerate to target framerate.
+    
+    Uses scipy's interp1d for smooth interpolation. Supports arrays of any shape
+    as long as time is the first dimension. Optionally pads to a target length
+    by repeating the last frame.
+    
+    Args:
+        data: Input trajectory (T, ...) where T is number of timesteps
+        source_hz: Original sampling frequency in Hz
+        target_hz: Target sampling frequency in Hz  
+        method: Interpolation method - 'linear', 'cubic', 'quadratic', 'slinear'
+        pad_to_length: If provided, pad output to this length by repeating last frame
+        
+    Returns:
+        interpolated_data: Resampled trajectory (T_new, ...) or (pad_to_length, ...) if padded
+        
+    Examples:
+        >>> # Interpolate qpos from 150Hz to 1000Hz
+        >>> qpos_interp = interpolate_trajectory(qpos, 150.0, 1000.0, method='cubic')
+        >>> 
+        >>> # Interpolate and pad to max length
+        >>> xpos_interp = interpolate_trajectory(xpos, 150.0, 1000.0, pad_to_length=5000)
+    """
+    from scipy.interpolate import interp1d
+    
+    # Convert to numpy if JAX array
+    data_np = np.array(data) if isinstance(data, jnp.ndarray) else data
+    
+    T = data_np.shape[0]
+    if T <= 1:
+        # Can't interpolate single frame
+        if pad_to_length and T < pad_to_length:
+            # Pad by repeating the single frame
+            pad_shape = (pad_to_length - T,) + data_np.shape[1:]
+            padding = np.tile(data_np[-1:], (pad_to_length - T,) + (1,) * (len(data_np.shape) - 1))
+            return np.concatenate([data_np, padding], axis=0)
+        return data_np
+    
+    # Create time arrays
+    duration = (T - 1) / source_hz  # Duration in seconds
+    t_original = np.linspace(0, duration, T)
+    
+    # New time points at target frequency
+    T_new = int(duration * target_hz) + 1  # +1 to include endpoint
+    t_new = np.linspace(0, duration, T_new)
+    
+    # Handle single and multi-dimensional arrays
+    orig_shape = data_np.shape
+    if len(orig_shape) == 1:
+        # 1D array - interpolate directly
+        interp_func = interp1d(t_original, data_np, kind=method, 
+                               axis=0, fill_value='extrapolate')
+        resampled = interp_func(t_new)
+    else:
+        # Multi-dimensional - flatten all non-time dimensions
+        data_flat = data_np.reshape(T, -1)
+        
+        # Interpolate each dimension
+        interp_func = interp1d(t_original, data_flat, kind=method,
+                               axis=0, fill_value='extrapolate')
+        resampled_flat = interp_func(t_new)
+        
+        # Reshape back
+        new_shape = (T_new,) + orig_shape[1:]
+        resampled = resampled_flat.reshape(new_shape)
+    
+    # Pad if requested
+    if pad_to_length and T_new < pad_to_length:
+        # Repeat last frame to reach target length
+        n_pad = pad_to_length - T_new
+        padding = np.tile(resampled[-1:], (n_pad,) + (1,) * (len(resampled.shape) - 1))
+        resampled = np.concatenate([resampled, padding], axis=0)
+    
+    return resampled
+
+
+def adjust_root_z_for_floor(
+    bout_qpos: Union[np.ndarray, jnp.ndarray],
+    bout_xpos: Union[np.ndarray, jnp.ndarray],
+    end_eff_indices: List[int],
+    percentile: float = 5.0,
+    target_z: float = -0.125
+) -> np.ndarray:
+    """
+    Adjust root z-position so feet touch the floor at target height.
+    
+    Computes the floor height as the mean of the lowest percentile of
+    end effector (foot) z-positions across all frames. Then adjusts the
+    root body z-position (qpos[:, 2]) to align feet with target floor height.
+    
+    Args:
+        bout_qpos: Joint positions (T, nq) - will modify qpos[:, 2]
+        bout_xpos: Body positions (T, nbodies, 3) - used to find floor
+        end_eff_indices: Indices of end effector bodies (e.g., leg tips/claws)
+        percentile: Percentile for ground contact detection (lower = more conservative)
+        target_z: Target floor z-coordinate
+        
+    Returns:
+        adjusted_qpos: Modified qpos with root z adjusted (T, nq)
+        
+    Examples:
+        >>> # Find claw indices
+        >>> claw_indices = [i for i, name in enumerate(names_xpos) if 'claw' in name]
+        >>> 
+        >>> # Adjust qpos so claws touch floor at z = -0.125
+        >>> qpos_adjusted = adjust_root_z_for_floor(qpos, xpos, claw_indices, 
+        ...                                         percentile=5.0, target_z=-0.125)
+    """
+    # Convert to numpy for processing
+    qpos_np = np.array(bout_qpos) if isinstance(bout_qpos, jnp.ndarray) else bout_qpos.copy()
+    xpos_np = np.array(bout_xpos) if isinstance(bout_xpos, jnp.ndarray) else bout_xpos
+    
+    # Extract end effector z-positions across all frames
+    end_eff_z = xpos_np[:, end_eff_indices, 2]  # Shape: (T, n_end_eff)
+    
+    # Compute floor as mean of lowest percentile across all end effectors
+    floor_z = np.mean(np.quantile(end_eff_z, percentile / 100.0, axis=0))
+    
+    # Compute offset needed to move floor to target height
+    z_offset = target_z - floor_z
+    
+    # Apply offset to root z-position (assuming free joint at qpos[:3])
+    qpos_np[:, 2] += z_offset
+    
+    return qpos_np
+
+
+def concatenate_bout_dicts(
+    file_paths: List[str],
+    enable_jax: bool = True,
+    verbose: bool = True
+) -> Dict[str, Union[Dict, np.ndarray, jnp.ndarray, List]]:
+    """
+    Load and concatenate multiple postprocessed H5 files into a single bout dictionary.
+    
+    Loads multiple bout-based H5 files and combines them into a single dictionary with
+    renumbered bout keys. Metadata in the 'info' section is merged intelligently:
+    - List fields (like clip_lengths) are concatenated
+    - Other fields are taken from the first file (assumed consistent across files)
+    
+    Args:
+        file_paths: List of paths to postprocessed H5 files
+        enable_jax: If True, convert arrays to JAX arrays
+        verbose: Print progress information
+        
+    Returns:
+        combined_dict: Dictionary with structure:
+            {
+                'info': {merged metadata},
+                'bout_000': {data},
+                'bout_001': {data},
+                ...
+            }
+            
+    Examples:
+        >>> # Load and concatenate multiple processing runs
+        >>> files = [
+        ...     'ik_output_v1_part1.h5',
+        ...     'ik_output_v1_part2.h5',
+        ...     'ik_output_v1_part3.h5'
+        ... ]
+        >>> combined = concatenate_bout_dicts(files, verbose=True)
+        >>> print(f"Total bouts: {len([k for k in combined.keys() if k != 'info'])}")
+        
+    Notes:
+        - Bout keys are renumbered sequentially starting from 'bout_000'
+        - Original file source can be tracked via bout index ranges if needed
+        - All files should have consistent data structure and info fields
+    """
+    from pathlib import Path
+    from utils import io_dict_to_hdf5 as ioh5
+    
+    if verbose:
+        print("=" * 80)
+        print("CONCATENATING BOUT DICTIONARIES")
+        print("=" * 80)
+        print(f"Loading {len(file_paths)} files...\n")
+    
+    combined_dict = {'info': {}}
+    bout_counter = 0
+    
+    # Track concatenated info fields
+    concatenated_fields = ['clip_lengths', 'clip_lengths_original', 'clip_lengths_interp_unpadded']
+    
+    for file_idx, file_path in enumerate(file_paths):
+        file_path = Path(file_path)
+        
+        if not file_path.exists():
+            print(f"⚠ Warning: File not found: {file_path}")
+            continue
+        
+        if verbose:
+            print(f"Loading [{file_idx + 1}/{len(file_paths)}]: {file_path.name}")
+        
+        # Load file
+        bout_dict = ioh5.load(file_path, enable_jax=enable_jax)
+        
+        # Get bout keys (exclude 'info')
+        bout_keys = sorted([k for k in bout_dict.keys() if k != 'info'])
+        
+        if verbose:
+            print(f"  Found {len(bout_keys)} bouts")
+        
+        # Copy bouts with new sequential numbering
+        for bout_key in bout_keys:
+            new_key = f'bout_{bout_counter:03d}'
+            combined_dict[new_key] = bout_dict[bout_key]
+            bout_counter += 1
+        
+        # Handle info section
+        if 'info' in bout_dict:
+            if file_idx == 0:
+                # First file: initialize info dict
+                combined_dict['info'] = {}
+                for key, value in bout_dict['info'].items():
+                    if key in concatenated_fields:
+                        # Start list for concatenation
+                        if isinstance(value, (list, np.ndarray, jnp.ndarray)):
+                            combined_dict['info'][key] = list(value) if isinstance(value, (list, tuple)) else value.tolist()
+                        else:
+                            combined_dict['info'][key] = [value]
+                    else:
+                        # Copy directly
+                        combined_dict['info'][key] = value
+            else:
+                # Subsequent files: merge info
+                for key, value in bout_dict['info'].items():
+                    if key in concatenated_fields:
+                        # Concatenate lists
+                        if isinstance(value, (list, np.ndarray, jnp.ndarray)):
+                            value_list = list(value) if isinstance(value, (list, tuple)) else value.tolist()
+                            if key in combined_dict['info']:
+                                combined_dict['info'][key].extend(value_list)
+                            else:
+                                combined_dict['info'][key] = value_list
+                    elif key not in combined_dict['info']:
+                        # Add missing key from subsequent files
+                        combined_dict['info'][key] = value
+        
+        if verbose:
+            print(f"  Total bouts so far: {bout_counter}\n")
+    
+    # Convert concatenated info lists back to arrays if they were arrays
+    if enable_jax:
+        for key in concatenated_fields:
+            if key in combined_dict['info'] and isinstance(combined_dict['info'][key], list):
+                combined_dict['info'][key] = jnp.array(combined_dict['info'][key])
+    else:
+        for key in concatenated_fields:
+            if key in combined_dict['info'] and isinstance(combined_dict['info'][key], list):
+                combined_dict['info'][key] = np.array(combined_dict['info'][key])
+    
+    if verbose:
+        print("=" * 80)
+        print("CONCATENATION COMPLETE")
+        print("=" * 80)
+        print(f"✓ Combined {len(file_paths)} files")
+        print(f"✓ Total bouts: {bout_counter}")
+        if 'clip_lengths' in combined_dict['info']:
+            total_frames = np.sum(combined_dict['info']['clip_lengths'])
+            print(f"✓ Total frames: {total_frames}")
+        print()
+    
+    return combined_dict
+

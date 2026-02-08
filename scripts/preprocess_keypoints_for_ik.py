@@ -15,6 +15,22 @@ Usage:
     python preprocess_keypoints_for_ik.py paths=workstation preprocessing.frame_start=100 preprocessing.frame_end=300
 """
 
+import os
+os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
+os.environ['MUJOCO_GL'] = 'egl'
+os.environ['PYOPENGL_PLATFORM'] = 'egl'
+os.environ["XLA_FLAGS"] = "--xla_gpu_triton_gemm_any=True"
+
+import jax
+jax.config.update("jax_compilation_cache_dir", "/tmp/jax_cache")
+jax.config.update("jax_persistent_cache_min_entry_size_bytes", -1)
+jax.config.update("jax_persistent_cache_min_compile_time_secs", 0)
+# Note: jax_persistent_cache_enable_xla_caches may not be available in all JAX versions
+try:
+    jax.config.update("jax_persistent_cache_enable_xla_caches", "xla_gpu_per_fusion_autotune_cache_dir")
+except AttributeError:
+    pass  # Skip if not available in this JAX version
+
 import json
 import sys
 from pathlib import Path
