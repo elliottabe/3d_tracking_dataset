@@ -145,7 +145,7 @@ def main(cfg: DictConfig):
             non_interp_dict['info'][key] = value
     
     # Save non-interpolated version (base file)
-    output_path = cfg.paths.save_dir / f'{output_file}.h5'
+    output_path = cfg.paths.save_dir / f'{output_file}_{cfg.anatomy.name}.h5'
     print(f"Saving non-interpolated data to: {output_path}")
     if 'info' in non_interp_dict and 'clip_lengths' in non_interp_dict['info']:
         print(f"  Clip lengths (original, unpadded): {non_interp_dict['info']['clip_lengths']}")
@@ -155,7 +155,7 @@ def main(cfg: DictConfig):
     print()
 
     # Save interpolated version (clean keys contain interpolated data)
-    output_path_interp = cfg.paths.save_dir / f'{output_file}_interp.h5'
+    output_path_interp = cfg.paths.save_dir / f'{output_file}_interp_{cfg.anatomy.name}.h5'
     print("=" * 80)
     print("SAVING COMBINED OUTPUT - INTERPOLATED")
     print("=" * 80)

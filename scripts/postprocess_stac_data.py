@@ -314,7 +314,7 @@ def process_bouts_batched(
         return egocentric_pos
     
     # Vmap floor adjustment
-    qpos_adjusted = jax.vmap(adjust_single_bout)(qpos_batch, xpos_batch)
+    qpos_adjusted = jax.vmap(adjust_single_bout)(qpos_batch, xpos_batch)    
     
     # Vmap MJX processing
     qpos_out, qvel_out, xpos_out, xquat_out = jax.vmap(process_single_bout)(qpos_adjusted)
