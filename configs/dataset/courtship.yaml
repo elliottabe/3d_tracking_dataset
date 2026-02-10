@@ -1,3 +1,9 @@
+# @package _global_.dataset
+
+defaults:
+  - preprocessing
+  - postprocessing
+
 name: courtship
 env_name: courtship
 version: analysis

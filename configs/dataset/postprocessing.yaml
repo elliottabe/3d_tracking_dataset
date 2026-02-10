@@ -1,0 +1,38 @@
+# @package _global_.postprocessing
+
+# Postprocessing configuration for STAC output
+# Usage: python postprocess_stac_data.py paths=workstation dataset=free_walking
+
+# Input files (relative to data_dir or absolute)
+stac_output_file: 'Fruitfly_ik_${anatomy.name}_free.h5'
+preprocessed_file: 'preprocessed_bout_${anatomy.name}.h5'
+
+# Output file
+output_file: 'ik_output_${anatomy.name}.h5'
+
+# Verbose output
+verbose: true
+
+# Interpolation settings
+interpolation:
+  enabled: true
+  source_hz: 800.0       # Original STAC framerate (dataset-specific)
+  target_hz: 1000.0      # Target framerate for MJX processing
+  method: 'cubic'        # scipy interpolation: 'linear', 'cubic', 'quintic'
+
+# Floor alignment settings  
+floor_alignment:
+  enabled: true
+  end_effector_names: ['claw_T1_left', 'claw_T1_right', 'claw_T2_left', 'claw_T2_right', 'claw_T3_left', 'claw_T3_right']
+  percentile: 5.0        # Percentile for ground contact detection
+  target_z: -0.125       # Target floor height
+
+# MJX processing settings
+mjx_processing:
+  enabled: true
+  max_qvel: 2000.0         # Max velocity clipping (not currently used)
+  compute_velocities: true
+
+# Egocentric site positions (body-frame coordinates)
+egocentric_sites:
+  enabled: true            # Compute site positions relative to thorax body frame
