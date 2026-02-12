@@ -450,22 +450,27 @@ def load_bouts_from_csv(bouts_csv_path: Path) -> List[Dict]:
         - bout_idx: Bout identifier
         - start_frame: Start frame index
         - end_frame: End frame index (inclusive)
+        - fly_id: Fly identifier (required)
     
     Args:
         bouts_csv_path: Path to CSV file with bout information
     
     Returns:
-        List of dicts with keys: 'bout_idx', 'start_frame', 'end_frame'
+        List of dicts with keys: 'bout_idx', 'start_frame', 'end_frame', 'fly_id'
     """
     print(f"\nLoading bout information from: {bouts_csv_path}")
     
     df = pd.read_csv(bouts_csv_path)
     
     # Check required columns
-    required_cols = ['bout_idx', 'start_frame', 'end_frame']
+    required_cols = ['bout_idx', 'start_frame', 'end_frame', 'fly_id']
     missing_cols = [col for col in required_cols if col not in df.columns]
     if missing_cols:
-        raise ValueError(f"CSV missing required columns: {missing_cols}")
+        raise ValueError(
+            f"CSV missing required columns: {missing_cols}\n"
+            f"Available columns: {list(df.columns)}\n"
+            f"The 'fly_id' column is required for tracking bout sources."
+        )
     
     # Convert to list of dicts
     bouts = []
@@ -473,14 +478,15 @@ def load_bouts_from_csv(bouts_csv_path: Path) -> List[Dict]:
         bout_info = {
             'bout_idx': int(row['bout_idx']-1),
             'start_frame': int(row['start_frame']),
-            'end_frame': int(row['end_frame'])
+            'end_frame': int(row['end_frame']),
+            'fly_id': str(row['fly_id'])
         }
         bouts.append(bout_info)
     
     print(f"Loaded {len(bouts)} bouts")
-    print(f"  First bout: idx={bouts[0]['bout_idx']}, frames {bouts[0]['start_frame']}-{bouts[0]['end_frame']}")
+    print(f"  First bout: idx={bouts[0]['bout_idx']}, fly_id={bouts[0]['fly_id']}, frames {bouts[0]['start_frame']}-{bouts[0]['end_frame']}")
     if len(bouts) > 1:
-        print(f"  Last bout:  idx={bouts[-1]['bout_idx']}, frames {bouts[-1]['start_frame']}-{bouts[-1]['end_frame']}")
+        print(f"  Last bout:  idx={bouts[-1]['bout_idx']}, fly_id={bouts[-1]['fly_id']}, frames {bouts[-1]['start_frame']}-{bouts[-1]['end_frame']}")
     
     return bouts
 
@@ -495,14 +501,14 @@ def load_concatenated_bouts(csv_path: Path,
     
     Args:
         csv_path: Path to CSV file with keypoint data
-        bouts: List of bout information dicts
+        bouts: List of bout information dicts (must include 'fly_id')
         csv_kp_names: List of CSV keypoint names
         csv_to_filtered_idx: Mapping from CSV name to filtered skeleton index
         filtered_node_names: List of filtered node names in order
     
     Returns:
         concatenated_kp: Concatenated keypoint array (T_total, N, 3)
-        clip_info: List of dicts with 'bout_idx', 'start_idx', 'end_idx' for each bout
+        clip_info: List of dicts with 'bout_idx', 'start_idx', 'end_idx', 'fly_id' for each bout
     """
     print(f"\nLoading {len(bouts)} bouts as concatenated array...")
     
@@ -511,6 +517,10 @@ def load_concatenated_bouts(csv_path: Path,
     df.columns = ['_'.join(col).strip() if isinstance(col, tuple) else col for col in df.columns.values]
     xyz_columns = [col for col in df.columns if col.endswith(('_x', '_y', '_z'))]
     kp_data = df[xyz_columns]
+    
+    # Get CSV size for validation
+    n_frames_available = len(kp_data)
+    print(f"CSV contains {n_frames_available} frames")
     
     # Create reordered column list (from reorder_csv_to_skeleton)
     reordered_cols = [''] * len(filtered_node_names) * 3
@@ -523,8 +533,18 @@ def load_concatenated_bouts(csv_path: Path,
     bout_arrays = []
     clip_info = []
     current_idx = 0
+    skipped_bouts = []
     
     for bout in bouts:
+        # Validate frame indices are within CSV bounds
+        if bout['start_frame'] >= n_frames_available or bout['end_frame'] > n_frames_available:
+            warning_msg = (f"⚠️ Skipping bout {bout['bout_idx']}: "
+                          f"frames {bout['start_frame']}-{bout['end_frame']} "
+                          f"out of bounds (CSV has {n_frames_available} frames)")
+            print(warning_msg)
+            skipped_bouts.append((bout['bout_idx'], warning_msg))
+            continue
+        
         frame_indices = np.arange(bout['start_frame'], bout['end_frame'])
         bout_data = kp_data.iloc[frame_indices][reordered_cols]
         bout_array = np.array(bout_data.values).reshape(-1, len(filtered_node_names), 3)
@@ -534,12 +554,20 @@ def load_concatenated_bouts(csv_path: Path,
         clip_info.append({
             'bout_idx': bout['bout_idx'],
             'start_idx': current_idx,
-            'end_idx': current_idx + len(bout_array)
+            'end_idx': current_idx + len(bout_array),
+            'fly_id': bout['fly_id']
         })
         current_idx += len(bout_array)
     
+    if not bout_arrays:
+        raise ValueError(f"No valid bouts found! All {len(bouts)} bouts have frame indices out of bounds.")
+    
+    if skipped_bouts:
+        print(f"\n⚠️ Warning: Skipped {len(skipped_bouts)} out-of-bounds bouts")
+    
     concatenated_kp = np.concatenate(bout_arrays, axis=0)
     
+    print(f"Loaded {len(bout_arrays)}/{len(bouts)} valid bouts")
     print(f"Concatenated shape: {concatenated_kp.shape}")
     print(f"  Total frames: {concatenated_kp.shape[0]}")
     print(f"  Bouts: {len(bouts)}")
@@ -748,6 +776,9 @@ def process_bouts_batch(csv_path: Path,
         concatenated_kp, clip_info = load_concatenated_bouts(
             csv_path, bouts, csv_kp_names, csv_to_filtered_idx, filtered_node_names
         )
+        
+        # Extract fly_ids from clip_info for later storage
+        fly_ids = [clip['fly_id'] for clip in clip_info]
         orig_concatenated = concatenated_kp.copy()
         
         # 5. Match to MuJoCo sites (once)
@@ -817,9 +848,17 @@ def process_bouts_batch(csv_path: Path,
             all_bouts_dict[f'bout_{bout_idx:03d}'] = bout_data
             
             scale_str = f", scale={alignment_info['scales']:.6f}" if alignment_info else ""
-            print(f"  ✓ bout_{bout_idx:03d}: {bout_data['keypoints'].shape[0]} frames{scale_str}")
+            fly_id_str = f", fly_id={fly_ids[bout_idx]}"
+            print(f"  ✓ bout_{bout_idx:03d}: {bout_data['keypoints'].shape[0]} frames{scale_str}{fly_id_str}")
         
-        print(f"\n✓ Successfully split into {len(all_bouts_dict)} bouts")
+        # Add info dictionary with fly_ids and clip_lengths
+        all_bouts_dict['info'] = {
+            'fly_ids': fly_ids,
+            'clip_lengths': [clip['end_idx'] - clip['start_idx'] for clip in clip_info]
+        }
+        
+        print(f"\n✓ Successfully split into {len([k for k in all_bouts_dict.keys() if k != 'info'])} bouts")
+        print(f"✓ Stored fly_ids in 'info': {fly_ids}")
         
         return all_bouts_dict
         

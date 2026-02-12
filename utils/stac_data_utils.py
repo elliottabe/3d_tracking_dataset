@@ -175,6 +175,10 @@ def reorganize_stac_by_bouts(
     # Store clip_lengths in 'info' for future reference
     bout_dict['info']['clip_lengths'] = clip_lengths
     
+    # Preserve fly_ids if present in input data
+    if 'fly_ids' in stac_data:
+        bout_dict['info']['fly_ids'] = stac_data['fly_ids']
+    
     # Compute frame ranges for each bout based on padding mode
     frame_ranges = []
     if is_padded:
@@ -664,8 +668,8 @@ def concatenate_bout_dicts(
     combined_dict = {'info': {}}
     bout_counter = 0
     
-    # Track concatenated info fields
-    concatenated_fields = ['clip_lengths', 'clip_lengths_original', 'clip_lengths_interp_unpadded']
+    # Track concatenated info fields (including fly_ids)
+    concatenated_fields = ['clip_lengths', 'clip_lengths_original', 'clip_lengths_interp_unpadded', 'fly_ids']
     
     for file_idx, file_path in enumerate(file_paths):
         file_path = Path(file_path)

@@ -137,6 +137,7 @@ def main(cfg: DictConfig):
                         non_interp_dict[bout_key][key] = value
     
     # Handle info specially - only include clip_lengths_original as clip_lengths
+    # Important: preserve fly_ids
     non_interp_dict['info'] = {}
     for key, value in combined_dict['info'].items():
         if key == 'clip_lengths_original':
@@ -190,6 +191,7 @@ def main(cfg: DictConfig):
                 interp_dict[bout_key][key] = value
     
     # Handle info specially - keep clip_lengths_interp_unpadded as clip_lengths, remove original
+    # Important: preserve fly_ids
     interp_dict['info'] = {}
     for key, value in combined_dict['info'].items():
         if key == 'clip_lengths_interp_unpadded':

@@ -55,39 +55,46 @@ from utils.io import load_stac_data
 from utils.mjx_preprocess import process_clip, ReferenceClip
 
 
-def load_clip_lengths(data_path: Path, filename: str) -> list:
+def load_clip_lengths(data_path: Path, filename: str) -> tuple:
     """
-    Load clip_lengths from preprocessed keypoint data.
-    
+    Load clip_lengths and fly_ids from preprocessed keypoint data.
+
     Args:
         data_path: Path to directory containing preprocessed_bout.h5
-        
+
     Returns:
         clip_lengths: List of frame counts for each bout
+        fly_ids: List of fly identifiers for each bout (or None if not present)
     """
     print("=" * 80)
     print("LOADING CLIP LENGTHS")
     print("=" * 80)
-    
+
     preprocessed_path = data_path / filename
     if not preprocessed_path.exists():
         raise FileNotFoundError(f"Preprocessed data not found: {preprocessed_path}")
-    
+
     print(f"Loading: {preprocessed_path}")
     data_dict = ioh5.load(preprocessed_path, enable_jax=False)
-    
+
     clip_lengths = [
-        data_dict[key]['keypoints'].shape[0] 
-        for key in data_dict 
+        data_dict[key]['keypoints'].shape[0]
+        for key in data_dict
         if 'keypoints' in data_dict[key]
     ]
-    
+
+    # Extract fly_ids from info if present
+    fly_ids = None
+    if 'info' in data_dict and 'fly_ids' in data_dict['info']:
+        fly_ids = list(data_dict['info']['fly_ids'])
+        print(f"✓ Found fly_ids: {fly_ids}")
+
     print(f"✓ Found {len(clip_lengths)} bouts")
     print(f"  Clip lengths: {clip_lengths}")
     print(f"  Total frames: {sum(clip_lengths)}")
     print()
-    
-    return clip_lengths
+
+    return clip_lengths, fly_ids
 
 
 def load_stac_output(stac_path: Path):
@@ -631,8 +638,8 @@ def main(cfg: DictConfig):
     print(f"  Output: {output_path}")
     print()
     
-    # Step 1: Load clip lengths
-    clip_lengths = load_clip_lengths(data_path, cfg.postprocessing.preprocessed_file)
+    # Step 1: Load clip lengths and fly_ids
+    clip_lengths, fly_ids = load_clip_lengths(data_path, cfg.postprocessing.preprocessed_file)
     
     # Step 2: Load STAC output
     cfg_d, d, stac_data = load_stac_output(stac_path)
@@ -646,7 +653,11 @@ def main(cfg: DictConfig):
         stac_data=stac_data,
         clip_lengths=clip_lengths,
     )
-    
+
+    # Inject fly_ids from preprocessing (STAC solver doesn't preserve them)
+    if fly_ids is not None:
+        bout_dict['info']['fly_ids'] = fly_ids
+
     # if cfg.postprocessing.verbose:
     #     print()
     #     print_bout_dict_structure(bout_dict, show_values=False)

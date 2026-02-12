@@ -1,0 +1,3 @@
+[submodule "stac-mjx"]
+	path = stac-mjx
+	url = git@github.com:elliottabe/stac-mjx.git
