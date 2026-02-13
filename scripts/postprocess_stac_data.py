@@ -53,6 +53,7 @@ from utils.stac_data_utils import (
 from utils.path_utils import load_config_with_path_template, convert_dict_to_path
 from utils.io import load_stac_data
 from utils.mjx_preprocess import process_clip, ReferenceClip
+from utils.geometric_angles import compute_geometric_angles_all_legs
 
 
 def load_clip_lengths(data_path: Path, filename: str) -> tuple:
@@ -732,7 +733,33 @@ def main(cfg: DictConfig):
             verbose=cfg.postprocessing.verbose
         )
     
-    # Step 6: Save output
+    # Step 6: Compute geometric joint angles (anipose-compatible)
+    print("=" * 80)
+    print("COMPUTING GEOMETRIC ANGLES")
+    print("=" * 80)
+    kp_names = bout_dict['info'].get('kp_names', [])
+    bout_keys = sorted([k for k in bout_dict.keys() if k != 'info'])
+    n_computed = 0
+    for bout_key in bout_keys:
+        bout = bout_dict[bout_key]
+        marker_data = bout.get('marker_sites', bout.get('kp_data'))
+        if marker_data is not None and len(kp_names) > 0:
+            geo_angles = compute_geometric_angles_all_legs(
+                np.asarray(marker_data), kp_names
+            )
+            if geo_angles:
+                bout['geometric_angles'] = geo_angles
+                n_computed += 1
+    print(f"  Computed geometric angles for {n_computed}/{len(bout_keys)} bouts")
+    if n_computed > 0:
+        example = bout_dict[bout_keys[0]].get('geometric_angles', {})
+        print(f"  Legs computed: {list(example.keys())}")
+        if example:
+            first_leg = list(example.keys())[0]
+            print(f"  Angles for {first_leg}: {list(example[first_leg].keys())}")
+    print()
+
+    # Step 7: Save output
     print("=" * 80)
     print("SAVING OUTPUT")
     print("=" * 80)

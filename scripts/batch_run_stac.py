@@ -189,28 +189,53 @@ def run_stac(
     if dry_run:
         print(f"  Would run: cd {stac_dir} && {' '.join(cmd)}")
         return True, "Dry run"
-    
+
     # Set up environment with GPU/rendering settings
     env = get_stac_environment(gpu_mem_fraction)
-    
+
+    # Log file co-located with the data
+    log_file = folder / f"stac_batch_{anatomy_name}.log"
+
     try:
         print(f"  Running STAC IK solver...")
-        result = subprocess.run(
-            cmd,
-            cwd=stac_dir,
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=6*3600  # 6 hour timeout
-        )
-        
-        if result.returncode == 0:
+        print(f"  Log file: {log_file}")
+
+        with open(log_file, 'w') as lf:
+            lf.write(f"STAC run started: {datetime.now().isoformat()}\n")
+            lf.write(f"Command: {' '.join(cmd)}\n")
+            lf.write(f"{'='*80}\n\n")
+            lf.flush()
+
+            proc = subprocess.Popen(
+                cmd,
+                cwd=stac_dir,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+            )
+
+            # Stream output to both console and log file
+            for line in proc.stdout:
+                sys.stdout.write(f"  | {line}")
+                sys.stdout.flush()
+                lf.write(line)
+                lf.flush()
+
+            proc.wait(timeout=6*3600)
+
+            lf.write(f"\n{'='*80}\n")
+            lf.write(f"STAC run finished: {datetime.now().isoformat()}\n")
+            lf.write(f"Return code: {proc.returncode}\n")
+
+        if proc.returncode == 0:
             return True, "Success"
         else:
-            error_msg = result.stderr[-500:] if result.stderr else "Unknown error"
-            return False, f"Failed with return code {result.returncode}: {error_msg}"
-    
+            return False, f"Failed with return code {proc.returncode} (see {log_file})"
+
     except subprocess.TimeoutExpired:
+        proc.kill()
         return False, "Timeout after 6 hours"
     except Exception as e:
         return False, f"Exception: {str(e)}"

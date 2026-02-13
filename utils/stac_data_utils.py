@@ -729,14 +729,15 @@ def concatenate_bout_dicts(
         if verbose:
             print(f"  Total bouts so far: {bout_counter}\n")
     
-    # Convert concatenated info lists back to arrays if they were arrays
-    if enable_jax:
-        for key in concatenated_fields:
-            if key in combined_dict['info'] and isinstance(combined_dict['info'][key], list):
+    # Convert concatenated info lists back to arrays (keep string lists as-is)
+    for key in concatenated_fields:
+        if key in combined_dict['info'] and isinstance(combined_dict['info'][key], list):
+            # Skip conversion for string lists (e.g. fly_ids)
+            if combined_dict['info'][key] and isinstance(combined_dict['info'][key][0], str):
+                continue
+            if enable_jax:
                 combined_dict['info'][key] = jnp.array(combined_dict['info'][key])
-    else:
-        for key in concatenated_fields:
-            if key in combined_dict['info'] and isinstance(combined_dict['info'][key], list):
+            else:
                 combined_dict['info'][key] = np.array(combined_dict['info'][key])
     
     if verbose:
