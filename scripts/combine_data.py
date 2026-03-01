@@ -80,7 +80,8 @@ def main(cfg: DictConfig):
     print()
 
     # Find all matching files
-    file_paths = [fp for fp in sorted(base_dir.rglob(f"{input_pattern}.h5")) if 'combined' not in fp.name]
+    # file_paths = [fp for fp in sorted(base_dir.rglob(f"{input_pattern}.h5")) if 'combined' not in fp.name]
+    file_paths = [Path('/data2/users/eabe/datasets/Johnson_lab/free_walking/Predictions_3D_20260202-171900/ik_output_v2_muscles_stationary_free.h5')]
 
 
     print(f"Found {len(file_paths)} files:")
