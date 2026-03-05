@@ -50,6 +50,7 @@ from datetime import datetime
 import os
 
 
+
 def get_stac_environment(gpu_mem_fraction: float = 0.9) -> dict:
     """
     Create environment dict with settings for headless GPU rendering and JAX optimization.
@@ -127,20 +128,21 @@ def find_prediction_folders(base_dir: Path, anatomy_name: str) -> list[tuple[Pat
     return prediction_folders
 
 
-def check_stac_outputs_exist(folder: Path, anatomy_name: str) -> tuple[bool, bool]:
+def check_stac_outputs_exist(folder: Path, anatomy_name: str, dataset: str) -> tuple[bool, bool]:
     """
     Check if STAC output files already exist.
-    
+
     Args:
         folder: Prediction folder path
         anatomy_name: Anatomy version (e.g., 'v1', 'v2')
-    
+        dataset: Dataset name (e.g., 'free_walking', 'courtship')
+
     Returns:
         (fit_offsets_exists, ik_only_exists) tuple
     """
-    fit_file = folder / f"Fruitfly_fit_{anatomy_name}_free.h5"
-    ik_file = folder / f"Fruitfly_ik_{anatomy_name}_free.h5"
-    
+    fit_file = folder / f"Fruitfly_fit_{anatomy_name}_{dataset}.h5"
+    ik_file = folder / f"Fruitfly_ik_{anatomy_name}_{dataset}.h5"
+
     return fit_file.exists(), ik_file.exists()
 
 
@@ -148,6 +150,7 @@ def run_stac(
     folder: Path,
     version_name: str,
     anatomy_name: str,
+    dataset: str,
     stac_dir: Path,
     gpu_mem_fraction: float = 0.9,
     stac_overrides: str = "",
@@ -155,16 +158,17 @@ def run_stac(
 ) -> tuple[bool, str]:
     """
     Run STAC IK solver on a single folder.
-    
+
     Args:
         folder: Path to prediction folder
         version_name: Version name for config override (folder name)
         anatomy_name: Anatomy version (e.g., 'v1', 'v2')
+        dataset: Dataset name (e.g., 'free_walking', 'courtship')
         stac_dir: Path to stac-mjx directory
         gpu_mem_fraction: Fraction of GPU memory to allocate
         stac_overrides: Additional Hydra config overrides
         dry_run: If True, only print command without running
-    
+
     Returns:
         (success, message) tuple
     """
@@ -174,7 +178,7 @@ def run_stac(
         sys.executable,  # Current Python interpreter
         "run_stac_fly_model.py",
         f"paths=workstation",
-        f"dataset=free_walking",
+        f"dataset={dataset}",
         f"anatomy={anatomy_name}",
         f"version={version_name}",
         "run_id=batch_stac",
@@ -271,10 +275,17 @@ Examples:
         help='Anatomy version (v1, v2, etc.)'
     )
     parser.add_argument(
+        '--dataset',
+        type=str,
+        default='free_walking',
+        choices=['free_walking', 'courtship'],
+        help='Dataset type (default: free_walking)'
+    )
+    parser.add_argument(
         '--base-dir',
         type=Path,
-        default=Path('/data2/users/eabe/datasets/Johnson_lab/free_walking'),
-        help='Base directory containing Predictions_3D_* folders'
+        default=None,
+        help='Base directory containing Predictions_3D_* folders (default: /data2/users/eabe/datasets/Johnson_lab/<dataset>)'
     )
     parser.add_argument(
         '--stac-dir',
@@ -306,7 +317,10 @@ Examples:
     )
     
     args = parser.parse_args()
-    
+
+    if args.base_dir is None:
+        args.base_dir = Path(f'/data2/users/eabe/datasets/Johnson_lab/{args.dataset}')
+
     # Validate stac-mjx directory
     if not args.stac_dir.exists():
         print(f"❌ Error: stac-mjx directory not found: {args.stac_dir}")
@@ -325,6 +339,7 @@ Examples:
     print(f"{'='*80}")
     print(f"Base directory: {args.base_dir}")
     print(f"Anatomy: {args.anatomy}")
+    print(f"Dataset: {args.dataset}")
     print(f"STAC directory: {args.stac_dir}")
     print(f"GPU memory fraction: {args.gpu_mem_fraction}")
     if args.stac_overrides:
@@ -351,33 +366,34 @@ Examples:
         print(f"📁 {folder.name}")
         
         # Check if outputs already exist
-        fit_exists, ik_exists = check_stac_outputs_exist(folder, args.anatomy)
-        
+        fit_exists, ik_exists = check_stac_outputs_exist(folder, args.anatomy, args.dataset)
+
         if (fit_exists and ik_exists) and not args.force:
             print(f"  ⏭️  Skipping: Output files already exist")
             print(f"     (Use --force to reprocess)")
             skipped.append(folder.name)
             print()
             continue
-        
+
         if fit_exists or ik_exists:
             print(f"  ℹ️  Partial outputs exist:")
             if fit_exists:
-                print(f"     ✓ Fruitfly_fit_{args.anatomy}_free.h5")
+                print(f"     ✓ Fruitfly_fit_{args.anatomy}_{args.dataset}.h5")
             else:
-                print(f"     ✗ Fruitfly_fit_{args.anatomy}_free.h5")
+                print(f"     ✗ Fruitfly_fit_{args.anatomy}_{args.dataset}.h5")
             if ik_exists:
-                print(f"     ✓ Fruitfly_ik_{args.anatomy}_free.h5")
+                print(f"     ✓ Fruitfly_ik_{args.anatomy}_{args.dataset}.h5")
             else:
-                print(f"     ✗ Fruitfly_ik_{args.anatomy}_free.h5")
+                print(f"     ✗ Fruitfly_ik_{args.anatomy}_{args.dataset}.h5")
             if args.force:
                 print(f"     Reprocessing due to --force flag")
-        
+
         # Run STAC
         success, message = run_stac(
             folder,
             version_name,
             args.anatomy,
+            args.dataset,
             args.stac_dir,
             args.gpu_mem_fraction,
             args.stac_overrides,
@@ -428,6 +444,7 @@ Examples:
             f.write(f"STAC Batch Processing Log - {timestamp}\n")
             f.write(f"{'='*80}\n")
             f.write(f"Anatomy: {args.anatomy}\n")
+            f.write(f"Dataset: {args.dataset}\n")
             f.write(f"GPU memory fraction: {args.gpu_mem_fraction}\n")
             if args.stac_overrides:
                 f.write(f"STAC overrides: {args.stac_overrides}\n")

@@ -32,6 +32,7 @@ from datetime import datetime
 import argparse
 
 
+
 def find_prediction_folders(base_dir: Path) -> list:
     """
     Find all Predictions_3D_* folders in the base directory.
@@ -51,21 +52,21 @@ def find_prediction_folders(base_dir: Path) -> list:
     return folders
 
 
-def check_stac_outputs_exist(folder: Path, anatomy: str) -> tuple:
+def check_stac_outputs_exist(folder: Path, anatomy: str, dataset_suffix: str) -> tuple:
     """
     Check if STAC IK outputs exist (required for postprocessing).
-    
+
     Args:
         folder: Path to prediction folder
         anatomy: Anatomy version (e.g., 'v1', 'v2_muscles')
-        
+        dataset_suffix: Short dataset suffix used in filenames (e.g., 'free', 'courtship')
+
     Returns:
         (exists, stac_path) tuple
     """
-    # STAC output naming pattern
-    stac_file = f"Fruitfly_ik_{anatomy}_free.h5"
+    stac_file = f"Fruitfly_ik_{anatomy}_{dataset_suffix}.h5"
     stac_path = folder / stac_file
-    
+
     return (stac_path.exists(), stac_path)
 
 
@@ -86,16 +87,17 @@ def check_postprocess_outputs_exist(folder: Path, anatomy: str) -> tuple:
     return (output_path.exists(), output_path)
 
 
-def run_postprocessing(folder: Path, anatomy: str, paths: str, dry_run: bool = False) -> dict:
+def run_postprocessing(folder: Path, anatomy: str, dataset: str, paths: str, dry_run: bool = False) -> dict:
     """
     Run postprocessing for a single prediction folder.
     
     Args:
         folder: Path to prediction folder
         anatomy: Anatomy version (e.g., 'v1')
+        dataset: Dataset name (e.g., 'free_walking', 'courtship')
         paths: Paths config to use (e.g., 'workstation', 'hyak')
         dry_run: If True, don't actually run, just show command
-        
+
     Returns:
         Dictionary with status information
     """
@@ -105,15 +107,15 @@ def run_postprocessing(folder: Path, anatomy: str, paths: str, dry_run: bool = F
         'message': '',
         'command': ''
     }
-    
+
     # Build command
     script_path = Path(__file__).parent / "postprocess_stac_data.py"
-    
+
     cmd = [
         sys.executable,  # Use same Python interpreter
         str(script_path),
         f"paths={paths}",
-        "dataset=free_walking",
+        f"dataset={dataset}",
         f"anatomy={anatomy}",
         f"paths.data_dir={folder}",
     ]
@@ -168,10 +170,17 @@ def main():
         description='Batch postprocess all Predictions_3D folders (after STAC IK)'
     )
     parser.add_argument(
+        '--dataset',
+        type=str,
+        default='free_walking',
+        choices=['free_walking', 'courtship'],
+        help='Dataset type (default: free_walking)'
+    )
+    parser.add_argument(
         '--base-dir',
         type=str,
-        default='/data2/users/eabe/datasets/Johnson_lab/free_walking',
-        help='Base directory containing Predictions_3D folders'
+        default=None,
+        help='Base directory containing Predictions_3D folders (default: /data2/users/eabe/datasets/Johnson_lab/<dataset>)'
     )
     parser.add_argument(
         '--anatomy',
@@ -203,7 +212,10 @@ def main():
     )
     
     args = parser.parse_args()
-    
+
+    if args.base_dir is None:
+        args.base_dir = f'/data2/users/eabe/datasets/Johnson_lab/{args.dataset}'
+
     # Setup logging
     if args.log_file:
         log_path = Path(args.log_file)
@@ -221,9 +233,10 @@ def main():
         sys.exit(1)
     
     print(f"\n{'='*80}")
-    print("BATCH POSTPROCESSING - FREE WALKING PREDICTIONS")
+    print(f"BATCH POSTPROCESSING - {args.dataset.upper()} PREDICTIONS")
     print(f"{'='*80}")
     print(f"Base directory: {base_dir}")
+    print(f"Dataset: {args.dataset}")
     print(f"Anatomy: {args.anatomy}")
     print(f"Paths config: {args.paths}")
     print(f"Force reprocess: {args.force}")
@@ -258,7 +271,7 @@ def main():
         print(f"{'-'*80}")
         
         # Check if STAC outputs exist
-        stac_exists, stac_path = check_stac_outputs_exist(folder, args.anatomy)
+        stac_exists, stac_path = check_stac_outputs_exist(folder, args.anatomy, args.dataset)
         if not stac_exists:
             folder_result['status'] = 'missing_stac'
             folder_result['message'] = f"STAC output not found: {stac_path.name}"
@@ -279,7 +292,7 @@ def main():
         
         # Run postprocessing
         print(f"✓ STAC output found - running postprocessing...")
-        folder_result = run_postprocessing(folder, args.anatomy, args.paths, args.dry_run)
+        folder_result = run_postprocessing(folder, args.anatomy, args.dataset, args.paths, args.dry_run)
         results.append(folder_result)
     
     # Print summary
@@ -324,6 +337,7 @@ def main():
         f.write(f"{'='*80}\n\n")
         f.write(f"Configuration:\n")
         f.write(f"  Base directory: {base_dir}\n")
+        f.write(f"  Dataset: {args.dataset}\n")
         f.write(f"  Anatomy: {args.anatomy}\n")
         f.write(f"  Paths: {args.paths}\n")
         f.write(f"  Force: {args.force}\n")

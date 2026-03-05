@@ -91,16 +91,17 @@ def check_outputs_exist(folder: Path, anatomy: str) -> tuple:
     return (output_path.exists(), output_path)
 
 
-def run_preprocessing(folder: Path, anatomy: str, paths: str, dry_run: bool = False) -> dict:
+def run_preprocessing(folder: Path, anatomy: str, dataset: str, paths: str, dry_run: bool = False) -> dict:
     """
     Run preprocessing for a single prediction folder.
     
     Args:
         folder: Path to prediction folder
         anatomy: Anatomy version (e.g., 'v1')
+        dataset: Dataset name (e.g., 'free_walking', 'courtship')
         paths: Paths config to use (e.g., 'workstation', 'hyak')
         dry_run: If True, don't actually run, just show command
-        
+
     Returns:
         Dictionary with status information
     """
@@ -110,7 +111,7 @@ def run_preprocessing(folder: Path, anatomy: str, paths: str, dry_run: bool = Fa
         'message': '',
         'command': ''
     }
-    
+
     # Build command
     script_path = Path(__file__).parent / "preprocess_keypoints_for_ik.py"
     
@@ -118,7 +119,7 @@ def run_preprocessing(folder: Path, anatomy: str, paths: str, dry_run: bool = Fa
         sys.executable,  # Use same Python interpreter
         str(script_path),
         f"paths={paths}",
-        "dataset=free_walking",
+        f"dataset={dataset}",
         f"anatomy={anatomy}",
         f"paths.data_dir={folder}",
     ]
@@ -173,10 +174,17 @@ def main():
         description='Batch process all Predictions_3D folders'
     )
     parser.add_argument(
+        '--dataset',
+        type=str,
+        default='free_walking',
+        choices=['free_walking', 'courtship'],
+        help='Dataset type (default: free_walking)'
+    )
+    parser.add_argument(
         '--base-dir',
         type=str,
-        default='/data2/users/eabe/datasets/Johnson_lab/free_walking',
-        help='Base directory containing Predictions_3D folders'
+        default=None,
+        help='Base directory containing Predictions_3D folders (default: /data2/users/eabe/datasets/Johnson_lab/<dataset>)'
     )
     parser.add_argument(
         '--anatomy',
@@ -208,7 +216,10 @@ def main():
     )
     
     args = parser.parse_args()
-    
+
+    if args.base_dir is None:
+        args.base_dir = f'/data2/users/eabe/datasets/Johnson_lab/{args.dataset}'
+
     # Setup logging
     if args.log_file:
         log_path = Path(args.log_file)
@@ -226,9 +237,10 @@ def main():
         sys.exit(1)
     
     print(f"\n{'='*80}")
-    print("BATCH PREPROCESSING - FREE WALKING PREDICTIONS")
+    print(f"BATCH PREPROCESSING - {args.dataset.upper()} PREDICTIONS")
     print(f"{'='*80}")
     print(f"Base directory: {base_dir}")
+    print(f"Dataset: {args.dataset}")
     print(f"Anatomy: {args.anatomy}")
     print(f"Paths config: {args.paths}")
     print(f"Force reprocess: {args.force}")
@@ -283,7 +295,7 @@ def main():
         
         # Run preprocessing
         print(f"✓ Prerequisites OK - running preprocessing...")
-        folder_result = run_preprocessing(folder, args.anatomy, args.paths, args.dry_run)
+        folder_result = run_preprocessing(folder, args.anatomy, args.dataset, args.paths, args.dry_run)
         results.append(folder_result)
     
     # Print summary
@@ -328,6 +340,7 @@ def main():
         f.write(f"{'='*80}\n\n")
         f.write(f"Configuration:\n")
         f.write(f"  Base directory: {base_dir}\n")
+        f.write(f"  Dataset: {args.dataset}\n")
         f.write(f"  Anatomy: {args.anatomy}\n")
         f.write(f"  Paths: {args.paths}\n")
         f.write(f"  Force: {args.force}\n")
