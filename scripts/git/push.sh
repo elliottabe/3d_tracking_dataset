@@ -22,10 +22,14 @@ for submodule in "${SUBMODULES[@]}"; do
         
         BRANCH=$(git symbolic-ref --short HEAD 2>/dev/null)
         if [ -n "$BRANCH" ]; then
-            UNPUSHED=$(git log origin/$BRANCH..HEAD --oneline 2>/dev/null | wc -l || echo "0")
+            if git ls-remote --exit-code --heads origin "$BRANCH" &>/dev/null; then
+                UNPUSHED=$(git log "origin/$BRANCH..HEAD" --oneline | wc -l)
+            else
+                UNPUSHED=1
+            fi
             if [ "$UNPUSHED" -gt 0 ]; then
-                echo "[$submodule] Pushing $UNPUSHED commit(s) to origin/$BRANCH..."
-                git push origin "$BRANCH"
+                echo "[$submodule] Pushing to origin/$BRANCH..."
+                git push --set-upstream origin "$BRANCH"
                 echo "  ✓ Pushed"
             else
                 echo "[$submodule] No commits to push"
@@ -43,10 +47,14 @@ done
 cd "$REPO_ROOT"
 BRANCH=$(git symbolic-ref --short HEAD 2>/dev/null)
 if [ -n "$BRANCH" ]; then
-    UNPUSHED=$(git log origin/$BRANCH..HEAD --oneline 2>/dev/null | wc -l || echo "0")
+    if git ls-remote --exit-code --heads origin "$BRANCH" &>/dev/null; then
+        UNPUSHED=$(git log "origin/$BRANCH..HEAD" --oneline | wc -l)
+    else
+        UNPUSHED=1
+    fi
     if [ "$UNPUSHED" -gt 0 ]; then
-        echo "[Main Repo] Pushing $UNPUSHED commit(s) to origin/$BRANCH..."
-        git push origin "$BRANCH"
+        echo "[Main Repo] Pushing to origin/$BRANCH..."
+        git push --set-upstream origin "$BRANCH"
         echo "  ✓ Pushed"
     else
         echo "[Main Repo] No commits to push"

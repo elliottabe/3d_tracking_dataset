@@ -6,5 +6,11 @@ defaults:
 
 name: courtship
 env_name: courtship
-version: analysis
+version: Data_analysis
 train: True
+
+
+concat:
+  input_pattern: 'ik_output_${anatomy.name}_${dataset.name}.h5'
+  output_file: 'ik_output_combined_${anatomy.name}_${dataset.name}.h5'
+  enable_jax: True

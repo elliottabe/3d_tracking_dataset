@@ -50,7 +50,7 @@ sys.path.insert(0, str(project_root))
 # Import utilities
 try:
     import utils.io_dict_to_hdf5 as ioh5
-    from utils.path_utils import load_config_with_path_template, convert_dict_to_path
+    from utils.path_utils import load_config_with_path_template, convert_dict_to_path, convert_dict_to_string
     from utils.optimized_floor_alignment import jit_vectorized_procrustes_with_scaling
     from utils.io import (
         match_csv_to_skeleton,
@@ -997,6 +997,9 @@ def main(cfg: DictConfig):
             print(f"Structure: bout_0/{{keypoints, orig_keypoints, kp_names, skeleton_edges}}")
             print(f"Keypoint order matches STAC config KP_NAMES")
             print(f"Ready for STAC IK solver!")
+            cfg_temp = cfg.copy()
+            cfg_temp.paths = convert_dict_to_string(cfg_temp.paths)
+            OmegaConf.save(cfg_temp, cfg.paths.log_dir / "preprocess_config.yaml")
         else:
             print("\n❌ Preprocessing failed")
             sys.exit(1)

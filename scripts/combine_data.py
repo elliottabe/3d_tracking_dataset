@@ -69,9 +69,9 @@ def main(cfg: DictConfig):
 
     # Get concatenation config (with defaults)
     input_pattern = cfg.dataset.get('concat', {}).get('input_pattern', 'ik_output_*')
-    output_file = cfg.dataset.get('concat', {}).get('output_file', 'ik_output_combined')
-    output_file_interp = cfg.dataset.get('concat', {}).get('output_file_interpolated', 
-                                                           output_file.replace('.h5', '_interpolated.h5'))
+    output_file = cfg.paths.save_dir / cfg.dataset.get('concat', {}).get('output_file', 'ik_output_combined')
+    output_file_interp = cfg.paths.save_dir / cfg.dataset.get('concat', {}).get('output_file_interpolated', 
+                                                           output_file.name.replace('.h5', '_interpolated.h5'))
     enable_jax = cfg.dataset.get('concat', {}).get('enable_jax', True)
 
     print(f"Data directory: {base_dir}")
@@ -80,8 +80,8 @@ def main(cfg: DictConfig):
     print()
 
     # Find all matching files
-    # file_paths = [fp for fp in sorted(base_dir.rglob(f"{input_pattern}.h5")) if 'combined' not in fp.name]
-    file_paths = [Path('/data2/users/eabe/datasets/Johnson_lab/free_walking/Predictions_3D_20260202-171900/ik_output_v2_muscles_stationary_free.h5')]
+    file_paths = [fp for fp in sorted(base_dir.rglob(f"{input_pattern}")) if 'combined' not in fp.name]
+    # file_paths = [Path('/data2/users/eabe/datasets/Johnson_lab/free_walking/Predictions_3D_20260202-171900/ik_output_v2_muscles_stationary_free.h5')]
 
 
     print(f"Found {len(file_paths)} files:")
@@ -147,17 +147,15 @@ def main(cfg: DictConfig):
             non_interp_dict['info'][key] = value
     
     # Save non-interpolated version (base file)
-    output_path = cfg.paths.save_dir / f'{output_file}_{cfg.anatomy.name}.h5'
-    print(f"Saving non-interpolated data to: {output_path}")
+    print(f"Saving non-interpolated data to: {output_file}")
     if 'info' in non_interp_dict and 'clip_lengths' in non_interp_dict['info']:
         print(f"  Clip lengths (original, unpadded): {non_interp_dict['info']['clip_lengths']}")
-    ioh5.save(output_path, non_interp_dict)
+    ioh5.save(output_file, non_interp_dict)
     print(f"✓ Saved successfully")
-    print(f"  File size: {output_path.stat().st_size / 1024 / 1024:.2f} MB")
+    print(f"  File size: {Path(output_file).stat().st_size / 1024 / 1024:.2f} MB")
     print()
 
     # Save interpolated version (clean keys contain interpolated data)
-    output_path_interp = cfg.paths.save_dir / f'{output_file}_interp_{cfg.anatomy.name}.h5'
     print("=" * 80)
     print("SAVING COMBINED OUTPUT - INTERPOLATED")
     print("=" * 80)
@@ -200,18 +198,18 @@ def main(cfg: DictConfig):
         elif key not in ['clip_lengths_original', 'clip_lengths']:
             interp_dict['info'][key] = value
     
-    print(f"Saving interpolated data to: {output_path_interp}")
+    print(f"Saving interpolated data to: {output_file_interp}")
     if 'info' in interp_dict:
         if 'clip_lengths' in interp_dict['info']:
             print(f"  Clip lengths (interpolated, unpadded): {interp_dict['info']['clip_lengths']}")
-    ioh5.save(output_path_interp, interp_dict)
+    ioh5.save(output_file_interp, interp_dict)
     print(f"✓ Saved successfully")
-    print(f"  File size: {output_path_interp.stat().st_size / 1024 / 1024:.2f} MB")
+    print(f"  File size: {Path(output_file_interp).stat().st_size / 1024 / 1024:.2f} MB")
     print()
 
     cfg_temp = cfg.copy()
     cfg_temp.paths = convert_dict_to_string(cfg_temp.paths)
-    OmegaConf.save(cfg_temp, cfg.paths.log_dir / "run_config.yaml")
+    OmegaConf.save(cfg_temp, cfg.paths.log_dir / "combined_config.yaml")
     # print(OmegaConf.to_yaml(cfg_temp, resolve=True))
     print("=" * 80)
     print("CONCATENATION PIPELINE COMPLETE")

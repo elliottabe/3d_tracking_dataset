@@ -50,7 +50,7 @@ from utils.stac_data_utils import (
     interpolate_trajectory,
     adjust_root_z_for_floor
 )
-from utils.path_utils import load_config_with_path_template, convert_dict_to_path
+from utils.path_utils import load_config_with_path_template, convert_dict_to_path, convert_dict_to_string
 from utils.io import load_stac_data
 from utils.mjx_preprocess import process_clip, ReferenceClip
 from utils.geometric_angles import compute_geometric_angles_all_legs
@@ -791,6 +791,9 @@ def main(cfg: DictConfig):
         print(f"  Upsampling: {upsampling:.2f}x")
     
     print(f"✓ Output saved to: {output_path}")
+    cfg_temp = cfg.copy()
+    cfg_temp.paths = convert_dict_to_string(cfg_temp.paths)
+    OmegaConf.save(cfg_temp, cfg.paths.log_dir / "postprocess_config.yaml")
     print()
 
 

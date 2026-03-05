@@ -4,7 +4,7 @@ dataset_name: ${dataset.name}
 ##### Easy Access Variables #####
 # if set to positive integer, overrides the default
 version: ${dataset.version}
-run_id: 'Testing'
+run_id: 'analysis'  # Used for organizing output directories; can be set to a timestamp or identifier
 load_jobid: ''
 note: ''
 restore_checkpoint: ''

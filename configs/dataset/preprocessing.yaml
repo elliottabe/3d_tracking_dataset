@@ -9,7 +9,7 @@ skeleton_path: 'data/fly50.json'
 xml_path: '${anatomy.mjcf_path}'  # Get from anatomy config
 
 # Bout configuration
-bout_name: 'preprocessed_bout_${anatomy.name}'  # Output file for preprocessed bout data
+bout_name: 'preprocessed_bout_${anatomy.name}_${dataset.name}'  # Output file for preprocessed bout data
 bouts_csv: 'walking_bouts_summary.csv'  # CSV with bout info (bout_idx, start_frame, end_frame)
 
 # Single bout mode (ignored if bouts_csv is used)
