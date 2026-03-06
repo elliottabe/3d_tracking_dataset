@@ -6,7 +6,7 @@ A reading and reference guide for `Joint_Kinematics_Analysis.ipynb`.
 
 ## What this notebook does
 
-This notebook takes the output of the STAC-MJX inverse kinematics (IK) solver — joint angles and body positions for free-walking *Drosophila* — and turns it into publication-ready kinematic analyses. Starting from a single HDF5 file containing 198 walking bouts across 7 flies, it computes per-frame kinematic features (angular velocities, step phases, swing/stance labels, heading and speed), reduces the high-dimensional joint space to a low-dimensional embedding (PCA, optional GPU-UMAP), and produces phase-coordination figures and paper-style plots comparable to Pratt et al. 2024 and DeAngelis et al. 2019.
+This notebook takes the output of the STAC-MJX inverse kinematics (IK) solver — joint angles and body positions for free-walking *Drosophila* — and turns it into publication-ready kinematic analyses. Starting from a single HDF5 file containing walking bouts across multiple flies, it computes per-frame kinematic features (angular velocities, step phases, swing/stance labels, heading and speed), reduces the high-dimensional joint space to a low-dimensional embedding (PCA, optional GPU-UMAP), and produces phase-coordination figures and paper-style plots comparable to Pratt et al. 2024 and DeAngelis et al. 2019.
 
 The main output is a flat Pandas DataFrame (`df_valid`) with ~100 columns per frame (joint angles, derivatives, phase signals, speed, PCA coordinates), plus PDF figures saved to `output/joint_kinematics/`.
 
@@ -40,16 +40,18 @@ Cell 14 → add PC1…PC10 to df_valid
 |---|---|
 | Distributions overview (speed, heading, height, leg spread) | 15 |
 | Step-cycle diagnostic | 16 |
-| Phase coordination (onset-based, per speed) | 17 |
-| Standard visualisations (scree, loadings, trajectories) | 18–26 |
-| Simple whole-session UMAP | 27–31 |
-| Per-fly summaries | 32 |
-| Paper figures (phase portraits, activity bins, ROM) | 33–36 |
-| Segment UMAP (DeAngelis et al. style) | 37–43 |
+| Phase coordination (onset-based, per step-cycle speed) | 17 |
+| Single-bout coordination diagnostic | 18 |
+| Standard visualisations (scree, loadings, PCA trajectories, leg coordination) | 19–27 |
+| Simple whole-session UMAP | 28–32 |
+| Per-fly summaries | 33 |
+| Paper figures (speed-binned PCA, ROM, 3-D stance trajectory) | 34–40 |
+| Segment UMAP (DeAngelis et al. style) | 41–49 |
+| Step-Cycle Joint-Angle UMAP | 50–53 |
 
 ---
 
-## Configuration — Cell 3
+## Configuration — Cell 2
 
 **This is the only cell most users need to edit.**
 
@@ -110,7 +112,7 @@ HDF5 file
         ▼ Cell 14  add columns to df_valid
   df_valid         ← + PC1 … PC10 columns
         │
-        ▼ Cells 15–43  Analysis & figures
+        ▼ Cells 15–53  Analysis & figures
 ```
 
 ---
@@ -200,8 +202,12 @@ Columns in `df` and `df_valid`, grouped by when they are added:
 |---|---|---|
 | `compute_derivatives(df, joint_cols, fps)` | `{col}_d1`, `{col}_d2` | Savitzky-Golay, window=5, polyorder=2 |
 | `compute_phases(df, legs, joint='tibia', fps)` | `{leg}_phase` | Bandpass 5–50 Hz + Hilbert; per-bout to avoid edge artifacts |
-| `classify_swing_stance(df, legs)` | `{leg}_swing_stance` | Tibia-based fallback: `phase ≥ 0` → stance (1). Not called directly in Cell 11 — used internally by `compute_swing_stance_from_z` |
-| `compute_swing_stance_from_z(df, legs, fps)` | `{leg}_swing_stance` | **Primary method (Cell 11 step 3)**. Hilbert phase of `{leg}_tip_z_world`: `phase < 0` → stance (1). Works correctly for all 6 legs (tibia phase is ~180° out of phase with the step cycle for T2/T3 vs T1). Falls back to tibia-based if Z data missing |
+| `classify_swing_stance(df, legs)` | `{leg}_swing_stance` | Tibia-based fallback: `phase ≥ 0` → stance (1). Used internally by `compute_swing_stance_from_z` |
+| `compute_swing_stance_from_z(df, legs, fps)` | `{leg}_swing_stance` | **Primary method (Cell 11 step 3)**. Hilbert phase of `{leg}_tip_z_world`: `phase < 0` → stance (1). Works correctly for all 6 legs. Falls back to tibia-based if Z data missing |
+| `compute_swing_stance_z_threshold(df, legs, fps)` | `{leg}_swing_stance` | Alternative: bandpass-filtered Z zero-crossing. `z_filt > 0` → swing (0). Onset-accurate (liftoff ≈ zero crossing) |
+| `compute_swing_stance_tip_speed(df, legs, fps, thresh_frac)` | `{leg}_swing_stance` | Alternative: 3-D world-frame tip speed threshold. `speed > thresh_frac × per-bout-max` → swing (0). Sharp onset at liftoff |
+| `compute_swing_stance_coxa(df, legs, fps)` | `{leg}_swing_stance` | Alternative: coxa_flexion zero-crossing. Forward protraction (`coxa_filt > 0`) = swing (0) |
+| `compute_swing_stance_tibia_perleg(df, legs, fps)` | `{leg}_swing_stance` | Alternative: tibia Hilbert phase with per-leg sign convention (T1 phase ≥ 0 = stance; T2/T3 phase < 0 = stance) |
 | `compute_n_legs_stance(df, legs)` | `n_legs_stance` | Row-sum of swing_stance columns |
 | `compute_heading_and_velocity(df, fps, body)` | `forward_speed`, `heading`, `turning_rate` | Per-bout; speed in mm/s; Gaussian-smoothed positions |
 | `compute_egocentric_leg_phase(df, legs, fps)` | `{leg}_ego_phase` | Bandpass + Hilbert on foot-tip Z height |
@@ -209,8 +215,8 @@ Columns in `df` and `df_valid`, grouped by when they are added:
 | `compute_relative_phases(df, legs, reference_leg)` | `{leg}_phase_rel` | Wrapped circular difference vs reference |
 | `swing_onsets_from_stance(series)` | frame index array | Returns indices where `swing_stance` transitions 1→0 (stance→swing); used in step-cycle and coordination analyses |
 | `compute_step_cycle_speed(df, fps, ref_leg)` | `step_cycle_id`, `step_cycle_mean_speed` | Assigns step-cycle index and mean forward speed per cycle; cycles defined by `ref_leg` swing onsets |
-| `compute_phase_offset(onsets_a, onsets_b, fps)` | float array | Onset-based phase of leg A relative to leg B's stride cycle; used in Cell 18 restore section |
-| `compute_phase_offset_by_cycle(ref_onsets, leg_onsets, cycle_speeds, q_lo, q_hi)` | float array | Like `compute_phase_offset` but filters to step cycles whose `step_cycle_mean_speed` ∈ [q_lo, q_hi); used in Cell 18 accumulation loop |
+| `compute_phase_offset(onsets_a, onsets_b, fps)` | float array | Onset-based phase of leg A relative to leg B's stride cycle |
+| `compute_phase_offset_by_cycle(ref_onsets, leg_onsets, cycle_speeds, q_lo, q_hi)` | float array | Like `compute_phase_offset` but filters to step cycles whose `step_cycle_mean_speed` ∈ [q_lo, q_hi) |
 | `mean_resultant_length(phases)` | scalar R ∈ [0,1] | Circular synchrony metric: 1 = perfect, 0 = uniform |
 
 ### Cells 5, 6, 7 — Reduction, visualisation & coordination
@@ -241,14 +247,14 @@ Columns in `df` and `df_valid`, grouped by when they are added:
 | **Main pipeline** | **8 → 14** | **Load data → build df → preprocess → PCA. Run this every session.** |
 | Distributions overview | 15 | Speed, heading (corridor-axis deviation), height, leg spread — KDE + per-bout strip plots |
 | Step-cycle diagnostic | 16 | 4-panel validation: 10 short + 10 long bouts → `step_cycle_diagnostic.pdf` |
-| Swing/stance convention diagnostic | 17 | 5-bout diagnostic: tip Z vs tibia angle vs Hilbert phase vs swing_stance → `step_cycle_swing_diagnostic.pdf` |
-| Phase coordination (onset-based, per step-cycle speed) | 18 | Polar histograms × 4 **step-cycle** speed quartiles + per-fly R-matrix; one bout can span multiple quartiles |
-| Single-bout coordination diagnostic | 19 | Set `DIAG_BOUT`; produces (1) Z-trace + onset timeline and (2) per-cycle polar grid for one selected bout |
-| Standard visualisations | 20–27 | Scree plot, loadings heatmap, PCA scatter panels, joint-vs-phase grids, leg coordination matrix, tripod strength |
-| Simple whole-session UMAP | 27–31 | cuML UMAP on joint-angle feature matrix; 3D scatter, per-bout trajectories |
-| Per-fly summaries | 32 | Speed distributions, R-matrix heatmaps, per-fly trajectory overlays |
-| **Paper figures** | **33–36** | **Phase-colored PCA portrait (Cell 33), own-phase portrait (Cell 34), activity-binned trajectory (Cell 35), range-of-motion bar chart (Cell 36)** |
-| Segment UMAP | 37–43 | DeAngelis-style windowed segments: sample (Cell 38), guard (Cell 39), per-joint UMAP (Cell 41–43) |
+| Phase coordination | 17 | Onset-based polar histograms × 4 step-cycle speed quartiles + per-fly R-matrix |
+| Single-bout coordination diagnostic | 18 | Set `DIAG_BOUT`; Z-trace + onset timeline and per-cycle polar grid for one bout |
+| Standard visualisations | 19–27 | Scree plot (19), loadings heatmap (20), PCA scatter panels (21–23), joint-vs-phase grids (24–25), leg coordination matrix (26), tripod strength (27) |
+| Simple whole-session UMAP | 28–32 | GPU imports (28), 3-D UMAP scatter with `COLOR_BY` toggle (29), fly ID encoding (30), UMAP color variables (31), per-bout trajectories (32) |
+| Per-fly summaries | 33 | Speed distributions, R-matrix heatmaps, per-fly trajectory overlays |
+| **Paper figures** | **34–40** | Speed-binned PCA (34–35), 3-D speed-binned PCA/trajectory (36–37), Range of Motion (38–39), ROM config (40) |
+| **Segment UMAP** | **41–49** | DeAngelis-style windowed segments; see detail below |
+| **Step-Cycle UMAP** | **50–53** | Step-cycle joint-angle UMAP (Section 11); see detail below |
 
 ---
 
@@ -266,13 +272,13 @@ Three step-phase signals are available. Pick based on your question:
 
 ## Activity filter
 
-Cells 33–35 (paper figures) filter frames using:
+Cells 34–35 (paper figures) filter frames using:
 
 ```python
 _activity_mask = df_valid['mean_abs_vel'] > df_valid['mean_abs_vel'].quantile(0.40)
 ```
 
-This keeps the **top 60% most-active frames** by mean absolute joint angular velocity. Using `mean_abs_vel` rather than a raw `forward_speed` threshold is more robust because joint velocity is directly interpretable and unit-consistent across sessions. `mean_abs_vel` is unit-agnostic for the purpose of ranking activity.
+This keeps the **top 60% most-active frames** by mean absolute joint angular velocity.
 
 ---
 
@@ -292,31 +298,27 @@ This keeps the **top 60% most-active frames** by mean absolute joint angular vel
 | World-frame leg-tip XYZ (`{leg}_tip_x/y/z_world`) | model-metres | From `xpos` (`claw_T{1,2,3}_{left,right}` bodies); ×10 → real mm |
 | `step_cycle_mean_speed` | mm/s | Mean `forward_speed` over one step cycle |
 
-`MODEL_SCALE = 100.0` is defined in Cell 4 for reference. `forward_speed` is in mm/s: the ÷100 model scale and ×1000 m→mm conversion give a net ×10 factor applied to the raw gradient output.
-
 ---
 
 ## UMAP analyses
 
-There are **two separate UMAP analyses** in the notebook. They answer different questions and operate on different inputs.
+There are **three separate UMAP analyses** in the notebook, answering different questions on different inputs.
 
-> **What is UMAP?** UMAP (Uniform Manifold Approximation and Projection) is a nonlinear dimensionality reduction method. Unlike PCA, it preserves local neighborhood structure rather than global variance. This makes it better at revealing discrete clusters or curved manifolds. Both analyses here use the GPU-accelerated version from RAPIDS cuML and require an NVIDIA GPU.
+> **What is UMAP?** UMAP (Uniform Manifold Approximation and Projection) is a nonlinear dimensionality reduction method. Unlike PCA, it preserves local neighborhood structure rather than global variance. All analyses here use the GPU-accelerated version from RAPIDS cuML (requires an NVIDIA GPU).
 
 ---
 
-### Analysis 1 — Simple whole-session UMAP (Cells 27–31)
+### Analysis 1 — Simple whole-session UMAP (Cells 28–32)
 
 **Question it answers:** What does the full joint-angle space look like? Do different flies, speeds, or gait states separate?
 
 #### What goes in
 
-The same feature matrix `X` that is fed to PCA (Cell 19): joint angles ± their first derivatives, one row per frame, NaN rows removed.
-
-Before running UMAP, `X` is standardized with `StandardScaler` (zero mean, unit variance per feature) to give `X_scaled`. This is the same transformation PCA already applied internally, but Cell 27 fits a **new, separate scaler** rather than reusing the one from Cell 13. The result is numerically identical — both scalers are fit on the same `X` — but keeping them separate means the UMAP section can be run independently without requiring Cell 13 to have run first. The `scaler_umap` object is only needed if you later want to transform new data into the same space.
+The same feature matrix `X` that is fed to PCA (Cell 12): joint angles ± their first derivatives, one row per frame, NaN rows removed. Standardized with `StandardScaler` → `X_scaled`.
 
 Shape: `(N_valid_frames, N_features)` — e.g. 78k frames × 48 features for the `'core'` joint set with derivatives.
 
-#### Processing (Cell 27)
+#### Processing (Cell 28–29)
 
 ```
 X  →  StandardScaler  →  X_scaled
@@ -331,142 +333,199 @@ X_scaled  →  cuML UMAP (n_components=6)  →  umap_result  shape (N, 6)
 | `reducer_cuml` | cuML object | Fitted UMAP reducer |
 | `umap_result` | (N, 6) | 6-D embedding; rows align 1-to-1 with `df_valid` |
 
-#### Figures produced
+#### Cell 29 — COLOR_BY toggle
+
+Cell 29 produces a 3-D scatter (UMAP dimensions 1, 2, 3) with a configurable coloring:
+
+```python
+COLOR_BY      = 'cycle_speed'  # 'instant_vel' | 'cycle_speed' | 'n_legs_stance'
+                               # 'phase_rel'   | 'phase'
+PHASE_REL_LEG = 'T1_right'    # used when COLOR_BY == 'phase_rel'
+PHASE_LEG     = 'T1_left'     # used when COLOR_BY == 'phase'
+```
+
+| Option | Variable colored | Colormap |
+|---|---|---|
+| `'instant_vel'` | `forward_speed` at each frame | turbo, data-range |
+| `'cycle_speed'` | `step_cycle_mean_speed` (mean speed of the step cycle containing each frame) | turbo, data-range |
+| `'n_legs_stance'` | `n_legs_stance` (0–6) | RdYlGn, 0–6 fixed |
+| `'phase_rel'` | `{PHASE_REL_LEG}_phase_rel` — phase relative to reference leg | twilight, ±π |
+| `'phase'` | `{PHASE_LEG}_phase` — that leg's own tibia Hilbert phase | twilight, ±π |
+
+#### Remaining cells
 
 | Cell | Figure | Coloring |
 |---|---|---|
-| 28 | 3D scatter (UMAP1, 2, 3) | `mean_abs_vel` (joint angular velocity) |
-| 29 | 3D scatter (UMAP1, 2, 3) | Fly ID (discrete colors) |
-| 30 | 2×2 panel of 2D scatters (UMAP1 vs UMAP2) | n_legs_stance, forward_speed, bout, fly ID |
-| 31 | Grid of per-bout 2D trajectories | Frame index (time within bout) |
+| 30 | Fly ID integer encoding (sets `codes`, `categories`) | — |
+| 31 | Multi-panel 2D scatter (UMAP1 vs UMAP2) | n_legs_stance, forward_speed, bout index, fly ID |
+| 32 | Grid of per-bout 2D trajectories | Frame index (time within bout) |
 
 #### Parameters
 
 | Parameter | Value | What it controls |
 |---|---|---|
-| `n_components=6` | 6 | Embedding dimensionality. Visualize any 3 at a time. More components = more information retained. |
-| `n_neighbors=15` | 15 | Size of the local neighborhood. **Small** (5–10) = fine local clusters, may fragment. **Large** (30–100) = broad global topology, smoother. |
-| `min_dist=0.01` | 0.01 | How tightly points are allowed to pack together. **Small** (0.01) = tight clusters, useful for finding discrete states. **Large** (0.5) = more uniform spread. |
-| `metric='euclidean'` | euclidean | Distance metric in the input space. |
+| `n_components=6` | 6 | Embedding dimensionality. Visualize any 3 at a time. |
+| `n_neighbors=15` | 15 | Size of the local neighborhood. Small = fine clusters; large = broad topology. |
+| `min_dist=0.01` | 0.01 | How tightly points pack. Small = tight clusters; large = uniform spread. |
+| `metric='euclidean'` | euclidean | Distance metric in input space. |
 
 #### How to interpret
 
-- **If points form a ring or torus:** the fly's gait is rhythmically structured. Rotation around the ring = progression through the stride cycle. A torus would indicate two coupled cycles (e.g., L and R tripods).
-- **If it forms discrete blobs:** there are distinct gait states (e.g., tripod A, tripod B, turns). Check `n_legs_stance` coloring — if blobs correspond to 3/3 alternation they are tripod phases.
-- **If fly IDs separate:** there is substantial inter-individual variability in joint kinematics. If they overlap, kinematics are consistent across flies.
-- **Cell 31 (per-bout trajectories):** each panel shows one bout's trajectory through UMAP space. If trajectories form loops, the gait is periodic; if they drift, there is non-stationary behavior (acceleration, turns).
+- **Ring or torus:** gait is rhythmically structured. Rotation = progression through stride cycle.
+- **Discrete blobs:** distinct gait states. Check `n_legs_stance` — blobs = tripod phases.
+- **Fly IDs separate:** substantial inter-individual variability.
+- **Cell 32 (per-bout trajectories):** loops = periodic gait; drift = non-stationary behavior.
 
 ---
 
-### Analysis 2 — Segment UMAP (Cells 37–43)
+### Analysis 2 — Segment UMAP, DeAngelis style (Cells 41–49)
 
-**Question it answers:** What are the distinct movement motifs in the data, and how are they distributed across gait cycle, speed, and individuals? This analysis was introduced by DeAngelis et al. (eLife 2019, paper 46409) for whole-body Drosophila locomotion analysis.
+**Question it answers:** What are the distinct movement motifs in the data, and how are they distributed across gait cycle, speed, and individuals? Introduced by DeAngelis et al. (eLife 2019).
 
-**Key difference from Analysis 1:** Instead of embedding single frames, each data point is a **short time window** (200 ms). This means the embedding captures temporal dynamics — a full stride cycle — not just a snapshot of joint angles.
+**Key difference from Analysis 1:** Each data point is a **short time window** (200 ms total), capturing temporal dynamics over a full stride cycle rather than a single-frame snapshot.
 
-#### Cell 37 — Configuration
+#### Cell 41 — Configuration
 
-All parameters for the segment UMAP are set here:
+All parameters for the segment UMAP are set here, plus the **shared coloring toggle** used by Cells 44, 46, 47, 48, and 49:
 
 | Parameter | Default | What it controls |
 |---|---|---|
-| `HALF_WIN_MS = 100` | 100 ms | Half-width of each window. Total window = 2×100+1 = 201 ms ≈ 1–2 stride cycles at typical walking speed. The paper used 100 ms at 150 Hz (31 frames); at 800 Hz this gives 161 frames. |
-| `HALF_WIN_FRAMES` | 80 | Computed from HALF_WIN_MS × FPS. Each segment spans frames [center−80, center+80]. |
-| `WIN_LENGTH` | 161 | Total frames per segment (2 × HALF_WIN_FRAMES + 1). |
-| `N_SEGMENTS_TARGET` | 100 000 | Number of segments to randomly sample. More = better coverage of behavior space but more memory. Reduce if GPU OOM. |
+| `HALF_WIN_MS = 100` | 100 ms | Half-width of each window. Total = 201 ms ≈ 1–2 stride cycles. |
+| `HALF_WIN_FRAMES` | 80 | Computed from HALF_WIN_MS × FPS. |
+| `WIN_LENGTH` | 161 | Total frames per segment. |
+| `N_SEGMENTS_TARGET` | 100 000 | Number of segments to randomly sample. Reduce if GPU OOM. |
 | `SEGMENT_SEED` | 42 | Random seed for reproducibility. |
-| `SEG_UMAP_N_NEIGHBORS` | 15 | UMAP neighborhood size (same meaning as Analysis 1). |
-| `SEG_UMAP_MIN_DIST` | 0.1 | UMAP cluster packing (same meaning as Analysis 1). |
-| `SEG_UMAP_COMPONENTS` | 3 | 3D for full-body and per-joint-type; 2D for per-(leg × joint). |
+| `SEG_UMAP_N_NEIGHBORS` | 15 | UMAP neighborhood size. |
+| `SEG_UMAP_MIN_DIST` | 0.1 | UMAP cluster packing. |
+| `SEG_UMAP_COMPONENTS` | 3 | Embedding dimensionality. |
+| `COLOR_BY_JT` | `'cycle_speed'` | **Coloring toggle** for all DeAngelis plotting cells (see below). |
+| `PHASE_REL_LEG_JT` | `'T1_right'` | Used when `COLOR_BY_JT == 'phase_rel'`. |
+| `PHASE_LEG_JT` | `'T1_left'` | Used when `COLOR_BY_JT == 'phase'`. |
 
-Cell 37 also prints the **memory estimate** for the full-body feature matrix (~2 GB raw at 100k segments). If you run out of GPU memory, decrease `N_SEGMENTS_TARGET` or `HALF_WIN_MS`.
+**COLOR_BY_JT options** (same options as Cell 29 `COLOR_BY`):
+- `'instant_vel'` — instantaneous forward speed at segment center
+- `'cycle_speed'` — step-cycle mean speed for the cycle containing the segment center
+- `'n_legs_stance'` — number of legs in stance at center frame (RdYlGn, 0–6)
+- `'phase_rel'` — phase of `PHASE_REL_LEG_JT` relative to reference leg (twilight, ±π)
+- `'phase'` — `PHASE_LEG_JT` own tibia Hilbert phase (twilight, ±π)
 
-#### Cell 38 — `sample_segments()` — extracting windows
+Cell 41 also prints the **memory estimate** (~2 GB raw at 100k segments). Reduce `N_SEGMENTS_TARGET` or `HALF_WIN_MS` if you run out of GPU memory.
 
-This function randomly samples `N_SEGMENTS_TARGET` time windows from the data and extracts the **egocentric foot-tip (x, y) positions** for each.
+#### Cell 42 — `sample_segments()` — extracting windows
 
-**What goes in:**
-- `bout_dict`: the raw HDF5 data
-- `HALF_WIN_FRAMES`: half-window length
-- `leg_tip_site_indices`: maps each leg to its column in `xpos_egocentric`
-
-**What it does:**
-1. Collects every valid center frame across all bouts (frames far enough from bout edges that a full window fits)
-2. Randomly samples `N_SEGMENTS_TARGET` of them (with fixed seed)
-3. For each sampled frame, extracts a `(WIN_LENGTH, 12)` window — 6 legs × (x, y) — from `xpos_egocentric`
+Randomly samples `N_SEGMENTS_TARGET` time windows; extracts **egocentric foot-tip (x, y) positions** for 6 legs.
 
 **What comes out:**
-- `segments_raw`: shape `(N, 161, 12)` — N segments, 161 frames, 12 variables (6 legs × x,y)
-- `seg_meta`: dict with arrays `fly_id`, `bout_id`, `bout_idx`, `center_frame` — one entry per segment, used to look up behavioral variables for coloring
+- `segments_raw`: shape `(N, 161, 12)` — N segments × 161 frames × 12 variables (6 legs × x,y)
+- `seg_meta`: dict with arrays `fly_id`, `bout_id`, `bout_idx`, `center_frame`
 
-Also defined here: `standardize_segments()`, which performs the two-stage normalization described below.
+Also defines `standardize_segments()` (two-stage normalization; see below).
 
 #### Two-stage standardization
 
-Before UMAP, each segment is standardized in two steps (following DeAngelis et al.):
+**Stage 1 — subtract per-segment temporal mean:** removes absolute foot position, keeps relative motion within each window.
 
-**Stage 1 — subtract per-segment temporal mean:**
-Each variable's mean across the 161 frames of that window is subtracted. This removes the absolute position of the fly (where it is in the arena) and keeps only the *relative motion* within the window. After this, all segments are centered around zero regardless of where the fly was standing.
+**Stage 2 — z-score across segments per (timepoint, variable):** equalizes variance across slow and fast joints / all points in the stride cycle.
 
-**Stage 2 — z-score across segments per (timepoint, variable):**
-At each of the 161 time points, and for each of the 12 variables, the mean and standard deviation are computed across all N segments. Each value is then divided by that std. This equalizes the variance contributed by each variable and each point in the stride cycle, so that slow joints (small amplitude) contribute equally to the UMAP as fast joints (large amplitude).
+#### Cell 43 — Guard + run full-body UMAP
 
-#### Cell 39 — Guard + run full-body UMAP
-
-After standardization, segments are flattened: `(N, 161, 12)` → `(N, 1932)`. Then cuML UMAP reduces this to 3D.
+Standardizes segments, flattens `(N, 161, 12)` → `(N, 1932)`, then runs cuML UMAP.
 
 **What comes out:**
-- `segments_std`: shape `(N, 161, 12)` — standardized segments
-- `X_seg`: shape `(N, 1932)` — flattened, ready for UMAP
-- `umap_seg`: shape `(N, 3)` — 3D full-body segment embedding
+- `segments_std`: `(N, 161, 12)` — standardized
+- `X_seg`: `(N, 1932)` — flattened
+- `umap_seg`: `(N, 3)` — 3-D full-body embedding
 
-#### Cell 40 — Behavioral coloring for full-body UMAP
+#### Cell 44 — Full-Body UMAP: Helpers and Figures
 
-This cell attaches behavioral labels to each segment using `seg_meta['center_frame']` and `seg_meta['bout_id']` as keys into `df_valid`. Three coloring variables are computed:
-- `seg_n_stance`: n_legs_stance at the segment center frame
-- `seg_mean_z`: mean foot-tip Z (height) across all 6 legs at center
-- `fly_codes`: integer fly ID
+Defines `_seg_col(col_or_arr)` helper (maps segment center frame → `df_valid` row for behavioral variable lookup) and computes `_jt_cvals`, `_jt_clabel`, `_jt_cmap`, `_jt_kw` from the `COLOR_BY_JT` toggle.
 
-Three 3D scatter figures are saved:
-- Colored by mean limb Z height
-- Colored by fly ID
-- Colored by n_legs_stance
+Produces:
+- **Figure 1:** single 3-D scatter colored by the `COLOR_BY_JT` toggle
+- **Figure 2:** fixed 2×2 overview panels (limb Z height, fly ID, n_legs_stance, bout index)
 
-#### Cell 41 — `sample_segments_qpos()` — joint-angle windows
+#### Cell 45 — `sample_segments_qpos()` — joint-angle windows
 
-Uses the **same** `(bout_idx, center_frame)` pairs from `seg_meta` to extract joint-angle time windows from `qpos`. This ensures all three UMAP analyses (full-body, per-joint, per-type) are computed on the same set of segments and can be directly compared.
-
-**What goes in:** `bout_dict`, `seg_meta`, `joint_list`
+Uses the **same** `(bout_idx, center_frame)` pairs from `seg_meta` to extract joint-angle time windows from `qpos`. All three subsequent UMAP analyses (per-leg×joint, per-joint-type) operate on the same segments as the full-body UMAP.
 
 **What comes out:**
-- `qpos_segs`: shape `(N, 161, N_joints)` — joint angles over time per segment
-- `qpos_col_names`: list of `'{leg}_{joint}'` strings (axis-2 labels)
+- `qpos_segs`: `(N, 161, N_joints)` — joint angles per segment
+- `qpos_col_names`: list of `'{leg}_{joint}'` strings
 
-#### Cell 42 — Per-(leg × joint) UMAP
+#### Cell 46 — Recompute Colors (lightweight)
 
-For every combination of leg and joint (e.g., T1_left / tibia, T2_right / coxa), a **separate 2D UMAP** is run.
+**Change `COLOR_BY_JT` in Cell 41, then re-run this cell alone** to update coloring without repeating heavy UMAP computation. Re-defines `_seg_col` and recomputes `_jt_cvals` etc. All plotting cells (47, 48, 49) read these variables.
 
-**What goes in:** For each (leg, joint): a single column from `qpos_segs`, giving shape `(N, 161)` — one time series per segment.
+You can also override the toggle directly in Cell 46 (comment is provided) for one-off changes.
 
-**Processing:** standardize → run 2D cuML UMAP.
+#### Cell 47 — Per-(Leg × Joint) UMAP: Run + Plot
+
+For every (leg, joint) combination, runs a separate **2-D cuML UMAP** on single-channel time series `(N, 161)`. Results plotted as a grid (rows = legs, columns = joint types) colored by `_jt_cvals` from Cell 46.
+
+**What comes out:** `umap_joints`: dict mapping `(leg, joint) → (N, 2)` embedding.
+
+Each panel reveals the kinematic range and structure for that specific joint. A ring shape = clear periodic motion; a cloud = noisy / less structured dynamics.
+
+#### Cell 48 — Per-Joint-Type UMAP: Run (heavy)
+
+For each joint type (e.g., `'tibia'`), pools all 6 legs' time series → shape `(N, 161×6)` → runs **3-D cuML UMAP**.
+
+**What comes out:** `umap_joint_types`: dict mapping `joint_name → (N, 6)` embedding (6-component).
+
+#### Cell 49 — Per-Joint-Type UMAP: Plot (lightweight)
+
+**Re-run after changing `COLOR_BY_JT` and Recompute Colors (Cell 46)** to update plots without re-running the UMAP fit. Produces a 2-row grid of 3-D scatter plots (one panel per joint type) colored by `_jt_cvals`.
+
+By pooling all 6 legs, this reveals the shared kinematic template per joint type regardless of which leg it belongs to.
+
+---
+
+### Analysis 3 — Step-Cycle Joint-Angle UMAP (Cells 50–53)
+
+**Question it answers:** What are the distinct gait patterns organized by complete stride cycles? Uses biologically-grounded segments (one T1_left step cycle per point) and joint angles as features.
+
+**Key difference from Analysis 2:** Segments are **T1_left step cycles** (biologically defined), not random windows. Features are **joint angles** (JOINT_SETS['main']), not egocentric foot positions. Time-normalization (phase-resampling) makes fast and slow cycles directly comparable.
+
+#### Cell 50 — Configuration
+
+| Parameter | Default | What it controls |
+|---|---|---|
+| `N_PHASE_BINS` | 50 | Phase grid points per cycle. Each cycle resampled to exactly this many points. |
+| `JOINT_SET_NAME` | `'main'` | Joint set to use: `'core'` / `'main'` / `'full'` |
+| `MIN_CYCLE_FRAMES` | 30 | Skip cycles shorter than this (≈37 ms at 800 Hz; filters partial cycles) |
+| `N_CYCLES_MAX` | `None` | Optional cap on cycle count; `None` = use all |
+| `SC_UMAP_COMPONENTS` | 3 | Embedding dimensionality |
+| `SC_UMAP_N_NEIGHBORS` | 15 | UMAP neighborhood size |
+| `SC_UMAP_MIN_DIST` | 0.10 | UMAP cluster packing |
+
+#### Cell 51 — `sample_step_cycle_segments()` — extracting cycles
+
+Iterates T1_left step cycles within each bout (using `swing_onsets_from_stance`). For each cycle `[t0, t1)`:
+1. Normalizes time within cycle to [0, 1]
+2. For each leg × each joint, interpolates the angle onto the `N_PHASE_BINS`-point phase grid
+3. Concatenates into a single feature vector: `N_PHASE_BINS × n_legs × n_joints` dims
+
+NaN values are linearly interpolated; all-NaN channels replaced with zeros.
 
 **What comes out:**
-- `umap_joints`: dict mapping `(leg, joint) → (N, 2)` embedding
-- Two grid figures (rows = legs, columns = joint types), colored by n_legs_stance and fly ID
+- `X_raw_sc`: `(N_cycles, N_PHASE_BINS × n_legs × n_joints)` float32
+- `sc_meta`: list of dicts with `fly_id`, `bout_id`, `speed`, `n_legs_stance`, `duration`
 
-**How to interpret:** Each panel is a 2D map of how that specific joint moves over time. If a joint has a clear periodic motion (e.g., tibia flexion during walking), its embedding will form a ring or arc. Joints with noisier or less structured dynamics appear as a cloud. Coloring by n_legs_stance shows where in stance/swing the joint is at particular parts of its kinematic range.
+#### Cell 52 — Standardize + Run
 
-#### Cell 43 — Per-joint-type UMAP
+Two-stage standardization:
+1. **Per-cycle DC removal:** reshape to `(N, n_legs×n_joints, N_PHASE_BINS)`, subtract the phase-axis mean per channel (removes absolute joint angle, keeps oscillatory shape)
+2. **Cross-cycle z-score:** z-score each feature across all cycles
 
-For each joint type (e.g., `'tibia'`), all 6 legs' time series are combined and a single **3D UMAP** is run.
+Then runs cuML UMAP → `umap_sc`: `(N_cycles, SC_UMAP_COMPONENTS)`.
 
-**What goes in:** For joint type `'tibia'`: columns from `qpos_segs` for all 6 legs, giving shape `(N, 161, 6)` → flattened to `(N, 966)`.
+Also computes metadata arrays: `sc_speeds`, `sc_stances`, `sc_durations`, `sc_fly_ids`.
 
-**What comes out:**
-- `umap_joint_types`: dict mapping `joint_name → (N, 3)` embedding
-- One multi-row figure: rows = joint types, columns = 3 coloring schemes (mean Z, fly ID, n_legs_stance)
+#### Cell 53 — Visualisation
 
-**How to interpret:** By pooling all 6 legs, this reveals the **shared kinematic template** for each joint type regardless of which leg it belongs to. If the tibia UMAP forms a ring, all legs go through the same flexion/extension cycle in the same order. Separation by fly ID in this embedding indicates inter-individual differences in the joint's kinematic profile.
+Produces:
+- **3-D scatter grid** (4 panels): colored by step-cycle speed, n_legs_stance, fly ID, cycle duration → `umap_step_cycle_{JOINT_SET_NAME}.pdf`
+- **2-D projection grid** (4 rows × 3 pairs): UMAP1×2, UMAP1×3, UMAP2×3 → `umap_step_cycle_{JOINT_SET_NAME}_2d.pdf`
 
 ---
 
@@ -475,7 +534,9 @@ For each joint type (e.g., `'tibia'`), all 6 legs' time series are combined and 
 | Question | Use |
 |---|---|
 | Does overall gait structure vary by fly or speed? | Analysis 1, Cell 29 |
-| What does the trajectory through kinematic space look like per bout? | Analysis 1, Cell 31 |
-| Are there discrete gait states (motifs)? | Analysis 2, full-body (Cells 39–40) |
-| Which joints have the most structured rhythmic dynamics? | Analysis 2, per-joint grid (Cell 42) |
-| Is the kinematic template for a joint consistent across legs? | Analysis 2, per-joint-type (Cell 43) |
+| What does the trajectory through kinematic space look like per bout? | Analysis 1, Cell 32 |
+| Are there discrete gait states (motifs) in full-body movement? | Analysis 2, full-body (Cells 43–44) |
+| Which joints have the most structured rhythmic dynamics? | Analysis 2, per-joint grid (Cell 47) |
+| Is the kinematic template for a joint consistent across legs? | Analysis 2, per-joint-type (Cells 48–49) |
+| How do complete stride cycles cluster by speed or gait mode? | Analysis 3, step-cycle UMAP (Cells 52–53) |
+| Do gait modes form structured clusters when using joint angles? | Analysis 3 vs Analysis 2 comparison |
