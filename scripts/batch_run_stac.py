@@ -93,13 +93,14 @@ def get_stac_environment(gpu_mem_fraction: float = 0.9) -> dict:
     return env
 
 
-def find_prediction_folders(base_dir: Path, anatomy_name: str) -> list[tuple[Path, str]]:
+def find_prediction_folders(base_dir: Path, anatomy_name: str, dataset: str) -> list[tuple[Path, str]]:
     """
     Find all Predictions_3D_* folders that have preprocessed bout files.
     
     Args:
         base_dir: Base directory containing prediction folders
         anatomy_name: Anatomy version (e.g., 'v1', 'v2')
+        dataset: Dataset name (e.g., 'free_walking', 'courtship')
     
     Returns:
         List of (folder_path, version_name) tuples
@@ -116,7 +117,7 @@ def find_prediction_folders(base_dir: Path, anatomy_name: str) -> list[tuple[Pat
             continue
         
         # Check if preprocessed file exists
-        preprocessed_file = folder / f"preprocessed_bout_{anatomy_name}.h5"
+        preprocessed_file = folder / f"preprocessed_bout_{anatomy_name}_{dataset}.h5"
         if not preprocessed_file.exists():
             print(f"⚠️  Skipping {folder.name}: No preprocessed file found")
             continue
@@ -348,11 +349,11 @@ Examples:
     print(f"Dry run: {args.dry_run}")
     print(f"{'='*80}\n")
     
-    prediction_folders = find_prediction_folders(args.base_dir, args.anatomy)
+    prediction_folders = find_prediction_folders(args.base_dir, args.anatomy, args.dataset)
     
     if not prediction_folders:
         print("❌ No prediction folders with preprocessed data found!")
-        print(f"   Looking for: {args.base_dir}/Predictions_3D_*/preprocessed_bout_{args.anatomy}.h5")
+        print(f"   Looking for: {args.base_dir}/Predictions_3D_*/preprocessed_bout_{args.anatomy}_{args.dataset}.h5")
         print("   Run batch_process_predictions.py first to create preprocessed files.")
         return 1
     

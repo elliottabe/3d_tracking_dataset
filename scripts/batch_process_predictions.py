@@ -51,11 +51,13 @@ def find_prediction_folders(base_dir: Path) -> list:
     return folders
 
 
-def check_prerequisites(folder: Path) -> tuple:
+def check_prerequisites(dataset, folder: Path) -> tuple:
     """
     Check if folder has required input files.
     
     Args:
+        dataset: Dataset name
+
         folder: Path to prediction folder
         
     Returns:
@@ -63,7 +65,7 @@ def check_prerequisites(folder: Path) -> tuple:
     """
     required_files = [
         'data3D.csv',
-        'walking_bouts_summary.csv'
+        f'{dataset}_bouts_summary.csv'
     ]
     
     missing = []
@@ -275,7 +277,7 @@ def main():
         print(f"{'-'*80}")
         
         # Check prerequisites
-        has_inputs, missing_files = check_prerequisites(folder)
+        has_inputs, missing_files = check_prerequisites(args.dataset, folder)
         if not has_inputs:
             folder_result['status'] = 'missing_inputs'
             folder_result['message'] = f"Missing files: {', '.join(missing_files)}"
