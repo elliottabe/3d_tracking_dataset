@@ -1,0 +1,28 @@
+# @package _global_.dataset
+
+defaults:
+  - preprocessing
+  - postprocessing
+
+name: BDN2_headless
+env_name: BDN2_headless
+version: Data_analysis
+train: True
+
+concat:
+  input_pattern: 'ik_output_${anatomy.name}_${dataset.name}.h5'
+  output_file: 'ik_output_combined_${anatomy.name}_${dataset.name}.h5'
+  enable_jax: True
+
+# Dataset-specific preprocessing overrides
+# Overrides defaults set in configs/dataset/preprocessing.yaml
+preprocessing:
+  # Headless fly: exclude missing/unreliable head keypoints from alignment computation
+  # The excluded keypoints are still *transformed* by the computed alignment
+  exclude_antenna: true   # Excludes Antenna_Base, EyeL, EyeR (headless)
+  exclude_wings: true     # Exclude wing points from Procrustes alignment
+
+  # Keypoint indices after v1 XML site reordering (see stac-mjx/configs/anatomy/v1.yaml KP_NAMES)
+  # Scutellum=0, WingL_base=1, WingR_base=2, Antenna_Base=3, EyeL=4, EyeR=5, WingL_V12=6, ...
+  antenna_indices: [3, 4, 5]        # Antenna_Base, EyeL, EyeR
+  wing_indices: [1, 2, 6, 7, 8, 9] # WingL_base, WingR_base, WingL_V12, WingL_V13, WingR_V12, WingR_V13

@@ -1,3 +1,4 @@
 [submodule "stac-mjx"]
 	path = stac-mjx
 	url = git@github.com:elliottabe/stac-mjx.git
+	branch = elliottabe/analysis_test
