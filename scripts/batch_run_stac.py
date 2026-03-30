@@ -182,7 +182,7 @@ def run_stac(
         f"dataset={dataset}",
         f"anatomy={anatomy_name}",
         f"version={version_name}",
-        "run_id=batch_stac",
+        "run_id=stac",
     ]
     
     # Add any additional STAC overrides
