@@ -65,25 +65,26 @@ def check_stac_outputs_exist(folder: Path, anatomy: str, dataset_suffix: str) ->
         (exists, stac_path) tuple
     """
     stac_file = f"Fruitfly_ik_{anatomy}_{dataset_suffix}.h5"
-    stac_path = folder / stac_file
+    stac_path = folder / "stac" / stac_file
 
     return (stac_path.exists(), stac_path)
 
 
-def check_postprocess_outputs_exist(folder: Path, anatomy: str) -> tuple:
+def check_postprocess_outputs_exist(folder: Path, anatomy: str, dataset: str) -> tuple:
     """
     Check if postprocessing outputs already exist.
-    
+
     Args:
         folder: Path to prediction folder
         anatomy: Anatomy version (e.g., 'v1', 'v2_muscles')
-        
+        dataset: Dataset name (e.g., 'free_walking')
+
     Returns:
         (exists, output_path) tuple
     """
-    output_file = f"ik_output_{anatomy}.h5"
-    output_path = folder / output_file
-    
+    output_file = f"ik_output_{anatomy}_{dataset}.h5"
+    output_path = folder / "postprocessing" / output_file
+
     return (output_path.exists(), output_path)
 
 
@@ -281,7 +282,7 @@ def main():
             continue
         
         # Check if postprocessing outputs exist
-        outputs_exist, output_path = check_postprocess_outputs_exist(folder, args.anatomy)
+        outputs_exist, output_path = check_postprocess_outputs_exist(folder, args.anatomy, args.dataset)
         if outputs_exist and not args.force:
             folder_result['status'] = 'skipped'
             folder_result['message'] = f"Output exists: {output_path.name}"

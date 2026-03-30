@@ -88,7 +88,7 @@ def check_outputs_exist(folder: Path, anatomy: str) -> tuple:
         (exists, output_path) tuple
     """
     output_file = f"preprocessed_bout_{anatomy}.h5"
-    output_path = folder / output_file
+    output_path = folder / "preprocessing" / output_file
     
     return (output_path.exists(), output_path)
 

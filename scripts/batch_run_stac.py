@@ -117,7 +117,7 @@ def find_prediction_folders(base_dir: Path, anatomy_name: str, dataset: str) -> 
             continue
         
         # Check if preprocessed file exists
-        preprocessed_file = folder / f"preprocessed_bout_{anatomy_name}_{dataset}.h5"
+        preprocessed_file = folder / "preprocessing" / f"preprocessed_bout_{anatomy_name}_{dataset}.h5"
         if not preprocessed_file.exists():
             print(f"⚠️  Skipping {folder.name}: No preprocessed file found")
             continue
@@ -141,8 +141,8 @@ def check_stac_outputs_exist(folder: Path, anatomy_name: str, dataset: str) -> t
     Returns:
         (fit_offsets_exists, ik_only_exists) tuple
     """
-    fit_file = folder / f"Fruitfly_fit_{anatomy_name}_{dataset}.h5"
-    ik_file = folder / f"Fruitfly_ik_{anatomy_name}_{dataset}.h5"
+    fit_file = folder / "stac" / f"Fruitfly_fit_{anatomy_name}_{dataset}.h5"
+    ik_file = folder / "stac" / f"Fruitfly_ik_{anatomy_name}_{dataset}.h5"
 
     return fit_file.exists(), ik_file.exists()
 
@@ -199,7 +199,8 @@ def run_stac(
     env = get_stac_environment(gpu_mem_fraction)
 
     # Log file co-located with the data
-    log_file = folder / f"stac_batch_{anatomy_name}.log"
+    log_file = folder / "stac" / f"stac_batch_{anatomy_name}.log"
+    log_file.parent.mkdir(parents=True, exist_ok=True)
 
     try:
         print(f"  Running STAC IK solver...")
@@ -353,7 +354,7 @@ Examples:
     
     if not prediction_folders:
         print("❌ No prediction folders with preprocessed data found!")
-        print(f"   Looking for: {args.base_dir}/Predictions_3D_*/preprocessed_bout_{args.anatomy}_{args.dataset}.h5")
+        print(f"   Looking for: {args.base_dir}/Predictions_3D_*/preprocessing/preprocessed_bout_{args.anatomy}_{args.dataset}.h5")
         print("   Run batch_process_predictions.py first to create preprocessed files.")
         return 1
     

@@ -632,7 +632,8 @@ def main(cfg: DictConfig):
     stac_path = data_path / stac_filename
     preprocessed_path = data_path / preprocessed_filename
     output_path = data_path / output_filename
-    
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
     print(f"File paths:")
     print(f"  STAC output: {stac_path}")
     print(f"  Preprocessed data: {preprocessed_path}")

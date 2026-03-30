@@ -903,7 +903,7 @@ def main(cfg: DictConfig):
     if not xml_path.is_absolute():
         xml_path = Path(project_root) / xml_path
     
-    output_dir = data_dir
+    output_dir = data_dir / "preprocessing"
     output_dir.mkdir(parents=True, exist_ok=True)
     
     print("Resolved paths:")
