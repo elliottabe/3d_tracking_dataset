@@ -64,13 +64,19 @@ def main(cfg: DictConfig):
     # Convert path strings to Path objects
     cfg.paths = convert_dict_to_path(cfg.paths)
 
+    # Create anatomy-specific output directory
+    anatomy_save_dir = cfg.paths.save_dir / cfg.anatomy.name
+    anatomy_save_dir.mkdir(parents=True, exist_ok=True)
+    anatomy_log_dir = anatomy_save_dir / "logs"
+    anatomy_log_dir.mkdir(parents=True, exist_ok=True)
+
     # Resolve paths
     base_dir = cfg.paths.data_dir.parent
 
     # Get concatenation config (with defaults)
     input_pattern = cfg.dataset.get('concat', {}).get('input_pattern', 'ik_output_*')
-    output_file = cfg.paths.save_dir / cfg.dataset.get('concat', {}).get('output_file', 'ik_output_combined')
-    output_file_interp = cfg.paths.save_dir / cfg.dataset.get('concat', {}).get('output_file_interpolated', 
+    output_file = anatomy_save_dir / cfg.dataset.get('concat', {}).get('output_file', 'ik_output_combined')
+    output_file_interp = anatomy_save_dir / cfg.dataset.get('concat', {}).get('output_file_interpolated',
                                                            output_file.name.replace('.h5', '_interpolated.h5'))
     enable_jax = cfg.dataset.get('concat', {}).get('enable_jax', True)
 
@@ -209,7 +215,7 @@ def main(cfg: DictConfig):
 
     cfg_temp = cfg.copy()
     cfg_temp.paths = convert_dict_to_string(cfg_temp.paths)
-    OmegaConf.save(cfg_temp, cfg.paths.log_dir / "combined_config.yaml")
+    OmegaConf.save(cfg_temp, anatomy_log_dir / "combined_config.yaml")
     # print(OmegaConf.to_yaml(cfg_temp, resolve=True))
     print("=" * 80)
     print("CONCATENATION PIPELINE COMPLETE")
