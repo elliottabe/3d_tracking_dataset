@@ -620,10 +620,11 @@ def process_single_bout(csv_path: Path,
                         apply_alignment: bool = False,
                         apply_scaling: bool = False,
                         exclude_antenna: bool = False,
-                        exclude_wings: bool = False) -> Optional[Dict]:
+                        exclude_wings: bool = False,
+                        exclude_wing_veins: bool = False) -> Optional[Dict]:
     """
     Process a single bout of keypoint data.
-    
+
     Args:
         csv_path: Path to CSV file with keypoint data
         skeleton_path: Path to skeleton JSON file
@@ -633,7 +634,8 @@ def process_single_bout(csv_path: Path,
         apply_alignment: Whether to apply Procrustes alignment
         apply_scaling: Whether to apply scaling during alignment
         exclude_antenna: Whether to exclude antenna from alignment
-        exclude_wings: Whether to exclude wings from alignment
+        exclude_wings: Whether to exclude all wing keypoints from alignment
+        exclude_wing_veins: Whether to exclude only wing vein keypoints (V12/V13) from alignment
     
     Returns:
         Dictionary with bout data if successful, None otherwise
@@ -687,9 +689,13 @@ def process_single_bout(csv_path: Path,
                 # Wing keypoints
                 wing_idx = [i for i, name in enumerate(xml_node_names) if 'Wing' in name]
                 exclude_indices.extend(wing_idx)
-            
+            elif exclude_wing_veins:
+                # Only wing vein keypoints (V12/V13), keep wing base
+                vein_idx = [i for i, name in enumerate(xml_node_names) if 'Wing' in name and ('V12' in name or 'V13' in name)]
+                exclude_indices.extend(vein_idx)
+
             exclude_arr = jnp.array(exclude_indices) if exclude_indices else None
-            
+
             kp_array_xml, alignment_info = apply_procrustes_alignment(
                 kp_array_xml, mj_model, xml_node_names, skeleton_to_mujoco,
                 exclude_indices=exclude_arr, apply_scaling=apply_scaling, preserve_translation=True
@@ -727,16 +733,17 @@ def process_bouts_batch(csv_path: Path,
                        apply_alignment: bool = False,
                        apply_scaling: bool = False,
                        exclude_antenna: bool = False,
-                       exclude_wings: bool = False) -> Optional[Dict]:
+                       exclude_wings: bool = False,
+                       exclude_wing_veins: bool = False) -> Optional[Dict]:
     """
-    Efficiently process multiple bouts by loading skeleton/model once and 
+    Efficiently process multiple bouts by loading skeleton/model once and
     processing all data as a concatenated array.
-    
+
     This is much faster than processing each bout individually because:
     - Skeleton and MuJoCo model loaded only once
     - Matching/filtering operations done once
     - JAX operations benefit from batch processing larger arrays
-    
+
     Args:
         csv_path: Path to CSV file with keypoint data
         skeleton_path: Path to skeleton JSON file
@@ -745,7 +752,8 @@ def process_bouts_batch(csv_path: Path,
         apply_alignment: Whether to apply Procrustes alignment
         apply_scaling: Whether to apply scaling during alignment
         exclude_antenna: Whether to exclude antenna from alignment
-        exclude_wings: Whether to exclude wings from alignment
+        exclude_wings: Whether to exclude all wing keypoints from alignment
+        exclude_wing_veins: Whether to exclude only wing vein keypoints (V12/V13) from alignment
     
     Returns:
         Dictionary with all bout data keyed by 'bout_<idx>' if successful, None otherwise
@@ -806,7 +814,11 @@ def process_bouts_batch(csv_path: Path,
                 wing_idx = [i for i, name in enumerate(xml_node_names) if 'Wing' in name]
                 exclude_indices.extend(wing_idx)
                 print(f"Excluding wing keypoints: {wing_idx}")
-        
+            elif exclude_wing_veins:
+                vein_idx = [i for i, name in enumerate(xml_node_names) if 'Wing' in name and ('V12' in name or 'V13' in name)]
+                exclude_indices.extend(vein_idx)
+                print(f"Excluding wing vein keypoints: {vein_idx}")
+
         exclude_arr = jnp.array(exclude_indices) if exclude_indices else None
         
         # 8. Split back into individual bouts and apply alignment PER BOUT
@@ -940,9 +952,10 @@ def main(cfg: DictConfig):
             apply_alignment=cfg.preprocessing.apply_alignment,
             apply_scaling=cfg.preprocessing.apply_scaling,
             exclude_antenna=cfg.preprocessing.exclude_antenna,
-            exclude_wings=cfg.preprocessing.exclude_wings
+            exclude_wings=cfg.preprocessing.exclude_wings,
+            exclude_wing_veins=cfg.preprocessing.get('exclude_wing_veins', False)
         )
-        
+
         if all_bouts_dict is not None:
             # Save all bouts as nested HDF5
             output_path = output_dir / f"{cfg.preprocessing.bout_name}.h5"
@@ -979,9 +992,10 @@ def main(cfg: DictConfig):
             apply_alignment=cfg.preprocessing.apply_alignment,
             apply_scaling=cfg.preprocessing.apply_scaling,
             exclude_antenna=cfg.preprocessing.exclude_antenna,
-            exclude_wings=cfg.preprocessing.exclude_wings
+            exclude_wings=cfg.preprocessing.exclude_wings,
+            exclude_wing_veins=cfg.preprocessing.get('exclude_wing_veins', False)
         )
-        
+
         if bout_data is not None:
             # Wrap in nested dictionary for consistency
             output_dict = {'bout_0': bout_data}

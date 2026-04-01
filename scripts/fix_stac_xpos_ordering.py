@@ -23,6 +23,10 @@ import h5py
 import numpy as np
 
 
+# Subdirectory names that contain raw STAC output (IK files to fix)
+_TARGETED_SUBDIRS = {"stac", "preprocessing", "postprocessing"}
+
+
 def find_preprocessed_file(stac_path: Path) -> Path | None:
     """Find the preprocessed_bout file corresponding to a Fruitfly_ik file."""
     parent = stac_path.parent
@@ -32,16 +36,24 @@ def find_preprocessed_file(stac_path: Path) -> Path | None:
         return None
     suffix = match.group(1)
 
-    # Try common naming patterns
-    candidates = [
-        parent / f"preprocessed_bout_{suffix}.h5",
-        parent / f"stationary_preprocessed_bout_{suffix}.h5",
-    ]
+    # Try common naming patterns in the same dir and a preprocessing/ subdir.
+    # When the IK file lives inside a named subdir (stac/, postprocessing/ etc.)
+    # the preprocessed file is typically in the sibling preprocessing/ directory.
+    search_dirs = [parent, parent / "preprocessing"]
+    if parent.name in _TARGETED_SUBDIRS:
+        grandparent = parent.parent
+        search_dirs.extend([grandparent, grandparent / "preprocessing"])
+
+    candidates = []
+    for d in search_dirs:
+        candidates.append(d / f"preprocessed_bout_{suffix}.h5")
+        candidates.append(d / f"stationary_preprocessed_bout_{suffix}.h5")
     # Also try without trailing qualifiers (e.g., _stationary_free -> just the base)
     parts = suffix.rsplit("_", 1)
     if len(parts) > 1:
-        candidates.append(parent / f"preprocessed_bout_{parts[0]}.h5")
-        candidates.append(parent / f"stationary_preprocessed_bout_{parts[0]}.h5")
+        for d in search_dirs:
+            candidates.append(d / f"preprocessed_bout_{parts[0]}.h5")
+            candidates.append(d / f"stationary_preprocessed_bout_{parts[0]}.h5")
 
     for c in candidates:
         if c.exists():
@@ -188,8 +200,13 @@ def main():
         print(f"Error: {args.base_dir} does not exist")
         sys.exit(1)
 
-    stac_files = sorted(args.base_dir.rglob(args.pattern))
-    print(f"Found {len(stac_files)} STAC files under {args.base_dir}")
+    all_stac_files = sorted(args.base_dir.rglob(args.pattern))
+    # Only process files that live inside targeted subdirs (stac/, preprocessing/,
+    # postprocessing/). Root-level copies are leftovers and should be skipped.
+    stac_files = [f for f in all_stac_files if f.parent.name in _TARGETED_SUBDIRS]
+    print(f"Found {len(stac_files)} STAC files in targeted subdirs "
+          f"({len(all_stac_files) - len(stac_files)} root-level files skipped) "
+          f"under {args.base_dir}")
 
     success = 0
     skipped = 0

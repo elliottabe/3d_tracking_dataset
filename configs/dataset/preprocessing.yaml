@@ -24,8 +24,4 @@ preserve_translation: true  # Preserve original position/orientation (only scale
 # Keypoint exclusion from alignment
 exclude_antenna: false
 exclude_wings: false
-
-# Antenna and wing keypoint indices (dataset-specific)
-# These should match the indices in the XML-ordered keypoints
-antenna_indices: [0]  # Default for courtship
-wing_indices: [6, 7, 8, 12]  # Default for courtship
+exclude_wing_veins: true  # Exclude only wing vein markers (V12/V13) from Procrustes scaling

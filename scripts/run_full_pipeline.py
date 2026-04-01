@@ -29,19 +29,21 @@ import argparse
 import subprocess
 import sys
 from pathlib import Path
-from datetime import datetime
 import time
+
+# Default data root — all datasets live under this directory
+DATA_ROOT = Path('/data2/users/eabe/datasets/Johnson_lab')
 
 
 class PipelineRunner:
     """Orchestrates the full pipeline execution."""
-    
+
     def __init__(
         self,
         anatomy: str,
-        base_dir: Path,
-        paths_config: str = "workstation",
         dataset: str = "free_walking",
+        base_dir: Path | None = None,
+        paths_config: str = "workstation",
         force: bool = False,
         skip_completed: bool = False,
         dry_run: bool = False,
@@ -49,19 +51,19 @@ class PipelineRunner:
         gpu_mem_fraction: float = 0.9
     ):
         self.anatomy = anatomy
-        self.base_dir = base_dir
-        self.paths_config = paths_config
         self.dataset = dataset
+        self.base_dir = base_dir if base_dir is not None else DATA_ROOT / dataset
+        self.paths_config = paths_config
         self.force = force
         self.skip_completed = skip_completed
         self.dry_run = dry_run
         self.stac_overrides = stac_overrides
         self.gpu_mem_fraction = gpu_mem_fraction
-        
+
         # Script paths
         self.scripts_dir = Path(__file__).parent
         self.project_dir = self.scripts_dir.parent
-        
+
         # Track timing and results
         self.step_results = {}
         self.step_times = {}
@@ -139,6 +141,7 @@ class PipelineRunner:
         cmd = [
             sys.executable,
             str(self.scripts_dir / "batch_process_predictions.py"),
+            f"--dataset={self.dataset}",
             f"--anatomy={self.anatomy}",
             f"--paths={self.paths_config}",
             f"--base-dir={self.base_dir}",
@@ -166,6 +169,7 @@ class PipelineRunner:
         cmd = [
             sys.executable,
             str(self.scripts_dir / "batch_run_stac.py"),
+            f"--dataset={self.dataset}",
             f"--anatomy={self.anatomy}",
             f"--base-dir={self.base_dir}",
             f"--gpu-mem-fraction={self.gpu_mem_fraction}",
@@ -195,6 +199,7 @@ class PipelineRunner:
         cmd = [
             sys.executable,
             str(self.scripts_dir / "batch_postprocess_predictions.py"),
+            f"--dataset={self.dataset}",
             f"--anatomy={self.anatomy}",
             f"--paths={self.paths_config}",
             f"--base-dir={self.base_dir}",
@@ -341,18 +346,25 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Run complete pipeline
+  # Run complete pipeline for free_walking with anatomy v1
   python scripts/run_full_pipeline.py --anatomy v1
-  
+
+  # Run for courtship dataset with v2_muscles anatomy
+  python scripts/run_full_pipeline.py --dataset courtship --anatomy v2_muscles
+
   # Dry run
   python scripts/run_full_pipeline.py --anatomy v1 --dry-run
-  
+
   # Run specific steps
   python scripts/run_full_pipeline.py --anatomy v1 --steps preprocess,stac
-  
+
   # Force reprocess everything
   python scripts/run_full_pipeline.py --anatomy v1 --force
-  
+
+  # Custom base directory
+  python scripts/run_full_pipeline.py --dataset courtship --anatomy v1 \\
+      --base-dir /path/to/custom/data
+
   # Custom STAC settings
   python scripts/run_full_pipeline.py --anatomy v1 \\
       --stac-overrides "dataset.stac.n_fit_frames=401"
@@ -380,8 +392,8 @@ Pipeline Steps:
     parser.add_argument(
         '--base-dir',
         type=Path,
-        default=Path('/data2/users/eabe/datasets/Johnson_lab/free_walking'),
-        help='Base directory containing Predictions_3D_* folders'
+        default=None,
+        help='Base directory containing Predictions_3D_* folders (default: DATA_ROOT/<dataset>)'
     )
     parser.add_argument(
         '--paths',
@@ -431,9 +443,9 @@ Pipeline Steps:
     # Create pipeline runner
     runner = PipelineRunner(
         anatomy=args.anatomy,
+        dataset=args.dataset,
         base_dir=args.base_dir,
         paths_config=args.paths,
-        dataset=args.dataset,
         force=args.force,
         skip_completed=args.skip_completed,
         dry_run=args.dry_run,

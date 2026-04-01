@@ -401,7 +401,7 @@ def process_all_bouts(
         print("\nRenaming original STAC data with '_stac' suffix...")
     for bout_key in bout_keys:
         bout = bout_dict[bout_key]
-        for key in ['qpos', 'xpos', 'xquat']:
+        for key in ['qpos', 'xpos', 'xquat', 'kp_data']:
             if key in bout:
                 bout[f'{key}_stac'] = bout[key]
     
@@ -415,7 +415,7 @@ def process_all_bouts(
         for bout_key in bout_keys:
             bout = bout_dict[bout_key]
             for key in ['qpos', 'xpos', 'xquat', 'kp_data']:
-                stac_key = f'{key}_stac' if key in ['qpos', 'xpos', 'xquat'] else key
+                stac_key = f'{key}_stac' if key in ['qpos', 'xpos', 'xquat', 'kp_data'] else key
                 if stac_key in bout:
                     bout[key] = interpolate_trajectory(
                         bout[stac_key],
