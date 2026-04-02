@@ -1,0 +1,6 @@
+Wed Mar 18 13:23:27 2026
+ERROR: gladLoadGL error
+
+Wed Mar 18 13:23:52 2026
+ERROR: gladLoadGL error
+

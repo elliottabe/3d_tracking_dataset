@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8"/>
+  <style>
+    body { margin: 0; padding: 0; overflow: hidden; background: transparent; }
+    #plot { width: 100%; }
+  </style>
+  <script src="./plotly.min.js"></script>
+</head>
+<body>
+  <div id="plot"></div>
+
+  <script>
+    // ── Streamlit component message-passing protocol ──────────────────────────
+    var _ready = false;
+
+    function _send(msg) {
+      window.parent.postMessage(Object.assign({isStreamlitMessage: true}, msg), "*");
+    }
+
+    function setFrameHeight(h) {
+      _send({type: "streamlit:setFrameHeight", height: h});
+    }
+
+    function setComponentValue(val) {
+      _send({type: "streamlit:setComponentValue",
+             value: JSON.stringify(val), dataType: "json"});
+    }
+
+    function signalReady() {
+      _send({type: "streamlit:componentReady", apiVersion: 1});
+    }
+
+    // ── Rendering ─────────────────────────────────────────────────────────────
+    var _lastRelayout = null;
+
+    function render(args) {
+      var fig    = JSON.parse(args.figure_json);
+      var config = args.config_json ? JSON.parse(args.config_json) : {};
+      var height = args.height || 450;
+
+      setFrameHeight(height);
+
+      var el = document.getElementById("plot");
+      el.style.height = height + "px";
+
+      Plotly.react(el, fig.data, fig.layout, config).then(function() {
+        // Remove any previous listener to avoid stacking
+        el.removeAllListeners("plotly_relayout");
+
+        el.on("plotly_relayout", function(eventData) {
+          // Only forward shape-position drag events
+          var sh = {};
+          Object.keys(eventData).forEach(function(k) {
+            if (k.indexOf("shapes[") === 0) sh[k] = eventData[k];
+          });
+          if (Object.keys(sh).length === 0) return;
+
+          // Deduplicate: skip if identical to last sent
+          var sig = JSON.stringify(sh);
+          if (sig === _lastRelayout) return;
+          _lastRelayout = sig;
+
+          setComponentValue([{relayout: sh}]);
+        });
+      });
+    }
+
+    // ── Message listener ──────────────────────────────────────────────────────
+    window.addEventListener("message", function(e) {
+      if (!e.data || !e.data.isStreamlitMessage) return;
+      if (e.data.type === "streamlit:render") {
+        render(e.data.args || {});
+      }
+    });
+
+    signalReady();
+  </script>
+</body>
+</html>
