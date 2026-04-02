@@ -140,26 +140,25 @@ def run_preprocessing(folder: Path, anatomy: str, dataset: str, paths: str, dry_
         print(f"{'='*80}")
         print(f"Command: {' '.join(cmd)}\n")
         
-        proc = subprocess.run(
+        proc = subprocess.Popen(
             cmd,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
             text=True,
-            timeout=600  # 10 minute timeout
+            bufsize=1,
         )
-        
+
+        for line in proc.stdout:
+            print(line, end='', flush=True)
+
+        proc.wait(timeout=600)
+
         if proc.returncode == 0:
             result['status'] = 'success'
             result['message'] = 'Preprocessing completed successfully'
         else:
             result['status'] = 'failed'
             result['message'] = f'Exit code {proc.returncode}'
-            # Print stderr for debugging
-            if proc.stderr:
-                print(f"\nSTDERR:\n{proc.stderr}")
-        
-        # Print stdout
-        if proc.stdout:
-            print(proc.stdout)
             
     except subprocess.TimeoutExpired:
         result['status'] = 'timeout'

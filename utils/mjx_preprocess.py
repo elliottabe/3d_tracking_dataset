@@ -156,12 +156,17 @@ def compute_velocity_from_kinematics(
         jp.ndarray: Trajectory of velocities.
     """
     qvel_translation = (qpos_trajectory[1:, :3] - qpos_trajectory[:-1, :3]) / dt
-    qvel_gyro = []
-    for t in range(qpos_trajectory.shape[0] - 1):
-        normed_diff = tr.quat_diff(qpos_trajectory[t, 3:7], qpos_trajectory[t + 1, 3:7])
-        normed_diff /= jp.linalg.norm(normed_diff)
-        angle = tr.quat_to_axisangle(normed_diff)
-        qvel_gyro.append(angle / dt)
-    qvel_gyro = jp.stack(qvel_gyro)
+
+    # Vectorized quaternion angular velocity (replaces Python for-loop)
+    quats_curr = qpos_trajectory[:-1, 3:7]  # (T-1, 4)
+    quats_next = qpos_trajectory[1:, 3:7]   # (T-1, 4)
+
+    def _single_gyro(q_curr, q_next):
+        normed_diff = tr.quat_diff(q_curr, q_next)
+        normed_diff = normed_diff / jp.linalg.norm(normed_diff)
+        return tr.quat_to_axisangle(normed_diff) / dt
+
+    qvel_gyro = jax.vmap(_single_gyro)(quats_curr, quats_next)
+
     qvel_joints = (qpos_trajectory[1:, 7:] - qpos_trajectory[:-1, 7:]) / dt
     return jp.concatenate([qvel_translation, qvel_gyro, qvel_joints], axis=1)

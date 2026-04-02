@@ -25,3 +25,41 @@ preserve_translation: true  # Preserve original position/orientation (only scale
 exclude_antenna: false
 exclude_wings: false
 exclude_wing_veins: true  # Exclude only wing vein markers (V12/V13) from Procrustes scaling
+
+# Keypoint filtering (applied after XML reordering, before Procrustes alignment)
+filtering:
+  enabled: true
+
+  confidence:
+    enabled: true
+    threshold: 0.5
+    exclude_keypoint_patterns: ['Wing']  # Don't mask these keypoints (preserves fast wing motion)
+
+  bone_length:
+    enabled: true
+    threshold_std: 5.0
+    exclude_keypoint_patterns: ['Wing']  # Skip edges involving these keypoints (substring match)
+
+  medfilt:
+    enabled: false              # OFF by default — can flag real fast motion
+    kernel: 5
+    spike_threshold_std: 5.0
+    use_spline: true
+
+  interpolation:
+    enabled: true
+    use_spline: true
+
+  confidence_smooth:
+    enabled: false              # OFF by default — attenuates real high-freq features (e.g. sine song)
+    smooth_window: 11
+    smooth_polyorder: 3
+    conf_low: 0.7               # fully smooth at/below this confidence
+    conf_high: 0.8              # fully trust raw at/above this confidence
+
+  savgol:
+    enabled: false
+    window_length: 11
+    polyorder: 3
+
+  save_figures: true  # Save diagnostic plots to output_dir/filter_figures/

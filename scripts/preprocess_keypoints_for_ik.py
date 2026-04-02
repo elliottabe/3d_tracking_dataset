@@ -56,6 +56,7 @@ try:
         match_csv_to_skeleton,
         reorder_keypoints_array,
         reorder_skeleton_edges)
+    from utils.keypoint_filter import filter_keypoints, load_confidence_from_csv, load_confidence_concatenated
 except ModuleNotFoundError as e:
     print(f"Error: Could not import utilities. Make sure you're running from the project root.")
     print(f"Current directory: {Path.cwd()}")
@@ -612,6 +613,50 @@ def save_to_hdf5(output_path: Path,
     print(f"  - skeleton_edges: {xml_edges.shape}")
 
 
+def _reorder_confidence_to_xml(confidence, filtered_node_names, xml_node_names):
+    """Reorder confidence columns from filtered_node_names order to xml_node_names order."""
+    if confidence is None:
+        return None
+    name_to_idx = {n: i for i, n in enumerate(filtered_node_names)}
+    xml_col_order = [name_to_idx[n] for n in xml_node_names if n in name_to_idx]
+    if len(xml_col_order) != len(xml_node_names):
+        print(f"  [filter] Warning: {len(xml_node_names) - len(xml_col_order)} XML nodes "
+              f"not found in filtered nodes — confidence may be incomplete")
+        return None
+    return confidence[:, xml_col_order]
+
+
+def apply_keypoint_filtering(
+    kp_array: np.ndarray,
+    xml_edges: np.ndarray,
+    xml_node_names: List[str],
+    filter_cfg: DictConfig,
+    confidence: Optional[np.ndarray] = None,
+    fig_dir=None,
+    bout_name: str = "bout",
+) -> Tuple[np.ndarray, Dict]:
+    """Apply keypoint filtering pipeline if enabled in config.
+
+    Returns:
+        filtered_kp: (T, N, 3) cleaned array
+        report: per-step summary dict (empty if filtering disabled)
+    """
+    if not filter_cfg.get('enabled', False):
+        print("Keypoint filtering: DISABLED")
+        return kp_array, {}
+
+    filtered_kp, report = filter_keypoints(
+        kp_array=kp_array,
+        confidence=confidence,
+        skeleton_edges=xml_edges,
+        filter_cfg=filter_cfg,
+        fig_dir=fig_dir if filter_cfg.get('save_figures', False) else None,
+        bout_name=bout_name,
+        kp_names=xml_node_names,
+    )
+    return filtered_kp, report
+
+
 def process_single_bout(csv_path: Path,
                         skeleton_path: Path,
                         xml_path: Path,
@@ -621,7 +666,9 @@ def process_single_bout(csv_path: Path,
                         apply_scaling: bool = False,
                         exclude_antenna: bool = False,
                         exclude_wings: bool = False,
-                        exclude_wing_veins: bool = False) -> Optional[Dict]:
+                        exclude_wing_veins: bool = False,
+                        filter_cfg: Optional[DictConfig] = None,
+                        output_dir: Optional[Path] = None) -> Optional[Dict]:
     """
     Process a single bout of keypoint data.
 
@@ -636,7 +683,9 @@ def process_single_bout(csv_path: Path,
         exclude_antenna: Whether to exclude antenna from alignment
         exclude_wings: Whether to exclude all wing keypoints from alignment
         exclude_wing_veins: Whether to exclude only wing vein keypoints (V12/V13) from alignment
-    
+        filter_cfg: Optional filtering configuration (OmegaConf DictConfig)
+        output_dir: Optional output directory for filter diagnostic figures
+
     Returns:
         Dictionary with bout data if successful, None otherwise
     """
@@ -674,7 +723,23 @@ def process_single_bout(csv_path: Path,
         )
         # IMPORTANT: Copy AFTER reordering so orig_keypoints are in same order as keypoints
         orig_kp_xml = kp_array_xml.copy()
-        
+
+        # 6b. Optional: Keypoint filtering (before Procrustes to avoid corrupting alignment)
+        filter_report = {}
+        if filter_cfg is not None and filter_cfg.get('enabled', False):
+            confidence = load_confidence_from_csv(
+                csv_path, frame_indices, csv_kp_names,
+                csv_to_filtered_idx, filtered_node_names
+            )
+            confidence = _reorder_confidence_to_xml(
+                confidence, filtered_node_names, xml_node_names
+            )
+            fig_dir = output_dir / "filter_figures" if output_dir and filter_cfg.get('save_figures', False) else None
+            kp_array_xml, filter_report = apply_keypoint_filtering(
+                kp_array_xml, xml_edges, xml_node_names, filter_cfg,
+                confidence=confidence, fig_dir=fig_dir, bout_name="single_bout",
+            )
+
         # 7. Optional: Apply Procrustes alignment
         alignment_info = None
         if apply_alignment:
@@ -734,7 +799,9 @@ def process_bouts_batch(csv_path: Path,
                        apply_scaling: bool = False,
                        exclude_antenna: bool = False,
                        exclude_wings: bool = False,
-                       exclude_wing_veins: bool = False) -> Optional[Dict]:
+                       exclude_wing_veins: bool = False,
+                       filter_cfg: Optional[DictConfig] = None,
+                       output_dir: Optional[Path] = None) -> Optional[Dict]:
     """
     Efficiently process multiple bouts by loading skeleton/model once and
     processing all data as a concatenated array.
@@ -754,7 +821,9 @@ def process_bouts_batch(csv_path: Path,
         exclude_antenna: Whether to exclude antenna from alignment
         exclude_wings: Whether to exclude all wing keypoints from alignment
         exclude_wing_veins: Whether to exclude only wing vein keypoints (V12/V13) from alignment
-    
+        filter_cfg: Optional filtering configuration (OmegaConf DictConfig)
+        output_dir: Optional output directory for filter diagnostic figures
+
     Returns:
         Dictionary with all bout data keyed by 'bout_<idx>' if successful, None otherwise
     """
@@ -821,21 +890,41 @@ def process_bouts_batch(csv_path: Path,
 
         exclude_arr = jnp.array(exclude_indices) if exclude_indices else None
         
-        # 8. Split back into individual bouts and apply alignment PER BOUT
+        # 7b. Load confidence once for all bouts (avoid re-reading CSV per bout)
+        concat_confidence = None
+        if filter_cfg is not None and filter_cfg.get('enabled', False):
+            concat_confidence = load_confidence_concatenated(
+                csv_path, bouts, csv_kp_names, csv_to_filtered_idx, filtered_node_names
+            )
+            concat_confidence = _reorder_confidence_to_xml(
+                concat_confidence, filtered_node_names, xml_node_names
+            )
+            fig_dir = output_dir / "filter_figures" if output_dir and filter_cfg.get('save_figures', False) else None
+
+        # 8. Split back into individual bouts and apply filtering + alignment PER BOUT
         print("\n" + "="*80)
-        print("PROCESSING INDIVIDUAL BOUTS WITH PER-BOUT ALIGNMENT")
+        print("PROCESSING INDIVIDUAL BOUTS WITH PER-BOUT FILTERING & ALIGNMENT")
         print("="*80)
-        
+
         all_bouts_dict = {}
         for clip in clip_info:
             bout_idx = clip['bout_idx']
             start_idx = clip['start_idx']
             end_idx = clip['end_idx']
-            
+
             # Extract this bout's data
             bout_kp = kp_array_xml[start_idx:end_idx]
             bout_orig = orig_xml[start_idx:end_idx]
-            
+
+            # 8b. Optional: Keypoint filtering PER BOUT (before Procrustes)
+            if filter_cfg is not None and filter_cfg.get('enabled', False):
+                bout_confidence = concat_confidence[start_idx:end_idx] if concat_confidence is not None else None
+                bout_kp, _ = apply_keypoint_filtering(
+                    bout_kp, xml_edges, xml_node_names, filter_cfg,
+                    confidence=bout_confidence, fig_dir=fig_dir,
+                    bout_name=f"bout_{bout_idx:03d}",
+                )
+
             # Apply Procrustes alignment PER BOUT (like the notebook does)
             alignment_info = None
             if apply_alignment:
@@ -953,7 +1042,9 @@ def main(cfg: DictConfig):
             apply_scaling=cfg.preprocessing.apply_scaling,
             exclude_antenna=cfg.preprocessing.exclude_antenna,
             exclude_wings=cfg.preprocessing.exclude_wings,
-            exclude_wing_veins=cfg.preprocessing.get('exclude_wing_veins', False)
+            exclude_wing_veins=cfg.preprocessing.get('exclude_wing_veins', False),
+            filter_cfg=cfg.preprocessing.get('filtering', None),
+            output_dir=output_dir,
         )
 
         if all_bouts_dict is not None:
@@ -993,7 +1084,9 @@ def main(cfg: DictConfig):
             apply_scaling=cfg.preprocessing.apply_scaling,
             exclude_antenna=cfg.preprocessing.exclude_antenna,
             exclude_wings=cfg.preprocessing.exclude_wings,
-            exclude_wing_veins=cfg.preprocessing.get('exclude_wing_veins', False)
+            exclude_wing_veins=cfg.preprocessing.get('exclude_wing_veins', False),
+            filter_cfg=cfg.preprocessing.get('filtering', None),
+            output_dir=output_dir,
         )
 
         if bout_data is not None:

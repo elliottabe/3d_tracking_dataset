@@ -318,8 +318,8 @@ def process_bouts_batched(
         
         relative_pos = site_xpos - thorax_xpos[None, :]
         egocentric_pos = jnp.dot(relative_pos, thorax_xmat)
-        
-        return egocentric_pos
+
+        return site_xpos, egocentric_pos
     
     # Vmap floor adjustment
     qpos_adjusted = jax.vmap(adjust_single_bout)(qpos_batch, xpos_batch)    
@@ -339,7 +339,8 @@ def process_bouts_batched(
         # Vmap over timesteps then bouts
         compute_egocentric_bout = jax.vmap(compute_egocentric_sites_single)
         compute_egocentric_batched = jax.vmap(compute_egocentric_bout)
-        xpos_egocentric = compute_egocentric_batched(qpos_out)
+        site_xpos, xpos_egocentric = compute_egocentric_batched(qpos_out)
+        result['site_xpos'] = site_xpos
         result['xpos_egocentric'] = xpos_egocentric
     
     return result
@@ -573,7 +574,9 @@ def process_all_bouts(
             bout['xpos'] = np.array(processed['xpos'][bout_idx])
             bout['xquat'] = np.array(processed['xquat'][bout_idx])
             
-            # Unpack egocentric positions if computed
+            # Unpack site positions if computed
+            if 'site_xpos' in processed:
+                bout['site_xpos'] = np.array(processed['site_xpos'][bout_idx])
             if 'xpos_egocentric' in processed:
                 bout['xpos_egocentric'] = np.array(processed['xpos_egocentric'][bout_idx])
         
@@ -735,22 +738,52 @@ def main(cfg: DictConfig):
         )
     
     # Step 6: Compute geometric joint angles (anipose-compatible)
+    # Concatenate all bouts and compute once for efficiency
     print("=" * 80)
     print("COMPUTING GEOMETRIC ANGLES")
     print("=" * 80)
     kp_names = bout_dict['info'].get('kp_names', [])
     bout_keys = sorted([k for k in bout_dict.keys() if k != 'info'])
     n_computed = 0
+
+    # Collect marker data from all bouts
+    all_marker_data = []
+    bout_lengths = []
+    valid_bout_keys = []
     for bout_key in bout_keys:
         bout = bout_dict[bout_key]
         marker_data = bout.get('marker_sites', bout.get('kp_data'))
         if marker_data is not None and len(kp_names) > 0:
-            geo_angles = compute_geometric_angles_all_legs(
-                np.asarray(marker_data), kp_names
-            )
-            if geo_angles:
-                bout['geometric_angles'] = geo_angles
+            md = np.asarray(marker_data)
+            all_marker_data.append(md)
+            bout_lengths.append(md.shape[0])
+            valid_bout_keys.append(bout_key)
+
+    if all_marker_data:
+        # Concatenate along time axis and compute angles once
+        concat_markers = np.concatenate(all_marker_data, axis=0)
+        geo_angles_all = compute_geometric_angles_all_legs(concat_markers, kp_names)
+
+        if geo_angles_all:
+            # Split results back into per-bout dicts
+            for bout_key, length in zip(valid_bout_keys, bout_lengths):
+                bout_angles = {}
+                for leg_name, leg_angles in geo_angles_all.items():
+                    bout_leg = {}
+                    for angle_name, angle_arr in leg_angles.items():
+                        bout_leg[angle_name] = angle_arr[:length]
+                    bout_angles[leg_name] = bout_leg
+                bout_dict[bout_key]['geometric_angles'] = bout_angles
                 n_computed += 1
+                # Trim arrays for next bout
+                geo_angles_all = {
+                    leg_name: {
+                        angle_name: angle_arr[length:]
+                        for angle_name, angle_arr in leg_angles.items()
+                    }
+                    for leg_name, leg_angles in geo_angles_all.items()
+                }
+
     print(f"  Computed geometric angles for {n_computed}/{len(bout_keys)} bouts")
     if n_computed > 0:
         example = bout_dict[bout_keys[0]].get('geometric_angles', {})

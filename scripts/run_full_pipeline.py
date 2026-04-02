@@ -26,6 +26,7 @@ Usage:
 """
 
 import argparse
+import logging
 import subprocess
 import sys
 from pathlib import Path
@@ -67,14 +68,38 @@ class PipelineRunner:
         # Track timing and results
         self.step_results = {}
         self.step_times = {}
+
+        # Set up logging to file and console
+        self.log_dir = self.base_dir / "pipeline_logs"
+        self.log_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        self.log_path = self.log_dir / f"pipeline_{dataset}_{anatomy}_{timestamp}.log"
+
+        self.logger = logging.getLogger(f"pipeline_{timestamp}")
+        self.logger.setLevel(logging.INFO)
+        self.logger.handlers.clear()
+
+        # File handler — captures everything
+        fh = logging.FileHandler(self.log_path)
+        fh.setFormatter(logging.Formatter("%(asctime)s | %(message)s", datefmt="%H:%M:%S"))
+        self.logger.addHandler(fh)
+
+        # Console handler
+        ch = logging.StreamHandler(sys.stdout)
+        ch.setFormatter(logging.Formatter("%(message)s"))
+        self.logger.addHandler(ch)
     
+    def log(self, msg: str):
+        """Log a message to both console and log file."""
+        self.logger.info(msg)
+
     def print_banner(self, text: str, char: str = "="):
         """Print a formatted banner."""
         width = 80
-        print(f"\n{char * width}")
-        print(text.center(width))
-        print(f"{char * width}\n")
-    
+        self.log(f"\n{char * width}")
+        self.log(text.center(width))
+        self.log(f"{char * width}\n")
+
     def print_step_header(self, step_num: int, total_steps: int, step_name: str):
         """Print step header."""
         self.print_banner(f"STEP {step_num}/{total_steps}: {step_name}", char="-")
@@ -86,46 +111,52 @@ class PipelineRunner:
         timeout: int = 3600
     ) -> tuple[bool, str]:
         """
-        Run a command and return success status.
-        
+        Run a command, streaming output in real-time to console and log file.
+
         Args:
             cmd: Command to run
             step_name: Name of the step for logging
             timeout: Timeout in seconds
-        
+
         Returns:
             (success, message) tuple
         """
         if self.dry_run:
-            print(f"[DRY RUN] Would execute: {' '.join(cmd)}")
+            self.log(f"[DRY RUN] Would execute: {' '.join(cmd)}")
             return True, "Dry run"
-        
-        print(f"Executing: {' '.join(cmd)}")
+
+        self.log(f"Executing: {' '.join(cmd)}")
         start_time = time.time()
-        
+
         try:
-            result = subprocess.run(
+            # Stream output line-by-line instead of capturing
+            proc = subprocess.Popen(
                 cmd,
                 cwd=self.project_dir,
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,  # Merge stderr into stdout
                 text=True,
-                timeout=timeout
+                bufsize=1,  # Line-buffered
             )
-            
+
+            # Read and log each line as it arrives
+            for line in proc.stdout:
+                line = line.rstrip('\n')
+                self.log(line)
+
+            proc.wait(timeout=timeout)
+
             elapsed = time.time() - start_time
             self.step_times[step_name] = elapsed
-            
-            # Print output
-            if result.stdout:
-                print(result.stdout)
-            
-            if result.returncode == 0:
+
+            if proc.returncode == 0:
                 return True, f"Success (took {elapsed:.1f}s)"
             else:
-                error_msg = result.stderr[-1000:] if result.stderr else "Unknown error"
-                return False, f"Failed with return code {result.returncode}\n{error_msg}"
-        
+                return False, f"Failed with return code {proc.returncode}"
+
         except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
             elapsed = time.time() - start_time
             self.step_times[step_name] = elapsed
             return False, f"Timeout after {elapsed:.1f}s"
@@ -156,16 +187,16 @@ class PipelineRunner:
         self.step_results["preprocess"] = (success, message)
         
         if success:
-            print(f"✅ Preprocessing complete: {message}")
+            self.log(f"Preprocessing complete: {message}")
         else:
-            print(f"❌ Preprocessing failed: {message}")
-        
+            self.log(f"Preprocessing failed: {message}")
+
         return success
-    
+
     def step_2_stac(self) -> bool:
         """Step 2: STAC IK solver."""
         self.print_step_header(2, 4, "STAC IK SOLVER")
-        
+
         cmd = [
             sys.executable,
             str(self.scripts_dir / "batch_run_stac.py"),
@@ -174,28 +205,28 @@ class PipelineRunner:
             f"--base-dir={self.base_dir}",
             f"--gpu-mem-fraction={self.gpu_mem_fraction}",
         ]
-        
+
         if self.stac_overrides:
             cmd.append(f"--stac-overrides={self.stac_overrides}")
         if self.force:
             cmd.append("--force")
         if self.dry_run:
             cmd.append("--dry-run")
-        
+
         success, message = self.run_command(cmd, "stac", timeout=7200)
         self.step_results["stac"] = (success, message)
-        
+
         if success:
-            print(f"✅ STAC IK complete: {message}")
+            self.log(f"STAC IK complete: {message}")
         else:
-            print(f"❌ STAC IK failed: {message}")
-        
+            self.log(f"STAC IK failed: {message}")
+
         return success
-    
+
     def step_3_postprocess(self) -> bool:
         """Step 3: Postprocessing."""
         self.print_step_header(3, 4, "POSTPROCESSING")
-        
+
         cmd = [
             sys.executable,
             str(self.scripts_dir / "batch_postprocess_predictions.py"),
@@ -204,26 +235,26 @@ class PipelineRunner:
             f"--paths={self.paths_config}",
             f"--base-dir={self.base_dir}",
         ]
-        
+
         if self.force:
             cmd.append("--force")
         if self.dry_run:
             cmd.append("--dry-run")
-        
+
         success, message = self.run_command(cmd, "postprocess", timeout=1800)
         self.step_results["postprocess"] = (success, message)
-        
+
         if success:
-            print(f"✅ Postprocessing complete: {message}")
+            self.log(f"Postprocessing complete: {message}")
         else:
-            print(f"❌ Postprocessing failed: {message}")
-        
+            self.log(f"Postprocessing failed: {message}")
+
         return success
-    
+
     def step_4_combine(self) -> bool:
         """Step 4: Combine all results."""
         self.print_step_header(4, 4, "COMBINE DATA")
-        
+
         cmd = [
             sys.executable,
             str(self.scripts_dir / "combine_data.py"),
@@ -231,69 +262,70 @@ class PipelineRunner:
             f"dataset={self.dataset}",
             f"anatomy={self.anatomy}",
         ]
-        
+
         if self.dry_run:
-            print(f"[DRY RUN] Would execute: {' '.join(cmd)}")
-            print("Note: combine_data.py doesn't have dry-run mode")
+            self.log(f"[DRY RUN] Would execute: {' '.join(cmd)}")
+            self.log("Note: combine_data.py doesn't have dry-run mode")
             self.step_results["combine"] = (True, "Dry run")
             return True
-        
+
         success, message = self.run_command(cmd, "combine", timeout=600)
         self.step_results["combine"] = (success, message)
-        
+
         if success:
-            print(f"✅ Combine complete: {message}")
+            self.log(f"Combine complete: {message}")
         else:
-            print(f"❌ Combine failed: {message}")
-        
+            self.log(f"Combine failed: {message}")
+
         return success
-    
+
     def run(self, steps: list[str] = None) -> bool:
         """
         Run the pipeline.
-        
+
         Args:
             steps: List of steps to run (default: all)
                    Options: 'preprocess', 'stac', 'postprocess', 'combine'
-        
+
         Returns:
             True if all steps succeeded
         """
         if steps is None:
             steps = ['preprocess', 'stac', 'postprocess', 'combine']
-        
+
         # Validate steps
         valid_steps = {'preprocess', 'stac', 'postprocess', 'combine'}
         invalid = set(steps) - valid_steps
         if invalid:
-            print(f"❌ Invalid steps: {invalid}")
-            print(f"   Valid steps: {valid_steps}")
+            self.log(f"Invalid steps: {invalid}")
+            self.log(f"   Valid steps: {valid_steps}")
             return False
-        
+
         # Print configuration
         self.print_banner("3D TRACKING DATA PIPELINE")
-        print(f"Configuration:")
-        print(f"  Anatomy: {self.anatomy}")
-        print(f"  Dataset: {self.dataset}")
-        print(f"  Base directory: {self.base_dir}")
-        print(f"  Paths config: {self.paths_config}")
-        print(f"  Steps to run: {', '.join(steps)}")
-        print(f"  Force reprocessing: {self.force}")
-        print(f"  Skip completed: {self.skip_completed}")
-        print(f"  Dry run: {self.dry_run}")
+        self.log(f"Configuration:")
+        self.log(f"  Anatomy: {self.anatomy}")
+        self.log(f"  Dataset: {self.dataset}")
+        self.log(f"  Base directory: {self.base_dir}")
+        self.log(f"  Paths config: {self.paths_config}")
+        self.log(f"  Steps to run: {', '.join(steps)}")
+        self.log(f"  Force reprocessing: {self.force}")
+        self.log(f"  Skip completed: {self.skip_completed}")
+        self.log(f"  Dry run: {self.dry_run}")
+        self.log(f"  Log file: {self.log_path}")
         if self.stac_overrides:
-            print(f"  STAC overrides: {self.stac_overrides}")
-        print()
-        
+            self.log(f"  STAC overrides: {self.stac_overrides}")
+        self.log("")
+
         # Confirm if not dry run
         if not self.dry_run:
             response = input("Continue with pipeline execution? [y/N]: ")
             if response.lower() != 'y':
-                print("Pipeline cancelled by user")
+                self.log("Pipeline cancelled by user")
                 return False
-        
+
         start_time = time.time()
-        
+
         # Run steps in order
         step_map = {
             'preprocess': self.step_1_preprocess,
@@ -301,43 +333,44 @@ class PipelineRunner:
             'postprocess': self.step_3_postprocess,
             'combine': self.step_4_combine,
         }
-        
+
         for step_name in steps:
             step_func = step_map[step_name]
-            
+
             # Run step
             success = step_func()
-            
+
             # Check if we should continue
             if not success and not self.dry_run:
-                print(f"\n❌ Step '{step_name}' failed. Stopping pipeline.")
+                self.log(f"\nStep '{step_name}' failed. Stopping pipeline.")
                 self.print_summary()
                 return False
-        
+
         # All steps completed
         elapsed = time.time() - start_time
         self.print_banner("PIPELINE COMPLETE")
-        print(f"Total time: {elapsed:.1f}s ({elapsed/60:.1f} minutes)")
+        self.log(f"Total time: {elapsed:.1f}s ({elapsed/60:.1f} minutes)")
         self.print_summary()
-        
+
         return all(success for success, _ in self.step_results.values())
-    
+
     def print_summary(self):
         """Print summary of pipeline execution."""
-        print("\n" + "=" * 80)
-        print("SUMMARY")
-        print("=" * 80)
-        
+        self.log("\n" + "=" * 80)
+        self.log("SUMMARY")
+        self.log("=" * 80)
+
         if not self.step_results:
-            print("No steps executed")
+            self.log("No steps executed")
             return
-        
+
         for step_name, (success, message) in self.step_results.items():
-            status = "✅" if success else "❌"
+            status = "PASS" if success else "FAIL"
             time_str = f" ({self.step_times.get(step_name, 0):.1f}s)" if step_name in self.step_times else ""
-            print(f"{status} {step_name.upper()}{time_str}: {message}")
-        
-        print("=" * 80 + "\n")
+            self.log(f"  [{status}] {step_name.upper()}{time_str}: {message}")
+
+        self.log("=" * 80)
+        self.log(f"Log saved to: {self.log_path}\n")
 
 
 def main():

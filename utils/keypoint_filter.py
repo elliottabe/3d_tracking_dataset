@@ -36,7 +36,12 @@ import matplotlib.gridspec as gridspec
 # ─── Internal helpers ──────────────────────────────────────────────────────────
 
 def _nan_interp_1d(vals: np.ndarray, use_spline: bool = True) -> np.ndarray:
-    """Interpolate NaN gaps in a 1-D signal. Skips if >50% of values are NaN."""
+    """Interpolate NaN gaps in a 1-D signal. Skips if >50% of values are NaN.
+
+    Only interpolates *between* valid data points. Leading/trailing NaN edges
+    are filled with the nearest valid value (no extrapolation) to avoid cubic
+    spline divergence at recording boundaries.
+    """
     nans = np.isnan(vals)
     if not np.any(nans):
         return vals
@@ -48,14 +53,27 @@ def _nan_interp_1d(vals: np.ndarray, use_spline: bool = True) -> np.ndarray:
     x_bad = np.where(nans)[0]
     out = vals.copy()
 
-    if use_spline:
-        try:
-            spl = splrep(x_good, v_good, k=3, s=0)
-            out[nans] = splev(x_bad, spl)
-        except Exception:
-            out[nans] = np.interp(x_bad, x_good, v_good)
-    else:
-        out[nans] = np.interp(x_bad, x_good, v_good)
+    # Split NaN positions into interior (between first/last valid) and edges
+    x_min, x_max = x_good[0], x_good[-1]
+    interior_mask = (x_bad >= x_min) & (x_bad <= x_max)
+    x_interior = x_bad[interior_mask]
+    x_edges = x_bad[~interior_mask]
+
+    # Interpolate interior gaps (spline or linear)
+    if len(x_interior) > 0:
+        if use_spline:
+            try:
+                spl = splrep(x_good, v_good, k=3, s=0)
+                out[x_interior] = splev(x_interior, spl)
+            except Exception:
+                out[x_interior] = np.interp(x_interior, x_good, v_good)
+        else:
+            out[x_interior] = np.interp(x_interior, x_good, v_good)
+
+    # Fill leading/trailing edges with nearest valid value (no extrapolation)
+    if len(x_edges) > 0:
+        out[x_edges] = np.interp(x_edges, x_good, v_good)
+
     return out
 
 
@@ -76,6 +94,8 @@ def _mask_low_confidence(
     kp_array: np.ndarray,
     confidence: np.ndarray,
     threshold: float,
+    kp_names: Optional[List[str]] = None,
+    exclude_keypoint_patterns: Optional[List[str]] = None,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Set keypoints with confidence < threshold to NaN.
@@ -84,18 +104,34 @@ def _mask_low_confidence(
         kp_array:   (T, N, 3)  3-D keypoint positions
         confidence: (T, N)     confidence scores in [0, 1]
         threshold:  scalar     detections below this are masked
+        kp_names:   list of N keypoint names (used for exclusion matching)
+        exclude_keypoint_patterns: list of substrings; keypoints whose name
+                    contains a pattern are not masked
 
     Returns:
         kp_masked: (T, N, 3) copy with NaN where confidence was low
         bad_mask:  (T, N) bool — True where keypoints were masked
     """
     bad_mask = confidence < threshold                      # (T, N)
+
+    # Zero out bad_mask for excluded keypoints
+    n_excluded = 0
+    if kp_names and exclude_keypoint_patterns:
+        for idx, name in enumerate(kp_names):
+            for pat in exclude_keypoint_patterns:
+                if pat in name:
+                    n_before = int(np.sum(bad_mask[:, idx]))
+                    bad_mask[:, idx] = False
+                    n_excluded += n_before
+                    break
+
     kp_masked = kp_array.copy().astype(float)
     kp_masked[bad_mask] = np.nan                           # broadcast over xyz dim
     n_bad = int(np.sum(bad_mask))
     frac = n_bad / bad_mask.size * 100
+    exclude_msg = f" (excluded {n_excluded} wing keypoint-frames)" if n_excluded else ""
     print(f"  [confidence] masked {n_bad}/{bad_mask.size} keypoint-frames "
-          f"({frac:.1f}%) below threshold={threshold}")
+          f"({frac:.1f}%) below threshold={threshold}{exclude_msg}")
     return kp_masked, bad_mask
 
 
@@ -103,6 +139,8 @@ def _detect_bone_length_outliers(
     kp_array: np.ndarray,
     edges: np.ndarray,
     threshold_std: float = 3.0,
+    kp_names: Optional[List[str]] = None,
+    exclude_keypoint_patterns: Optional[List[str]] = None,
 ) -> Tuple[np.ndarray, Dict]:
     """
     Flag frames where a bone's length deviates more than threshold_std sigma
@@ -112,6 +150,9 @@ def _detect_bone_length_outliers(
         kp_array:      (T, N, 3) — may already contain NaNs
         edges:         (E, 2)    skeleton edge index pairs
         threshold_std: deviation cutoff in robust-sigma units
+        kp_names:      list of N keypoint names (used for exclusion matching)
+        exclude_keypoint_patterns: list of substrings; edges where *either*
+                       endpoint name contains a pattern are skipped
 
     Returns:
         kp_flagged: copy with additional NaN outliers
@@ -120,9 +161,35 @@ def _detect_bone_length_outliers(
     kp_flagged = kp_array.copy()
     report: Dict[int, int] = {}
     total_flagged = 0
+    n_excluded = 0
 
-    for ei, (i, j) in enumerate(edges):
-        lengths = np.linalg.norm(kp_array[:, i, :] - kp_array[:, j, :], axis=1)
+    # Build set of keypoint indices to exclude from bone-length checking
+    excluded_kp_indices = set()
+    if kp_names and exclude_keypoint_patterns:
+        for idx, name in enumerate(kp_names):
+            for pat in exclude_keypoint_patterns:
+                if pat in name:
+                    excluded_kp_indices.add(idx)
+                    break
+
+    # Vectorized bone length computation for all edges at once
+    # edges shape: (E, 2) -> compute all E bone lengths across T frames
+    idx_i = edges[:, 0]  # (E,)
+    idx_j = edges[:, 1]  # (E,)
+    # all_lengths shape: (T, E)
+    all_lengths = np.linalg.norm(
+        kp_array[:, idx_i, :] - kp_array[:, idx_j, :], axis=2
+    )
+
+    for ei in range(len(edges)):
+        i, j = edges[ei]
+
+        # Skip edges involving excluded keypoints
+        if i in excluded_kp_indices or j in excluded_kp_indices:
+            n_excluded += 1
+            continue
+
+        lengths = all_lengths[:, ei]
         valid = np.isfinite(lengths)
         if np.sum(valid) < 5:
             continue
@@ -141,11 +208,12 @@ def _detect_bone_length_outliers(
             total_flagged += n
             report[ei] = n
 
+    exclude_msg = f" (skipped {n_excluded} excluded edges)" if n_excluded else ""
     if total_flagged:
         print(f"  [bone-length] flagged {total_flagged} keypoint-frames across "
-              f"{len(report)} bones (>{threshold_std}σ from median length)")
+              f"{len(report)} bones (>{threshold_std}σ from median length){exclude_msg}")
     else:
-        print(f"  [bone-length] no outliers found (threshold={threshold_std}σ)")
+        print(f"  [bone-length] no outliers found (threshold={threshold_std}σ){exclude_msg}")
     return kp_flagged, report
 
 
@@ -223,6 +291,122 @@ def _medfilt_interpolate(
     else:
         print(f"  [medfilt+interp] no spikes detected; interpolated NaN gaps "
               f"(kernel={medfilt_kernel})")
+    return kp_out
+
+
+def _interpolate_nan_gaps(
+    kp_array: np.ndarray,
+    use_spline: bool = True,
+) -> np.ndarray:
+    """
+    Interpolate all NaN gaps in a (T, N, 3) keypoint array.
+
+    Per keypoint, per coordinate: spline-interpolate internal NaN gaps,
+    then linear-fill any remaining leading/trailing edge NaNs.
+
+    Args:
+        kp_array:   (T, N, 3) — may contain NaN
+        use_spline: use cubic spline (True) or linear interpolation (False)
+    """
+    T, N, _ = kp_array.shape
+    # Reshape to (T, N*3) so we can iterate over columns without nested loops
+    kp_flat = kp_array.reshape(T, -1).copy()
+    nan_counts = np.isnan(kp_flat).sum(axis=0)  # per-column NaN count
+    total_filled = 0
+
+    # Only process columns that have NaNs
+    cols_with_nans = np.where(nan_counts > 0)[0]
+    for c in cols_with_nans:
+        vals = kp_flat[:, c]
+        n_nan_before = int(nan_counts[c])
+
+        # Primary interpolation (spline or linear)
+        kp_flat[:, c] = _nan_interp_1d(vals, use_spline=use_spline)
+
+        # Edge fill: nearest-neighbour for leading/trailing NaNs
+        vals = kp_flat[:, c]
+        nans = np.isnan(vals)
+        if np.any(nans) and np.any(~nans):
+            valid_idx = np.where(~nans)[0]
+            vals[nans] = np.interp(np.where(nans)[0], valid_idx, vals[valid_idx])
+            kp_flat[:, c] = vals
+
+        total_filled += n_nan_before - int(np.sum(np.isnan(kp_flat[:, c])))
+
+    kp_out = kp_flat.reshape(T, N, 3)
+    if total_filled > 0:
+        print(f"  [interpolation] filled {total_filled} NaN coordinate-values "
+              f"({'spline' if use_spline else 'linear'})")
+    else:
+        print(f"  [interpolation] no NaN gaps to fill")
+    return kp_out
+
+
+def _confidence_weighted_smooth(
+    kp_array: np.ndarray,
+    confidence: np.ndarray,
+    smooth_window: int = 11,
+    smooth_polyorder: int = 3,
+    conf_low: float = 0.3,
+    conf_high: float = 0.8,
+) -> np.ndarray:
+    """
+    Blend Savitzky-Golay smoothed trajectory with raw using confidence.
+
+    For each keypoint at each frame:
+      - confidence >= conf_high: keep raw value (trust tracker)
+      - confidence <= conf_low:  use fully smoothed value
+      - in between: linear blend
+
+    Args:
+        kp_array:        (T, N, 3) — should be NaN-free (run after interpolation)
+        confidence:      (T, N)    continuous confidence scores in [0, 1]
+        smooth_window:   Savitzky-Golay window length (must be odd)
+        smooth_polyorder: polynomial order for Savitzky-Golay
+        conf_low:        confidence at/below which smoothing is fully applied
+        conf_high:       confidence at/above which raw data is fully trusted
+    """
+    T, N, _ = kp_array.shape
+    if smooth_window % 2 == 0:
+        smooth_window += 1
+    smooth_window = min(smooth_window, T if T % 2 != 0 else T - 1)
+    if smooth_window <= smooth_polyorder:
+        print(f"  [conf-smooth] skipped (window={smooth_window} <= polyorder={smooth_polyorder})")
+        return kp_array
+
+    kp_out = kp_array.copy()
+
+    # Compute blend weight from confidence: 0 = fully smoothed, 1 = fully raw
+    denom = max(conf_high - conf_low, 1e-8)
+    weight = np.clip((confidence - conf_low) / denom, 0.0, 1.0)  # (T, N)
+
+    # Expand weight to (T, N, 3) for broadcasting
+    weight_3d = weight[:, :, np.newaxis]  # (T, N, 3)
+
+    # Find keypoints that need blending (any frame with weight < 1)
+    needs_blend = np.any(weight < 1.0, axis=0)  # (N,)
+
+    # Apply savgol per coordinate column for keypoints that need it
+    # Reshape to (T, N*3) for efficient column-wise savgol
+    kp_flat = kp_out.reshape(T, -1)
+    smoothed_flat = kp_flat.copy()
+    has_nan = np.any(np.isnan(kp_flat), axis=0)  # (N*3,)
+
+    for c in range(kp_flat.shape[1]):
+        kp_idx = c // 3
+        if not needs_blend[kp_idx] or has_nan[c]:
+            continue
+        smoothed_flat[:, c] = signal.savgol_filter(kp_flat[:, c], smooth_window, smooth_polyorder)
+
+    smoothed = smoothed_flat.reshape(T, N, 3)
+    kp_out = weight_3d * kp_out + (1.0 - weight_3d) * smoothed
+
+    total_blended = int(np.sum(needs_blend * np.sum(weight < 1.0, axis=0)))
+
+    frac = total_blended / (T * N) * 100 if (T * N) > 0 else 0
+    print(f"  [conf-smooth] blended {total_blended}/{T * N} keypoint-frames "
+          f"({frac:.1f}%) (conf_low={conf_low}, conf_high={conf_high}, "
+          f"window={smooth_window})")
     return kp_out
 
 
@@ -458,10 +642,12 @@ def filter_keypoints(
     Apply the full filtering pipeline to a (T, N, 3) keypoint array.
 
     Steps (each enabled/disabled via filter_cfg sub-keys):
-      1. confidence masking   (filter_cfg.confidence.enabled)
-      2. bone-length outliers (filter_cfg.bone_length.enabled)
-      3. medfilt + interp     (filter_cfg.medfilt.enabled)
-      4. savgol smoothing     (filter_cfg.savgol.enabled)
+      1. confidence masking           (filter_cfg.confidence.enabled)
+      2. bone-length outliers         (filter_cfg.bone_length.enabled, default OFF)
+      3. medfilt spike detection      (filter_cfg.medfilt.enabled, default OFF)
+      4. interpolate NaN gaps         (filter_cfg.interpolation.enabled)
+      5. confidence-weighted smooth   (filter_cfg.confidence_smooth.enabled)
+      6. savgol smoothing             (filter_cfg.savgol.enabled, default OFF)
 
     Args:
         kp_array:       (T, N, 3)  raw keypoint positions (mm)
@@ -481,27 +667,50 @@ def filter_keypoints(
     kp = kp_raw.copy()
     print("\n--- Keypoint Filtering ---")
 
-    # Step 1: confidence masking
+    # Step 1: confidence masking — NaN out low-confidence frames
     if filter_cfg.get('confidence', {}).get('enabled', False) and confidence is not None:
         threshold = filter_cfg.confidence.get('threshold', 0.5)
-        kp, conf_mask = _mask_low_confidence(kp, confidence, threshold)
+        conf_exclude = list(filter_cfg.confidence.get('exclude_keypoint_patterns', []))
+        kp, conf_mask = _mask_low_confidence(
+            kp, confidence, threshold,
+            kp_names=kp_names, exclude_keypoint_patterns=conf_exclude,
+        )
         report['confidence_masked'] = int(np.sum(conf_mask))
 
-    # Step 2: bone-length outlier detection
-    if filter_cfg.get('bone_length', {}).get('enabled', True):
+    # Step 2: bone-length outlier detection (optional, default OFF)
+    if filter_cfg.get('bone_length', {}).get('enabled', False):
         std_thresh = filter_cfg.bone_length.get('threshold_std', 3.0)
-        kp, bone_rpt = _detect_bone_length_outliers(kp, skeleton_edges, std_thresh)
+        exclude_patterns = list(filter_cfg.bone_length.get('exclude_keypoint_patterns', []))
+        kp, bone_rpt = _detect_bone_length_outliers(
+            kp, skeleton_edges, std_thresh,
+            kp_names=kp_names, exclude_keypoint_patterns=exclude_patterns,
+        )
         report['bone_outliers'] = bone_rpt
 
-    # Step 3: medfilt spike detection + spline interpolation
-    if filter_cfg.get('medfilt', {}).get('enabled', True):
+    # Step 3: medfilt spike detection + spline interpolation (optional, default OFF)
+    if filter_cfg.get('medfilt', {}).get('enabled', False):
         kernel = filter_cfg.medfilt.get('kernel', 5)
         spike_std = filter_cfg.medfilt.get('spike_threshold_std', 5.0)
         use_spline = filter_cfg.medfilt.get('use_spline', True)
         kp = _medfilt_interpolate(kp, medfilt_kernel=kernel,
                                   spike_threshold_std=spike_std, use_spline=use_spline)
 
-    # Step 4: Savitzky-Golay final smoothing
+    # Step 4: interpolate NaN gaps (from confidence masking and/or outlier steps)
+    if filter_cfg.get('interpolation', {}).get('enabled', True):
+        use_spline = filter_cfg.interpolation.get('use_spline', True)
+        kp = _interpolate_nan_gaps(kp, use_spline=use_spline)
+
+    # Step 5: confidence-weighted smoothing — blend raw + smoothed by confidence
+    if filter_cfg.get('confidence_smooth', {}).get('enabled', False) and confidence is not None:
+        window = filter_cfg.confidence_smooth.get('smooth_window', 11)
+        order = filter_cfg.confidence_smooth.get('smooth_polyorder', 3)
+        c_low = filter_cfg.confidence_smooth.get('conf_low', 0.3)
+        c_high = filter_cfg.confidence_smooth.get('conf_high', 0.8)
+        kp = _confidence_weighted_smooth(kp, confidence,
+                                         smooth_window=window, smooth_polyorder=order,
+                                         conf_low=c_low, conf_high=c_high)
+
+    # Step 6: Savitzky-Golay final smoothing (optional, default OFF)
     if filter_cfg.get('savgol', {}).get('enabled', False):
         window = filter_cfg.savgol.get('window_length', 11)
         order = filter_cfg.savgol.get('polyorder', 3)
