@@ -596,3 +596,65 @@ Cell 1–14   (main pipeline — must be run first)
 Once `height_speed_phase_diff` is in df_valid, it can be added as a color variable to the UMAP embeddings (Cell 29 `COLOR_BY` toggle). Frames where the phase offset is ~0° vs. ~π will occupy different regions of the UMAP if the embedding is capturing gait dynamics — this is a strong validation test for both analyses.
 
 Also: the oscillation amplitude (Cell H6 `z_amp` per cycle) can be added to the step-cycle UMAP metadata (`sc_meta`) as another variable to color by in Cell 53.
+
+---
+
+## Per-Cycle Peak Phase Analysis (Cells P0–P1)
+
+### Motivation
+
+Phase-averaged traces (H2, S0) blur the signal: the std band reflects both biological variability and the fact that different cycles have different amplitudes, not just different phases. A complementary view skips the averaging entirely and asks directly: *at what gait phase do the signal peaks actually occur?* This avoids averaging in phase-space and lets the data speak as a distribution.
+
+### Step 1 — Hilbert phase as a gait clock
+
+For each frame, the T1_left leg tip speed `s(t)` is mean-centered and passed through the Hilbert transform to produce the analytic signal:
+
+```
+z(t) = s(t) + i·H{s(t)}
+φ(t) = atan2( Im(z(t)), Re(z(t)) )    ∈ [-π, π]
+```
+
+`H{s}` is the 90°-phase-shifted copy of `s`, so `z(t)` is always a rotating phasor. `φ(t)` is its instantaneous angle — a continuous clock reading that advances monotonically through the stride cycle. The convention is fixed by the signal peak: `s` is maximal at mid-swing, so `φ = 0` at mid-swing. Tracing forward: touchdown ≈ `+π/2`, mid-stance ≈ `±π`, liftoff ≈ `-π/2`.
+
+Every frame in the dataset now carries a gait phase value that is independent of stride duration or speed.
+
+### Step 2 — Stride cycle segmentation
+
+Step cycles are defined as liftoff-to-liftoff on T1_left. Liftoff = upward crossing of `φ = -π/2` (the moment leg speed starts rising from near-zero). Within each cycle, `φ` sweeps from `-π/2` back around to the next `-π/2` crossing.
+
+### Step 3 — Peak detection within each cycle
+
+Within each stride segment we apply `scipy.signal.find_peaks` to `thorax_z_detrended` and `forward_speed_osc` independently. We take the **top-2 peaks by prominence** (ranked by `props['prominences']`), then sort those two by frame position to label them `peak_rank=0` (early) and `peak_rank=1` (late).
+
+For each detected peak at frame `t*` we record a single number: `φ(t*)`. This is the gait-clock reading at the exact moment the signal hit its maximum. No binning, no averaging — just one phase sample per peak per cycle.
+
+Key parameters (tunable in P0):
+- `Z_PROM = 0.3 µm` — minimum prominence to count as a height peak
+- `SPD_PROM = 2.0 mm/s` — minimum prominence for a speed peak
+- `PEAK_MIN_DIST = 15 frames` — minimum frame separation between peaks within one cycle
+
+### Step 4 — Circular mean across cycles and flies
+
+A set of phase samples `{φ₁, φ₂, …, φₙ}` cannot be averaged arithmetically because `-π` and `+π` are the same angle. The correct estimator is the **circular mean**:
+
+```
+μ = atan2( Σ sin(φᵢ),  Σ cos(φᵢ) )
+```
+
+Geometrically: project each angle onto the unit circle as a unit vector, sum the vectors, and take the angle of the resultant. If all samples cluster tightly, the resultant is long and the mean is well-defined. If they are uniformly scattered the resultant cancels toward zero — the circular analog of high variance.
+
+Per-fly means are computed first (`scipy.stats.circmean` per fly), then shown as individual dots on the polar. The overall arrow is the circular mean over all cycles pooled.
+
+### Step 5 — Rose histogram and polar layout
+
+The rose histogram bins `{φᵢ}` into `N_PBINS = 24` equal-width bins over `[-π, π]` and plots `counts / counts.sum()` as bar height — i.e., the empirical probability distribution of peak phases. Normalising by total count makes the height signal and speed signal directly comparable in shape regardless of their different event counts.
+
+The figure has one polar per speed quantile (`N_Q_POLAR`, default 3). On each polar:
+- **Blue rose** = height peak phases (early + late pooled)
+- **Red rose** = speed peak phases, same normalisation, 50% alpha
+- **Arrows** = circular mean per (signal × rank): solid = early peak, dashed = late peak
+- **Dots** = per-fly circular means: ○ = early peak, △ = late peak
+
+### Interpreting the overlap
+
+When the blue and red roses land on the same phase bins — and the arrows point in the same direction — it means: at the moment body height is maximal, forward speed is also maximal, and they are both locked to the same gait-clock reading. The fact that this holds consistently across all three speed quantiles rules out a speed-dependent confound and establishes a fixed kinematic coupling between body height oscillation and speed oscillation, both anchored to the T1_left stride phase.
