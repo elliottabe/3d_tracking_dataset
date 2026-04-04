@@ -215,3 +215,6 @@ __marimo__/
 *.h5
 
 Archive/
+# Large generated outputs — keep off git
+notebooks/output/joint_kinematics/umap_per_joint_grid_phase.pdf
+notebooks/output/joint_kinematics/umap_per_joint_type_phase.pdf
