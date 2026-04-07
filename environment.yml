@@ -8,7 +8,6 @@ dependencies:
   - numpy=2.2.6
   - matplotlib
   - pandas
-  - pip
   - black
   - glew
   - mesalib
@@ -18,23 +17,7 @@ dependencies:
   - ffmpeg
   - rapids=25.12
   - cuda-version>=12.2,<=12.9
-  - scikit-learn
-  - jax
-  - pip
-  - pip:
-      - hydra-core
-      - h5py
-      - natsort
-      - nvidia-ml-py3
-      - tqdm
-      - psutil
-      - mediapy
-      - imageio[ffmpeg]
-      - ray[core]
-      - mujoco
-      - mujoco-mjx
-      - ipywidgets
-      - uv
+  - uv
 variables:             # Set MuJoCo environment variables
   MUJOCO_GL: egl
   PYOPENGL_PLATFORM: egl
