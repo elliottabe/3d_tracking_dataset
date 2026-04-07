@@ -4,25 +4,23 @@ Batch postprocess all Predictions_3D_* folders after STAC IK has run.
 This script finds all Predictions_3D folders and runs the postprocessing pipeline
 on each one (after STAC IK solver has been run). It handles:
 - Finding all prediction folders with STAC outputs
-- Running postprocess_stac_data.py for each folder
+- Detecting single-fly vs dual-fly layouts (fly0/fly1)
+- Running postprocess_stac_data.py for each folder (and each fly)
 - Logging results (success/failure/skipped)
 - Resuming processing (skips folders with existing outputs)
 
 Usage:
     # Postprocess all folders with STAC outputs
     python scripts/batch_postprocess_predictions.py
-    
+
     # Force reprocess even if outputs exist
     python scripts/batch_postprocess_predictions.py --force
-    
+
     # Dry run (show what would be processed)
     python scripts/batch_postprocess_predictions.py --dry-run
-    
-    # Process specific anatomy version
-    python scripts/batch_postprocess_predictions.py --anatomy v1
-    
-    # Process with specific paths config
-    python scripts/batch_postprocess_predictions.py --paths workstation
+
+    # Process courtship dataset (auto-detects fly0/fly1)
+    python scripts/batch_postprocess_predictions.py --dataset courtship
 """
 
 import sys
@@ -32,78 +30,101 @@ from datetime import datetime
 import argparse
 
 
-
 def find_prediction_folders(base_dir: Path) -> list:
     """
     Find all Predictions_3D_* folders in the base directory.
-    
+
     Args:
         base_dir: Base directory to search
-        
+
     Returns:
         List of Path objects for prediction folders, sorted by name
     """
     pattern = "Predictions_3D_*"
     folders = sorted(base_dir.glob(pattern))
-    
-    # Filter to only directories
     folders = [f for f in folders if f.is_dir()]
-    
     return folders
 
 
-def check_stac_outputs_exist(folder: Path, anatomy: str, dataset_suffix: str) -> tuple:
+def find_stac_outputs(folder: Path, anatomy: str, dataset: str) -> list[dict]:
     """
-    Check if STAC IK outputs exist (required for postprocessing).
+    Find all STAC IK outputs in a folder, detecting fly-specific files.
 
     Args:
         folder: Path to prediction folder
-        anatomy: Anatomy version (e.g., 'v1', 'v2_muscles')
-        dataset_suffix: Short dataset suffix used in filenames (e.g., 'free', 'courtship')
+        anatomy: Anatomy version
+        dataset: Dataset name
 
     Returns:
-        (exists, stac_path) tuple
+        List of dicts with keys: 'fly_suffix', 'fly_label', 'stac_path'
     """
-    stac_file = f"Fruitfly_ik_{anatomy}_{dataset_suffix}.h5"
-    stac_path = folder / "stac" / stac_file
+    stac_dir = folder / "stac"
+    items = []
 
-    return (stac_path.exists(), stac_path)
+    # Check for fly-suffixed STAC outputs first
+    fly_files = sorted(stac_dir.glob(f"Fruitfly_ik_{anatomy}_{dataset}_fly*.h5"))
+    if fly_files:
+        for fp in fly_files:
+            stem = fp.stem  # Fruitfly_ik_v1_courtship_fly0
+            base_stem = f"Fruitfly_ik_{anatomy}_{dataset}"
+            fly_suffix = stem[len(base_stem):]  # _fly0
+            fly_label = fly_suffix.lstrip('_') if fly_suffix else 'single'
+            items.append({
+                'fly_suffix': fly_suffix,
+                'fly_label': fly_label,
+                'stac_path': fp,
+            })
+    else:
+        # Check for standard single-fly file
+        standard_file = stac_dir / f"Fruitfly_ik_{anatomy}_{dataset}.h5"
+        if standard_file.exists():
+            items.append({
+                'fly_suffix': '',
+                'fly_label': 'single',
+                'stac_path': standard_file,
+            })
+
+    return items
 
 
-def check_postprocess_outputs_exist(folder: Path, anatomy: str, dataset: str) -> tuple:
+def check_postprocess_outputs_exist(folder: Path, anatomy: str, dataset: str, fly_suffix: str = '') -> tuple:
     """
     Check if postprocessing outputs already exist.
 
     Args:
         folder: Path to prediction folder
-        anatomy: Anatomy version (e.g., 'v1', 'v2_muscles')
-        dataset: Dataset name (e.g., 'free_walking')
+        anatomy: Anatomy version
+        dataset: Dataset name
+        fly_suffix: Fly suffix (e.g., '_fly0' or '')
 
     Returns:
         (exists, output_path) tuple
     """
-    output_file = f"ik_output_{anatomy}_{dataset}.h5"
+    output_file = f"ik_output_{anatomy}_{dataset}{fly_suffix}.h5"
     output_path = folder / "postprocessing" / output_file
-
     return (output_path.exists(), output_path)
 
 
-def run_postprocessing(folder: Path, anatomy: str, dataset: str, paths: str, dry_run: bool = False) -> dict:
+def run_postprocessing(folder: Path, anatomy: str, dataset: str, paths: str,
+                       fly_suffix: str = '', dry_run: bool = False) -> dict:
     """
-    Run postprocessing for a single prediction folder.
-    
+    Run postprocessing for a single prediction folder and fly.
+
     Args:
         folder: Path to prediction folder
-        anatomy: Anatomy version (e.g., 'v1')
-        dataset: Dataset name (e.g., 'free_walking', 'courtship')
-        paths: Paths config to use (e.g., 'workstation', 'hyak')
+        anatomy: Anatomy version
+        dataset: Dataset name
+        paths: Paths config to use
+        fly_suffix: Fly suffix for file paths (e.g., '_fly0' or '')
         dry_run: If True, don't actually run, just show command
 
     Returns:
         Dictionary with status information
     """
+    fly_label = fly_suffix.lstrip('_') if fly_suffix else 'single'
     result = {
         'folder': folder.name,
+        'fly': fly_label,
         'status': 'unknown',
         'message': '',
         'command': ''
@@ -113,28 +134,36 @@ def run_postprocessing(folder: Path, anatomy: str, dataset: str, paths: str, dry
     script_path = Path(__file__).parent / "postprocess_stac_data.py"
 
     cmd = [
-        sys.executable,  # Use same Python interpreter
+        sys.executable,
         str(script_path),
         f"paths={paths}",
         f"dataset={dataset}",
         f"anatomy={anatomy}",
         f"paths.data_dir={folder}",
     ]
-    
+
+    # Add fly-specific overrides
+    if fly_suffix:
+        cmd.extend([
+            f"postprocessing.stac_output_file=stac/Fruitfly_ik_{anatomy}_{dataset}{fly_suffix}.h5",
+            f"postprocessing.preprocessed_file=preprocessing/preprocessed_bout_{anatomy}_{dataset}{fly_suffix}.h5",
+            f"postprocessing.output_file=postprocessing/ik_output_{anatomy}_{dataset}{fly_suffix}.h5",
+        ])
+
     result['command'] = ' '.join(cmd)
-    
+
     if dry_run:
         result['status'] = 'dry-run'
-        result['message'] = 'Would run postprocessing (dry-run mode)'
+        result['message'] = f'Would run postprocessing for {fly_label} (dry-run mode)'
         return result
-    
+
     # Run command
     try:
         print(f"\n{'='*80}")
-        print(f"POSTPROCESSING: {folder.name}")
+        print(f"POSTPROCESSING: {folder.name} [{fly_label}]")
         print(f"{'='*80}")
         print(f"Command: {' '.join(cmd)}\n")
-        
+
         proc = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
@@ -150,18 +179,18 @@ def run_postprocessing(folder: Path, anatomy: str, dataset: str, paths: str, dry
 
         if proc.returncode == 0:
             result['status'] = 'success'
-            result['message'] = 'Postprocessing completed successfully'
+            result['message'] = f'Postprocessing completed successfully for {fly_label}'
         else:
             result['status'] = 'failed'
             result['message'] = f'Exit code {proc.returncode}'
-            
+
     except subprocess.TimeoutExpired:
         result['status'] = 'timeout'
         result['message'] = 'Processing timed out after 10 minutes'
     except Exception as e:
         result['status'] = 'error'
         result['message'] = str(e)
-    
+
     return result
 
 
@@ -180,7 +209,7 @@ def main():
         '--base-dir',
         type=str,
         default=None,
-        help='Base directory containing Predictions_3D folders (default: /data2/users/eabe/datasets/Johnson_lab/<dataset>)'
+        help='Base directory containing Predictions_3D folders'
     )
     parser.add_argument(
         '--anatomy',
@@ -210,7 +239,7 @@ def main():
         default=None,
         help='Path to log file (default: batch_postprocess_TIMESTAMP.log)'
     )
-    
+
     args = parser.parse_args()
 
     if args.base_dir is None:
@@ -220,18 +249,17 @@ def main():
     if args.log_file:
         log_path = Path(args.log_file)
     else:
-        # Create logs directory if it doesn't exist
         logs_dir = Path(__file__).parent.parent / "logs"
         logs_dir.mkdir(exist_ok=True)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         log_path = logs_dir / f"batch_postprocess_{timestamp}.log"
-    
+
     # Find all prediction folders
     base_dir = Path(args.base_dir)
     if not base_dir.exists():
-        print(f"❌ Error: Base directory not found: {base_dir}")
+        print(f"Error: Base directory not found: {base_dir}")
         sys.exit(1)
-    
+
     print(f"\n{'='*80}")
     print(f"BATCH POSTPROCESSING - {args.dataset.upper()} PREDICTIONS")
     print(f"{'='*80}")
@@ -243,94 +271,105 @@ def main():
     print(f"Dry run: {args.dry_run}")
     print(f"Log file: {log_path}")
     print()
-    
+
     folders = find_prediction_folders(base_dir)
-    
+
     if not folders:
-        print(f"❌ No Predictions_3D_* folders found in {base_dir}")
+        print(f"No Predictions_3D_* folders found in {base_dir}")
         sys.exit(1)
-    
+
     print(f"Found {len(folders)} prediction folders:")
     for i, folder in enumerate(folders, 1):
         print(f"  [{i}] {folder.name}")
     print()
-    
+
     # Process each folder
     results = []
-    
+
     for folder in folders:
-        folder_result = {
-            'folder': folder.name,
-            'status': 'unknown',
-            'message': '',
-            'command': ''
-        }
-        
         print(f"\n{'-'*80}")
         print(f"Checking: {folder.name}")
         print(f"{'-'*80}")
-        
-        # Check if STAC outputs exist
-        stac_exists, stac_path = check_stac_outputs_exist(folder, args.anatomy, args.dataset)
-        if not stac_exists:
-            folder_result['status'] = 'missing_stac'
-            folder_result['message'] = f"STAC output not found: {stac_path.name}"
-            print(f"⚠ Skipping - STAC IK output not found: {stac_path.name}")
+
+        # Find STAC outputs (auto-detects fly-specific files)
+        stac_items = find_stac_outputs(folder, args.anatomy, args.dataset)
+
+        if not stac_items:
+            result = {
+                'folder': folder.name, 'fly': 'n/a',
+                'status': 'missing_stac',
+                'message': f"STAC output not found",
+                'command': ''
+            }
+            print(f"  Skipping - STAC IK output not found")
             print("  Run STAC IK solver first")
-            results.append(folder_result)
+            results.append(result)
             continue
-        
-        # Check if postprocessing outputs exist
-        outputs_exist, output_path = check_postprocess_outputs_exist(folder, args.anatomy, args.dataset)
-        if outputs_exist and not args.force:
-            folder_result['status'] = 'skipped'
-            folder_result['message'] = f"Output exists: {output_path.name}"
-            print(f"✓ Skipping - output already exists: {output_path.name}")
-            print("  Use --force to reprocess")
+
+        for stac_item in stac_items:
+            fly_suffix = stac_item['fly_suffix']
+            fly_label = stac_item['fly_label']
+
+            # Check if postprocessing outputs exist
+            outputs_exist, output_path = check_postprocess_outputs_exist(
+                folder, args.anatomy, args.dataset, fly_suffix
+            )
+            if outputs_exist and not args.force:
+                result = {
+                    'folder': folder.name, 'fly': fly_label,
+                    'status': 'skipped',
+                    'message': f"Output exists: {output_path.name}",
+                    'command': ''
+                }
+                print(f"  [{fly_label}] Skipping - output already exists: {output_path.name}")
+                print("    Use --force to reprocess")
+                results.append(result)
+                continue
+
+            # Run postprocessing
+            print(f"  [{fly_label}] STAC output found - running postprocessing...")
+            folder_result = run_postprocessing(
+                folder, args.anatomy, args.dataset, args.paths, fly_suffix, args.dry_run
+            )
             results.append(folder_result)
-            continue
-        
-        # Run postprocessing
-        print(f"✓ STAC output found - running postprocessing...")
-        folder_result = run_postprocessing(folder, args.anatomy, args.dataset, args.paths, args.dry_run)
-        results.append(folder_result)
-    
+
     # Print summary
     print(f"\n\n{'='*80}")
     print("BATCH POSTPROCESSING SUMMARY")
     print(f"{'='*80}\n")
-    
+
     status_counts = {}
     for result in results:
         status = result['status']
         status_counts[status] = status_counts.get(status, 0) + 1
-    
-    print(f"Total folders: {len(results)}")
+
+    print(f"Total items: {len(results)}")
     for status, count in sorted(status_counts.items()):
         icon = {
-            'success': '✓',
-            'failed': '✗',
-            'error': '✗',
-            'timeout': '⏱',
-            'skipped': '⊘',
-            'missing_stac': '⚠',
-            'dry-run': '▷'
+            'success': '+',
+            'failed': 'X',
+            'error': 'X',
+            'timeout': 'T',
+            'skipped': '-',
+            'missing_stac': '!',
+            'dry-run': '>'
         }.get(status, '?')
-        print(f"  {icon} {status}: {count}")
-    
+        print(f"  [{icon}] {status}: {count}")
+
     print(f"\nDetailed results:")
     for result in results:
         icon = {
-            'success': '✓',
-            'failed': '✗',
-            'error': '✗',
-            'timeout': '⏱',
-            'skipped': '⊘',
-            'missing_stac': '⚠',
-            'dry-run': '▷'
+            'success': '+',
+            'failed': 'X',
+            'error': 'X',
+            'timeout': 'T',
+            'skipped': '-',
+            'missing_stac': '!',
+            'dry-run': '>'
         }.get(result['status'], '?')
-        print(f"  {icon} {result['folder']}: {result['status']} - {result['message']}")
-    
+        fly_str = f" [{result.get('fly', 'single')}]"
+        print(f"  [{icon}] {result['folder']}{fly_str}: {result['status']} - {result['message']}")
+
     # Write log file
     with open(log_path, 'w') as f:
         f.write(f"Batch Postprocessing Log - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
@@ -342,24 +381,25 @@ def main():
         f.write(f"  Paths: {args.paths}\n")
         f.write(f"  Force: {args.force}\n")
         f.write(f"  Dry-run: {args.dry_run}\n\n")
-        
+
         f.write(f"Summary:\n")
-        f.write(f"  Total folders: {len(results)}\n")
+        f.write(f"  Total items: {len(results)}\n")
         for status, count in sorted(status_counts.items()):
             f.write(f"  {status}: {count}\n")
         f.write(f"\n")
-        
+
         f.write(f"Detailed Results:\n")
         f.write(f"{'-'*80}\n")
         for result in results:
             f.write(f"\nFolder: {result['folder']}\n")
+            f.write(f"Fly: {result.get('fly', 'single')}\n")
             f.write(f"Status: {result['status']}\n")
             f.write(f"Message: {result['message']}\n")
             if result['command']:
                 f.write(f"Command: {result['command']}\n")
-    
-    print(f"\n✓ Log saved to: {log_path}")
-    
+
+    print(f"\nLog saved to: {log_path}")
+
     # Exit with error code if any failures
     if status_counts.get('failed', 0) > 0 or status_counts.get('error', 0) > 0:
         sys.exit(1)

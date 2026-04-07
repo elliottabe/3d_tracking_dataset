@@ -443,7 +443,8 @@ def apply_procrustes_alignment(kp_array: np.ndarray,
     return aligned_kp, alignment_info
 
 
-def load_bouts_from_csv(bouts_csv_path: Path) -> List[Dict]:
+def load_bouts_from_csv(bouts_csv_path: Path,
+                        fly_label: Optional[str] = None) -> List[Dict]:
     """
     Load bout information from CSV file.
     
@@ -476,11 +477,17 @@ def load_bouts_from_csv(bouts_csv_path: Path) -> List[Dict]:
     # Convert to list of dicts
     bouts = []
     for _, row in df.iterrows():
+        fid = str(row['fly_id'])
+        # If reading a unified bouts csv (no _flyN suffix on fly_id), append
+        # the per-run fly_label so each output reflects the physical fly
+        # whose keypoints were processed.
+        if fly_label is not None and not fid.endswith(('_fly0', '_fly1')):
+            fid = f"{fid}_{fly_label}"
         bout_info = {
             'bout_idx': int(row['bout_idx']-1),
             'start_frame': int(row['start_frame']),
             'end_frame': int(row['end_frame']),
-            'fly_id': str(row['fly_id'])
+            'fly_id': fid,
         }
         bouts.append(bout_info)
     
@@ -574,6 +581,66 @@ def load_concatenated_bouts(csv_path: Path,
     print(f"  Bouts: {len(bouts)}")
     
     return concatenated_kp, clip_info
+
+
+def load_sibling_concatenated(sibling_csv_path: Path,
+                              bouts: List[Dict],
+                              csv_to_filtered_idx: Dict,
+                              filtered_node_names: List[str]) -> Optional[np.ndarray]:
+    """
+    Load the *other* fly's keypoints over the same frame ranges used by the
+    self-fly's bouts list. Used by the identity-relink stage to compare two
+    flies in the same world frame before per-fly Procrustes alignment.
+
+    Returns a (T_total, N, 3) array matching the same concatenation order as
+    ``load_concatenated_bouts``, or None if the sibling CSV does not exist.
+    """
+    if not sibling_csv_path.exists():
+        return None
+
+    df = pd.read_csv(sibling_csv_path, header=[0, 1])
+    df.columns = ['_'.join(col).strip() if isinstance(col, tuple) else col
+                  for col in df.columns.values]
+
+    reordered_cols = [''] * len(filtered_node_names) * 3
+    for csv_name, new_idx in csv_to_filtered_idx.items():
+        reordered_cols[new_idx * 3] = f"{csv_name}_x"
+        reordered_cols[new_idx * 3 + 1] = f"{csv_name}_y"
+        reordered_cols[new_idx * 3 + 2] = f"{csv_name}_z"
+
+    # Bail out if any required column is missing in the sibling csv
+    if any(c not in df.columns for c in reordered_cols):
+        print(f"  [identity-relink] sibling csv {sibling_csv_path.name} is "
+              f"missing required keypoint columns — skipping relink")
+        return None
+
+    n_frames_available = len(df)
+    arrays = []
+    for bout in bouts:
+        if bout['start_frame'] >= n_frames_available or bout['end_frame'] > n_frames_available:
+            continue
+        frame_indices = np.arange(bout['start_frame'], bout['end_frame'])
+        sub = df.iloc[frame_indices][reordered_cols]
+        arr = np.array(sub.values).reshape(-1, len(filtered_node_names), 3)
+        arrays.append(arr)
+
+    if not arrays:
+        return None
+    return np.concatenate(arrays, axis=0)
+
+
+def derive_sibling_csv_path(csv_path: Path) -> Optional[Path]:
+    """
+    Given a per-fly csv path like ``data3D_fly0.csv``, return the path of the
+    other fly's csv (``data3D_fly1.csv``). Returns None if the filename does
+    not match the expected pattern.
+    """
+    name = csv_path.name
+    if '_fly0' in name:
+        return csv_path.with_name(name.replace('_fly0', '_fly1'))
+    if '_fly1' in name:
+        return csv_path.with_name(name.replace('_fly1', '_fly0'))
+    return None
 
 
 def save_to_hdf5(output_path: Path,
@@ -856,6 +923,51 @@ def process_bouts_batch(csv_path: Path,
         
         # Extract fly_ids from clip_info for later storage
         fly_ids = [clip['fly_id'] for clip in clip_info]
+
+        # 4b. Identity relink (multi-fly) — runs on raw concatenated 3D before
+        # any Procrustes alignment so the sibling fly is in the same world frame.
+        relink_log_summary = None
+        if (filter_cfg is not None
+                and filter_cfg.get('enabled', False)
+                and filter_cfg.get('identity_relink', {}).get('enabled', False)):
+            from utils.identity_relink import relink_pair, RelinkConfig
+            sibling_csv = derive_sibling_csv_path(csv_path)
+            if sibling_csv is None:
+                print("  [identity-relink] csv_path does not contain _fly0/_fly1 "
+                      "— skipping relink")
+            else:
+                print(f"\n[identity-relink] Loading sibling csv: {sibling_csv.name}")
+                sibling_kp = load_sibling_concatenated(
+                    sibling_csv, bouts, csv_to_filtered_idx, filtered_node_names
+                )
+                if sibling_kp is None:
+                    print("  [identity-relink] sibling data unavailable — skipping")
+                elif sibling_kp.shape != concatenated_kp.shape:
+                    print(f"  [identity-relink] shape mismatch self={concatenated_kp.shape} "
+                          f"vs sibling={sibling_kp.shape} — skipping")
+                else:
+                    rl_cfg = filter_cfg.identity_relink
+                    cfg_obj = RelinkConfig(
+                        velocity_alpha=float(rl_cfg.get('velocity_alpha', 0.5)),
+                        body_length_alpha=float(rl_cfg.get('body_length_alpha', 0.05)),
+                        body_length_weight=float(rl_cfg.get('body_length_weight', 0.5)),
+                        swap_ratio=float(rl_cfg.get('swap_ratio', 0.7)),
+                        require_min_displacement=float(rl_cfg.get('require_min_displacement', 0.0)),
+                    )
+                    relinked_self, _, log = relink_pair(
+                        concatenated_kp, sibling_kp, filtered_node_names, cfg_obj,
+                    )
+                    n_segs = log['n_swap_segments']
+                    frac = log['fraction_swapped']
+                    print(f"  [identity-relink] {n_segs} swap segments, "
+                          f"{frac*100:.2f}% of frames in swapped state")
+                    concatenated_kp = relinked_self
+                    relink_log_summary = dict(
+                        n_swap_segments=n_segs,
+                        fraction_swapped=float(frac),
+                        swap_frames=list(map(int, log['swap_frames'])),
+                    )
+
         orig_concatenated = concatenated_kp.copy()
         
         # 5. Match to MuJoCo sites (once)
@@ -957,6 +1069,8 @@ def process_bouts_batch(csv_path: Path,
             'fly_ids': fly_ids,
             'clip_lengths': [clip['end_idx'] - clip['start_idx'] for clip in clip_info]
         }
+        if relink_log_summary is not None:
+            all_bouts_dict['info']['identity_relink'] = relink_log_summary
         
         print(f"\n✓ Successfully split into {len([k for k in all_bouts_dict.keys() if k != 'info'])} bouts")
         print(f"✓ Stored fly_ids in 'info': {fly_ids}")
@@ -1025,7 +1139,16 @@ def main(cfg: DictConfig):
             print(f"❌ Error: Bouts CSV file not found: {bouts_csv_path}")
             sys.exit(1)
         
-        bouts = load_bouts_from_csv(bouts_csv_path)
+        # Derive fly_label from csv filename so unified bouts get the right
+        # per-run fly suffix (data3D_fly1.csv → 'fly1').
+        fly_label = None
+        cn = csv_path.name
+        if '_fly0' in cn:
+            fly_label = 'fly0'
+        elif '_fly1' in cn:
+            fly_label = 'fly1'
+
+        bouts = load_bouts_from_csv(bouts_csv_path, fly_label=fly_label)
         
         print(f"\nProcessing {len(bouts)} bouts in EFFICIENT BATCH mode:")
         print("  ✓ Loading skeleton/model once")

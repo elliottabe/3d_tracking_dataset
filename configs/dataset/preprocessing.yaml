@@ -40,6 +40,20 @@ filtering:
     threshold_std: 5.0
     exclude_keypoint_patterns: ['Wing']  # Skip edges involving these keypoints (substring match)
 
+  centroid_jump:
+    enabled: false              # OFF by default — enable for multi-fly (courtship)
+    threshold_mm: 2.0           # Max allowed frame-to-frame centroid displacement
+    trunk_keypoints: ['Scutellum', 'Postnotum', 'Scutum']
+    window: 1                   # Extra frames to mask on each side of a jump
+
+  identity_relink:
+    enabled: false              # OFF by default — enable for multi-fly (courtship)
+    velocity_alpha: 0.5         # EMA weight for velocity prediction (1 = no smoothing)
+    body_length_alpha: 0.05     # EMA weight for body-length tracking
+    body_length_weight: 0.5     # Cost weight relative to centroid distance
+    swap_ratio: 0.7             # Swap if cost_swapped < cost_current * swap_ratio
+    require_min_displacement: 0.0  # Only run swap test if max obs jump >= this
+
   medfilt:
     enabled: false              # OFF by default — can flag real fast motion
     kernel: 5

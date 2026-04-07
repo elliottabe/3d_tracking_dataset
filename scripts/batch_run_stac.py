@@ -9,28 +9,27 @@ on each one using run_stac_fly_model.py which handles:
 - Automatic padding to max_length (if enabled)
 - MOCAP_SCALE_FACTOR application
 
-The script sets up proper environment variables for headless GPU rendering (MUJOCO_GL),
-GPU memory management (XLA_PYTHON_CLIENT_MEM_FRACTION), and JAX compilation caching
-following the pattern in stac-mjx/run_stac_fly_model.py.
+Supports dual-fly datasets (courtship): automatically detects fly-suffixed preprocessed
+files and processes each fly independently with appropriate Hydra overrides.
 
 Usage:
     # Dry run to see what would be processed
     python scripts/batch_run_stac.py --anatomy v1 --dry-run
-    
+
     # Process all folders
     python scripts/batch_run_stac.py --anatomy v1
-    
+
     # Force reprocessing even if outputs exist
     python scripts/batch_run_stac.py --anatomy v1 --force
-    
+
     # Custom GPU memory fraction (default 0.9)
     python scripts/batch_run_stac.py --anatomy v1 --gpu-mem-fraction 0.8
-    
+
     # Pass additional STAC config overrides
     python scripts/batch_run_stac.py --anatomy v1 --stac-overrides "dataset.stac.n_fit_frames=401"
-    
-    # Skip fit_offsets stage (only run ik_only)
-    python scripts/batch_run_stac.py --anatomy v1 --stac-overrides "dataset.stac.skip_fit_offsets=True"
+
+    # Process courtship dataset (auto-detects fly0/fly1)
+    python scripts/batch_run_stac.py --dataset courtship --anatomy v1
 
 Directory structure:
     /data2/users/eabe/datasets/Johnson_lab/free_walking/
@@ -38,8 +37,10 @@ Directory structure:
             preprocessed_bout_v1.h5          <- Input
             Fruitfly_fit_v1_free.h5         <- Output (fit_offsets stage)
             Fruitfly_ik_v1_free.h5          <- Output (ik_only stage)
-        Predictions_3D_20260203-103416/
-            ...
+    /data2/users/eabe/datasets/Johnson_lab/courtship/
+        Predictions_3D_34327248/
+            preprocessed_bout_v1_courtship_fly0.h5  <- Input (fly0)
+            preprocessed_bout_v1_courtship_fly1.h5  <- Input (fly1)
 """
 
 import argparse
@@ -50,99 +51,104 @@ from datetime import datetime
 import os
 
 
-
 def get_stac_environment(gpu_mem_fraction: float = 0.9) -> dict:
     """
     Create environment dict with settings for headless GPU rendering and JAX optimization.
-    
-    Based on stac-mjx/demos/run_stac_fly_model.py environment setup:
-    - MUJOCO_GL='egl': Use EGL for headless rendering (no display needed)
-    - PYOPENGL_PLATFORM='egl': PyOpenGL backend for headless
-    - XLA_PYTHON_CLIENT_MEM_FRACTION: Fraction of GPU memory for JAX (default 0.9)
-    - JAX compilation cache: Speed up repeated runs
-    - XLA_FLAGS: Enable GPU optimizations
-    
+
     Args:
         gpu_mem_fraction: Fraction of GPU memory to allocate (0.0-1.0)
-    
+
     Returns:
         dict: Environment variables for subprocess
     """
     env = os.environ.copy()
-    
-    # Headless rendering (critical for cluster/server execution)
+
+    # Headless rendering
     env['MUJOCO_GL'] = 'egl'
     env['PYOPENGL_PLATFORM'] = 'egl'
-    
+
     # GPU memory management
     env['XLA_PYTHON_CLIENT_MEM_FRACTION'] = str(gpu_mem_fraction)
-    
-    # JAX compilation cache (speeds up repeated runs)
+
+    # JAX compilation cache
     env['JAX_COMPILATION_CACHE_DIR'] = '/tmp/jax_cache'
     env['JAX_PERSISTENT_CACHE_MIN_ENTRY_SIZE_BYTES'] = '-1'
     env['JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS'] = '0'
-    
+
     # GPU optimizations
     env['XLA_FLAGS'] = '--xla_gpu_triton_gemm_any=True'
-    
-    # Per-fusion autotune cache
+
     cache_dir = Path(env['JAX_COMPILATION_CACHE_DIR'])
     cache_dir.mkdir(exist_ok=True)
     env['XLA_FLAGS'] += f' --xla_gpu_per_fusion_autotune_cache_dir={cache_dir}'
-    
+
     return env
 
 
-def find_prediction_folders(base_dir: Path, anatomy_name: str, dataset: str) -> list[tuple[Path, str]]:
+def find_preprocessed_files(base_dir: Path, anatomy_name: str, dataset: str) -> list[tuple[Path, str, str]]:
     """
-    Find all Predictions_3D_* folders that have preprocessed bout files.
-    
+    Find all Predictions_3D_* folders with preprocessed bout files.
+
+    Detects both single-fly (preprocessed_bout_v1_courtship.h5) and dual-fly
+    (preprocessed_bout_v1_courtship_fly0.h5) layouts.
+
     Args:
         base_dir: Base directory containing prediction folders
         anatomy_name: Anatomy version (e.g., 'v1', 'v2')
         dataset: Dataset name (e.g., 'free_walking', 'courtship')
-    
+
     Returns:
-        List of (folder_path, version_name) tuples
+        List of (folder_path, version_name, fly_suffix) tuples.
+        fly_suffix is '' for single-fly or '_fly0'/'_fly1' for dual-fly.
     """
-    prediction_folders = []
-    
+    items = []
+
     if not base_dir.exists():
         print(f"Error: Base directory does not exist: {base_dir}")
         return []
-    
-    # Find all Predictions_3D_* directories
+
     for folder in sorted(base_dir.glob("Predictions_3D_*")):
         if not folder.is_dir():
             continue
-        
-        # Check if preprocessed file exists
-        preprocessed_file = folder / "preprocessing" / f"preprocessed_bout_{anatomy_name}_{dataset}.h5"
-        if not preprocessed_file.exists():
-            print(f"⚠️  Skipping {folder.name}: No preprocessed file found")
-            continue
-        
-        # Extract version name (folder name)
+
         version_name = folder.name
-        prediction_folders.append((folder, version_name))
-    
-    return prediction_folders
+        preproc_dir = folder / "preprocessing"
+
+        # Check for fly-suffixed files first
+        fly_files = sorted(preproc_dir.glob(f"preprocessed_bout_{anatomy_name}_{dataset}_fly*.h5"))
+        if fly_files:
+            for fp in fly_files:
+                # Extract fly suffix: preprocessed_bout_v1_courtship_fly0.h5 -> _fly0
+                stem = fp.stem  # preprocessed_bout_v1_courtship_fly0
+                base_stem = f"preprocessed_bout_{anatomy_name}_{dataset}"
+                fly_suffix = stem[len(base_stem):]  # _fly0
+                items.append((folder, version_name, fly_suffix))
+        else:
+            # Check for standard single-fly file
+            standard_file = preproc_dir / f"preprocessed_bout_{anatomy_name}_{dataset}.h5"
+            if standard_file.exists():
+                items.append((folder, version_name, ''))
+            else:
+                print(f"  Skipping {folder.name}: No preprocessed file found")
+
+    return items
 
 
-def check_stac_outputs_exist(folder: Path, anatomy_name: str, dataset: str) -> tuple[bool, bool]:
+def check_stac_outputs_exist(folder: Path, anatomy_name: str, dataset: str, fly_suffix: str = '') -> tuple[bool, bool]:
     """
     Check if STAC output files already exist.
 
     Args:
         folder: Prediction folder path
-        anatomy_name: Anatomy version (e.g., 'v1', 'v2')
-        dataset: Dataset name (e.g., 'free_walking', 'courtship')
+        anatomy_name: Anatomy version
+        dataset: Dataset name
+        fly_suffix: Fly suffix (e.g., '_fly0' or '')
 
     Returns:
         (fit_offsets_exists, ik_only_exists) tuple
     """
-    fit_file = folder / "stac" / f"Fruitfly_fit_{anatomy_name}_{dataset}.h5"
-    ik_file = folder / "stac" / f"Fruitfly_ik_{anatomy_name}_{dataset}.h5"
+    fit_file = folder / "stac" / f"Fruitfly_fit_{anatomy_name}_{dataset}{fly_suffix}.h5"
+    ik_file = folder / "stac" / f"Fruitfly_ik_{anatomy_name}_{dataset}{fly_suffix}.h5"
 
     return fit_file.exists(), ik_file.exists()
 
@@ -153,19 +159,21 @@ def run_stac(
     anatomy_name: str,
     dataset: str,
     stac_dir: Path,
+    fly_suffix: str = '',
     gpu_mem_fraction: float = 0.9,
     stac_overrides: str = "",
     dry_run: bool = False
 ) -> tuple[bool, str]:
     """
-    Run STAC IK solver on a single folder.
+    Run STAC IK solver on a single folder/fly.
 
     Args:
         folder: Path to prediction folder
         version_name: Version name for config override (folder name)
-        anatomy_name: Anatomy version (e.g., 'v1', 'v2')
-        dataset: Dataset name (e.g., 'free_walking', 'courtship')
+        anatomy_name: Anatomy version
+        dataset: Dataset name
         stac_dir: Path to stac-mjx directory
+        fly_suffix: Fly suffix for input/output filenames (e.g., '_fly0' or '')
         gpu_mem_fraction: Fraction of GPU memory to allocate
         stac_overrides: Additional Hydra config overrides
         dry_run: If True, only print command without running
@@ -173,10 +181,8 @@ def run_stac(
     Returns:
         (success, message) tuple
     """
-    # Build command with Hydra overrides
-    # Use run_stac_fly_model.py which handles multi-bout concatenation and padding
     cmd = [
-        sys.executable,  # Current Python interpreter
+        sys.executable,
         "run_stac_fly_model.py",
         f"paths=workstation",
         f"dataset={dataset}",
@@ -184,26 +190,38 @@ def run_stac(
         f"version={version_name}",
         "run_id=stac",
     ]
-    
+
+    # Add fly-specific overrides for input/output filenames
+    if fly_suffix:
+        input_filename = f"preprocessed_bout_{anatomy_name}_{dataset}{fly_suffix}.h5"
+        fit_path = f"Fruitfly_fit_{anatomy_name}_{dataset}{fly_suffix}.h5"
+        ik_path = f"Fruitfly_ik_{anatomy_name}_{dataset}{fly_suffix}.h5"
+        cmd.extend([
+            f"dataset.preprocessing.input_filename={input_filename}",
+            f"dataset.stac.fit_offsets_path={fit_path}",
+            f"dataset.stac.ik_only_path={ik_path}",
+        ])
+
     # Add any additional STAC overrides
     if stac_overrides:
-        # Split on spaces, preserving quoted values
         overrides = [o.strip() for o in stac_overrides.split() if o.strip()]
         cmd.extend(overrides)
-    
+
+    fly_label = fly_suffix.lstrip('_') if fly_suffix else 'single'
+
     if dry_run:
         print(f"  Would run: cd {stac_dir} && {' '.join(cmd)}")
         return True, "Dry run"
 
-    # Set up environment with GPU/rendering settings
+    # Set up environment
     env = get_stac_environment(gpu_mem_fraction)
 
-    # Log file co-located with the data
-    log_file = folder / "stac" / f"stac_batch_{anatomy_name}.log"
+    # Log file
+    log_file = folder / "stac" / f"stac_batch_{anatomy_name}{fly_suffix}.log"
     log_file.parent.mkdir(parents=True, exist_ok=True)
 
     try:
-        print(f"  Running STAC IK solver...")
+        print(f"  Running STAC IK solver [{fly_label}]...")
         print(f"  Log file: {log_file}")
 
         with open(log_file, 'w') as lf:
@@ -222,7 +240,6 @@ def run_stac(
                 bufsize=1,
             )
 
-            # Stream output to both console and log file
             for line in proc.stdout:
                 sys.stdout.write(f"  | {line}")
                 sys.stdout.flush()
@@ -255,21 +272,18 @@ def main():
 Examples:
   # Dry run to see what would be processed
   python scripts/batch_run_stac.py --anatomy v1 --dry-run
-  
+
   # Process all folders
   python scripts/batch_run_stac.py --anatomy v1
-  
+
   # Force reprocessing
   python scripts/batch_run_stac.py --anatomy v1 --force
-  
-  # Adjust GPU memory
-  python scripts/batch_run_stac.py --anatomy v1 --gpu-mem-fraction 0.8
-  
-  # Pass STAC config overrides
-  python scripts/batch_run_stac.py --anatomy v1 --stac-overrides "dataset.stac.n_fit_frames=401"
+
+  # Process courtship (auto-detects fly0/fly1)
+  python scripts/batch_run_stac.py --dataset courtship --anatomy v1
         """
     )
-    
+
     parser.add_argument(
         '--anatomy',
         type=str,
@@ -287,7 +301,7 @@ Examples:
         '--base-dir',
         type=Path,
         default=None,
-        help='Base directory containing Predictions_3D_* folders (default: /data2/users/eabe/datasets/Johnson_lab/<dataset>)'
+        help='Base directory containing Predictions_3D_* folders'
     )
     parser.add_argument(
         '--stac-dir',
@@ -305,7 +319,7 @@ Examples:
         '--stac-overrides',
         type=str,
         default='',
-        help='Additional Hydra config overrides for STAC (e.g., "dataset.stac.n_fit_frames=401")'
+        help='Additional Hydra config overrides for STAC'
     )
     parser.add_argument(
         '--force',
@@ -317,7 +331,7 @@ Examples:
         action='store_true',
         help='Print what would be done without actually running'
     )
-    
+
     args = parser.parse_args()
 
     if args.base_dir is None:
@@ -325,17 +339,17 @@ Examples:
 
     # Validate stac-mjx directory
     if not args.stac_dir.exists():
-        print(f"❌ Error: stac-mjx directory not found: {args.stac_dir}")
+        print(f"Error: stac-mjx directory not found: {args.stac_dir}")
         print("   Make sure the stac-mjx submodule is initialized:")
         print("   git submodule update --init --recursive")
         return 1
-    
+
     run_stac_script = args.stac_dir / "run_stac_fly_model.py"
     if not run_stac_script.exists():
-        print(f"❌ Error: run_stac_fly_model.py not found in {args.stac_dir}")
+        print(f"Error: run_stac_fly_model.py not found in {args.stac_dir}")
         return 1
-    
-    # Find all prediction folders with preprocessed data
+
+    # Find all preprocessed files
     print(f"\n{'='*80}")
     print(f"STAC Batch Processing")
     print(f"{'='*80}")
@@ -349,46 +363,46 @@ Examples:
     print(f"Force reprocessing: {args.force}")
     print(f"Dry run: {args.dry_run}")
     print(f"{'='*80}\n")
-    
-    prediction_folders = find_prediction_folders(args.base_dir, args.anatomy, args.dataset)
-    
-    if not prediction_folders:
-        print("❌ No prediction folders with preprocessed data found!")
-        print(f"   Looking for: {args.base_dir}/Predictions_3D_*/preprocessing/preprocessed_bout_{args.anatomy}_{args.dataset}.h5")
+
+    preprocessed_items = find_preprocessed_files(args.base_dir, args.anatomy, args.dataset)
+
+    if not preprocessed_items:
+        print("No prediction folders with preprocessed data found!")
+        print(f"   Looking for: {args.base_dir}/Predictions_3D_*/preprocessing/preprocessed_bout_{args.anatomy}_{args.dataset}*.h5")
         print("   Run batch_process_predictions.py first to create preprocessed files.")
         return 1
-    
-    print(f"Found {len(prediction_folders)} prediction folder(s) with preprocessed data:\n")
-    
-    # Process each folder
+
+    print(f"Found {len(preprocessed_items)} preprocessed item(s):\n")
+
+    # Process each item
     results = []
     skipped = []
-    
-    for folder, version_name in prediction_folders:
-        print(f"📁 {folder.name}")
-        
+
+    for folder, version_name, fly_suffix in preprocessed_items:
+        fly_label = fly_suffix.lstrip('_') if fly_suffix else 'single'
+        print(f"  {folder.name} [{fly_label}]")
+
         # Check if outputs already exist
-        fit_exists, ik_exists = check_stac_outputs_exist(folder, args.anatomy, args.dataset)
+        fit_exists, ik_exists = check_stac_outputs_exist(folder, args.anatomy, args.dataset, fly_suffix)
 
         if (fit_exists and ik_exists) and not args.force:
-            print(f"  ⏭️  Skipping: Output files already exist")
-            print(f"     (Use --force to reprocess)")
-            skipped.append(folder.name)
+            print(f"    Skipping: Output files already exist (use --force to reprocess)")
+            skipped.append(f"{folder.name} [{fly_label}]")
             print()
             continue
 
         if fit_exists or ik_exists:
-            print(f"  ℹ️  Partial outputs exist:")
+            print(f"    Partial outputs exist:")
             if fit_exists:
-                print(f"     ✓ Fruitfly_fit_{args.anatomy}_{args.dataset}.h5")
+                print(f"      + Fruitfly_fit_{args.anatomy}_{args.dataset}{fly_suffix}.h5")
             else:
-                print(f"     ✗ Fruitfly_fit_{args.anatomy}_{args.dataset}.h5")
+                print(f"      - Fruitfly_fit_{args.anatomy}_{args.dataset}{fly_suffix}.h5")
             if ik_exists:
-                print(f"     ✓ Fruitfly_ik_{args.anatomy}_{args.dataset}.h5")
+                print(f"      + Fruitfly_ik_{args.anatomy}_{args.dataset}{fly_suffix}.h5")
             else:
-                print(f"     ✗ Fruitfly_ik_{args.anatomy}_{args.dataset}.h5")
+                print(f"      - Fruitfly_ik_{args.anatomy}_{args.dataset}{fly_suffix}.h5")
             if args.force:
-                print(f"     Reprocessing due to --force flag")
+                print(f"      Reprocessing due to --force flag")
 
         # Run STAC
         success, message = run_stac(
@@ -397,51 +411,52 @@ Examples:
             args.anatomy,
             args.dataset,
             args.stac_dir,
+            fly_suffix,
             args.gpu_mem_fraction,
             args.stac_overrides,
             args.dry_run
         )
-        
-        results.append((folder.name, success, message))
-        
+
+        results.append((f"{folder.name} [{fly_label}]", success, message))
+
         if success:
-            print(f"  ✅ {message}")
+            print(f"  [+] {message}")
         else:
-            print(f"  ❌ {message}")
-        
+            print(f"  [X] {message}")
+
         print()
-    
+
     # Summary
     print(f"\n{'='*80}")
     print("SUMMARY")
     print(f"{'='*80}")
-    
+
     if skipped:
-        print(f"⏭️  Skipped {len(skipped)} folder(s) with existing outputs:")
+        print(f"Skipped {len(skipped)} item(s) with existing outputs:")
         for name in skipped:
             print(f"   - {name}")
         print()
-    
+
     if results:
         successful = sum(1 for _, success, _ in results if success)
         failed = len(results) - successful
-        
-        print(f"✅ Successful: {successful}/{len(results)}")
+
+        print(f"Successful: {successful}/{len(results)}")
         if failed > 0:
-            print(f"❌ Failed: {failed}/{len(results)}")
-            print("\nFailed folders:")
+            print(f"Failed: {failed}/{len(results)}")
+            print("\nFailed items:")
             for name, success, message in results:
                 if not success:
                     print(f"   - {name}: {message}")
-    
+
     # Create log file
     if not args.dry_run and results:
         log_dir = Path("logs")
         log_dir.mkdir(exist_ok=True)
-        
+
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         log_file = log_dir / f"batch_stac_{timestamp}.log"
-        
+
         with open(log_file, 'w') as f:
             f.write(f"STAC Batch Processing Log - {timestamp}\n")
             f.write(f"{'='*80}\n")
@@ -452,23 +467,23 @@ Examples:
                 f.write(f"STAC overrides: {args.stac_overrides}\n")
             f.write(f"Force: {args.force}\n")
             f.write(f"\n")
-            
+
             if skipped:
-                f.write(f"Skipped folders ({len(skipped)}):\n")
+                f.write(f"Skipped items ({len(skipped)}):\n")
                 for name in skipped:
                     f.write(f"  - {name}\n")
                 f.write(f"\n")
-            
+
             if results:
-                f.write(f"Processed folders ({len(results)}):\n")
+                f.write(f"Processed items ({len(results)}):\n")
                 for name, success, message in results:
-                    status = "✅" if success else "❌"
+                    status = "[+]" if success else "[X]"
                     f.write(f"  {status} {name}: {message}\n")
-        
+
         print(f"\nLog saved to: {log_file}")
-    
+
     print(f"{'='*80}\n")
-    
+
     # Return appropriate exit code
     if results:
         failed = sum(1 for _, success, _ in results if not success)

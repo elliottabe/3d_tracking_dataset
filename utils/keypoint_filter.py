@@ -5,6 +5,8 @@ Stacked cleaning pipeline applied before Procrustes alignment:
   1. Confidence masking  — sets low-confidence keypoints to NaN
   2. Bone-length outlier detection — flags frames where a segment length
      deviates more than `threshold_std` sigma (MAD-based) from the temporal median
+  2b. Centroid-jump detection — flags frames where the body centroid teleports
+      (identity switch in multi-fly tracking)
   3. Median-filter spike detection + spline interpolation — identifies remaining
      trajectory spikes and fills all NaN gaps via cubic spline
   4. Savitzky-Golay smoothing — optional final trajectory smoothing
@@ -23,6 +25,7 @@ from scipy.interpolate import splrep, splev
 from typing import Optional, Tuple, Dict, List
 from omegaconf import DictConfig
 import traceback as _traceback
+from utils.centroid_jump_check import mask_centroid_jumps
 
 # Set non-interactive backend before any pyplot import so figure saving works
 # headlessly (on servers without a display).  This must happen at import time
@@ -686,6 +689,32 @@ def filter_keypoints(
             kp_names=kp_names, exclude_keypoint_patterns=exclude_patterns,
         )
         report['bone_outliers'] = bone_rpt
+
+    # Step 2b: centroid-jump detection for identity switches (optional, default OFF)
+    # Detect on the *raw* input (kp_raw) so prior bone-length masking doesn't
+    # NaN out the centroid and hide the jump. Apply the mask to the in-progress kp.
+    if filter_cfg.get('centroid_jump', {}).get('enabled', False) and kp_names is not None:
+        from utils.centroid_jump_check import detect_centroid_jumps
+        cj_cfg = filter_cfg.centroid_jump
+        trunk_kps = list(cj_cfg.get('trunk_keypoints', ['Scutellum', 'Postnotum', 'Scutum']))
+        thresh = cj_cfg.get('threshold_mm', 2.0)
+        win = cj_cfg.get('window', 1)
+        bad_mask, cj_report = detect_centroid_jumps(
+            kp_raw, kp_names, trunk_kps, threshold_mm=thresh,
+        )
+        if win > 0 and bad_mask.any():
+            expanded = bad_mask.copy()
+            for off in range(1, win + 1):
+                expanded[off:] |= bad_mask[:-off]
+                expanded[:-off] |= bad_mask[off:]
+            bad_mask = expanded
+        n_masked = int(bad_mask.sum())
+        cj_report['n_frames_masked'] = n_masked
+        cj_report['window'] = win
+        kp[bad_mask] = np.nan
+        report['centroid_jumps'] = cj_report
+        print(f"  [centroid jump] Flagged {cj_report['n_frames_flagged']} frames "
+              f"(masked {n_masked} with window={win}) [computed on raw input]")
 
     # Step 3: medfilt spike detection + spline interpolation (optional, default OFF)
     if filter_cfg.get('medfilt', {}).get('enabled', False):
