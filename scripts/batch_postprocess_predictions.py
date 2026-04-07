@@ -63,7 +63,17 @@ def find_stac_outputs(folder: Path, anatomy: str, dataset: str) -> list[dict]:
     stac_dir = folder / "stac"
     items = []
 
-    # Check for fly-suffixed STAC outputs first
+    # Check for merged-flies STAC output first (single file containing all flies)
+    merged_file = stac_dir / f"Fruitfly_ik_{anatomy}_{dataset}_merged.h5"
+    if merged_file.exists():
+        items.append({
+            'fly_suffix': '_merged',
+            'fly_label': 'merged',
+            'stac_path': merged_file,
+        })
+        return items
+
+    # Check for fly-suffixed STAC outputs (legacy per-fly STAC runs)
     fly_files = sorted(stac_dir.glob(f"Fruitfly_ik_{anatomy}_{dataset}_fly*.h5"))
     if fly_files:
         for fp in fly_files:

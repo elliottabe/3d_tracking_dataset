@@ -44,6 +44,8 @@ def build_unified_bouts_csv(folder: Path, dataset: str,
 
     df0 = pd.read_csv(fly0_csv)
     df1 = pd.read_csv(fly1_csv)
+    df0["source_fly"] = "fly0"
+    df1["source_fly"] = "fly1"
     df = pd.concat([df0, df1], ignore_index=True)
 
     # Strip _fly0 / _fly1 suffix from fly_id (session-level only)
@@ -51,8 +53,10 @@ def build_unified_bouts_csv(folder: Path, dataset: str,
         df["fly_id"] = df["fly_id"].astype(str).str.replace(r"_fly\d+$", "",
                                                               regex=True)
 
-    df = df.drop_duplicates(subset=["fly_id", "start_frame", "end_frame"])
-    df = df.sort_values(["fly_id", "start_frame"]).reset_index(drop=True)
+    df = df.drop_duplicates(
+        subset=["fly_id", "source_fly", "start_frame", "end_frame"]
+    )
+    df = df.sort_values(["fly_id", "source_fly", "start_frame"]).reset_index(drop=True)
     df["bout_idx"] = range(1, len(df) + 1)
 
     df.to_csv(out_csv, index=False)

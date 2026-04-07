@@ -474,6 +474,8 @@ def load_bouts_from_csv(bouts_csv_path: Path,
             f"The 'fly_id' column is required for tracking bout sources."
         )
     
+    has_source_fly = 'source_fly' in df.columns
+
     # Convert to list of dicts
     bouts = []
     for _, row in df.iterrows():
@@ -488,6 +490,7 @@ def load_bouts_from_csv(bouts_csv_path: Path,
             'start_frame': int(row['start_frame']),
             'end_frame': int(row['end_frame']),
             'fly_id': fid,
+            'source_fly': str(row['source_fly']) if has_source_fly else '',
         }
         bouts.append(bout_info)
     
@@ -563,7 +566,8 @@ def load_concatenated_bouts(csv_path: Path,
             'bout_idx': bout['bout_idx'],
             'start_idx': current_idx,
             'end_idx': current_idx + len(bout_array),
-            'fly_id': bout['fly_id']
+            'fly_id': bout['fly_id'],
+            'source_fly': bout.get('source_fly', ''),
         })
         current_idx += len(bout_array)
     
@@ -923,6 +927,7 @@ def process_bouts_batch(csv_path: Path,
         
         # Extract fly_ids from clip_info for later storage
         fly_ids = [clip['fly_id'] for clip in clip_info]
+        source_flies = [clip.get('source_fly', '') for clip in clip_info]
 
         # 4b. Identity relink (multi-fly) — runs on raw concatenated 3D before
         # any Procrustes alignment so the sibling fly is in the same world frame.
@@ -1067,6 +1072,7 @@ def process_bouts_batch(csv_path: Path,
         # Add info dictionary with fly_ids and clip_lengths
         all_bouts_dict['info'] = {
             'fly_ids': fly_ids,
+            'source_flies': source_flies,
             'clip_lengths': [clip['end_idx'] - clip['start_idx'] for clip in clip_info]
         }
         if relink_log_summary is not None:

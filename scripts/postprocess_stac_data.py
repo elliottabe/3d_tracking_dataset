@@ -90,12 +90,18 @@ def load_clip_lengths(data_path: Path, filename: str) -> tuple:
         fly_ids = list(data_dict['info']['fly_ids'])
         print(f"✓ Found fly_ids: {fly_ids}")
 
+    # Extract source_flies (which fly originally detected each bout)
+    source_flies = None
+    if 'info' in data_dict and 'source_flies' in data_dict['info']:
+        source_flies = list(data_dict['info']['source_flies'])
+        print(f"✓ Found source_flies: {source_flies}")
+
     print(f"✓ Found {len(clip_lengths)} bouts")
     print(f"  Clip lengths: {clip_lengths}")
     print(f"  Total frames: {sum(clip_lengths)}")
     print()
 
-    return clip_lengths, fly_ids
+    return clip_lengths, fly_ids, source_flies
 
 
 def load_stac_output(stac_path: Path):
@@ -644,7 +650,7 @@ def main(cfg: DictConfig):
     print()
     
     # Step 1: Load clip lengths and fly_ids
-    clip_lengths, fly_ids = load_clip_lengths(data_path, cfg.postprocessing.preprocessed_file)
+    clip_lengths, fly_ids, source_flies = load_clip_lengths(data_path, cfg.postprocessing.preprocessed_file)
     
     # Step 2: Load STAC output
     cfg_d, d, stac_data = load_stac_output(stac_path)
@@ -662,6 +668,8 @@ def main(cfg: DictConfig):
     # Inject fly_ids from preprocessing (STAC solver doesn't preserve them)
     if fly_ids is not None:
         bout_dict['info']['fly_ids'] = fly_ids
+    if source_flies is not None:
+        bout_dict['info']['source_flies'] = source_flies
 
     # if cfg.postprocessing.verbose:
     #     print()

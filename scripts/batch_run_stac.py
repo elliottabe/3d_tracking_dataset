@@ -50,6 +50,59 @@ from pathlib import Path
 from datetime import datetime
 import os
 
+# Add project root to path for utility imports
+_PROJECT_ROOT = Path(__file__).parent.parent
+sys.path.insert(0, str(_PROJECT_ROOT))
+from utils import io_dict_to_hdf5 as ioh5  # noqa: E402
+
+
+def merge_fly_preprocessed(fly_files: list[Path], out_path: Path,
+                           force: bool = False) -> Path:
+    """
+    Merge per-fly preprocessed bout h5 files into a single combined file so
+    STAC can run once over all bouts (avoids JAX recompile per fly).
+
+    Concatenates bout_NNN entries (renumbering sequentially) and merges
+    info/clip_lengths, info/fly_ids, info/source_flies as parallel lists.
+    """
+    if out_path.exists() and not force:
+        return out_path
+
+    print(f"  Merging {len(fly_files)} per-fly preprocessed files into {out_path.name}")
+
+    combined: dict = {}
+    info: dict = {
+        'clip_lengths': [],
+        'fly_ids': [],
+        'source_flies': [],
+    }
+    bout_counter = 0
+
+    for fp in fly_files:
+        d = ioh5.load(fp, enable_jax=False)
+        bout_keys = sorted(k for k in d.keys() if k != 'info')
+        sub_info = d.get('info', {})
+        sub_fly_ids = list(sub_info.get('fly_ids', []))
+        sub_source = list(sub_info.get('source_flies', []))
+        sub_clip = list(sub_info.get('clip_lengths', []))
+
+        for i, bk in enumerate(bout_keys):
+            new_key = f'bout_{bout_counter:03d}'
+            combined[new_key] = d[bk]
+            if i < len(sub_clip):
+                info['clip_lengths'].append(int(sub_clip[i]))
+            else:
+                info['clip_lengths'].append(int(d[bk]['keypoints'].shape[0]))
+            info['fly_ids'].append(sub_fly_ids[i] if i < len(sub_fly_ids) else '')
+            info['source_flies'].append(sub_source[i] if i < len(sub_source) else '')
+            bout_counter += 1
+
+    combined['info'] = info
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    ioh5.save(out_path, combined)
+    print(f"  ✓ Combined {bout_counter} bouts → {out_path}")
+    return out_path
+
 
 def get_stac_environment(gpu_mem_fraction: float = 0.9) -> dict:
     """
@@ -89,7 +142,15 @@ def _default_stac_dir() -> Path:
     return Path(__file__).resolve().parent.parent / "stac-mjx"
 
 
-def find_preprocessed_files(base_dir: Path, anatomy_name: str, dataset: str) -> list[tuple[Path, str, str]]:
+def _default_stac_dir() -> Path:
+    return Path(__file__).resolve().parent.parent / "stac-mjx"
+
+
+MERGED_SUFFIX = '_merged'
+
+
+def find_preprocessed_files(base_dir: Path, anatomy_name: str, dataset: str,
+                            force_merge: bool = False) -> list[tuple[Path, str, str]]:
     """
     Find all Predictions_3D_* folders with preprocessed bout files.
 
@@ -123,15 +184,16 @@ def find_preprocessed_files(base_dir: Path, anatomy_name: str, dataset: str) -> 
         version_name = folder.name
         preproc_dir = folder / "preprocessing"
 
-        # Check for fly-suffixed files first
+        # Check for fly-suffixed files first; if present, merge them into a
+        # single _merged h5 so STAC can run once and avoid recompiling per fly.
         fly_files = sorted(preproc_dir.glob(f"preprocessed_bout_{anatomy_name}_{dataset}_fly*.h5"))
         if fly_files:
-            for fp in fly_files:
-                # Extract fly suffix: preprocessed_bout_v1_courtship_fly0.h5 -> _fly0
-                stem = fp.stem  # preprocessed_bout_v1_courtship_fly0
-                base_stem = f"preprocessed_bout_{anatomy_name}_{dataset}"
-                fly_suffix = stem[len(base_stem):]  # _fly0
-                items.append((folder, version_name, fly_suffix))
+            merged_path = preproc_dir / f"preprocessed_bout_{anatomy_name}_{dataset}{MERGED_SUFFIX}.h5"
+            try:
+                merge_fly_preprocessed(fly_files, merged_path, force=force_merge)
+                items.append((folder, version_name, MERGED_SUFFIX))
+            except Exception as e:
+                print(f"  ⚠ Failed to merge per-fly files in {folder.name}: {e}")
         else:
             # Check for standard single-fly file
             standard_file = preproc_dir / f"preprocessed_bout_{anatomy_name}_{dataset}.h5"
@@ -385,7 +447,9 @@ Examples:
     print(f"Dry run: {args.dry_run}")
     print(f"{'='*80}\n")
 
-    preprocessed_items = find_preprocessed_files(args.base_dir, args.anatomy, args.dataset)
+    preprocessed_items = find_preprocessed_files(
+        args.base_dir, args.anatomy, args.dataset, force_merge=args.force
+    )
 
     if not preprocessed_items:
         print("No prediction folders with preprocessed data found!")
