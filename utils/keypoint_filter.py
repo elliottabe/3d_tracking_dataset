@@ -21,7 +21,7 @@ Usage::
 
 import numpy as np
 from scipy import signal
-from scipy.interpolate import splrep, splev
+from scipy.interpolate import PchipInterpolator
 from typing import Optional, Tuple, Dict, List
 from omegaconf import DictConfig
 import traceback as _traceback
@@ -42,8 +42,9 @@ def _nan_interp_1d(vals: np.ndarray, use_spline: bool = True) -> np.ndarray:
     """Interpolate NaN gaps in a 1-D signal. Skips if >50% of values are NaN.
 
     Only interpolates *between* valid data points. Leading/trailing NaN edges
-    are filled with the nearest valid value (no extrapolation) to avoid cubic
-    spline divergence at recording boundaries.
+    are filled with the nearest valid value (no extrapolation). Interior gaps
+    are filled with a monotone PCHIP cubic interpolant, which is C¹-smooth but
+    does not overshoot between anchor points (unlike a global cubic spline).
     """
     nans = np.isnan(vals)
     if not np.any(nans):
@@ -66,8 +67,8 @@ def _nan_interp_1d(vals: np.ndarray, use_spline: bool = True) -> np.ndarray:
     if len(x_interior) > 0:
         if use_spline:
             try:
-                spl = splrep(x_good, v_good, k=3, s=0)
-                out[x_interior] = splev(x_interior, spl)
+                pchip = PchipInterpolator(x_good, v_good, extrapolate=False)
+                out[x_interior] = pchip(x_interior)
             except Exception:
                 out[x_interior] = np.interp(x_interior, x_good, v_good)
         else:

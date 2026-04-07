@@ -33,8 +33,8 @@ from pathlib import Path
 import time
 
 # Default data root — all datasets live under this directory
-DATA_ROOT = Path('/gscratch/portia/eabe/data/Johnson_lab')
-# DATA_ROOT = Path('/data2/users/eabe/datasets/Johnson_lab')
+# DATA_ROOT = Path('/gscratch/portia/eabe/data/Johnson_lab')
+DATA_ROOT = Path('/data2/users/eabe/datasets/Johnson_lab')
 
 
 class PipelineRunner:
