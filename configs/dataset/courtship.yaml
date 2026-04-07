@@ -1,4 +1,29 @@
-name: courtship
-env_name: courtship
-version: analysis
-train: True
+# @package _global_
+
+defaults:
+  - preprocessing
+  - postprocessing
+
+dataset:
+  name: courtship
+  env_name: courtship
+  version: Data_analysis
+  train: True
+
+  concat:
+    input_pattern: 'postprocessing/ik_output_${anatomy.name}_${dataset.name}*.h5'
+    output_file: 'ik_output_combined_${anatomy.name}_${dataset.name}.h5'
+    enable_jax: True
+
+# Multi-fly cleanup: identity relink runs first (sustained ID swaps),
+# then centroid_jump masks any remaining single-frame outliers.
+# These overrides land on cfg.preprocessing.* (root) so the preprocess
+# script picks them up.
+preprocessing:
+  filtering:
+    identity_relink:
+      enabled: true
+    centroid_jump:
+      enabled: true
+      window: 3                 # Mask 3 frames on each side of a jump
+      threshold_mm: 1.5         # Tightened from 2.0 for courtship

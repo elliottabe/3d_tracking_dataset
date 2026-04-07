@@ -1,0 +1,79 @@
+# @package _global_.preprocessing
+
+# Preprocessing configuration for keypoint data
+# Usage: python preprocess_keypoints_for_ik.py paths=workstation dataset=free_walking anatomy=v1
+
+# Input/output paths (relative to dataset path or absolute)
+csv_path: 'data3D.csv'
+skeleton_path: 'data/fly50.json'
+xml_path: '${anatomy.mjcf_path}'  # Get from anatomy config
+
+# Bout configuration
+bout_name: 'preprocessed_bout_${anatomy.name}_${dataset.name}'  # Output file for preprocessed bout data
+bouts_csv: '${dataset.name}_bouts_summary.csv'  # CSV with bout info (bout_idx, start_frame, end_frame)
+
+# Single bout mode (ignored if bouts_csv is used)
+frame_start: null  # Start frame index (null for all frames)
+frame_end: null    # End frame index (null for all frames)
+
+# Alignment options
+apply_alignment: true
+apply_scaling: true
+preserve_translation: true  # Preserve original position/orientation (only scale)
+
+# Keypoint exclusion from alignment
+exclude_antenna: false
+exclude_wings: false
+exclude_wing_veins: true  # Exclude only wing vein markers (V12/V13) from Procrustes scaling
+
+# Keypoint filtering (applied after XML reordering, before Procrustes alignment)
+filtering:
+  enabled: true
+
+  confidence:
+    enabled: true
+    threshold: 0.5
+    exclude_keypoint_patterns: ['Wing']  # Don't mask these keypoints (preserves fast wing motion)
+
+  bone_length:
+    enabled: true
+    threshold_std: 5.0
+    exclude_keypoint_patterns: ['Wing']  # Skip edges involving these keypoints (substring match)
+
+  centroid_jump:
+    enabled: false              # OFF by default — enable for multi-fly (courtship)
+    threshold_mm: 2.0           # Max allowed frame-to-frame centroid displacement
+    trunk_keypoints: ['Scutellum', 'Postnotum', 'Scutum']
+    window: 1                   # Extra frames to mask on each side of a jump
+
+  identity_relink:
+    enabled: false              # OFF by default — enable for multi-fly (courtship)
+    velocity_alpha: 0.5         # EMA weight for velocity prediction (1 = no smoothing)
+    body_length_alpha: 0.05     # EMA weight for body-length tracking
+    body_length_weight: 0.5     # Cost weight relative to centroid distance
+    swap_ratio: 0.7             # Swap if cost_swapped < cost_current * swap_ratio
+    require_min_displacement: 0.0  # Only run swap test if max obs jump >= this
+
+  medfilt:
+    enabled: false              # OFF by default — can flag real fast motion
+    kernel: 5
+    spike_threshold_std: 5.0
+    use_spline: true
+
+  interpolation:
+    enabled: true
+    use_spline: true
+
+  confidence_smooth:
+    enabled: false              # OFF by default — attenuates real high-freq features (e.g. sine song)
+    smooth_window: 11
+    smooth_polyorder: 3
+    conf_low: 0.7               # fully smooth at/below this confidence
+    conf_high: 0.8              # fully trust raw at/above this confidence
+
+  savgol:
+    enabled: false
+    window_length: 11
+    polyorder: 3
+
+  save_figures: true  # Save diagnostic plots to output_dir/filter_figures/

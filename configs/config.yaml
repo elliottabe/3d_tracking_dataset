@@ -4,7 +4,7 @@ dataset_name: ${dataset.name}
 ##### Easy Access Variables #####
 # if set to positive integer, overrides the default
 version: ${dataset.version}
-run_id: 'Testing'
+run_id: 'analysis'  # Used for organizing output directories; can be set to a timestamp or identifier
 load_jobid: ''
 note: ''
 restore_checkpoint: ''
@@ -12,8 +12,8 @@ restore_checkpoint: ''
 # set default task and default training config based on dataset
 defaults:
   - _self_
-  # - anatomy: v1
-  - dataset: courtship
+  - anatomy: v1
+  - dataset: free_walking
   - paths: workstation
   # - train: imitation
 
@@ -37,7 +37,7 @@ hydra:
 
   run:
     # dir: ${paths.base_dir}/${hydra:job.override_dirname}
-    dir: ${paths.base_dir}/run_id=${run_id}
+    dir: ${paths.base_dir}/${run_id}
   sweep:
-    dir: ${paths.base_dir}/run_id=${run_id}
+    dir: ${paths.base_dir}/${run_id}
     subdir: ${hydra.job.override_dirname}

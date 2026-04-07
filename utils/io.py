@@ -42,6 +42,11 @@ class ModelConfig:
     RENDER_FPS: int
     N_SAMPLE_FRAMES: int
     M_REG_COEF: int
+    
+    # Optional fields for newer configs
+    N_ITER_Q: int = 800  # Number of iterations for q optimization
+    N_ITER_M: int = 2000  # Number of iterations for m optimization
+    name: str = ""  # Model name (optional)
 
 
 @dataclass
@@ -51,6 +56,7 @@ class MujocoConfig:
     solver: str
     iterations: int
     ls_iterations: int
+    dt: float = 0.001  # Timestep for MuJoCo simulation
 
 
 @dataclass
@@ -67,6 +73,12 @@ class StacConfig:
     infer_qvels: bool
     n_frames_per_clip: int
     mujoco: MujocoConfig
+    continuous: bool = False  # Whether data is continuous (for edge effect handling)
+    
+    # Optional fields used by pipeline scripts
+    save_path: str = ""  # Base save directory
+    xml_dir: str = ""  # Directory containing XML model files
+    enable_padding: bool = False  # Whether to pad clips to same length
 
 
 @dataclass
@@ -418,7 +430,10 @@ def load_stac_data(file_path) -> tuple[Config, StacData]:
         # Load config from YAML string
         config_yaml = f["config"][()].decode("utf-8")
         config = OmegaConf.create(config_yaml)
-        config = OmegaConf.structured(Config(**config))
+        # Only extract model and stac fields for Config dataclass
+        # (config may have additional fields like dataset_name, version, paths, etc.)
+        config_filtered = {"model": config["model"], "stac": config["stac"]}
+        config = OmegaConf.structured(Config(**config_filtered))
 
         # Load additional values
         kp_names = [name.decode("utf-8") for name in f["kp_names"]]

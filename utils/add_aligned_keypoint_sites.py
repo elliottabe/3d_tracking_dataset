@@ -174,21 +174,22 @@ def add_aligned_keypoint_sites_to_model(xml_path: str,
 
 
 def get_aligned_site_indices(mj_model: mujoco.MjModel,
-                             node_names: List[str]) -> dict:
+                             node_names: List[str], 
+                             suffix: str='') -> dict:
     """
     Get mapping from node index to site index for aligned keypoint sites.
 
     Args:
         mj_model: Compiled MuJoCo model
         node_names: List of node names in order
-
+        suffix: Suffix to append to site names
     Returns:
         Dict mapping node index (0-12) to site index in mj_data.site_xpos
     """
     aligned_site_ids = {}
 
     for i, node_name in enumerate(node_names):
-        site_name = f'aligned[{node_name}]'
+        site_name = f'aligned[{node_name}]{suffix}'
         try:
             site_id = mujoco.mj_name2id(mj_model, mujoco.mjtObj.mjOBJ_SITE, site_name)
             aligned_site_ids[i] = site_id
@@ -198,7 +199,7 @@ def get_aligned_site_indices(mj_model: mujoco.MjModel,
     return aligned_site_ids
 
 
-def set_aligned_site_colors(spec: mujoco.MjSpec, color_coded: bool = True) -> mujoco.MjSpec:
+def set_aligned_site_colors(spec: mujoco.MjSpec, color_coded: bool = True, suffix: str = '') -> mujoco.MjSpec:
     """
     Set colors for aligned keypoint sites in a MuJoCo spec.
     
@@ -234,9 +235,9 @@ def set_aligned_site_colors(spec: mujoco.MjSpec, color_coded: bool = True) -> mu
     # Find and update aligned sites
     updated_count = 0
     for site in spec.sites:
-        if 'aligned[' in site.name:
+        if f'aligned[' in site.name and site.name.endswith(suffix):
             # Extract node name from 'aligned[NodeName]'
-            node_name = site.name.replace('aligned[', '').replace(']', '')
+            node_name = site.name.replace('aligned[', '').replace(']', '').replace(suffix, '')
             
             # Determine color based on node name
             if color_coded:
@@ -271,7 +272,121 @@ def set_aligned_site_colors(spec: mujoco.MjSpec, color_coded: bool = True) -> mu
     
     print(f"✓ Updated colors for {updated_count} aligned sites")
     return spec
+# New approach: Create mocap bodies for aligned keypoints
+# These will automatically work when attaching fly model to floor
 
+from typing import List, Dict
+
+def add_aligned_mocap_bodies(spec: mujoco.MjSpec, 
+                              node_names: List[str],
+                              color_coded: bool = True,
+                              prefix: str = 'aligned_') -> mujoco.MjSpec:
+    """
+    Add mocap bodies with colored sites for aligned keypoint visualization.
+    
+    Mocap bodies are free-floating and can be positioned anywhere in the scene
+    by updating mj_data.mocap_pos[mocap_id].
+    
+    Args:
+        spec: MuJoCo spec object
+        node_names: List of keypoint node names
+        color_coded: Whether to use different colors for body parts
+        prefix: Prefix for mocap body names
+        
+    Returns:
+        Modified spec with mocap bodies added
+    """
+    # Color scheme
+    if color_coded:
+        colors = {
+            'antenna': [1.0, 0.0, 0.0, 1],      # Red
+            'eye': [1.0, 0.5, 0.0, 1],          # Orange
+            'wing_left': [0.0, 0.0, 1.0, 1],    # Blue
+            'wing_right': [0.0, 0.8, 1.0, 1],   # Cyan
+            'T1L': [0.0, 1.0, 0.0, 1],          # Green
+            'T1R': [0.5, 1.0, 0.0, 1],          # Lime
+            'T2L': [1.0, 1.0, 0.0, 1],          # Yellow
+            'T2R': [1.0, 0.65, 0.0, 1],         # Orange
+            'T3L': [0.8, 0.0, 0.8, 1],          # Purple
+            'T3R': [1.0, 0.0, 0.5, 1],          # Pink
+            'default': [0.5, 0.5, 0.5, 1]       # Gray
+        }
+    else:
+        colors = {'default': [0, 1, 0, 1]}
+    
+    # Add mocap body for each keypoint
+    for node_name in node_names:
+        # Determine color
+        if color_coded:
+            if 'Antenna' in node_name or 'antenna' in node_name.lower():
+                color = colors['antenna']
+            elif 'Eye' in node_name or 'eye' in node_name.lower():
+                color = colors['eye']
+            elif 'WingL' in node_name:
+                color = colors['wing_left']
+            elif 'WingR' in node_name:
+                color = colors['wing_right']
+            elif 'T1L' in node_name:
+                color = colors['T1L']
+            elif 'T1R' in node_name:
+                color = colors['T1R']
+            elif 'T2L' in node_name:
+                color = colors['T2L']
+            elif 'T2R' in node_name:
+                color = colors['T2R']
+            elif 'T3L' in node_name:
+                color = colors['T3L']
+            elif 'T3R' in node_name:
+                color = colors['T3R']
+            else:
+                color = colors['default']
+        else:
+            color = colors['default']
+        
+        # Create mocap body
+        mocap_body = spec.worldbody.add_body()
+        mocap_body.name = f'{prefix}{node_name}'
+        mocap_body.mocap = True
+        mocap_body.pos = [0, 0, 0]
+        
+        # Add visualization site
+        site = mocap_body.add_site()
+        site.name = f'{prefix}site_{node_name}'
+        site.size = [0.005, 0.005, 0.005]
+        site.type = mujoco.mjtGeom.mjGEOM_SPHERE
+        site.group = 3
+        site.rgba = color
+    
+    print(f"✓ Added {len(node_names)} mocap bodies with colored sites")
+    return spec
+
+
+def get_aligned_mocap_indices(mj_model: mujoco.MjModel,
+                               node_names: List[str],
+                               prefix: str = 'aligned_') -> Dict[int, int]:
+    """
+    Get mapping from keypoint index to mocap index.
+    
+    Args:
+        mj_model: Compiled MuJoCo model
+        node_names: List of node names in order
+        prefix: Prefix used for mocap body names
+        
+    Returns:
+        Dict mapping keypoint index to mocap index for mj_data.mocap_pos
+    """
+    mocap_indices = {}
+    
+    for i, node_name in enumerate(node_names):
+        body_name = f'{prefix}{node_name}'
+        try:
+            body_id = mujoco.mj_name2id(mj_model, mujoco.mjtObj.mjOBJ_BODY, body_name)
+            mocap_id = mj_model.body_mocapid[body_id]
+            mocap_indices[i] = mocap_id
+        except Exception as e:
+            print(f"Warning: Could not find mocap body {body_name}: {e}")
+    
+    return mocap_indices
 
 def remove_aligned_sites(xml_path: str,
                         output_path: Optional[str] = None,

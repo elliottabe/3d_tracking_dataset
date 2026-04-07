@@ -42,20 +42,20 @@ def register_custom_resolvers():
                     # Fallback: construct the path manually using override_dirname
                     override_dirname = hydra_cfg.job.override_dirname
                     if override_dirname:
-                        return f"{base_dir}/run_id={run_id}/{override_dirname}"
+                        return f"{base_dir}/{run_id}/{override_dirname}"
                     else:
-                        return f"{base_dir}/run_id={run_id}"
+                        return f"{base_dir}/{run_id}"
                 else:
                     # For single run, use the standard path
-                    return f"{base_dir}/run_id={run_id}"
+                    return f"{base_dir}/{run_id}"
             else:
                 # If Hydra not initialized, assume single run
-                return f"{base_dir}/run_id={run_id}"
+                return f"{base_dir}/{run_id}"
                 
         except Exception as e:
             logger.debug(f"Could not determine if multirun: {e}")
             # If we can't determine, use the standard path
-            return f"{base_dir}/run_id={run_id}"
+            return f"{base_dir}/{run_id}"
     
     ##### Custom Resolver #####
     # Register all resolvers (with replace=True to avoid conflicts if already registered)
@@ -364,7 +364,7 @@ def load_config_with_path_template(config_path, paths_template=None, dataset=Non
     
     return cfg
 
-def create_fresh_config_with_paths(dataset, paths_template="workstation", version="debug", run_id="Testing", config_dir="../configs", verbose=True):
+def create_fresh_config_with_paths(dataset, paths_template="workstation", version="debug", run_id="Testing", config_dir="../configs", verbose=True, other_overrides=None):
     """
     Create a fresh config using Hydra with specified paths template.
     
@@ -383,10 +383,10 @@ def create_fresh_config_with_paths(dataset, paths_template="workstation", versio
         print(f"🔄 Creating fresh config for dataset '{dataset}' with paths template '{paths_template}'")
     
     # Handle both absolute and relative config_dir paths
-    config_dir_path = Path(config_dir)
-    if not config_dir_path.is_absolute():
-        config_dir_path = Path.cwd() / config_dir_path
-    config_dir = str(config_dir_path.resolve())
+    # config_dir_path = Path(config_dir)
+    # if not config_dir_path.is_absolute():
+    #     config_dir_path = Path.cwd() / config_dir_path
+    # config_dir = str(config_dir_path.resolve())
     
     try:
         with initialize(version_base=None, config_path=config_dir):
@@ -401,6 +401,9 @@ def create_fresh_config_with_paths(dataset, paths_template="workstation", versio
             if paths_template:
                 overrides.append(f"paths={paths_template}")
             
+            # Add any other overrides provided
+            if other_overrides:
+                overrides.extend(other_overrides)
             if verbose:
                 print(f"   Hydra overrides: {overrides}")
             

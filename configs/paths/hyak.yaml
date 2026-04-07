@@ -8,3 +8,5 @@ log_dir:  ${paths.save_dir}/logs/
 ckpt_dir: ${paths.save_dir}/ckpt/
 fig_dir:  ${paths.save_dir}/figures/
 data_dir: /gscratch/portia/${paths.user}/biomech_model/Flybody/datasets/${version}/
+
+project_dir: /gscratch/portia/${paths.user}/Research/MyRepos/

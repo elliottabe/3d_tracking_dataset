@@ -213,3 +213,6 @@ __marimo__/
 .claude/
 *.csv
 *.h5
+
+Archive/
+figures/

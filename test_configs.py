@@ -1,8 +1,9 @@
-from omegaconf import DictConfig, OmegaConf
-from utils.utils import load_cfg
 import hydra
 from pathlib import Path
-from utils.path_utils import convert_dict_to_path, save_config
+from omegaconf import DictConfig, OmegaConf
+from utils.path_utils import convert_dict_to_path, convert_dict_to_string
+
+
 @hydra.main(version_base=None, config_path="./configs", config_name="config")
 def my_app(cfg: DictConfig) -> None:
     # Create directories specified in the config if they do not exist
