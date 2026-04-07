@@ -33,7 +33,8 @@ from pathlib import Path
 import time
 
 # Default data root — all datasets live under this directory
-DATA_ROOT = Path('/data2/users/eabe/datasets/Johnson_lab')
+DATA_ROOT = Path('/gscratch/portia/eabe/data/Johnson_lab')
+# DATA_ROOT = Path('/data2/users/eabe/datasets/Johnson_lab')
 
 
 class PipelineRunner:
@@ -49,8 +50,10 @@ class PipelineRunner:
         skip_completed: bool = False,
         dry_run: bool = False,
         stac_overrides: str = "",
-        gpu_mem_fraction: float = 0.9
+        gpu_mem_fraction: float = 0.9,
+        yes: bool = False,
     ):
+        self.yes = yes
         self.anatomy = anatomy
         self.dataset = dataset
         self.base_dir = base_dir if base_dir is not None else DATA_ROOT / dataset
@@ -202,6 +205,7 @@ class PipelineRunner:
             str(self.scripts_dir / "batch_run_stac.py"),
             f"--dataset={self.dataset}",
             f"--anatomy={self.anatomy}",
+            f"--paths={self.paths_config}",
             f"--base-dir={self.base_dir}",
             f"--gpu-mem-fraction={self.gpu_mem_fraction}",
         ]
@@ -318,7 +322,7 @@ class PipelineRunner:
         self.log("")
 
         # Confirm if not dry run
-        if not self.dry_run:
+        if not self.dry_run and not self.yes:
             response = input("Continue with pipeline execution? [y/N]: ")
             if response.lower() != 'y':
                 self.log("Pipeline cancelled by user")
@@ -462,6 +466,11 @@ Pipeline Steps:
         help='GPU memory fraction for STAC (0.0-1.0, default 0.9)'
     )
     parser.add_argument(
+        '-y', '--yes',
+        action='store_true',
+        help='Skip interactive confirmation prompt (for unattended runs)'
+    )
+    parser.add_argument(
         '--stac-overrides',
         type=str,
         default='',
@@ -483,7 +492,8 @@ Pipeline Steps:
         skip_completed=args.skip_completed,
         dry_run=args.dry_run,
         stac_overrides=args.stac_overrides,
-        gpu_mem_fraction=args.gpu_mem_fraction
+        gpu_mem_fraction=args.gpu_mem_fraction,
+        yes=args.yes,
     )
     
     # Run pipeline

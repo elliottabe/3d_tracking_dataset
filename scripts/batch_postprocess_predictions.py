@@ -41,7 +41,9 @@ def find_prediction_folders(base_dir: Path) -> list:
         List of Path objects for prediction folders, sorted by name
     """
     pattern = "Predictions_3D_*"
-    folders = sorted(base_dir.glob(pattern))
+    if base_dir.is_dir() and base_dir.match(pattern):
+        return [base_dir]
+    folders = sorted(base_dir.rglob(pattern))
     folders = [f for f in folders if f.is_dir()]
     return folders
 

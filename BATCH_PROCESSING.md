@@ -49,7 +49,7 @@ You can run each step individually (detailed below) or use the full pipeline scr
 /data2/users/eabe/datasets/Johnson_lab/free_walking/
 ├── Predictions_3D_20260202-171900/
 │   ├── data3D.csv                    # Raw 3D keypoint data
-│   ├── walking_bouts_summary.csv     # Bout info with fly_id
+│   ├── free_walking_bouts_summary.csv     # Bout info with fly_id ({dataset}_bouts_summary.csv)
 │   ├── preprocessed_bout_v1.h5       # Output from step 1
 │   ├── Fruitfly_ik_v1_free.h5        # Output from step 2 (STAC)
 │   └── ik_output_v1.h5               # Output from step 3
@@ -94,7 +94,7 @@ python scripts/batch_process_predictions.py --log-file my_preprocess.log
 ### What It Does
 
 For each `Predictions_3D_*` folder:
-- Checks for required input files (`data3D.csv`, `walking_bouts_summary.csv`)
+- Checks for required input files (`data3D.csv`, `{dataset}_bouts_summary.csv`)
 - Skips if output already exists (unless `--force`)
 - Runs `preprocess_keypoints_for_ik.py` with appropriate paths
 - Logs all results to timestamped log file
@@ -389,7 +389,7 @@ Available columns: ['bout_idx', 'start_frame', 'end_frame', ...]
 The 'fly_id' column is required for tracking bout sources.
 ```
 
-**Solution:** Ensure your `walking_bouts_summary.csv` has a `fly_id` column. It should look like:
+**Solution:** Ensure your `{dataset}_bouts_summary.csv` (e.g. `free_walking_bouts_summary.csv`) has a `fly_id` column. It should look like:
 ```csv
 fly_id,bout_idx,start_frame,end_frame,n_frames,...
 Session6/2025_10_12_15_06_46,1,13258,13491,234,...

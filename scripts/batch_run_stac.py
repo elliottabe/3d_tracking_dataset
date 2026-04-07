@@ -85,6 +85,10 @@ def get_stac_environment(gpu_mem_fraction: float = 0.9) -> dict:
     return env
 
 
+def _default_stac_dir() -> Path:
+    return Path(__file__).resolve().parent.parent / "stac-mjx"
+
+
 def find_preprocessed_files(base_dir: Path, anatomy_name: str, dataset: str) -> list[tuple[Path, str, str]]:
     """
     Find all Predictions_3D_* folders with preprocessed bout files.
@@ -107,7 +111,12 @@ def find_preprocessed_files(base_dir: Path, anatomy_name: str, dataset: str) -> 
         print(f"Error: Base directory does not exist: {base_dir}")
         return []
 
-    for folder in sorted(base_dir.glob("Predictions_3D_*")):
+    # Allow base_dir to itself be a single Predictions_3D_* folder (per-folder slurm jobs)
+    if base_dir.is_dir() and base_dir.match("Predictions_3D_*"):
+        candidate_folders = [base_dir]
+    else:
+        candidate_folders = sorted(base_dir.glob("Predictions_3D_*"))
+    for folder in candidate_folders:
         if not folder.is_dir():
             continue
 
@@ -162,6 +171,7 @@ def run_stac(
     fly_suffix: str = '',
     gpu_mem_fraction: float = 0.9,
     stac_overrides: str = "",
+    paths_config: str = "workstation",
     dry_run: bool = False
 ) -> tuple[bool, str]:
     """
@@ -184,10 +194,15 @@ def run_stac(
     cmd = [
         sys.executable,
         "run_stac_fly_model.py",
-        f"paths=workstation",
+        f"paths={paths_config}",
         f"dataset={dataset}",
         f"anatomy={anatomy_name}",
         f"version={version_name}",
+        # Override base_dir/data_dir to the actual folder so nested layouts
+        # (e.g. <dataset>/sessionX/Predictions_3D_*) are handled correctly
+        # instead of the default <dataset>/<version> assumption.
+        f"paths.base_dir={folder}",
+        f"paths.data_dir={folder}",
         "run_id=stac",
     ]
 
@@ -304,9 +319,15 @@ Examples:
         help='Base directory containing Predictions_3D_* folders'
     )
     parser.add_argument(
+        '--paths',
+        type=str,
+        default='workstation',
+        help='Paths config (workstation, hyak, etc.)'
+    )
+    parser.add_argument(
         '--stac-dir',
         type=Path,
-        default=Path('/home/eabe/Research/MyRepos/3d_tracking_dataset/stac-mjx'),
+        default=_default_stac_dir(),
         help='Path to stac-mjx directory'
     )
     parser.add_argument(
@@ -414,6 +435,7 @@ Examples:
             fly_suffix,
             args.gpu_mem_fraction,
             args.stac_overrides,
+            args.paths,
             args.dry_run
         )
 
