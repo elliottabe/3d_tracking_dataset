@@ -44,9 +44,14 @@ def slurm_submit(script: str) -> str:
 
 
 def find_folders(base_dir: Path, dataset: str) -> list[Path]:
-    """Find every Predictions_3D_* folder containing <dataset>_bouts_summary.csv."""
-    bouts_name = f"{dataset}_bouts_summary.csv"
-    folders = sorted({p.parent for p in base_dir.rglob(bouts_name)
+    """Find every Predictions_3D_* folder containing a <dataset>_bouts*summary.csv.
+
+    Matches both single-animal (`<dataset>_bouts_summary.csv`) and multi-animal
+    per-fly (`<dataset>_bouts_fly0_summary.csv`, `_fly1_summary.csv`, ...) layouts.
+    Folders containing multiple per-fly summaries are de-duplicated.
+    """
+    pattern = f"{dataset}_bouts*summary.csv"
+    folders = sorted({p.parent for p in base_dir.rglob(pattern)
                       if p.parent.match("Predictions_3D_*")})
     return folders
 
@@ -170,7 +175,7 @@ def main():
                    help='Do not submit a final combine job after the per-folder jobs')
     p.add_argument('--conda-env', default='3d_tracking', help='Conda environment to use')
     p.add_argument('--partition', default='gpu-l40s', help='SLURM partition to submit jobs to')
-    p.add_argument('--cpus', type=int, default=16, help='Number of CPUs per job')
+    p.add_argument('--cpus', type=int, default=8, help='Number of CPUs per job')
     p.add_argument('--mem', type=int, default=128, help='Memory per job in GB')
     p.add_argument('--time', default='24:00:00', help='Per-folder job time limit')
     p.add_argument('--combine-time', default='03:00:00', help='Time limit for combine job')
@@ -254,3 +259,14 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+'''
+
+squeue -u $USER -h -o "%i %j" | awk '/pipe_courtship|combine_courtship/ {print $1}' | xargs -r scancel
+
+python ./scripts/slurm_run.py --dataset free_walking --anatomy v1 --paths hyak --base-dir /gscratch/portia/eabe/data/Johnson_lab/free_walking/session11
+
+
+
+'''
