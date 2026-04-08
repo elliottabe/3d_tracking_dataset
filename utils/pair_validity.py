@@ -111,8 +111,11 @@ def compute_pair_validity(
         Keypoint names (length N, shared by both flies).
     cfg : PairValidityConfig, optional
     swap_state : ndarray (T,) bool, optional
-        If provided (e.g. from utils.identity_relink.relink_pair), used as a
-        pair-level identity-confidence mask with a guard window.
+        Cumulative relink state from utils.identity_relink.relink_pair —
+        True where the assignment was flipped relative to the input. The
+        keypoints passed in are assumed to already be relink-corrected, so
+        only *toggle events* in this state mark uncertain frames; toggles
+        are dilated by `cfg.swap_guard_frames` on each side.
 
     Returns
     -------
@@ -149,7 +152,13 @@ def compute_pair_validity(
             raise ValueError(
                 f"swap_state length {swap.shape[0]} != bout length {T}"
             )
-        guarded = _guard_dilate(swap, cfg.swap_guard_frames)
+        # Only the toggle events are uncertain — frames deep inside a stable
+        # (un)swapped segment are reliable because the relink correction has
+        # already been applied to the keypoints.
+        toggles = np.zeros(T, dtype=bool)
+        if T >= 2:
+            toggles[1:] = swap[1:] != swap[:-1]
+        guarded = _guard_dilate(toggles, cfg.swap_guard_frames)
         identity_valid = ~guarded
     else:
         identity_valid = np.ones(T, dtype=bool)
@@ -246,5 +255,6 @@ if __name__ == "__main__":
     print("n_both:", out["n_valid_both"], "expected ~50")
     print("class:", out["bout_pair_class"])
     assert not out["valid_fly1"][55]
-    assert not out["valid_both"][85]
+    assert not out["valid_both"][85]   # within ±5 of toggle at frame 80
+    assert out["valid_both"][110]      # deep inside swapped segment, far from toggle
     print("OK")

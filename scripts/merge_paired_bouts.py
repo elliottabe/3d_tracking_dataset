@@ -96,10 +96,27 @@ def merge_paired(
         "source_fly0_bout_keys": [],
         "source_fly1_bout_keys": [],
     }
-    if "kp_names" in d0.get("info", {}):
-        info["kp_names"] = list(d0["info"]["kp_names"])
-    if "skeleton_edges" in d0.get("info", {}):
-        info["skeleton_edges"] = d0["info"]["skeleton_edges"]
+    # kp_names / skeleton_edges may live in info OR per-bout (legacy preproc
+    # writes them per-bout). Probe both locations.
+    def _probe(d, key):
+        v = d.get("info", {}).get(key) if isinstance(d.get("info", {}), dict) else None
+        if v is not None and len(v) > 0:
+            return v
+        for bk in sorted(k for k in d.keys() if k != "info"):
+            bv = d[bk].get(key) if isinstance(d[bk], dict) else None
+            if bv is not None and len(bv) > 0:
+                return bv
+        return None
+    kpn = _probe(d0, "kp_names")
+    if kpn is None:
+        kpn = _probe(d1, "kp_names")
+    if kpn is not None:
+        info["kp_names"] = list(kpn)
+    skel = _probe(d0, "skeleton_edges")
+    if skel is None:
+        skel = _probe(d1, "skeleton_edges")
+    if skel is not None:
+        info["skeleton_edges"] = skel
 
     pair_class_counts: dict[str, int] = {
         "paired": 0, "fly0_only": 0, "fly1_only": 0,

@@ -78,13 +78,32 @@ def merge_fly_preprocessed(fly_files: list[Path], out_path: Path,
     }
     bout_counter = 0
 
+    def _extract_kp_names(d, sub_info):
+        # Per-fly preproc puts kp_names at top level; paired-split puts it in info.
+        kpn = sub_info.get('kp_names') if isinstance(sub_info, dict) else None
+        if kpn is None or len(kpn) == 0:
+            kpn = d.get('kp_names')
+        return list(kpn) if kpn is not None and len(kpn) > 0 else None
+
     for fp in fly_files:
         d = ioh5.load(fp, enable_jax=False)
         bout_keys = sorted(k for k in d.keys() if k != 'info')
         sub_info = d.get('info', {})
+        if not isinstance(sub_info, dict):
+            sub_info = {}
         sub_fly_ids = list(sub_info.get('fly_ids', []))
         sub_source = list(sub_info.get('source_flies', []))
         sub_clip = list(sub_info.get('clip_lengths', []))
+
+        sub_kp_names = _extract_kp_names(d, sub_info)
+        if sub_kp_names is not None:
+            if 'kp_names' not in info:
+                info['kp_names'] = sub_kp_names
+            elif list(info['kp_names']) != sub_kp_names:
+                print(f"  ⚠ kp_names mismatch in {fp.name}; keeping first-seen ordering")
+        sub_skel = sub_info.get('skeleton_edges') if isinstance(sub_info, dict) else None
+        if sub_skel is not None and 'skeleton_edges' not in info:
+            info['skeleton_edges'] = sub_skel
 
         for i, bk in enumerate(bout_keys):
             new_key = f'bout_{bout_counter:03d}'
