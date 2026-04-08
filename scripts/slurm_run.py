@@ -164,7 +164,7 @@ def main():
     p.add_argument('--paths', default='hyak', help='Paths config (hyak, workstation, ...)')
     p.add_argument('--base-dir', type=Path, default=None,
                    help='Dataset root to search (default: DATA_ROOT/<dataset>)')
-    p.add_argument('--steps', default='preprocess,stac,postprocess',
+    p.add_argument('--steps', default='preprocess,pair,stac,postprocess',
                    help='Per-folder steps to run (combine is submitted as a separate job)')
     p.add_argument('--no-combine', action='store_true',
                    help='Do not submit a final combine job after the per-folder jobs')

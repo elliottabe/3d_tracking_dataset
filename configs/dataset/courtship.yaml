@@ -27,3 +27,5 @@ preprocessing:
       enabled: true
       window: 3                 # Mask 3 frames on each side of a jump
       threshold_mm: 1.5         # Tightened from 2.0 for courtship
+  pair_validity:
+    enabled: true

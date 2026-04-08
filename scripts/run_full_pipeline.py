@@ -196,6 +196,34 @@ class PipelineRunner:
 
         return success
 
+    def step_pair(self) -> bool:
+        """Optional step: pair per-fly preprocessed bouts for dual-fly datasets.
+
+        No-op for single-fly datasets (the wrapper script skips folders that
+        lack fly0/fly1 pairs).
+        """
+        self.print_step_header(1, 5, "PAIR DUAL-FLY BOUTS")
+
+        cmd = [
+            sys.executable,
+            str(self.scripts_dir / "batch_pair_bouts.py"),
+            f"--dataset={self.dataset}",
+            f"--anatomy={self.anatomy}",
+            f"--base-dir={self.base_dir}",
+        ]
+        if self.force:
+            cmd.append("--force")
+        if self.dry_run:
+            cmd.append("--dry-run")
+
+        success, message = self.run_command(cmd, "pair", timeout=1800)
+        self.step_results["pair"] = (success, message)
+        if success:
+            self.log(f"Pairing complete: {message}")
+        else:
+            self.log(f"Pairing failed: {message}")
+        return success
+
     def step_2_stac(self) -> bool:
         """Step 2: STAC IK solver."""
         self.print_step_header(2, 4, "STAC IK SOLVER")
@@ -295,10 +323,10 @@ class PipelineRunner:
             True if all steps succeeded
         """
         if steps is None:
-            steps = ['preprocess', 'stac', 'postprocess', 'combine']
+            steps = ['preprocess', 'pair', 'stac', 'postprocess', 'combine']
 
         # Validate steps
-        valid_steps = {'preprocess', 'stac', 'postprocess', 'combine'}
+        valid_steps = {'preprocess', 'pair', 'stac', 'postprocess', 'combine'}
         invalid = set(steps) - valid_steps
         if invalid:
             self.log(f"Invalid steps: {invalid}")
@@ -333,6 +361,7 @@ class PipelineRunner:
         # Run steps in order
         step_map = {
             'preprocess': self.step_1_preprocess,
+            'pair': self.step_pair,
             'stac': self.step_2_stac,
             'postprocess': self.step_3_postprocess,
             'combine': self.step_4_combine,
@@ -441,8 +470,9 @@ Pipeline Steps:
     parser.add_argument(
         '--steps',
         type=str,
-        default='preprocess,stac,postprocess,combine',
-        help='Comma-separated list of steps to run (preprocess,stac,postprocess,combine)'
+        default='preprocess,pair,stac,postprocess,combine',
+        help='Comma-separated list of steps to run (preprocess,pair,stac,postprocess,combine). '
+             'The "pair" step is a no-op for single-fly datasets.'
     )
     parser.add_argument(
         '--force',

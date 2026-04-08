@@ -186,7 +186,17 @@ def find_preprocessed_files(base_dir: Path, anatomy_name: str, dataset: str,
 
         # Check for fly-suffixed files first; if present, merge them into a
         # single _merged h5 so STAC can run once and avoid recompiling per fly.
-        fly_files = sorted(preproc_dir.glob(f"preprocessed_bout_{anatomy_name}_{dataset}_fly*.h5"))
+        # Prefer *_paired.h5 variants (validity-filtered by the pair step) when
+        # they exist — they replace the raw per-fly files for the STAC run.
+        paired_stem = f"preprocessed_bout_{anatomy_name}_{dataset}"
+        paired_fly_files = sorted(preproc_dir.glob(f"{paired_stem}_fly*_paired.h5"))
+        if paired_fly_files:
+            fly_files = paired_fly_files
+        else:
+            fly_files = sorted(preproc_dir.glob(
+                f"{paired_stem}_fly*.h5"))
+            # Exclude any stray _paired.h5 that isn't one of the per-fly files
+            fly_files = [f for f in fly_files if not f.name.endswith("_paired.h5")]
         if fly_files:
             merged_path = preproc_dir / f"preprocessed_bout_{anatomy_name}_{dataset}{MERGED_SUFFIX}.h5"
             try:

@@ -57,6 +57,11 @@ try:
         reorder_keypoints_array,
         reorder_skeleton_edges)
     from utils.keypoint_filter import filter_keypoints, load_confidence_from_csv, load_confidence_concatenated
+    from utils.pair_validity import (
+        compute_pair_validity,
+        pair_validity_config_from_dict,
+        PairValidityConfig,
+    )
 except ModuleNotFoundError as e:
     print(f"Error: Could not import utilities. Make sure you're running from the project root.")
     print(f"Current directory: {Path.cwd()}")
@@ -862,6 +867,21 @@ def process_single_bout(csv_path: Path,
         return None
 
 
+def _filter_ok_for_bout(kp: np.ndarray, names, pv_cfg) -> np.ndarray:
+    from utils.pair_validity import _match_indices, _filter_valid
+    idx = _match_indices(names, pv_cfg.critical_kp_patterns)
+    return _filter_valid(kp, idx)
+
+
+def _ground_ok_for_bout(kp: np.ndarray, names, pv_cfg) -> np.ndarray:
+    from utils.pair_validity import _match_indices, _ground_valid
+    idx = _match_indices(names, pv_cfg.ground_kp_patterns)
+    mask, _ = _ground_valid(
+        kp, idx, pv_cfg.floor_percentile, pv_cfg.ground_epsilon_mm
+    )
+    return mask
+
+
 def process_bouts_batch(csv_path: Path,
                        skeleton_path: Path,
                        xml_path: Path,
@@ -872,7 +892,8 @@ def process_bouts_batch(csv_path: Path,
                        exclude_wings: bool = False,
                        exclude_wing_veins: bool = False,
                        filter_cfg: Optional[DictConfig] = None,
-                       output_dir: Optional[Path] = None) -> Optional[Dict]:
+                       output_dir: Optional[Path] = None,
+                       pair_validity_cfg: Optional[DictConfig] = None) -> Optional[Dict]:
     """
     Efficiently process multiple bouts by loading skeleton/model once and
     processing all data as a concatenated array.
@@ -932,6 +953,7 @@ def process_bouts_batch(csv_path: Path,
         # 4b. Identity relink (multi-fly) — runs on raw concatenated 3D before
         # any Procrustes alignment so the sibling fly is in the same world frame.
         relink_log_summary = None
+        global_swap_state = None  # (T_total,) bool from identity_relink, if it ran
         if (filter_cfg is not None
                 and filter_cfg.get('enabled', False)
                 and filter_cfg.get('identity_relink', {}).get('enabled', False)):
@@ -967,6 +989,7 @@ def process_bouts_batch(csv_path: Path,
                     print(f"  [identity-relink] {n_segs} swap segments, "
                           f"{frac*100:.2f}% of frames in swapped state")
                     concatenated_kp = relinked_self
+                    global_swap_state = np.asarray(log['swap_state'], dtype=bool)
                     relink_log_summary = dict(
                         n_swap_segments=n_segs,
                         fraction_swapped=float(frac),
@@ -1023,6 +1046,18 @@ def process_bouts_batch(csv_path: Path,
         print("PROCESSING INDIVIDUAL BOUTS WITH PER-BOUT FILTERING & ALIGNMENT")
         print("="*80)
 
+        # Parse pair_validity config once (used per-bout below)
+        pv_enabled = False
+        pv_obj: Optional[PairValidityConfig] = None
+        if pair_validity_cfg is not None:
+            pv_obj = pair_validity_config_from_dict(pair_validity_cfg)
+            pv_enabled = bool(pv_obj.enabled)
+        if pv_enabled:
+            print(f"\n[pair_validity] enabled: critical={list(pv_obj.critical_kp_patterns)}, "
+                  f"ground_eps={pv_obj.ground_epsilon_mm}mm, "
+                  f"floor_pct={pv_obj.floor_percentile}, "
+                  f"swap_guard={pv_obj.swap_guard_frames}")
+
         all_bouts_dict = {}
         for clip in clip_info:
             bout_idx = clip['bout_idx']
@@ -1062,7 +1097,30 @@ def process_bouts_batch(csv_path: Path,
             
             if alignment_info is not None:
                 bout_data['alignment_info'] = alignment_info
-            
+
+            # Per-frame validity for this physical fly (paired merge happens later)
+            if pv_enabled:
+                bout_swap = (global_swap_state[start_idx:end_idx]
+                             if global_swap_state is not None else None)
+                # Use self-fly for both arguments: this run only has the self
+                # fly's kp. compute_pair_validity's fly1 mask will mirror fly0
+                # (same array) — we keep only valid_fly0 as `valid_fly` here,
+                # and let merge_paired_bouts.py combine the two runs later.
+                pv_out = compute_pair_validity(
+                    aligned_bout_kp, aligned_bout_kp, xml_node_names,
+                    cfg=pv_obj, swap_state=bout_swap,
+                )
+                bout_data['valid_fly'] = pv_out['valid_fly0']
+                bout_data['filter_ok'] = _filter_ok_for_bout(
+                    aligned_bout_kp, xml_node_names, pv_obj
+                )
+                bout_data['ground_ok'] = _ground_ok_for_bout(
+                    aligned_bout_kp, xml_node_names, pv_obj
+                )
+                if bout_swap is not None:
+                    bout_data['swap_state'] = bout_swap
+                bout_data['floor_z'] = float(pv_out['floor_z_fly0'])
+
             all_bouts_dict[f'bout_{bout_idx:03d}'] = bout_data
             
             scale_str = f", scale={alignment_info['scales']:.6f}" if alignment_info else ""
@@ -1077,6 +1135,17 @@ def process_bouts_batch(csv_path: Path,
         }
         if relink_log_summary is not None:
             all_bouts_dict['info']['identity_relink'] = relink_log_summary
+        if pv_enabled:
+            all_bouts_dict['info']['pair_validity'] = {
+                'enabled': True,
+                'critical_kp_patterns': list(pv_obj.critical_kp_patterns),
+                'ground_kp_patterns': list(pv_obj.ground_kp_patterns),
+                'ground_epsilon_mm': float(pv_obj.ground_epsilon_mm),
+                'floor_percentile': float(pv_obj.floor_percentile),
+                'swap_guard_frames': int(pv_obj.swap_guard_frames),
+                'min_paired_frames': int(pv_obj.min_paired_frames),
+                'min_solo_frames': int(pv_obj.min_solo_frames),
+            }
         
         print(f"\n✓ Successfully split into {len([k for k in all_bouts_dict.keys() if k != 'info'])} bouts")
         print(f"✓ Stored fly_ids in 'info': {fly_ids}")
@@ -1174,6 +1243,7 @@ def main(cfg: DictConfig):
             exclude_wing_veins=cfg.preprocessing.get('exclude_wing_veins', False),
             filter_cfg=cfg.preprocessing.get('filtering', None),
             output_dir=output_dir,
+            pair_validity_cfg=cfg.preprocessing.get('pair_validity', None),
         )
 
         if all_bouts_dict is not None:

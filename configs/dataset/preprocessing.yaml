@@ -77,3 +77,18 @@ filtering:
     polyorder: 3
 
   save_figures: true  # Save diagnostic plots to output_dir/filter_figures/
+
+# Per-frame validity for paired dual-fly bouts (courtship).
+# When enabled, process_bouts_batch adds `valid_fly0`, `valid_fly1`,
+# `valid_both`, and `pair_state` arrays to each bout so downstream code can
+# separate frames where only one fly is tracked well from frames where both
+# are tracked. Requires filtering.identity_relink to run for the swap mask.
+pair_validity:
+  enabled: false              # Enable in dataset overrides (e.g. courtship)
+  critical_kp_patterns: ['*Tarsus*', '*Claw*', '*Scutellum*', '*Scutum*']
+  ground_kp_patterns:   ['*Tarsus*', '*Claw*']
+  ground_epsilon_mm: 0.05
+  floor_percentile: 5.0
+  swap_guard_frames: 5
+  min_paired_frames: 30
+  min_solo_frames: 30
