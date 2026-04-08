@@ -75,8 +75,20 @@ def merge_fly_preprocessed(fly_files: list[Path], out_path: Path,
         'clip_lengths': [],
         'fly_ids': [],
         'source_flies': [],
+        'bucket': [],
     }
     bout_counter = 0
+
+    def _bucket_for_file(fp: Path) -> str:
+        name = fp.stem
+        for tag in ('fly0_only', 'fly1_only', 'both'):
+            if name.endswith(f'_{tag}'):
+                return tag
+        if name.endswith('_fly0'):
+            return 'fly0'
+        if name.endswith('_fly1'):
+            return 'fly1'
+        return ''
 
     def _extract_kp_names(d, sub_info):
         # Per-fly preproc puts kp_names at top level; paired-split puts it in info.
@@ -94,6 +106,8 @@ def merge_fly_preprocessed(fly_files: list[Path], out_path: Path,
         sub_fly_ids = list(sub_info.get('fly_ids', []))
         sub_source = list(sub_info.get('source_flies', []))
         sub_clip = list(sub_info.get('clip_lengths', []))
+        sub_bucket = list(sub_info.get('bucket', []))
+        file_bucket = _bucket_for_file(fp)
 
         sub_kp_names = _extract_kp_names(d, sub_info)
         if sub_kp_names is not None:
@@ -114,6 +128,7 @@ def merge_fly_preprocessed(fly_files: list[Path], out_path: Path,
                 info['clip_lengths'].append(int(d[bk]['keypoints'].shape[0]))
             info['fly_ids'].append(sub_fly_ids[i] if i < len(sub_fly_ids) else '')
             info['source_flies'].append(sub_source[i] if i < len(sub_source) else '')
+            info['bucket'].append(sub_bucket[i] if i < len(sub_bucket) else file_bucket)
             bout_counter += 1
 
     combined['info'] = info
@@ -205,17 +220,27 @@ def find_preprocessed_files(base_dir: Path, anatomy_name: str, dataset: str,
 
         # Check for fly-suffixed files first; if present, merge them into a
         # single _merged h5 so STAC can run once and avoid recompiling per fly.
-        # Prefer *_paired.h5 variants (validity-filtered by the pair step) when
-        # they exist — they replace the raw per-fly files for the STAC run.
-        paired_stem = f"preprocessed_bout_{anatomy_name}_{dataset}"
-        paired_fly_files = sorted(preproc_dir.glob(f"{paired_stem}_fly*_paired.h5"))
-        if paired_fly_files:
-            fly_files = paired_fly_files
+        # Prefer the new validity-bucket files (_fly0_only / _fly1_only / _both)
+        # produced by batch_split_valid_bouts.py when they exist; they replace
+        # the raw per-fly files for the STAC run.
+        stem = f"preprocessed_bout_{anatomy_name}_{dataset}"
+        bucket_files = []
+        for tag in ('fly0_only', 'fly1_only', 'both'):
+            candidate = preproc_dir / f"{stem}_{tag}.h5"
+            if candidate.exists():
+                bucket_files.append(candidate)
+        if bucket_files:
+            fly_files = bucket_files
         else:
-            fly_files = sorted(preproc_dir.glob(
-                f"{paired_stem}_fly*.h5"))
-            # Exclude any stray _paired.h5 that isn't one of the per-fly files
-            fly_files = [f for f in fly_files if not f.name.endswith("_paired.h5")]
+            fly_files = sorted(preproc_dir.glob(f"{stem}_fly*.h5"))
+            # Exclude bucket / legacy paired variants
+            fly_files = [
+                f for f in fly_files
+                if not any(f.name.endswith(s)
+                           for s in ("_fly0_only.h5", "_fly1_only.h5",
+                                     "_both.h5", "_paired.h5",
+                                     "_fly0_paired.h5", "_fly1_paired.h5"))
+            ]
         if fly_files:
             merged_path = preproc_dir / f"preprocessed_bout_{anatomy_name}_{dataset}{MERGED_SUFFIX}.h5"
             try:

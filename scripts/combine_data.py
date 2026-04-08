@@ -96,122 +96,164 @@ def main(cfg: DictConfig):
     print()
 
     # Concatenate
-    combined_dict = concatenate_bout_dicts(
+    full_dict = concatenate_bout_dicts(
         file_paths=[str(fp) for fp in file_paths],
         enable_jax=enable_jax,
         verbose=True
     )
 
-    # Print structure
-    # print_bout_dict_structure(combined_dict, show_values=False, max_depth=2)
+    # Partition by validity bucket if present (multianimal pipeline emits a
+    # parallel `info['bucket']` list of fly0_only / fly1_only / both tags).
+    # For single-animal datasets there is no bucket info, so we keep a single
+    # combined output named `ik_output_combined.h5` (legacy behaviour).
+    bucket_list = []
+    info_buckets = full_dict.get('info', {}).get('bucket', None)
+    if info_buckets is not None:
+        bucket_list = list(np.asarray(info_buckets).tolist()) \
+            if not isinstance(info_buckets, list) else list(info_buckets)
 
-    # Create non-interpolated version by renaming _stac keys to clean keys
-    print("\n" + "=" * 80)
-    print("CREATING NON-INTERPOLATED VERSION")
-    print("=" * 80)
+    def _filter_dict_by_bucket(src: dict, keep_indices: list[int]) -> dict:
+        """Build a sub combined_dict containing only bouts at the given indices,
+        renumbered sequentially. Concatenated info fields are sliced to match."""
+        all_keys = sorted([k for k in src.keys() if k != 'info'])
+        out = {}
+        for new_idx, old_idx in enumerate(keep_indices):
+            new_key = f'bout_{new_idx:03d}'
+            out[new_key] = src[all_keys[old_idx]]
+        out['info'] = {}
+        concat_fields = {'clip_lengths', 'clip_lengths_original',
+                         'clip_lengths_interp_unpadded', 'fly_ids',
+                         'source_flies', 'bucket'}
+        for k, v in src.get('info', {}).items():
+            if k in concat_fields:
+                try:
+                    arr = np.asarray(v).tolist() if not isinstance(v, list) else v
+                    out['info'][k] = [arr[i] for i in keep_indices]
+                except Exception:
+                    out['info'][k] = v
+            else:
+                out['info'][k] = v
+        return out
+
+    if bucket_list:
+        present = sorted(set(bucket_list), key=lambda x: ['fly0_only', 'both', 'fly1_only'].index(x)
+                         if x in ('fly0_only', 'both', 'fly1_only') else 99)
+        partitions = []
+        for bucket in present:
+            keep = [i for i, b in enumerate(bucket_list) if b == bucket]
+            if not keep:
+                continue
+            sub = _filter_dict_by_bucket(full_dict, keep)
+            partitions.append((bucket, sub))
+        if not partitions:
+            print("⚠ No bouts in any bucket — nothing to write")
+            return
+        print(f"\nPartitioned into {len(partitions)} validity bucket(s): "
+              f"{[b for b, _ in partitions]}")
+    else:
+        partitions = [(None, full_dict)]
+
+    def _save_one(combined_dict: dict, out_base: Path, out_interp: Path):
+        # Create non-interpolated version by renaming _stac keys to clean keys
+        print("\n" + "=" * 80)
+        print(f"CREATING NON-INTERPOLATED VERSION → {out_base.name}")
+        print("=" * 80)
     
-    # Get clip_lengths_original for unpadding
-    clip_lengths_original = combined_dict.get('info', {}).get('clip_lengths_original', [])
-    bout_keys = sorted([k for k in combined_dict.keys() if k != 'info'])
-    
-    if clip_lengths_original is not None and len(clip_lengths_original) > 0:
-        print(f"Unpadding {len(bout_keys)} bouts to original lengths...")
-    
-    non_interp_dict = {}
-    for bout_idx, bout_key in enumerate(bout_keys):
-        bout_data = combined_dict[bout_key]
-        non_interp_dict[bout_key] = {}
-        
-        # Get original length for this bout (for unpadding)
-        orig_length = clip_lengths_original[bout_idx] if bout_idx < len(clip_lengths_original) else None
-        
-        for key, value in bout_data.items():
-            if key.endswith('_stac'):
-                # Rename _stac keys to clean keys (already at original length)
-                clean_key = key[:-5]  # Remove '_stac' suffix
-                non_interp_dict[bout_key][clean_key] = value
-            elif not any(f"{key}_stac" in bout_data for k in [key]):
-                # For keys without _stac counterpart, check if they need unpadding
-                if not any(f"{k}_stac" == key for k in bout_data.keys()):
-                    # If this is a trajectory array and we have original length, unpad it
+        # Get clip_lengths_original for unpadding
+        clip_lengths_original = combined_dict.get('info', {}).get('clip_lengths_original', [])
+        bout_keys = sorted([k for k in combined_dict.keys() if k != 'info'])
+
+        if clip_lengths_original is not None and len(clip_lengths_original) > 0:
+            print(f"Unpadding {len(bout_keys)} bouts to original lengths...")
+
+        non_interp_dict = {}
+        for bout_idx, bout_key in enumerate(bout_keys):
+            bout_data = combined_dict[bout_key]
+            non_interp_dict[bout_key] = {}
+
+            orig_length = clip_lengths_original[bout_idx] if bout_idx < len(clip_lengths_original) else None
+
+            for key, value in bout_data.items():
+                if key.endswith('_stac'):
+                    clean_key = key[:-5]
+                    non_interp_dict[bout_key][clean_key] = value
+                elif not any(f"{k}_stac" == key for k in bout_data.keys()):
                     if orig_length is not None and isinstance(value, (np.ndarray, jnp.ndarray)) and len(value.shape) > 0 and value.shape[0] > orig_length:
-                        # Unpad by taking only the first orig_length frames
                         if enable_jax and isinstance(value, jnp.ndarray):
                             non_interp_dict[bout_key][key] = np.array(value[:orig_length])
                         else:
                             non_interp_dict[bout_key][key] = value[:orig_length]
                     else:
                         non_interp_dict[bout_key][key] = value
-    
-    # Handle info specially - only include clip_lengths_original as clip_lengths
-    # Important: preserve fly_ids
-    non_interp_dict['info'] = {}
-    for key, value in combined_dict['info'].items():
-        if key == 'clip_lengths_original':
-            non_interp_dict['info']['clip_lengths'] = value
-        elif key not in ['clip_lengths', 'clip_lengths_interp_unpadded']:
-            non_interp_dict['info'][key] = value
-    
-    # Save non-interpolated version (base file)
-    print(f"Saving non-interpolated data to: {output_file}")
-    if 'info' in non_interp_dict and 'clip_lengths' in non_interp_dict['info']:
-        print(f"  Clip lengths (original, unpadded): {non_interp_dict['info']['clip_lengths']}")
-    ioh5.save(output_file, non_interp_dict)
-    print(f"✓ Saved successfully")
-    print(f"  File size: {Path(output_file).stat().st_size / 1024 / 1024:.2f} MB")
-    print()
 
-    # Save interpolated version (clean keys contain interpolated data)
-    print("=" * 80)
-    print("SAVING COMBINED OUTPUT - INTERPOLATED")
-    print("=" * 80)
-    
-    # Clean up interpolated dict to remove clip_lengths_original
-    # and optionally unpad to clip_lengths_interp_unpadded
-    clip_lengths_interp_unpadded = combined_dict.get('info', {}).get('clip_lengths_interp_unpadded', [])
-    
-    if clip_lengths_interp_unpadded is not None and len(clip_lengths_interp_unpadded) > 0:
-        print(f"Unpadding {len(bout_keys)} bouts to interpolated unpadded lengths...")
-    
-    interp_dict = {}
-    for bout_idx, bout_key in enumerate(bout_keys):
-        bout_data = combined_dict[bout_key]
-        interp_dict[bout_key] = {}
-        
-        # Get unpadded length for this bout (if available)
-        unpadded_length = clip_lengths_interp_unpadded[bout_idx] if bout_idx < len(clip_lengths_interp_unpadded) else None
-        
-        for key, value in bout_data.items():
-            # Skip _stac keys in interpolated version
-            if key.endswith('_stac'):
-                continue
-                
-            # Unpad trajectory arrays to their unpadded interpolated length
-            if unpadded_length is not None and isinstance(value, (np.ndarray, jnp.ndarray)) and len(value.shape) > 0 and value.shape[0] > unpadded_length:
-                if enable_jax and isinstance(value, jnp.ndarray):
-                    interp_dict[bout_key][key] = np.array(value[:unpadded_length])
+        non_interp_dict['info'] = {}
+        for key, value in combined_dict['info'].items():
+            if key == 'clip_lengths_original':
+                non_interp_dict['info']['clip_lengths'] = value
+            elif key not in ['clip_lengths', 'clip_lengths_interp_unpadded']:
+                non_interp_dict['info'][key] = value
+
+        print(f"Saving non-interpolated data to: {out_base}")
+        if 'info' in non_interp_dict and 'clip_lengths' in non_interp_dict['info']:
+            print(f"  Clip lengths (original, unpadded): {non_interp_dict['info']['clip_lengths']}")
+        ioh5.save(out_base, non_interp_dict)
+        print(f"✓ Saved successfully")
+        print(f"  File size: {Path(out_base).stat().st_size / 1024 / 1024:.2f} MB")
+        print()
+
+        print("=" * 80)
+        print(f"SAVING COMBINED OUTPUT - INTERPOLATED → {out_interp.name}")
+        print("=" * 80)
+
+        clip_lengths_interp_unpadded = combined_dict.get('info', {}).get('clip_lengths_interp_unpadded', [])
+
+        if clip_lengths_interp_unpadded is not None and len(clip_lengths_interp_unpadded) > 0:
+            print(f"Unpadding {len(bout_keys)} bouts to interpolated unpadded lengths...")
+
+        interp_dict = {}
+        for bout_idx, bout_key in enumerate(bout_keys):
+            bout_data = combined_dict[bout_key]
+            interp_dict[bout_key] = {}
+
+            unpadded_length = clip_lengths_interp_unpadded[bout_idx] if bout_idx < len(clip_lengths_interp_unpadded) else None
+
+            for key, value in bout_data.items():
+                if key.endswith('_stac'):
+                    continue
+
+                if unpadded_length is not None and isinstance(value, (np.ndarray, jnp.ndarray)) and len(value.shape) > 0 and value.shape[0] > unpadded_length:
+                    if enable_jax and isinstance(value, jnp.ndarray):
+                        interp_dict[bout_key][key] = np.array(value[:unpadded_length])
+                    else:
+                        interp_dict[bout_key][key] = value[:unpadded_length]
                 else:
-                    interp_dict[bout_key][key] = value[:unpadded_length]
-            else:
-                interp_dict[bout_key][key] = value
-    
-    # Handle info specially - keep clip_lengths_interp_unpadded as clip_lengths, remove original
-    # Important: preserve fly_ids
-    interp_dict['info'] = {}
-    for key, value in combined_dict['info'].items():
-        if key == 'clip_lengths_interp_unpadded':
-            interp_dict['info']['clip_lengths'] = value
-        elif key not in ['clip_lengths_original', 'clip_lengths']:
-            interp_dict['info'][key] = value
-    
-    print(f"Saving interpolated data to: {output_file_interp}")
-    if 'info' in interp_dict:
-        if 'clip_lengths' in interp_dict['info']:
+                    interp_dict[bout_key][key] = value
+
+        interp_dict['info'] = {}
+        for key, value in combined_dict['info'].items():
+            if key == 'clip_lengths_interp_unpadded':
+                interp_dict['info']['clip_lengths'] = value
+            elif key not in ['clip_lengths_original', 'clip_lengths']:
+                interp_dict['info'][key] = value
+
+        print(f"Saving interpolated data to: {out_interp}")
+        if 'info' in interp_dict and 'clip_lengths' in interp_dict['info']:
             print(f"  Clip lengths (interpolated, unpadded): {interp_dict['info']['clip_lengths']}")
-    ioh5.save(output_file_interp, interp_dict)
-    print(f"✓ Saved successfully")
-    print(f"  File size: {Path(output_file_interp).stat().st_size / 1024 / 1024:.2f} MB")
-    print()
+        ioh5.save(out_interp, interp_dict)
+        print(f"✓ Saved successfully")
+        print(f"  File size: {Path(out_interp).stat().st_size / 1024 / 1024:.2f} MB")
+        print()
+
+    # Run save for each partition (one path for single-animal, three for multianimal)
+    for bucket, sub in partitions:
+        if bucket is None:
+            base_out = output_file
+            interp_out = output_file_interp
+        else:
+            stem = output_file.name[:-3] if output_file.name.endswith('.h5') else output_file.name
+            base_out = output_file.with_name(f"{stem}_{bucket}.h5")
+            interp_out = output_file.with_name(f"{stem}_{bucket}_interpolated.h5")
+        _save_one(sub, base_out, interp_out)
 
     cfg_temp = cfg.copy()
     cfg_temp.paths = convert_dict_to_string(cfg_temp.paths)

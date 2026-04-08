@@ -196,17 +196,20 @@ class PipelineRunner:
 
         return success
 
-    def step_pair(self) -> bool:
-        """Optional step: pair per-fly preprocessed bouts for dual-fly datasets.
+    def step_split_valid(self) -> bool:
+        """Optional step: split per-fly preprocessed bouts into validity buckets.
 
-        No-op for single-fly datasets (the wrapper script skips folders that
-        lack fly0/fly1 pairs).
+        Reads the existing fly0/fly1 preprocessed h5s and writes per-bucket
+        STAC inputs (_fly0_only / _fly1_only / _both). No-op for single-fly
+        datasets — the wrapper script skips folders without fly0/fly1 pairs,
+        and folders that yield zero valid bouts are reported but do not fail
+        the pipeline.
         """
-        self.print_step_header(1, 5, "PAIR DUAL-FLY BOUTS")
+        self.print_step_header(1, 5, "SPLIT VALID BOUTS")
 
         cmd = [
             sys.executable,
-            str(self.scripts_dir / "batch_pair_bouts.py"),
+            str(self.scripts_dir / "batch_split_valid_bouts.py"),
             f"--dataset={self.dataset}",
             f"--anatomy={self.anatomy}",
             f"--base-dir={self.base_dir}",
@@ -216,12 +219,12 @@ class PipelineRunner:
         if self.dry_run:
             cmd.append("--dry-run")
 
-        success, message = self.run_command(cmd, "pair", timeout=1800)
-        self.step_results["pair"] = (success, message)
+        success, message = self.run_command(cmd, "split_valid", timeout=1800)
+        self.step_results["split_valid"] = (success, message)
         if success:
-            self.log(f"Pairing complete: {message}")
+            self.log(f"Split complete: {message}")
         else:
-            self.log(f"Pairing failed: {message}")
+            self.log(f"Split failed: {message}")
         return success
 
     def step_2_stac(self) -> bool:
@@ -323,10 +326,10 @@ class PipelineRunner:
             True if all steps succeeded
         """
         if steps is None:
-            steps = ['preprocess', 'pair', 'stac', 'postprocess', 'combine']
+            steps = ['preprocess', 'split_valid', 'stac', 'postprocess', 'combine']
 
         # Validate steps
-        valid_steps = {'preprocess', 'pair', 'stac', 'postprocess', 'combine'}
+        valid_steps = {'preprocess', 'split_valid', 'stac', 'postprocess', 'combine'}
         invalid = set(steps) - valid_steps
         if invalid:
             self.log(f"Invalid steps: {invalid}")
@@ -361,7 +364,7 @@ class PipelineRunner:
         # Run steps in order
         step_map = {
             'preprocess': self.step_1_preprocess,
-            'pair': self.step_pair,
+            'split_valid': self.step_split_valid,
             'stac': self.step_2_stac,
             'postprocess': self.step_3_postprocess,
             'combine': self.step_4_combine,
