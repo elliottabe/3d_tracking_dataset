@@ -673,7 +673,7 @@ def concatenate_bout_dicts(
     bout_counter = 0
     
     # Track concatenated info fields (including fly_ids)
-    concatenated_fields = ['clip_lengths', 'clip_lengths_original', 'clip_lengths_interp_unpadded', 'fly_ids', 'source_flies', 'bucket']
+    concatenated_fields = ['clip_lengths', 'clip_lengths_original', 'clip_lengths_interp_unpadded', 'fly_ids', 'source_flies', 'start_frames', 'end_frames', 'bucket']
     
     for file_idx, file_path in enumerate(file_paths):
         file_path = Path(file_path)

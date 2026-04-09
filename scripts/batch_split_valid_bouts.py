@@ -95,6 +95,10 @@ def classify_and_split(
     fly_ids0 = list(info0.get("fly_ids", []))
     fly_ids1 = list(info1.get("fly_ids", []))
     clip_lengths0 = list(info0.get("clip_lengths", []))
+    start_frames0 = list(info0.get("start_frames", []))
+    end_frames0 = list(info0.get("end_frames", []))
+    start_frames1 = list(info1.get("start_frames", []))
+    end_frames1 = list(info1.get("end_frames", []))
 
     def _idx(keys, k):
         try:
@@ -104,7 +108,8 @@ def classify_and_split(
 
     bucket_data: dict[str, dict] = {b: {} for b in BUCKETS}
     bucket_info: dict[str, dict] = {
-        b: {"fly_ids": [], "source_flies": [], "clip_lengths": [], "bucket": []}
+        b: {"fly_ids": [], "source_flies": [], "clip_lengths": [],
+            "start_frames": [], "end_frames": [], "bucket": []}
         for b in BUCKETS
     }
     for b in BUCKETS:
@@ -139,8 +144,12 @@ def classify_and_split(
         i0 = _idx(bout_keys0, bk)
         T = int(clip_lengths0[i0]) if i0 is not None and i0 < len(clip_lengths0) else int(v0.size)
         base_id0 = fly_ids0[i0] if i0 is not None and i0 < len(fly_ids0) else f"{bk}_fly0"
+        sf0 = int(start_frames0[i0]) if i0 is not None and i0 < len(start_frames0) else -1
+        ef0 = int(end_frames0[i0]) if i0 is not None and i0 < len(end_frames0) else -1
         i1 = _idx(bout_keys1, bk)
         base_id1 = fly_ids1[i1] if i1 is not None and i1 < len(fly_ids1) else f"{bk}_fly1"
+        sf1 = int(start_frames1[i1]) if i1 is not None and i1 < len(start_frames1) else -1
+        ef1 = int(end_frames1[i1]) if i1 is not None and i1 < len(end_frames1) else -1
 
         entry = {
             "src_bout_key": bk,
@@ -161,13 +170,15 @@ def classify_and_split(
 
             bucket_data["both"][new_key0] = _copy_bout(b0)
             bucket_data["both"][new_key1] = _copy_bout(b1)
-            for new_key, base, src_fly in (
-                (new_key0, base_id0, "fly0"),
-                (new_key1, base_id1, "fly1"),
+            for new_key, base, src_fly, sf, ef in (
+                (new_key0, base_id0, "fly0", sf0, ef0),
+                (new_key1, base_id1, "fly1", sf1, ef1),
             ):
                 bucket_info["both"]["fly_ids"].append(str(base))
                 bucket_info["both"]["source_flies"].append(src_fly)
                 bucket_info["both"]["clip_lengths"].append(T)
+                bucket_info["both"]["start_frames"].append(int(sf))
+                bucket_info["both"]["end_frames"].append(int(ef))
                 bucket_info["both"]["bucket"].append("both")
             entry["bucket"] = "both"
             entry["out_keys"] = {"fly0": new_key0, "fly1": new_key1}
@@ -179,6 +190,8 @@ def classify_and_split(
                 bucket_info["fly0_only"]["fly_ids"].append(str(base_id0))
                 bucket_info["fly0_only"]["source_flies"].append("fly0")
                 bucket_info["fly0_only"]["clip_lengths"].append(T)
+                bucket_info["fly0_only"]["start_frames"].append(int(sf0))
+                bucket_info["fly0_only"]["end_frames"].append(int(ef0))
                 bucket_info["fly0_only"]["bucket"].append("fly0_only")
                 entry["bucket"] = "fly0_only"
                 entry["out_keys"] = {"fly0": new_key}
@@ -189,6 +202,8 @@ def classify_and_split(
                 bucket_info["fly1_only"]["fly_ids"].append(str(base_id1))
                 bucket_info["fly1_only"]["source_flies"].append("fly1")
                 bucket_info["fly1_only"]["clip_lengths"].append(T)
+                bucket_info["fly1_only"]["start_frames"].append(int(sf1))
+                bucket_info["fly1_only"]["end_frames"].append(int(ef1))
                 bucket_info["fly1_only"]["bucket"].append("fly1_only")
                 # If neither solo passed, bucket stays None.
                 if entry["bucket"] is None:

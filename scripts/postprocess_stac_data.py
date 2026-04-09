@@ -102,12 +102,20 @@ def load_clip_lengths(data_path: Path, filename: str) -> tuple:
         buckets = list(data_dict['info']['bucket'])
         print(f"✓ Found bucket tags: {buckets}")
 
+    # Extract original raw-video frame ranges per bout
+    start_frames = None
+    end_frames = None
+    if 'info' in data_dict and 'start_frames' in data_dict['info']:
+        start_frames = [int(x) for x in data_dict['info']['start_frames']]
+    if 'info' in data_dict and 'end_frames' in data_dict['info']:
+        end_frames = [int(x) for x in data_dict['info']['end_frames']]
+
     print(f"✓ Found {len(clip_lengths)} bouts")
     print(f"  Clip lengths: {clip_lengths}")
     print(f"  Total frames: {sum(clip_lengths)}")
     print()
 
-    return clip_lengths, fly_ids, source_flies, buckets
+    return clip_lengths, fly_ids, source_flies, buckets, start_frames, end_frames
 
 
 def load_stac_output(stac_path: Path):
@@ -656,7 +664,7 @@ def main(cfg: DictConfig):
     print()
     
     # Step 1: Load clip lengths and fly_ids
-    clip_lengths, fly_ids, source_flies, buckets = load_clip_lengths(data_path, cfg.postprocessing.preprocessed_file)
+    clip_lengths, fly_ids, source_flies, buckets, start_frames, end_frames = load_clip_lengths(data_path, cfg.postprocessing.preprocessed_file)
     
     # Step 2: Load STAC output
     cfg_d, d, stac_data = load_stac_output(stac_path)
@@ -678,6 +686,10 @@ def main(cfg: DictConfig):
         bout_dict['info']['source_flies'] = source_flies
     if buckets is not None:
         bout_dict['info']['bucket'] = buckets
+    if start_frames is not None:
+        bout_dict['info']['start_frames'] = start_frames
+    if end_frames is not None:
+        bout_dict['info']['end_frames'] = end_frames
 
     # if cfg.postprocessing.verbose:
     #     print()

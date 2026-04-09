@@ -75,6 +75,8 @@ def merge_fly_preprocessed(fly_files: list[Path], out_path: Path,
         'clip_lengths': [],
         'fly_ids': [],
         'source_flies': [],
+        'start_frames': [],
+        'end_frames': [],
         'bucket': [],
     }
     bout_counter = 0
@@ -106,6 +108,8 @@ def merge_fly_preprocessed(fly_files: list[Path], out_path: Path,
         sub_fly_ids = list(sub_info.get('fly_ids', []))
         sub_source = list(sub_info.get('source_flies', []))
         sub_clip = list(sub_info.get('clip_lengths', []))
+        sub_start = list(sub_info.get('start_frames', []))
+        sub_end = list(sub_info.get('end_frames', []))
         sub_bucket = list(sub_info.get('bucket', []))
         file_bucket = _bucket_for_file(fp)
 
@@ -128,6 +132,8 @@ def merge_fly_preprocessed(fly_files: list[Path], out_path: Path,
                 info['clip_lengths'].append(int(d[bk]['keypoints'].shape[0]))
             info['fly_ids'].append(sub_fly_ids[i] if i < len(sub_fly_ids) else '')
             info['source_flies'].append(sub_source[i] if i < len(sub_source) else '')
+            info['start_frames'].append(int(sub_start[i]) if i < len(sub_start) else -1)
+            info['end_frames'].append(int(sub_end[i]) if i < len(sub_end) else -1)
             info['bucket'].append(sub_bucket[i] if i < len(sub_bucket) else file_bucket)
             bout_counter += 1
 

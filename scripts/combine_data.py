@@ -123,7 +123,8 @@ def main(cfg: DictConfig):
         out['info'] = {}
         concat_fields = {'clip_lengths', 'clip_lengths_original',
                          'clip_lengths_interp_unpadded', 'fly_ids',
-                         'source_flies', 'bucket'}
+                         'source_flies', 'start_frames', 'end_frames',
+                         'bucket'}
         for k, v in src.get('info', {}).items():
             if k in concat_fields:
                 try:
