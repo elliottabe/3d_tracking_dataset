@@ -72,6 +72,7 @@ def build_script(
     paths: str,
     steps: str,
     extra: str,
+    requeue_line: str = "",
     dependency_line: str = "",
 ) -> str:
     return f"""#!/bin/bash
@@ -90,6 +91,7 @@ def build_script(
 #SBATCH --mail-user=eabe@uw.edu
 {nodelist_line}
 #SBATCH --exclude=g[3107,3115,3109]
+{requeue_line}
 {dependency_line}
 module load cuda/12.9.1
 set -x
@@ -124,7 +126,8 @@ def build_combine_script(
     anatomy: str,
     paths: str,
     base_dir: Path,
-    dependency_line: str,
+    requeue_line: str = "",
+    dependency_line: str = "",
 ) -> str:
     return f"""#!/bin/bash
 #SBATCH --job-name={job_name}
@@ -142,6 +145,7 @@ def build_combine_script(
 #SBATCH --mail-user=eabe@uw.edu
 {nodelist_line}
 #SBATCH --exclude=g[3107,3115,3109]
+{requeue_line}
 {dependency_line}
 module load cuda/12.9.1
 set -x
@@ -169,7 +173,7 @@ def main():
     p.add_argument('--paths', default='hyak', help='Paths config (hyak, workstation, ...)')
     p.add_argument('--base-dir', type=Path, default=None,
                    help='Dataset root to search (default: DATA_ROOT/<dataset>)')
-    p.add_argument('--steps', default='preprocess,pair,stac,postprocess',
+    p.add_argument('--steps', default='preprocess,split_valid,stac,postprocess',
                    help='Per-folder steps to run (combine is submitted as a separate job)')
     p.add_argument('--no-combine', action='store_true',
                    help='Do not submit a final combine job after the per-folder jobs')
@@ -183,7 +187,17 @@ def main():
                    help='Extra args appended to run_full_pipeline.py (e.g. --force)')
     p.add_argument('--dry-run', action='store_true',
                    help='Print scripts and folder list without submitting')
+    p.add_argument('--requeue', dest='requeue', action='store_true', default=None,
+                   help='Add #SBATCH --requeue so preempted jobs are automatically '
+                        'requeued. Default: on for ckpt* partitions, off otherwise.')
+    p.add_argument('--no-requeue', dest='requeue', action='store_false',
+                   help='Disable automatic requeue on preemption.')
     args = p.parse_args()
+
+    # Default: requeue on for preemptible ckpt* partitions.
+    if args.requeue is None:
+        args.requeue = args.partition.startswith('ckpt')
+    requeue_line = "#SBATCH --requeue" if args.requeue else ""
 
     base_dir = args.base_dir if args.base_dir is not None else DATA_ROOT / args.dataset
     if not base_dir.exists():
@@ -192,9 +206,9 @@ def main():
 
     folders = find_folders(base_dir, args.dataset)
     if not folders:
-        print(f"No Predictions_3D_* folders with {args.dataset}_bouts_summary.csv "
-              f"under {base_dir}", file=sys.stderr)
-        sys.exit(1)
+        print(f"No Predictions_3D_* folders with {args.dataset}_bouts*summary.csv "
+              f"under {base_dir} — nothing to submit, skipping.")
+        return
 
     print(f"Found {len(folders)} folder(s) under {base_dir}:")
     for f in folders:
@@ -223,6 +237,7 @@ def main():
             paths=args.paths,
             steps=args.steps,
             extra=args.extra,
+            requeue_line=requeue_line,
         )
         if args.dry_run:
             print("\n--- SCRIPT (dry-run) ---")
@@ -251,6 +266,7 @@ def main():
         anatomy=args.anatomy,
         paths=args.paths,
         base_dir=base_dir,
+        requeue_line=requeue_line,
         dependency_line=dep,
     )
     cjid = slurm_submit(combine_script)
@@ -266,6 +282,7 @@ if __name__ == "__main__":
 squeue -u $USER -h -o "%i %j" | awk '/pipe_courtship|combine_courtship/ {print $1}' | xargs -r scancel
 
 python ./scripts/slurm_run.py --dataset free_walking --anatomy v1 --paths hyak --base-dir /gscratch/portia/eabe/data/Johnson_lab/free_walking/session11
+python ./scripts/slurm_run.py --dataset courtship --anatomy v1 --paths hyak --base-dir /gscratch/portia/eabe/data/Johnson_lab/courtship/04092026 --ckpt-g2
 
 
 

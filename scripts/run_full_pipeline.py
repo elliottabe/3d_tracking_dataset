@@ -296,6 +296,7 @@ class PipelineRunner:
             f"paths={self.paths_config}",
             f"dataset={self.dataset}",
             f"anatomy={self.anatomy}",
+            f"+base_dir={self.base_dir}",
         ]
 
         if self.dry_run:
@@ -473,9 +474,8 @@ Pipeline Steps:
     parser.add_argument(
         '--steps',
         type=str,
-        default='preprocess,pair,stac,postprocess,combine',
-        help='Comma-separated list of steps to run (preprocess,pair,stac,postprocess,combine). '
-             'The "pair" step is a no-op for single-fly datasets.'
+        default='preprocess,stac,postprocess,combine',
+        help='Comma-separated list of steps to run (preprocess,stac,postprocess,combine).'
     )
     parser.add_argument(
         '--force',
