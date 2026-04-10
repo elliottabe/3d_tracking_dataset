@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -237,8 +238,15 @@ def classify_and_split(
         "outputs": written,
         "bouts": index_entries,
     }
-    with open(index_path, "w") as fh:
+    # Atomic write: json.dump to a .tmp sibling, fsync, then os.replace. This
+    # keeps the manifest in lockstep with the bucket h5s — if a SLURM
+    # preemption kills us mid-write we never leave a truncated index_path.
+    tmp_index_path = index_path.with_suffix(index_path.suffix + ".tmp")
+    with open(tmp_index_path, "w") as fh:
         json.dump(manifest, fh, indent=2)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp_index_path, index_path)
     return manifest
 
 

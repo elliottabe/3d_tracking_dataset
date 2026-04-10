@@ -1102,14 +1102,15 @@ def process_bouts_batch(csv_path: Path,
             if alignment_info is not None:
                 bout_data['alignment_info'] = alignment_info
 
-            # Per-frame validity for this physical fly (paired merge happens later)
+            # Per-frame validity for this physical fly (bucketing happens later in split_valid)
             if pv_enabled:
                 bout_swap = (global_swap_state[start_idx:end_idx]
                              if global_swap_state is not None else None)
                 # Use self-fly for both arguments: this run only has the self
                 # fly's kp. compute_pair_validity's fly1 mask will mirror fly0
                 # (same array) — we keep only valid_fly0 as `valid_fly` here,
-                # and let merge_paired_bouts.py combine the two runs later.
+                # and let batch_split_valid_bouts.py combine the two per-fly
+                # runs into fly0_only / fly1_only / both buckets later.
                 pv_out = compute_pair_validity(
                     aligned_bout_kp, aligned_bout_kp, xml_node_names,
                     cfg=pv_obj, swap_state=bout_swap,

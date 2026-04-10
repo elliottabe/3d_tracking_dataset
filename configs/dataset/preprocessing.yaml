@@ -85,8 +85,12 @@ filtering:
 # are tracked. Requires filtering.identity_relink to run for the swap mask.
 pair_validity:
   enabled: false              # Enable in dataset overrides (e.g. courtship)
-  critical_kp_patterns: ['*Tarsus*', '*Claw*', '*Scutellum*', '*Scutum*']
-  ground_kp_patterns:   ['*Tarsus*', '*Claw*']
+  # fly50 skeleton uses names like T1L_TaT1/T1L_TaT3/T1L_TaTip (tarsal
+  # segments + tip) and Scutellum for the thorax. The old '*Tarsus*'/'*Claw*'
+  # patterns matched nothing on this skeleton, so every frame passed the
+  # ground fallback and failed the critical filter on any Scutellum NaN.
+  critical_kp_patterns: ['*_TaT1', '*_TaT3', '*_TaTip', 'Scutellum']
+  ground_kp_patterns:   ['*_TaTip', '*_TaT3']
   ground_epsilon_mm: 0.05
   floor_percentile: 5.0
   swap_guard_frames: 5
