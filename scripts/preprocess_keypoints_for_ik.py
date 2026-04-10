@@ -508,6 +508,34 @@ def load_bouts_from_csv(bouts_csv_path: Path,
     return bouts
 
 
+def _build_compact_frame_map(tracking_info_path: Path, n_csv_rows: int) -> Optional[Dict[int, int]]:
+    """If the CSV is compact (bouts-mode JARVIS output), build a mapping from
+    original video frame number -> compact CSV row index.
+
+    Returns None if the CSV is sparse (legacy full-video output).
+    Detection: if tracking_info.json exists, has a 'bouts' array, and the sum
+    of bout lengths matches n_csv_rows, the CSV is compact.
+    """
+    if not tracking_info_path.exists():
+        return None
+    import json
+    with open(tracking_info_path) as f:
+        info = json.load(f)
+    bouts = info.get('bouts')
+    if not bouts:
+        return None
+    compact_total = sum(b['end'] - b['start'] + 1 for b in bouts)
+    if compact_total != n_csv_rows:
+        return None  # sparse format, no remapping needed
+    frame_map = {}
+    row = 0
+    for b in bouts:
+        for frame in range(b['start'], b['end'] + 1):
+            frame_map[frame] = row
+            row += 1
+    return frame_map
+
+
 def load_concatenated_bouts(csv_path: Path, 
                             bouts: List[Dict],
                             csv_kp_names: List[str],
@@ -538,31 +566,52 @@ def load_concatenated_bouts(csv_path: Path,
     # Get CSV size for validation
     n_frames_available = len(kp_data)
     print(f"CSV contains {n_frames_available} frames")
-    
+
+    # Detect compact (bouts-mode) CSV and build frame remapping if needed
+    tracking_info_path = csv_path.parent / "tracking_info.json"
+    compact_map = _build_compact_frame_map(tracking_info_path, n_frames_available)
+    if compact_map is not None:
+        print(f"  Detected compact (bouts-mode) CSV — remapping {len(compact_map)} frames")
+
     # Create reordered column list (from reorder_csv_to_skeleton)
     reordered_cols = [''] * len(filtered_node_names) * 3
     for csv_name, new_idx in csv_to_filtered_idx.items():
         reordered_cols[new_idx * 3] = f"{csv_name}_x"
         reordered_cols[new_idx * 3 + 1] = f"{csv_name}_y"
         reordered_cols[new_idx * 3 + 2] = f"{csv_name}_z"
-    
+
     # Extract and concatenate bout data
     bout_arrays = []
     clip_info = []
     current_idx = 0
     skipped_bouts = []
-    
+
     for bout in bouts:
-        # Validate frame indices are within CSV bounds
-        if bout['start_frame'] >= n_frames_available or bout['end_frame'] > n_frames_available:
-            warning_msg = (f"⚠️ Skipping bout {bout['bout_idx']}: "
-                          f"frames {bout['start_frame']}-{bout['end_frame']} "
-                          f"out of bounds (CSV has {n_frames_available} frames)")
-            print(warning_msg)
-            skipped_bouts.append((bout['bout_idx'], warning_msg))
-            continue
-        
-        frame_indices = np.arange(bout['start_frame'], bout['end_frame'])
+        if compact_map is not None:
+            # Map original video frames -> compact CSV rows
+            rows = []
+            for f in range(bout['start_frame'], bout['end_frame']):
+                r = compact_map.get(f)
+                if r is not None:
+                    rows.append(r)
+            if not rows:
+                warning_msg = (f"Skipping bout {bout['bout_idx']}: "
+                              f"frames {bout['start_frame']}-{bout['end_frame']} "
+                              f"not found in compact CSV frame map")
+                print(warning_msg)
+                skipped_bouts.append((bout['bout_idx'], warning_msg))
+                continue
+            frame_indices = np.array(rows)
+        else:
+            # Validate frame indices are within CSV bounds
+            if bout['start_frame'] >= n_frames_available or bout['end_frame'] > n_frames_available:
+                warning_msg = (f"Skipping bout {bout['bout_idx']}: "
+                              f"frames {bout['start_frame']}-{bout['end_frame']} "
+                              f"out of bounds (CSV has {n_frames_available} frames)")
+                print(warning_msg)
+                skipped_bouts.append((bout['bout_idx'], warning_msg))
+                continue
+            frame_indices = np.arange(bout['start_frame'], bout['end_frame'])
         bout_data = kp_data.iloc[frame_indices][reordered_cols]
         bout_array = np.array(bout_data.values).reshape(-1, len(filtered_node_names), 3)
         
@@ -627,11 +676,26 @@ def load_sibling_concatenated(sibling_csv_path: Path,
         return None
 
     n_frames_available = len(df)
+
+    # Detect compact (bouts-mode) CSV
+    tracking_info_path = sibling_csv_path.parent / "tracking_info.json"
+    compact_map = _build_compact_frame_map(tracking_info_path, n_frames_available)
+
     arrays = []
     for bout in bouts:
-        if bout['start_frame'] >= n_frames_available or bout['end_frame'] > n_frames_available:
-            continue
-        frame_indices = np.arange(bout['start_frame'], bout['end_frame'])
+        if compact_map is not None:
+            rows = []
+            for f in range(bout['start_frame'], bout['end_frame']):
+                r = compact_map.get(f)
+                if r is not None:
+                    rows.append(r)
+            if not rows:
+                continue
+            frame_indices = np.array(rows)
+        else:
+            if bout['start_frame'] >= n_frames_available or bout['end_frame'] > n_frames_available:
+                continue
+            frame_indices = np.arange(bout['start_frame'], bout['end_frame'])
         sub = df.iloc[frame_indices][reordered_cols]
         arr = np.array(sub.values).reshape(-1, len(filtered_node_names), 3)
         arrays.append(arr)
