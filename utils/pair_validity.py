@@ -94,6 +94,42 @@ def _guard_dilate(mask: np.ndarray, radius: int) -> np.ndarray:
     return out
 
 
+def compute_single_fly_validity(
+    fly_kp: np.ndarray,
+    kp_names: Sequence[str],
+    cfg: Optional[PairValidityConfig] = None,
+) -> dict:
+    """Per-frame validity mask for a *single* fly (no cross-fly check).
+
+    This is the honest version of what the per-fly preprocessing stage can
+    actually compute, since at that point only one fly's keypoints are in
+    memory. The previous code wedged ``compute_pair_validity`` into this
+    spot by passing the same array twice — that produced
+    ``valid_both ≡ valid_fly0`` and a fake ``identity_valid`` mask. Use this
+    helper instead and let the real cross-fly mask be built later in
+    ``batch_split_valid_bouts.py`` after both flies are loaded.
+
+    Returns a dict with keys ``valid_fly``, ``filter_ok``, ``ground_ok``,
+    ``floor_z``, ``n_frames``.
+    """
+    if cfg is None:
+        cfg = PairValidityConfig()
+    T = fly_kp.shape[0]
+    critical_idx = _match_indices(kp_names, cfg.critical_kp_patterns)
+    ground_idx = _match_indices(kp_names, cfg.ground_kp_patterns)
+    filt = _filter_valid(fly_kp, critical_idx)
+    grd, floor = _ground_valid(
+        fly_kp, ground_idx, cfg.floor_percentile, cfg.ground_epsilon_mm
+    )
+    return dict(
+        valid_fly=filt & grd,
+        filter_ok=filt,
+        ground_ok=grd,
+        floor_z=floor,
+        n_frames=T,
+    )
+
+
 def compute_pair_validity(
     fly0_kp: np.ndarray,
     fly1_kp: np.ndarray,

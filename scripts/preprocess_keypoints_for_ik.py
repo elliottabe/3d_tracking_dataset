@@ -59,6 +59,7 @@ try:
     from utils.keypoint_filter import filter_keypoints, load_confidence_from_csv, load_confidence_concatenated
     from utils.pair_validity import (
         compute_pair_validity,
+        compute_single_fly_validity,
         pair_validity_config_from_dict,
         PairValidityConfig,
     )
@@ -869,21 +870,6 @@ def process_single_bout(csv_path: Path,
         return None
 
 
-def _filter_ok_for_bout(kp: np.ndarray, names, pv_cfg) -> np.ndarray:
-    from utils.pair_validity import _match_indices, _filter_valid
-    idx = _match_indices(names, pv_cfg.critical_kp_patterns)
-    return _filter_valid(kp, idx)
-
-
-def _ground_ok_for_bout(kp: np.ndarray, names, pv_cfg) -> np.ndarray:
-    from utils.pair_validity import _match_indices, _ground_valid
-    idx = _match_indices(names, pv_cfg.ground_kp_patterns)
-    mask, _ = _ground_valid(
-        kp, idx, pv_cfg.floor_percentile, pv_cfg.ground_epsilon_mm
-    )
-    return mask
-
-
 def process_bouts_batch(csv_path: Path,
                        skeleton_path: Path,
                        xml_path: Path,
@@ -956,11 +942,31 @@ def process_bouts_batch(csv_path: Path,
 
         # 4b. Identity relink (multi-fly) — runs on raw concatenated 3D before
         # any Procrustes alignment so the sibling fly is in the same world frame.
+        #
+        # NOTE: By default this is now DEFERRED to batch_split_valid_bouts.py,
+        # where both fly0 and fly1 per-fly h5s are simultaneously available and
+        # we can run a single joint, bout-aware relink. The legacy per-fly path
+        # discarded the sibling output and ran twice (once per CSV), causing
+        # fly0 and fly1 to disagree on which frames were swapped — see
+        # plans/concurrent-leaping-liskov.md root cause #1. Set
+        # filter_cfg.identity_relink.defer_to_batch_split = false to fall back
+        # to the old behavior.
         relink_log_summary = None
         global_swap_state = None  # (T_total,) bool from identity_relink, if it ran
+        _ir_cfg = (filter_cfg.get('identity_relink', {})
+                   if filter_cfg is not None else {})
+        _ir_enabled = bool(_ir_cfg.get('enabled', False))
+        _ir_defer = bool(_ir_cfg.get('defer_to_batch_split', True))
         if (filter_cfg is not None
                 and filter_cfg.get('enabled', False)
-                and filter_cfg.get('identity_relink', {}).get('enabled', False)):
+                and _ir_enabled
+                and _ir_defer):
+            print("\n[identity-relink] deferred to batch_split_valid_bouts.py "
+                  "(joint two-fly relink runs after both per-fly h5s exist)")
+        if (filter_cfg is not None
+                and filter_cfg.get('enabled', False)
+                and _ir_enabled
+                and not _ir_defer):
             from utils.identity_relink import relink_pair, RelinkConfig
             sibling_csv = derive_sibling_csv_path(csv_path)
             if sibling_csv is None:
@@ -1102,29 +1108,26 @@ def process_bouts_batch(csv_path: Path,
             if alignment_info is not None:
                 bout_data['alignment_info'] = alignment_info
 
-            # Per-frame validity for this physical fly (bucketing happens later in split_valid)
+            # Per-frame validity for this physical fly (bucketing + cross-fly
+            # checks happen later in batch_split_valid_bouts.py once both
+            # per-fly h5s exist). At this stage we only know one fly's kp, so
+            # we honestly compute single-fly validity (filter_ok & ground_ok)
+            # and skip the cross-fly identity check entirely. The bogus
+            # compute_pair_validity(self, self, ...) call that used to live
+            # here produced valid_both ≡ valid_fly0 and a fake identity_valid
+            # mask — see plans/concurrent-leaping-liskov.md root cause #4.
             if pv_enabled:
                 bout_swap = (global_swap_state[start_idx:end_idx]
                              if global_swap_state is not None else None)
-                # Use self-fly for both arguments: this run only has the self
-                # fly's kp. compute_pair_validity's fly1 mask will mirror fly0
-                # (same array) — we keep only valid_fly0 as `valid_fly` here,
-                # and let batch_split_valid_bouts.py combine the two per-fly
-                # runs into fly0_only / fly1_only / both buckets later.
-                pv_out = compute_pair_validity(
-                    aligned_bout_kp, aligned_bout_kp, xml_node_names,
-                    cfg=pv_obj, swap_state=bout_swap,
+                pv_out = compute_single_fly_validity(
+                    aligned_bout_kp, xml_node_names, cfg=pv_obj,
                 )
-                bout_data['valid_fly'] = pv_out['valid_fly0']
-                bout_data['filter_ok'] = _filter_ok_for_bout(
-                    aligned_bout_kp, xml_node_names, pv_obj
-                )
-                bout_data['ground_ok'] = _ground_ok_for_bout(
-                    aligned_bout_kp, xml_node_names, pv_obj
-                )
+                bout_data['valid_fly'] = pv_out['valid_fly']
+                bout_data['filter_ok'] = pv_out['filter_ok']
+                bout_data['ground_ok'] = pv_out['ground_ok']
+                bout_data['floor_z'] = float(pv_out['floor_z'])
                 if bout_swap is not None:
                     bout_data['swap_state'] = bout_swap
-                bout_data['floor_z'] = float(pv_out['floor_z_fly0'])
 
             all_bouts_dict[f'bout_{bout_idx:03d}'] = bout_data
             
