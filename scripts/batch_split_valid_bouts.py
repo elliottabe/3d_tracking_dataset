@@ -316,6 +316,32 @@ def _copy_bout(src_bout: dict) -> dict:
     return {k: v for k, v in src_bout.items()}
 
 
+def _apply_mask(src_bout: dict, mask: np.ndarray) -> dict:
+    """Return a new bout dict with per-frame arrays sliced by ``mask``.
+
+    This drops every frame where ``mask`` is False, so the resulting bout
+    contains only the frames where that fly's tracking was trusted. Any value
+    whose first axis matches ``T = mask.size`` is treated as per-frame and
+    sliced; everything else (scalars, nested dicts like ``alignment_info``,
+    kp_names, skeleton_edges, …) is passed through unchanged.
+
+    Trimming here is what keeps NaN/untracked frames out of STAC's fit
+    window. Without it, ``batch_run_stac.merge_fly_preprocessed`` would
+    concatenate the untrimmed bouts into ``_merged.h5`` and STAC's first
+    500-frame offset optimization would see all-NaN rows and produce
+    ``Final error of nan``.
+    """
+    mask = np.asarray(mask, dtype=bool)
+    T = int(mask.size)
+    out: dict = {}
+    for k, v in src_bout.items():
+        if isinstance(v, np.ndarray) and v.ndim >= 1 and v.shape[0] == T:
+            out[k] = v[mask]
+        else:
+            out[k] = v
+    return out
+
+
 def classify_and_split(
     fly0_path: Path,
     fly1_path: Path,
@@ -446,45 +472,51 @@ def classify_and_split(
 
         if n_both >= min_paired:
             # 'both' wins — emit two entries (fly0 then fly1) so STAC sees both.
+            # Trim each bout to the cross-fly paired-valid frames so STAC never
+            # sees the untracked stretches. stored length == n_both.
             new_key0 = f"bout_{counters['both']:03d}"
             counters["both"] += 1
             new_key1 = f"bout_{counters['both']:03d}"
             counters["both"] += 1
 
-            bucket_data["both"][new_key0] = _copy_bout(b0)
-            bucket_data["both"][new_key1] = _copy_bout(b1)
+            bucket_data["both"][new_key0] = _apply_mask(b0, v_both)
+            bucket_data["both"][new_key1] = _apply_mask(b1, v_both)
             for new_key, base, src_fly, sf, ef in (
                 (new_key0, base_id0, "fly0", sf0, ef0),
                 (new_key1, base_id1, "fly1", sf1, ef1),
             ):
                 bucket_info["both"]["fly_ids"].append(str(base))
                 bucket_info["both"]["source_flies"].append(src_fly)
-                bucket_info["both"]["clip_lengths"].append(T)
+                bucket_info["both"]["clip_lengths"].append(n_both)
                 bucket_info["both"]["start_frames"].append(int(sf))
                 bucket_info["both"]["end_frames"].append(int(ef))
                 bucket_info["both"]["bucket"].append("both")
             entry["bucket"] = "both"
             entry["out_keys"] = {"fly0": new_key0, "fly1": new_key1}
+            entry["n_stored"] = {"fly0": n_both, "fly1": n_both}
         else:
             if n0 >= min_solo:
+                # fly0_only: trim to frames where fly0 was valid; stored len = n0
                 new_key = f"bout_{counters['fly0_only']:03d}"
                 counters["fly0_only"] += 1
-                bucket_data["fly0_only"][new_key] = _copy_bout(b0)
+                bucket_data["fly0_only"][new_key] = _apply_mask(b0, v0)
                 bucket_info["fly0_only"]["fly_ids"].append(str(base_id0))
                 bucket_info["fly0_only"]["source_flies"].append("fly0")
-                bucket_info["fly0_only"]["clip_lengths"].append(T)
+                bucket_info["fly0_only"]["clip_lengths"].append(n0)
                 bucket_info["fly0_only"]["start_frames"].append(int(sf0))
                 bucket_info["fly0_only"]["end_frames"].append(int(ef0))
                 bucket_info["fly0_only"]["bucket"].append("fly0_only")
                 entry["bucket"] = "fly0_only"
                 entry["out_keys"] = {"fly0": new_key}
+                entry["n_stored"] = {"fly0": n0}
             if n1 >= min_solo:
+                # fly1_only: trim to frames where fly1 was valid; stored len = n1
                 new_key = f"bout_{counters['fly1_only']:03d}"
                 counters["fly1_only"] += 1
-                bucket_data["fly1_only"][new_key] = _copy_bout(b1)
+                bucket_data["fly1_only"][new_key] = _apply_mask(b1, v1)
                 bucket_info["fly1_only"]["fly_ids"].append(str(base_id1))
                 bucket_info["fly1_only"]["source_flies"].append("fly1")
-                bucket_info["fly1_only"]["clip_lengths"].append(T)
+                bucket_info["fly1_only"]["clip_lengths"].append(n1)
                 bucket_info["fly1_only"]["start_frames"].append(int(sf1))
                 bucket_info["fly1_only"]["end_frames"].append(int(ef1))
                 bucket_info["fly1_only"]["bucket"].append("fly1_only")
@@ -492,9 +524,11 @@ def classify_and_split(
                 if entry["bucket"] is None:
                     entry["bucket"] = "fly1_only"
                     entry["out_keys"] = {"fly1": new_key}
+                    entry["n_stored"] = {"fly1": n1}
                 elif entry["bucket"] == "fly0_only":
                     entry["bucket"] = "fly0_only+fly1_only"
                     entry["out_keys"]["fly1"] = new_key
+                    entry.setdefault("n_stored", {})["fly1"] = n1
 
         index_entries.append(entry)
 
