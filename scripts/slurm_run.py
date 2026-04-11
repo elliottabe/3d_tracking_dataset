@@ -97,7 +97,7 @@ module load cuda/12.9.1
 set -x
 source ~/.bashrc
 nvidia-smi
-conda activate {conda_env}
+micromamba activate {conda_env}
 unset LD_LIBRARY_PATH
 echo "Node: $SLURMD_NODENAME"
 echo "Folder: {folder}"

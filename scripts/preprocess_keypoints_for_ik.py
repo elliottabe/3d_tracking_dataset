@@ -436,10 +436,10 @@ def apply_procrustes_alignment(kp_array: np.ndarray,
     
     print(f"Scale factor applied: {alignment_info['scales']:.4f}")
     
-    # Check scaling quality
-    orig_center = np.mean(kp_array, axis=(0, 1))
-    scaled_center = np.mean(aligned_kp, axis=(0, 1))
-    data_span = np.max(aligned_kp[0], axis=0) - np.min(aligned_kp[0], axis=0)
+    # Check scaling quality (nan-aware: kp_array/aligned_kp contain nans from untracked keypoints)
+    orig_center = np.nanmean(kp_array, axis=(0, 1))
+    scaled_center = np.nanmean(aligned_kp, axis=(0, 1))
+    data_span = np.nanmax(aligned_kp[0], axis=0) - np.nanmin(aligned_kp[0], axis=0)
     scale_ratio = data_span / ref_span
     print(f"Original data center: {orig_center}")
     print(f"Scaled data center: {scaled_center} (should match original)")
