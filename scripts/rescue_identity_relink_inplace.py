@@ -157,9 +157,19 @@ def _resolve_kp_names(d: dict) -> List[str]:
     raise KeyError("Could not locate kp_names in the H5 (looked under info and bouts)")
 
 
-def _make_pv_cfg(d: dict) -> PairValidityConfig:
+def _make_pv_cfg(
+    d: dict,
+    min_pair_separation_mm: float | None = None,
+    colocation_centroid_kp: str | None = None,
+) -> PairValidityConfig:
     """Build a PairValidityConfig from the info echo if present, else
-    default."""
+    default.
+
+    CLI overrides (``min_pair_separation_mm`` / ``colocation_centroid_kp``)
+    take precedence over the echoed values so the user can rescue an old
+    combined h5 whose ``info['pair_validity']`` was written before the
+    identity-collapse detector was introduced.
+    """
     pv_info = (d.get("info", {}) or {}).get("pair_validity", {}) or {}
     kwargs = {}
     for k in (
@@ -168,6 +178,8 @@ def _make_pv_cfg(d: dict) -> PairValidityConfig:
         "swap_guard_frames",
         "min_paired_frames",
         "min_solo_frames",
+        "min_pair_separation_mm",
+        "colocation_centroid_kp",
     ):
         if k in pv_info:
             kwargs[k] = pv_info[k]
@@ -175,6 +187,10 @@ def _make_pv_cfg(d: dict) -> PairValidityConfig:
         kwargs["critical_kp_patterns"] = tuple(pv_info["critical_kp_patterns"])
     if "ground_kp_patterns" in pv_info:
         kwargs["ground_kp_patterns"] = tuple(pv_info["ground_kp_patterns"])
+    if min_pair_separation_mm is not None:
+        kwargs["min_pair_separation_mm"] = float(min_pair_separation_mm)
+    if colocation_centroid_kp is not None:
+        kwargs["colocation_centroid_kp"] = str(colocation_centroid_kp)
     return PairValidityConfig(**kwargs)
 
 
@@ -218,11 +234,23 @@ def rescue_relink_both_bucket(
     in_path: Path,
     out_path: Path,
     cfg: RelinkConfig,
+    min_pair_separation_mm: float | None = None,
+    colocation_centroid_kp: str | None = None,
 ) -> dict:
     """Run joint per-bout relink + real pair_validity on a combined bouts H5.
 
     See the module docstring for the why and the algorithm. Returns a summary
     dict suitable for printing or saving alongside the rescued H5.
+
+    Args:
+        min_pair_separation_mm: CLI override for
+            ``PairValidityConfig.min_pair_separation_mm``. When > 0, frames
+            where the two flies' centroid keypoints are closer than this
+            threshold are marked invalid for BOTH flies — this catches the
+            identity-collapse failure mode where the tracker drops two
+            tracks onto the same physical animal.
+        colocation_centroid_kp: CLI override for the centroid keypoint name
+            used by the co-location detector.
     """
     print(f"\nLoading: {in_path}")
     d = ioh5.load(str(in_path), enable_jax=False)
@@ -237,7 +265,11 @@ def rescue_relink_both_bucket(
     pairs = _pair_bouts(bout_keys, info)
     print(f"  identified {len(pairs)} fly0/fly1 pairs")
 
-    pv_cfg = _make_pv_cfg(d)
+    pv_cfg = _make_pv_cfg(
+        d,
+        min_pair_separation_mm=min_pair_separation_mm,
+        colocation_centroid_kp=colocation_centroid_kp,
+    )
     print(f"  pair_validity cfg: {pv_cfg}")
 
     n_pairs_with_swap = 0
@@ -245,6 +277,8 @@ def rescue_relink_both_bucket(
     total_frames = 0
     swapped_frames = 0
     swap_segments = 0
+    colocated_frames = 0
+    n_pairs_with_colocation = 0
     swapped_keys_per_pair: Dict[str, Sequence[str]] = {}
 
     for k0, k1 in pairs:
@@ -307,6 +341,17 @@ def rescue_relink_both_bucket(
         b1["valid_fly0"] = pv_out["valid_fly0"]
         b1["valid_fly1"] = pv_out["valid_fly1"]
         b1["valid_both"] = pv_out["valid_both"]
+        # Persist the collapse mask for downstream diagnostics / re-runs so
+        # the rescue is idempotent and the notebook can plot it alongside
+        # the wing diagnostics without recomputing.
+        pair_colocated = pv_out.get("pair_colocated")
+        if pair_colocated is not None:
+            b0["pair_colocated"] = pair_colocated
+            b1["pair_colocated"] = pair_colocated
+            n_coloc = int(pair_colocated.sum())
+            colocated_frames += n_coloc
+            if n_coloc > 0:
+                n_pairs_with_colocation += 1
 
         total_frames += int(swap_state.shape[0])
         swapped_frames += int(swap_state.sum())
@@ -324,6 +369,11 @@ def rescue_relink_both_bucket(
         swapped_frames=int(swapped_frames),
         fraction_swapped=(swapped_frames / total_frames) if total_frames else 0.0,
         n_swap_segments=int(swap_segments),
+        colocated_frames=int(colocated_frames),
+        n_pairs_with_colocation=int(n_pairs_with_colocation),
+        fraction_colocated=(colocated_frames / total_frames) if total_frames else 0.0,
+        min_pair_separation_mm=float(pv_cfg.min_pair_separation_mm),
+        colocation_centroid_kp=str(pv_cfg.colocation_centroid_kp),
         relink_cfg=dict(
             swap_ratio=cfg.swap_ratio,
             bl_tube_factor=cfg.bl_tube_factor,
@@ -386,6 +436,27 @@ def main(argv: List[str] | None = None) -> int:
     parser.add_argument("--velocity-alpha", type=float, default=0.5)
     parser.add_argument("--body-length-alpha", type=float, default=0.05)
     parser.add_argument("--body-length-weight", type=float, default=0.5)
+    # Identity-collapse detector. Overrides whatever value is echoed in the
+    # input h5's info['pair_validity']. Pass None (omit the flag) to defer
+    # to the echoed config.
+    parser.add_argument(
+        "--min-pair-separation-mm",
+        type=float,
+        default=None,
+        help="Inter-fly centroid distance (mm) below which frames are marked "
+             "invalid for both flies. Rescues identity-collapse bouts where "
+             "the tracker dropped two tracks onto the same animal. "
+             "Overrides info['pair_validity']['min_pair_separation_mm']. "
+             "Recommended: 1.0 for Drosophila courtship.",
+    )
+    parser.add_argument(
+        "--colocation-centroid-kp",
+        type=str,
+        default=None,
+        help="Keypoint name used by the co-location detector as each fly's "
+             "centroid. Overrides info['pair_validity']['colocation_centroid_kp']. "
+             "Default: 'Scutellum'.",
+    )
     args = parser.parse_args(argv)
 
     if args.out_path == args.in_path:
@@ -394,7 +465,13 @@ def main(argv: List[str] | None = None) -> int:
         parser.error(f"input H5 does not exist: {args.in_path}")
 
     cfg = _build_relink_cfg(args)
-    rescue_relink_both_bucket(args.in_path, args.out_path, cfg)
+    rescue_relink_both_bucket(
+        args.in_path,
+        args.out_path,
+        cfg,
+        min_pair_separation_mm=args.min_pair_separation_mm,
+        colocation_centroid_kp=args.colocation_centroid_kp,
+    )
     return 0
 
 

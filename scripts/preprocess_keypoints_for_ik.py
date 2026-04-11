@@ -777,18 +777,22 @@ def apply_keypoint_filtering(
     confidence: Optional[np.ndarray] = None,
     fig_dir=None,
     bout_name: str = "bout",
-) -> Tuple[np.ndarray, Dict]:
+) -> Tuple[np.ndarray, Dict, np.ndarray]:
     """Apply keypoint filtering pipeline if enabled in config.
 
     Returns:
-        filtered_kp: (T, N, 3) cleaned array
-        report: per-step summary dict (empty if filtering disabled)
+        filtered_kp:   (T, N, 3) cleaned array
+        report:        per-step summary dict (empty if filtering disabled)
+        edge_nan_mask: (T, N) bool — True on frame-keypoints that were in a
+            leading/trailing NaN run in the raw input (phantom after any
+            bounded extrapolation). All-False if filtering is disabled.
     """
+    T, N = kp_array.shape[:2]
     if not filter_cfg.get('enabled', False):
         print("Keypoint filtering: DISABLED")
-        return kp_array, {}
+        return kp_array, {}, np.zeros((T, N), dtype=bool)
 
-    filtered_kp, report = filter_keypoints(
+    filtered_kp, report, edge_nan_mask = filter_keypoints(
         kp_array=kp_array,
         confidence=confidence,
         skeleton_edges=xml_edges,
@@ -797,7 +801,7 @@ def apply_keypoint_filtering(
         bout_name=bout_name,
         kp_names=xml_node_names,
     )
-    return filtered_kp, report
+    return filtered_kp, report, edge_nan_mask
 
 
 def process_single_bout(csv_path: Path,
@@ -878,7 +882,7 @@ def process_single_bout(csv_path: Path,
                 confidence, filtered_node_names, xml_node_names
             )
             fig_dir = output_dir / "filter_figures" if output_dir and filter_cfg.get('save_figures', False) else None
-            kp_array_xml, filter_report = apply_keypoint_filtering(
+            kp_array_xml, filter_report, _ = apply_keypoint_filtering(
                 kp_array_xml, xml_edges, xml_node_names, filter_cfg,
                 confidence=confidence, fig_dir=fig_dir, bout_name="single_bout",
             )
@@ -1142,10 +1146,17 @@ def process_bouts_batch(csv_path: Path,
             bout_kp = kp_array_xml[start_idx:end_idx]
             bout_orig = orig_xml[start_idx:end_idx]
 
-            # 8b. Optional: Keypoint filtering PER BOUT (before Procrustes)
+            # 8b. Optional: Keypoint filtering PER BOUT (before Procrustes).
+            # `bout_edge_nan` is a (T, N) bool mask marking frame-keypoints
+            # that were in a leading/trailing NaN run in the raw input. Short
+            # edge gaps are filled by bounded linear extrapolation (see
+            # `filter_cfg.interpolation.max_edge_extrap_frames`), longer runs
+            # stay NaN. Either way we pass the mask into pair_validity so
+            # those frames are marked untrusted downstream.
+            bout_edge_nan = np.zeros(bout_kp.shape[:2], dtype=bool)
             if filter_cfg is not None and filter_cfg.get('enabled', False):
                 bout_confidence = concat_confidence[start_idx:end_idx] if concat_confidence is not None else None
-                bout_kp, _ = apply_keypoint_filtering(
+                bout_kp, _, bout_edge_nan = apply_keypoint_filtering(
                     bout_kp, xml_edges, xml_node_names, filter_cfg,
                     confidence=bout_confidence, fig_dir=fig_dir,
                     bout_name=f"bout_{bout_idx:03d}",
@@ -1161,14 +1172,15 @@ def process_bouts_batch(csv_path: Path,
                 )
             else:
                 aligned_bout_kp = bout_kp
-            
+
             bout_data = {
                 'keypoints': aligned_bout_kp,
                 'orig_keypoints': bout_orig,
                 'kp_names': xml_node_names,
                 'skeleton_edges': xml_edges,
+                'edge_nan': bout_edge_nan,
             }
-            
+
             if alignment_info is not None:
                 bout_data['alignment_info'] = alignment_info
 
@@ -1185,6 +1197,7 @@ def process_bouts_batch(csv_path: Path,
                              if global_swap_state is not None else None)
                 pv_out = compute_single_fly_validity(
                     aligned_bout_kp, xml_node_names, cfg=pv_obj,
+                    edge_nan_mask=bout_edge_nan,
                 )
                 bout_data['valid_fly'] = pv_out['valid_fly']
                 bout_data['filter_ok'] = pv_out['filter_ok']

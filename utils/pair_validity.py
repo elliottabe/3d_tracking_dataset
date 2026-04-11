@@ -42,6 +42,13 @@ class PairValidityConfig:
     swap_guard_frames: int = 5
     min_paired_frames: int = 30
     min_solo_frames: int = 30
+    # Identity-collapse detector. When > 0, frames where the two flies'
+    # ``colocation_centroid_kp`` are closer than this threshold are marked
+    # invalid for BOTH flies (see ``compute_colocation_mask``). 0 disables
+    # the check. For courtship, ~1.0 mm (half a Drosophila body length) is
+    # a reasonable floor.
+    min_pair_separation_mm: float = 0.0
+    colocation_centroid_kp: str = "Scutellum"
 
 
 def _match_indices(kp_names: Sequence[str], patterns: Sequence[str]) -> List[int]:
@@ -94,10 +101,62 @@ def _guard_dilate(mask: np.ndarray, radius: int) -> np.ndarray:
     return out
 
 
+def compute_colocation_mask(
+    fly0_kp: np.ndarray,
+    fly1_kp: np.ndarray,
+    kp_names: Sequence[str],
+    min_separation_mm: float,
+    centroid_kp: str = "Scutellum",
+) -> np.ndarray:
+    """Per-frame mask flagging identity-collapse frames in a paired bout.
+
+    A frame is True iff the two flies' ``centroid_kp`` positions are
+    measurable and closer than ``min_separation_mm``. The JARVIS multi-peak
+    tracker occasionally produces two output tracks that both lock onto the
+    same physical animal (e.g. when one fly is occluded); that failure mode
+    shows up as an inter-fly centroid distance that collapses to ~0.
+
+    NaN handling: frames with any NaN in either centroid are returned as
+    False — we only invalidate frames we can actually measure. Downstream
+    validity logic will still drop NaN frames via ``_filter_valid``.
+
+    Args:
+        fly0_kp, fly1_kp: (T, N, 3) keypoints in a *shared* world frame.
+            Passing egocentric arrays is useless because each fly is at the
+            origin in its own frame.
+        kp_names: ordered keypoint names (length N, shared by both flies).
+        min_separation_mm: inter-centroid distance threshold. 0 disables
+            the check and returns an all-False mask.
+        centroid_kp: keypoint name to use as the body centroid. Must be in
+            ``kp_names``. If missing, the function returns an all-False
+            mask (fail-open).
+
+    Returns:
+        (T,) bool ndarray. True on collapse frames.
+    """
+    T = fly0_kp.shape[0]
+    if min_separation_mm <= 0 or T == 0:
+        return np.zeros(T, dtype=bool)
+    if fly0_kp.shape != fly1_kp.shape:
+        return np.zeros(T, dtype=bool)
+    try:
+        idx = list(kp_names).index(centroid_kp)
+    except ValueError:
+        return np.zeros(T, dtype=bool)
+    c0 = fly0_kp[:, idx, :]
+    c1 = fly1_kp[:, idx, :]
+    diff = c0 - c1
+    with np.errstate(invalid="ignore"):
+        dist = np.linalg.norm(diff, axis=1)
+    mask = np.isfinite(dist) & (dist < float(min_separation_mm))
+    return mask
+
+
 def compute_single_fly_validity(
     fly_kp: np.ndarray,
     kp_names: Sequence[str],
     cfg: Optional[PairValidityConfig] = None,
+    edge_nan_mask: Optional[np.ndarray] = None,
 ) -> dict:
     """Per-frame validity mask for a *single* fly (no cross-fly check).
 
@@ -108,6 +167,18 @@ def compute_single_fly_validity(
     ``valid_both ≡ valid_fly0`` and a fake ``identity_valid`` mask. Use this
     helper instead and let the real cross-fly mask be built later in
     ``batch_split_valid_bouts.py`` after both flies are loaded.
+
+    Args:
+        fly_kp: (T, N, 3) keypoints. Already filtered + interpolated.
+        kp_names: ordered keypoint names (length N).
+        cfg: pair validity config.
+        edge_nan_mask: optional (T, N) bool — True on frame-keypoints that were
+            originally in a leading/trailing NaN run. Any frame with an edge
+            NaN on ANY keypoint is marked not-filter-OK (hence not-valid).
+            This handles the case where short edge gaps were filled by bounded
+            linear extrapolation: the values are finite but still phantom, so
+            the plain ``isfinite`` check in ``_filter_valid`` would otherwise
+            trust them.
 
     Returns a dict with keys ``valid_fly``, ``filter_ok``, ``ground_ok``,
     ``floor_z``, ``n_frames``.
@@ -121,6 +192,11 @@ def compute_single_fly_validity(
     grd, floor = _ground_valid(
         fly_kp, ground_idx, cfg.floor_percentile, cfg.ground_epsilon_mm
     )
+    if edge_nan_mask is not None:
+        edge_bad = np.asarray(edge_nan_mask, dtype=bool)
+        if edge_bad.shape == (T, fly_kp.shape[1]):
+            # A frame is phantom if ANY keypoint sat in an edge NaN run.
+            filt = filt & ~edge_bad.any(axis=1)
     return dict(
         valid_fly=filt & grd,
         filter_ok=filt,
@@ -136,6 +212,8 @@ def compute_pair_validity(
     kp_names: Sequence[str],
     cfg: Optional[PairValidityConfig] = None,
     swap_state: Optional[np.ndarray] = None,
+    edge_nan_mask_fly0: Optional[np.ndarray] = None,
+    edge_nan_mask_fly1: Optional[np.ndarray] = None,
 ) -> dict:
     """Compute per-frame validity masks for a paired bout.
 
@@ -152,6 +230,13 @@ def compute_pair_validity(
         keypoints passed in are assumed to already be relink-corrected, so
         only *toggle events* in this state mark uncertain frames; toggles
         are dilated by `cfg.swap_guard_frames` on each side.
+    edge_nan_mask_fly0, edge_nan_mask_fly1 : ndarray (T, N) bool, optional
+        Per-fly edge-NaN masks carried over from preprocessing. Frames where
+        ANY keypoint was in a leading/trailing NaN run (whether filled by
+        bounded extrapolation or left NaN) are marked not-valid for that fly.
+        Callers in the joint-relink pathway should pass these *after* applying
+        any swap_state-driven row exchange so the masks remain aligned with
+        the post-swap keypoints.
 
     Returns
     -------
@@ -161,6 +246,10 @@ def compute_pair_validity(
         bout_pair_class : str      'paired'|'fly0_only'|'fly1_only'|'mixed'|'empty'
         floor_z_fly0, floor_z_fly1 : float
         identity_valid : (T,) bool
+        pair_colocated : (T,) bool  — True on frames where the two flies'
+            centroid keypoints are within ``cfg.min_pair_separation_mm``
+            (identity-collapse detector; False everywhere when disabled).
+        n_colocated : int
     """
     if cfg is None:
         cfg = PairValidityConfig()
@@ -174,6 +263,21 @@ def compute_pair_validity(
 
     filt0 = _filter_valid(fly0_kp, critical_idx)
     filt1 = _filter_valid(fly1_kp, critical_idx)
+
+    def _edge_bad(mask, fly_kp):
+        if mask is None:
+            return None
+        arr = np.asarray(mask, dtype=bool)
+        if arr.shape != (T, fly_kp.shape[1]):
+            return None
+        return arr.any(axis=1)
+
+    edge_bad0 = _edge_bad(edge_nan_mask_fly0, fly0_kp)
+    edge_bad1 = _edge_bad(edge_nan_mask_fly1, fly1_kp)
+    if edge_bad0 is not None:
+        filt0 = filt0 & ~edge_bad0
+    if edge_bad1 is not None:
+        filt1 = filt1 & ~edge_bad1
 
     grd0, floor0 = _ground_valid(
         fly0_kp, ground_idx, cfg.floor_percentile, cfg.ground_epsilon_mm
@@ -199,8 +303,21 @@ def compute_pair_validity(
     else:
         identity_valid = np.ones(T, dtype=bool)
 
-    valid_fly0 = filt0 & grd0 & identity_valid
-    valid_fly1 = filt1 & grd1 & identity_valid
+    # Identity-collapse detector. When enabled (min_pair_separation_mm > 0),
+    # frames where the two flies' centroid keypoints are closer than the
+    # threshold are treated as invalid for *both* flies — we have no way to
+    # tell which track was real, so the safe policy is to drop both.
+    pair_colocated = compute_colocation_mask(
+        fly0_kp,
+        fly1_kp,
+        kp_names,
+        min_separation_mm=cfg.min_pair_separation_mm,
+        centroid_kp=cfg.colocation_centroid_kp,
+    )
+    not_colocated = ~pair_colocated
+
+    valid_fly0 = filt0 & grd0 & identity_valid & not_colocated
+    valid_fly1 = filt1 & grd1 & identity_valid & not_colocated
     valid_both = valid_fly0 & valid_fly1
 
     pair_state = (
@@ -220,6 +337,7 @@ def compute_pair_validity(
         valid_both=valid_both,
         pair_state=pair_state,
         identity_valid=identity_valid,
+        pair_colocated=pair_colocated,
         bout_pair_class=bout_pair_class,
         floor_z_fly0=floor0,
         floor_z_fly1=floor1,
@@ -227,6 +345,7 @@ def compute_pair_validity(
         n_valid_both=n_both,
         n_valid_fly0=n_fly0,
         n_valid_fly1=n_fly1,
+        n_colocated=int(pair_colocated.sum()),
     )
 
 
@@ -272,6 +391,8 @@ def pair_validity_config_from_dict(d) -> PairValidityConfig:
         swap_guard_frames=int(get("swap_guard_frames", 5)),
         min_paired_frames=int(get("min_paired_frames", 30)),
         min_solo_frames=int(get("min_solo_frames", 30)),
+        min_pair_separation_mm=float(get("min_pair_separation_mm", 0.0)),
+        colocation_centroid_kp=str(get("colocation_centroid_kp", "Scutellum")),
     )
 
 

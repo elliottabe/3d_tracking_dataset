@@ -16,7 +16,7 @@ All operations work on numpy arrays of shape (T, N, 3).
 Usage::
 
     from utils.keypoint_filter import filter_keypoints, load_confidence_from_csv
-    filtered, report = filter_keypoints(kp_array, confidence, skeleton_edges, cfg.preprocessing.filtering)
+    filtered, report, edge_nan_mask = filter_keypoints(kp_array, confidence, skeleton_edges, cfg.preprocessing.filtering)
 """
 
 import numpy as np
@@ -38,32 +38,75 @@ import matplotlib.gridspec as gridspec
 
 # ─── Internal helpers ──────────────────────────────────────────────────────────
 
-def _nan_interp_1d(vals: np.ndarray, use_spline: bool = True) -> np.ndarray:
+def _nan_interp_1d(
+    vals: np.ndarray,
+    use_spline: bool = True,
+    max_edge_extrap: int = 0,
+    edge_fit_window: int = 5,
+) -> Tuple[np.ndarray, np.ndarray]:
     """Interpolate NaN gaps in a 1-D signal. Skips if >50% of values are NaN.
 
-    Only interpolates *between* valid data points. Leading/trailing NaN edges
-    are filled with the nearest valid value (no extrapolation). Interior gaps
-    are filled with a monotone PCHIP cubic interpolant, which is C¹-smooth but
-    does not overshoot between anchor points (unlike a global cubic spline).
+    Interior gaps are filled with a monotone PCHIP cubic interpolant (C¹-smooth,
+    no overshoot between anchors). Leading/trailing NaN runs are handled with
+    bounded *linear extrapolation*: a degree-1 fit on the `edge_fit_window`
+    nearest valid points is evaluated at up to `max_edge_extrap` frames into the
+    edge run. Anything beyond that cap stays NaN and is dropped downstream by
+    `pair_validity`. This replaces the old constant-hold edge fill, which
+    produced flat tails whenever a bout had poorly-tracked trailing frames.
+
+    Args:
+        vals: (T,) 1-D signal with possible NaNs.
+        use_spline: use PCHIP cubic interpolation for interior gaps (True) or
+            plain linear interpolation (False).
+        max_edge_extrap: maximum number of leading/trailing frames to fill by
+            linear extrapolation. 0 = never extrapolate edges (leave NaN).
+        edge_fit_window: number of valid frames (nearest the edge) used to fit
+            the linear extrapolation model.
+
+    Returns:
+        out: (T,) filled signal. May still contain NaN where edge runs exceeded
+            the cap, or where the input was too sparse to interpolate safely.
+        phantom_mask: (T,) bool — True for any frame that was originally in a
+            leading/trailing NaN run, regardless of whether it was filled by
+            extrapolation. Interior NaNs that were filled by PCHIP are NOT
+            marked phantom. Used by `pair_validity.compute_single_fly_validity`
+            to mark these frames as not-trusted even when they were filled.
     """
+    T = len(vals)
+    phantom_mask = np.zeros(T, dtype=bool)
     nans = np.isnan(vals)
     if not np.any(nans):
-        return vals
-    if np.mean(~nans) < 0.5 or np.sum(~nans) < 4:
-        return vals  # too sparse — leave as NaN rather than extrapolate wildly
+        return vals, phantom_mask
 
-    x_good = np.where(~nans)[0]
+    finite_idx = np.where(~nans)[0]
+    if finite_idx.size == 0:
+        # Fully NaN column: every frame is "phantom" by construction.
+        phantom_mask[:] = True
+        return vals, phantom_mask
+
+    # Always record original edge-NaN positions as phantom, even if we later
+    # fill them by extrapolation.
+    x_min, x_max = finite_idx[0], finite_idx[-1]
+    if x_min > 0:
+        phantom_mask[:x_min] = True
+    if x_max < T - 1:
+        phantom_mask[x_max + 1:] = True
+
+    if np.mean(~nans) < 0.5 or np.sum(~nans) < 4:
+        # Too sparse — leave as NaN rather than interpolate wildly.
+        return vals, phantom_mask
+
+    x_good = finite_idx
     v_good = vals[~nans]
     x_bad = np.where(nans)[0]
     out = vals.copy()
 
     # Split NaN positions into interior (between first/last valid) and edges
-    x_min, x_max = x_good[0], x_good[-1]
     interior_mask = (x_bad >= x_min) & (x_bad <= x_max)
     x_interior = x_bad[interior_mask]
-    x_edges = x_bad[~interior_mask]
 
-    # Interpolate interior gaps (spline or linear)
+    # Interior gaps: PCHIP (or linear fallback). Always filled — these are
+    # interpolation, not extrapolation.
     if len(x_interior) > 0:
         if use_spline:
             try:
@@ -74,11 +117,39 @@ def _nan_interp_1d(vals: np.ndarray, use_spline: bool = True) -> np.ndarray:
         else:
             out[x_interior] = np.interp(x_interior, x_good, v_good)
 
-    # Fill leading/trailing edges with nearest valid value (no extrapolation)
-    if len(x_edges) > 0:
-        out[x_edges] = np.interp(x_edges, x_good, v_good)
+    # Edge gaps: bounded linear extrapolation. No more constant-hold.
+    if max_edge_extrap > 0:
+        n_good = len(x_good)
+        fit_n = min(edge_fit_window, n_good)
 
-    return out
+        # Leading edge: indices [0, x_min) — fill the `max_edge_extrap` frames
+        # closest to x_min (i.e. [x_min - n_fill, x_min)).
+        if x_min > 0:
+            n_fill = int(min(x_min, max_edge_extrap))
+            fill_idx = np.arange(x_min - n_fill, x_min)
+            if fit_n >= 2:
+                slope, intercept = np.polyfit(
+                    x_good[:fit_n].astype(float), v_good[:fit_n], 1
+                )
+                out[fill_idx] = slope * fill_idx.astype(float) + intercept
+            elif fit_n == 1:
+                out[fill_idx] = v_good[0]
+
+        # Trailing edge: indices (x_max, T) — fill the `max_edge_extrap` frames
+        # closest to x_max (i.e. [x_max + 1, x_max + 1 + n_fill)).
+        if x_max < T - 1:
+            n_trail = T - 1 - x_max
+            n_fill = int(min(n_trail, max_edge_extrap))
+            fill_idx = np.arange(x_max + 1, x_max + 1 + n_fill)
+            if fit_n >= 2:
+                slope, intercept = np.polyfit(
+                    x_good[-fit_n:].astype(float), v_good[-fit_n:], 1
+                )
+                out[fill_idx] = slope * fill_idx.astype(float) + intercept
+            elif fit_n == 1:
+                out[fill_idx] = v_good[-1]
+
+    return out, phantom_mask
 
 
 def _nan_medfilt1d(vals: np.ndarray, kernel_size: int) -> np.ndarray:
@@ -255,8 +326,11 @@ def _medfilt_interpolate(
             finite_mask = np.isfinite(vals)
 
             if np.sum(finite_mask) < medfilt_kernel:
-                # Not enough data for median filter — just interpolate gaps
-                kp_out[:, n, d] = _nan_interp_1d(vals, use_spline=use_spline)
+                # Not enough data for median filter — just interpolate interior
+                # gaps. Edges (if any) are left NaN here and handled later by
+                # `_interpolate_nan_gaps` with the real config knobs.
+                filled, _ = _nan_interp_1d(vals, use_spline=use_spline)
+                kp_out[:, n, d] = filled
                 continue
 
             # NaN-aware median filter reference
@@ -275,18 +349,11 @@ def _medfilt_interpolate(
                     vals[spike_mask] = np.nan
                     total_spikes += n_spikes
 
-            kp_out[:, n, d] = _nan_interp_1d(vals, use_spline=use_spline)
-
-    # Fill any remaining NaN gaps: linear interp for internal gaps,
-    # nearest-neighbour for leading/trailing edges.
-    for n in range(N):
-        for d in range(3):
-            vals = kp_out[:, n, d]
-            nans = np.isnan(vals)
-            if np.any(nans) and np.any(~nans):
-                valid_idx = np.where(~nans)[0]
-                vals[nans] = np.interp(np.where(nans)[0], valid_idx, vals[valid_idx])
-                kp_out[:, n, d] = vals
+            # Interior-only fill; the subsequent `_interpolate_nan_gaps` pass in
+            # `filter_keypoints` applies bounded edge extrapolation using the
+            # real config-driven limits.
+            filled, _ = _nan_interp_1d(vals, use_spline=use_spline)
+            kp_out[:, n, d] = filled
 
     if total_spikes:
         print(f"  [medfilt+interp] detected {total_spikes} coordinate-spikes "
@@ -301,49 +368,75 @@ def _medfilt_interpolate(
 def _interpolate_nan_gaps(
     kp_array: np.ndarray,
     use_spline: bool = True,
-) -> np.ndarray:
+    max_edge_extrap_frames: int = 0,
+    edge_fit_window: int = 5,
+) -> Tuple[np.ndarray, np.ndarray]:
     """
     Interpolate all NaN gaps in a (T, N, 3) keypoint array.
 
-    Per keypoint, per coordinate: spline-interpolate internal NaN gaps,
-    then linear-fill any remaining leading/trailing edge NaNs.
+    Per coordinate: PCHIP interpolate interior NaN gaps. Leading/trailing NaN
+    runs are filled by *bounded linear extrapolation* (up to
+    ``max_edge_extrap_frames`` frames of linear fit on the nearest
+    ``edge_fit_window`` valid points); any edge frames beyond that cap remain
+    NaN and are dropped downstream by pair_validity.
 
     Args:
-        kp_array:   (T, N, 3) — may contain NaN
-        use_spline: use cubic spline (True) or linear interpolation (False)
+        kp_array: (T, N, 3) — may contain NaN.
+        use_spline: cubic PCHIP (True) or linear (False) for interior gaps.
+        max_edge_extrap_frames: max frames of leading/trailing linear
+            extrapolation. 0 disables edge extrapolation entirely.
+        edge_fit_window: number of valid frames used to fit the edge linear
+            model.
+
+    Returns:
+        kp_out: (T, N, 3) filled array. May still contain NaN on frame-keypoints
+            whose edge NaN run exceeded ``max_edge_extrap_frames``.
+        edge_nan_mask: (T, N) bool — True for any (frame, keypoint) that was
+            originally in a leading/trailing NaN run on *any* of its three
+            coordinates, regardless of whether the frame was filled by
+            extrapolation. Used by
+            ``pair_validity.compute_single_fly_validity`` to mark phantom
+            frames as untrusted.
     """
     T, N, _ = kp_array.shape
-    # Reshape to (T, N*3) so we can iterate over columns without nested loops
+    # Reshape to (T, N*3) so we can iterate over columns without nested loops.
     kp_flat = kp_array.reshape(T, -1).copy()
+    phantom_flat = np.zeros(kp_flat.shape, dtype=bool)
     nan_counts = np.isnan(kp_flat).sum(axis=0)  # per-column NaN count
     total_filled = 0
 
-    # Only process columns that have NaNs
     cols_with_nans = np.where(nan_counts > 0)[0]
     for c in cols_with_nans:
         vals = kp_flat[:, c]
         n_nan_before = int(nan_counts[c])
 
-        # Primary interpolation (spline or linear)
-        kp_flat[:, c] = _nan_interp_1d(vals, use_spline=use_spline)
+        filled, phantom = _nan_interp_1d(
+            vals,
+            use_spline=use_spline,
+            max_edge_extrap=max_edge_extrap_frames,
+            edge_fit_window=edge_fit_window,
+        )
+        kp_flat[:, c] = filled
+        phantom_flat[:, c] = phantom
 
-        # Edge fill: nearest-neighbour for leading/trailing NaNs
-        vals = kp_flat[:, c]
-        nans = np.isnan(vals)
-        if np.any(nans) and np.any(~nans):
-            valid_idx = np.where(~nans)[0]
-            vals[nans] = np.interp(np.where(nans)[0], valid_idx, vals[valid_idx])
-            kp_flat[:, c] = vals
-
-        total_filled += n_nan_before - int(np.sum(np.isnan(kp_flat[:, c])))
+        total_filled += n_nan_before - int(np.sum(np.isnan(filled)))
 
     kp_out = kp_flat.reshape(T, N, 3)
+    # OR across x/y/z coords for each (T, N) — a frame-keypoint is "edge
+    # phantom" if any of its coordinates sat in an edge NaN run.
+    edge_nan_mask = np.any(phantom_flat.reshape(T, N, 3), axis=2)
+
+    n_edge_frames = int(np.any(edge_nan_mask, axis=1).sum())
     if total_filled > 0:
-        print(f"  [interpolation] filled {total_filled} NaN coordinate-values "
-              f"({'spline' if use_spline else 'linear'})")
+        msg = (f"  [interpolation] filled {total_filled} NaN coordinate-values "
+               f"({'spline' if use_spline else 'linear'}, "
+               f"edge_extrap≤{max_edge_extrap_frames})")
+        if n_edge_frames:
+            msg += f"; {n_edge_frames} frames flagged edge-phantom"
+        print(msg)
     else:
         print(f"  [interpolation] no NaN gaps to fill")
-    return kp_out
+    return kp_out, edge_nan_mask
 
 
 def _confidence_weighted_smooth(
@@ -641,7 +734,7 @@ def filter_keypoints(
     fig_dir=None,
     bout_name: str = "bout",
     kp_names: Optional[List[str]] = None,
-) -> Tuple[np.ndarray, Dict]:
+) -> Tuple[np.ndarray, Dict, np.ndarray]:
     """
     Apply the full filtering pipeline to a (T, N, 3) keypoint array.
 
@@ -653,6 +746,17 @@ def filter_keypoints(
       5. confidence-weighted smooth   (filter_cfg.confidence_smooth.enabled)
       6. savgol smoothing             (filter_cfg.savgol.enabled, default OFF)
 
+    The interpolation stage replaces the legacy constant-hold edge fill with
+    bounded linear extrapolation (controlled by
+    ``filter_cfg.interpolation.max_edge_extrap_frames`` and ``.edge_fit_window``)
+    and returns a ``(T, N)`` ``edge_nan_mask`` identifying frame-keypoints that
+    were originally in a leading/trailing NaN run. Downstream,
+    ``pair_validity.compute_single_fly_validity`` uses this mask to mark those
+    phantom frames as untrusted (``valid_fly = False``) even when they were
+    filled by extrapolation. Subsequent stages (``confidence_smooth``,
+    ``savgol``) already skip columns containing NaN, so any edge frames left
+    un-extrapolated propagate as NaN safely.
+
     Args:
         kp_array:       (T, N, 3)  raw keypoint positions (mm)
         confidence:     (T, N)     confidence scores in [0, 1], or None
@@ -663,12 +767,17 @@ def filter_keypoints(
         kp_names:       List of N keypoint names for plot axis labels.
 
     Returns:
-        kp_filtered: (T, N, 3) cleaned array
-        report:      per-step summary dict
+        kp_filtered:   (T, N, 3) cleaned array
+        report:        per-step summary dict
+        edge_nan_mask: (T, N) bool — True where a frame-keypoint was in a
+            leading/trailing NaN run in the input (phantom after any bounded
+            extrapolation). Passed to pair_validity for honest validity masks.
     """
     report: Dict = {}
     kp_raw = kp_array.astype(float)
     kp = kp_raw.copy()
+    T_raw, N_raw = kp_raw.shape[:2]
+    edge_nan_mask = np.zeros((T_raw, N_raw), dtype=bool)
     print("\n--- Keypoint Filtering ---")
 
     # Step 1: confidence masking — NaN out low-confidence frames
@@ -727,8 +836,17 @@ def filter_keypoints(
 
     # Step 4: interpolate NaN gaps (from confidence masking and/or outlier steps)
     if filter_cfg.get('interpolation', {}).get('enabled', True):
-        use_spline = filter_cfg.interpolation.get('use_spline', True)
-        kp = _interpolate_nan_gaps(kp, use_spline=use_spline)
+        interp_cfg = filter_cfg.interpolation
+        use_spline = interp_cfg.get('use_spline', True)
+        max_edge_extrap = int(interp_cfg.get('max_edge_extrap_frames', 0))
+        edge_fit_window = int(interp_cfg.get('edge_fit_window', 5))
+        kp, edge_nan_mask = _interpolate_nan_gaps(
+            kp,
+            use_spline=use_spline,
+            max_edge_extrap_frames=max_edge_extrap,
+            edge_fit_window=edge_fit_window,
+        )
+        report['edge_nan_frames'] = int(np.any(edge_nan_mask, axis=1).sum())
 
     # Step 5: confidence-weighted smoothing — blend raw + smoothed by confidence
     if filter_cfg.get('confidence_smooth', {}).get('enabled', False) and confidence is not None:
@@ -755,7 +873,7 @@ def filter_keypoints(
             print(f"  [filter viz] Warning: figure generation failed — {exc}")
             _traceback.print_exc()
 
-    return kp, report
+    return kp, report, edge_nan_mask
 
 
 def load_confidence_from_csv(

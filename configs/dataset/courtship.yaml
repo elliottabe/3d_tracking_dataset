@@ -29,3 +29,10 @@ preprocessing:
       threshold_mm: 1.5         # Tightened from 2.0 for courtship
   pair_validity:
     enabled: true
+    # Identity-collapse detector: flag frames where fly0 and fly1 Scutellum
+    # are closer than ~half a Drosophila body length (≈1 mm). The JARVIS
+    # multi-peak tracker can drop one track onto the other when one fly is
+    # occluded, producing two tracks on the same physical animal; this
+    # threshold catches the fallout without re-running tracking.
+    min_pair_separation_mm: 1.0
+    colocation_centroid_kp: Scutellum

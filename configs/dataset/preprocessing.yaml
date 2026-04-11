@@ -63,6 +63,15 @@ filtering:
   interpolation:
     enabled: true
     use_spline: true
+    # Bounded edge extrapolation to avoid the old constant-hold flat tails.
+    # When a bout has leading/trailing NaN runs (e.g. poorly-tracked frames at
+    # the ends), we fit a line to the nearest `edge_fit_window` valid points
+    # and extrapolate up to `max_edge_extrap_frames` into the edge run. Any
+    # frames beyond the cap stay NaN and are dropped by pair_validity. Set
+    # max_edge_extrap_frames=0 to disable extrapolation entirely (edges stay
+    # NaN and are invalidated).
+    max_edge_extrap_frames: 5
+    edge_fit_window: 5
 
   confidence_smooth:
     enabled: false              # OFF by default — attenuates real high-freq features (e.g. sine song)
@@ -96,3 +105,11 @@ pair_validity:
   swap_guard_frames: 5
   min_paired_frames: 30
   min_solo_frames: 30
+  # Identity-collapse detector. When > 0, frames where the two flies'
+  # `colocation_centroid_kp` positions are closer than this threshold are
+  # marked invalid for BOTH flies (neither track can be trusted when they
+  # snap onto the same physical animal). 0 disables the check. For
+  # Drosophila courtship, ~1.0 mm (half a body length) is a reasonable
+  # floor — override in the dataset config.
+  min_pair_separation_mm: 0.0
+  colocation_centroid_kp: Scutellum

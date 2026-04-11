@@ -182,6 +182,8 @@ def joint_relink_shared_bouts(
     total_frames = 0
     swapped_frames = 0
     swap_segments = 0
+    colocated_frames = 0
+    n_pairs_colocated = 0
     per_bout: dict[str, dict] = {}
 
     for bk in sorted(rl0_dict.keys()):
@@ -212,8 +214,16 @@ def joint_relink_shared_bouts(
             rl0_kp = rl0_dict[bk]
             rl1_kp = rl1_dict[bk]
 
+        # Edge-NaN masks from preprocessing follow the keypoints through
+        # the swap pass above (they are (T, N) per-frame arrays and therefore
+        # handled by _swap_rows_between). Pass them to pair_validity so any
+        # phantom frames filled by bounded linear extrapolation in
+        # keypoint_filter are still marked as not-valid here.
+        edge_nan0 = b0.get("edge_nan")
+        edge_nan1 = b1.get("edge_nan")
         pv_out = compute_pair_validity(
             rl0_kp, rl1_kp, kp_names, cfg=pv_cfg, swap_state=swap_state,
+            edge_nan_mask_fly0=edge_nan0, edge_nan_mask_fly1=edge_nan1,
         )
         for tgt in (b0, b1):
             tgt["valid_fly0"] = pv_out["valid_fly0"]
@@ -224,6 +234,12 @@ def joint_relink_shared_bouts(
         # (the bucket loop falls back to these if valid_fly0/1 are absent).
         b0["valid_fly"] = pv_out["valid_fly0"]
         b1["valid_fly"] = pv_out["valid_fly1"]
+        # Surface the identity-collapse mask so downstream consumers can
+        # plot it / filter on it without recomputing the distance.
+        pair_colocated = pv_out.get("pair_colocated")
+        if pair_colocated is not None:
+            b0["pair_colocated"] = pair_colocated
+            b1["pair_colocated"] = pair_colocated
         b0["swap_state"] = swap_state.copy()
         b1["swap_state"] = swap_state.copy()
         b0["n_swap_segments"] = int(log["n_swap_segments"])
@@ -232,16 +248,21 @@ def joint_relink_shared_bouts(
         b1["fraction_swapped"] = float(log["fraction_swapped"])
 
         n_swap = int(swap_state.sum())
+        n_coloc = int(pv_out.get("n_colocated", 0))
         total_frames += T
         swapped_frames += n_swap
         swap_segments += int(log["n_swap_segments"])
+        colocated_frames += n_coloc
         if log["n_swap_segments"] > 0:
             n_pairs_swap += 1
+        if n_coloc > 0:
+            n_pairs_colocated += 1
         per_bout[bk] = {
             "n_frames": T,
             "n_swapped": n_swap,
             "n_swap_segments": int(log["n_swap_segments"]),
             "fraction_swapped": float(log["fraction_swapped"]),
+            "n_colocated": n_coloc,
         }
 
     summary = {
@@ -251,6 +272,10 @@ def joint_relink_shared_bouts(
         "swapped_frames": swapped_frames,
         "fraction_swapped": (swapped_frames / total_frames) if total_frames else 0.0,
         "n_swap_segments": swap_segments,
+        "colocated_frames": colocated_frames,
+        "n_pairs_colocated": n_pairs_colocated,
+        "fraction_colocated": (colocated_frames / total_frames) if total_frames else 0.0,
+        "min_pair_separation_mm": float(pv_cfg.min_pair_separation_mm),
         "trimmed_bouts": trimmed,
         "per_bout": per_bout,
     }
@@ -259,6 +284,12 @@ def joint_relink_shared_bouts(
               f"{swap_segments} swap segments, "
               f"{summary['fraction_swapped']*100:.2f}% frames swapped"
               + (f", trimmed={len(trimmed)}" if trimmed else ""))
+        if pv_cfg.min_pair_separation_mm > 0:
+            print(f"  [joint-relink] identity-collapse guard: "
+                  f"{n_pairs_colocated}/{n_pairs} bouts affected, "
+                  f"{colocated_frames} frames dropped "
+                  f"({summary['fraction_colocated']*100:.2f}%) "
+                  f"[min_pair_separation_mm={pv_cfg.min_pair_separation_mm}]")
     return summary
 
 
