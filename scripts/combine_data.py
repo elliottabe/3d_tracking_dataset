@@ -64,22 +64,23 @@ def main(cfg: DictConfig):
     # Convert path strings to Path objects
     cfg.paths = convert_dict_to_path(cfg.paths)
 
-    # Create anatomy-specific output directory
-    anatomy_save_dir = cfg.paths.save_dir / cfg.anatomy.name
-    anatomy_save_dir.mkdir(parents=True, exist_ok=True)
-    anatomy_log_dir = anatomy_save_dir / "logs"
-    anatomy_log_dir.mkdir(parents=True, exist_ok=True)
-
     # Resolve paths — prefer a CLI-supplied base_dir so the combine step only
-    # aggregates predictions from the current run's base dir rather than every
-    # Predictions_3D_* under the dataset-level parent.
+    # aggregates predictions from the current run's base dir and writes its
+    # outputs back into that same folder (per-folder bouts workflow). Falls
+    # back to the dataset-level save_dir when no override is given.
     override = cfg.get('base_dir', None)
     if override:
         base_dir = Path(override)
+        anatomy_save_dir = base_dir / cfg.anatomy.name
         print(f"Using base_dir override: {base_dir}")
     else:
         base_dir = cfg.paths.data_dir.parent
+        anatomy_save_dir = cfg.paths.save_dir / cfg.anatomy.name
         print(f"Using default base_dir from config: {base_dir}")
+
+    anatomy_save_dir.mkdir(parents=True, exist_ok=True)
+    anatomy_log_dir = anatomy_save_dir / "logs"
+    anatomy_log_dir.mkdir(parents=True, exist_ok=True)
 
     # Get concatenation config (with defaults)
     input_pattern = cfg.dataset.get('concat', {}).get('input_pattern', 'ik_output_*')
