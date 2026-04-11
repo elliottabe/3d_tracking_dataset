@@ -80,6 +80,26 @@ class RelinkConfig:
     # than the bl emission gain, while leaving real contact-time swaps cheap.
     # Set to 0 to disable and fall back to a pure bl-only Viterbi.
     bl_viterbi_position_weight: float = 1.0
+    # Body-length outlier rejection. Frames where either fly's body length
+    # falls outside [bl_outlier_low * base_s, bl_outlier_high * base_l] are
+    # treated as tracking errors: emission cost and position-aware transition
+    # cost are zeroed at those frames, so a collapsed-body glitch cannot seed
+    # a fake swap segment. The baselines are the robust per-frame
+    # ``median(min(bl0, bl1))`` and ``median(max(bl0, bl1))`` used inside
+    # the Viterbi. 0.7 handles "soft" collapses — tracker mislabelings that
+    # drop bl to 70-95% of baseline, still below the Antenna_Base→Abd_tip
+    # range fruit flies can reach by natural bending. 0.5 was too permissive
+    # and let soft collapses seed false swap segments; see
+    # ``docs/superpowers/specs/2026-04-11-identity-relink-bl-outlier-fix-design.md``.
+    bl_viterbi_outlier_low: float = 0.7   # reject bl < low * base_smaller
+    bl_viterbi_outlier_high: float = 2.0  # reject bl > high * base_larger
+    # Minimum length (in frames) for a swap segment to survive the Viterbi
+    # backtrace. Any True-run shorter than this is flipped back to False.
+    # One-sided: we suppress spurious short *swaps*, never spurious short
+    # un-swaps. Real courtship identity swaps require sustained contact
+    # (typically many frames), while single-frame tracking glitches that
+    # sneak through outlier rejection often manifest as 1-3 frame blips.
+    bl_viterbi_min_swap_frames: int = 5
 
 
 def _resolve_indices(kp_names: List[str], names: Tuple[str, ...]) -> List[int]:
@@ -126,6 +146,9 @@ def _bl_viterbi_swap_state(
     cent0: Optional[np.ndarray] = None,
     cent1: Optional[np.ndarray] = None,
     position_weight: float = 1.0,
+    outlier_low: float = 0.5,
+    outlier_high: float = 2.0,
+    min_swap_frames: int = 5,
 ) -> Tuple[Optional[np.ndarray], dict]:
     """Globally optimal binary swap-state from per-frame body lengths.
 
@@ -148,19 +171,20 @@ def _bl_viterbi_swap_state(
     info = dict(used=False, base_smaller=None, base_larger=None,
                 relative_separation=None, transition_cost=None,
                 ref_fly0_smaller=None, position_aware=False,
-                d_switch_median=None, d_stay_median=None)
+                d_switch_median=None, d_stay_median=None,
+                n_outlier_frames=0, n_short_runs_suppressed=0)
     bl0 = np.asarray(bl0, dtype=float)
     bl1 = np.asarray(bl1, dtype=float)
     T = bl0.shape[0]
     if T == 0:
         return None, info
 
-    valid = np.isfinite(bl0) & np.isfinite(bl1) & (bl0 > 0) & (bl1 > 0)
-    if valid.sum() < max(20, T // 20):
+    finite = np.isfinite(bl0) & np.isfinite(bl1) & (bl0 > 0) & (bl1 > 0)
+    if finite.sum() < max(20, T // 20):
         return None, info
 
-    bv0 = bl0[valid]
-    bv1 = bl1[valid]
+    bv0 = bl0[finite]
+    bv1 = bl1[finite]
     smaller = np.minimum(bv0, bv1)
     larger = np.maximum(bv0, bv1)
     base_s = float(np.median(smaller))
@@ -170,6 +194,24 @@ def _bl_viterbi_swap_state(
     info.update(base_smaller=base_s, base_larger=base_l,
                 relative_separation=rel_sep)
     if rel_sep < min_separation:
+        return None, info
+
+    # Reject frames where either fly's body length is physically implausible
+    # relative to the robust baselines. The typical failure mode is a tracker
+    # briefly mis-attributing an internal keypoint, collapsing bl to well
+    # below base_smaller (e.g. 9-15 when baselines are 24/27). Left in place,
+    # those frames would flip the emission cost to prefer the swapped state
+    # and, when combined with a phantom-collision d_switch, seed a spurious
+    # multi-frame swap segment.
+    bl_low = outlier_low * base_s
+    bl_high = outlier_high * base_l
+    plausible = (
+        (bl0 >= bl_low) & (bl0 <= bl_high)
+        & (bl1 >= bl_low) & (bl1 <= bl_high)
+    )
+    valid = finite & plausible
+    info["n_outlier_frames"] = int(finite.sum() - valid.sum())
+    if valid.sum() < max(20, T // 20):
         return None, info
 
     # Reference: in the input, is fly0 *usually* the smaller fly?
@@ -223,8 +265,14 @@ def _bl_viterbi_swap_state(
             )
             # NaN-safe: if either centroid is missing, treat both costs as 0
             # so the optimizer falls back to the bl emission alone for that
-            # transition.
+            # transition. Same treatment for transitions that touch a
+            # body-length-outlier frame — a phantom collision at an outlier
+            # frame would otherwise produce an artificially-small d_switch
+            # and seed a spurious swap.
             bad = ~(np.isfinite(d_stay) & np.isfinite(d_switch))
+            trans_valid = np.zeros(T, dtype=bool)
+            trans_valid[1:] = valid[1:] & valid[:-1]
+            bad |= ~trans_valid
             d_stay = np.where(bad, 0.0, d_stay)
             d_switch = np.where(bad, 0.0, d_switch)
             d_stay *= position_weight
@@ -273,8 +321,31 @@ def _bl_viterbi_swap_state(
     for t in range(T - 1, 0, -1):
         state[t - 1] = bt[t, state[t]]
 
+    state_bool = state.astype(bool)
+
+    # Minimum-run suppression (one-sided): flip any True-run shorter than
+    # ``min_swap_frames`` back to False. Real courtship identity swaps
+    # persist across many frames of sustained contact; short blips that
+    # survive the outlier mask are almost always detector noise or
+    # boundary effects around a glitch we already zero-cost'd.
+    if min_swap_frames > 1 and state_bool.any():
+        i = 0
+        n_suppressed = 0
+        while i < T:
+            if state_bool[i]:
+                j = i
+                while j < T and state_bool[j]:
+                    j += 1
+                if (j - i) < min_swap_frames:
+                    state_bool[i:j] = False
+                    n_suppressed += 1
+                i = j
+            else:
+                i += 1
+        info["n_short_runs_suppressed"] = n_suppressed
+
     info["used"] = True
-    return state.astype(bool), info
+    return state_bool, info
 
 
 def _seed_body_length(bl: np.ndarray, window: int) -> float:
@@ -418,6 +489,9 @@ def relink_pair(
             cent0=cent0,
             cent1=cent1,
             position_weight=cfg.bl_viterbi_position_weight,
+            outlier_low=cfg.bl_viterbi_outlier_low,
+            outlier_high=cfg.bl_viterbi_outlier_high,
+            min_swap_frames=cfg.bl_viterbi_min_swap_frames,
         )
 
     if bl_vit_state is not None:
