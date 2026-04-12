@@ -36,3 +36,5 @@ preprocessing:
     # threshold catches the fallout without re-running tracking.
     min_pair_separation_mm: 1.0
     colocation_centroid_kp: Scutellum
+  sex_cleaning:
+    enabled: true

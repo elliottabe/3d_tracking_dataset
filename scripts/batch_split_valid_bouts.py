@@ -536,14 +536,17 @@ def classify_and_split(
             d0, d1, shared, kp_names, cfg_obj, pv_cfg, verbose=True,
         )
 
-    # Per-sex aggressive cleaning: song analysis → sex ID → clean female
+    # Per-sex aggressive cleaning: song analysis → sex ID → clean female.
+    # Config source priority: CLI override > h5 info (echoed by preprocess).
     sex_summary: dict | None = None
-    if (sex_cleaning_cfg is not None
-            and sex_cleaning_cfg.get("enabled", False)
+    _sc_cfg = sex_cleaning_cfg
+    if _sc_cfg is None or not _sc_cfg.get("enabled", False):
+        _sc_cfg = dict(info0.get("sex_cleaning", {}) or {})
+    if (_sc_cfg.get("enabled", False)
             and shared
             and kp_names is not None):
         sex_summary = sex_clean_shared_bouts(
-            d0, d1, shared, kp_names, sex_cleaning_cfg, verbose=True,
+            d0, d1, shared, kp_names, _sc_cfg, verbose=True,
         )
 
     fly_ids0 = list(info0.get("fly_ids", []))

@@ -951,7 +951,8 @@ def process_bouts_batch(csv_path: Path,
                        exclude_wing_veins: bool = False,
                        filter_cfg: Optional[DictConfig] = None,
                        output_dir: Optional[Path] = None,
-                       pair_validity_cfg: Optional[DictConfig] = None) -> Optional[Dict]:
+                       pair_validity_cfg: Optional[DictConfig] = None,
+                       sex_cleaning_cfg: Optional[DictConfig] = None) -> Optional[Dict]:
     """
     Efficiently process multiple bouts by loading skeleton/model once and
     processing all data as a concatenated array.
@@ -1235,6 +1236,12 @@ def process_bouts_batch(csv_path: Path,
                 'min_paired_frames': int(pv_obj.min_paired_frames),
                 'min_solo_frames': int(pv_obj.min_solo_frames),
             }
+
+        # Echo sex_cleaning config so batch_split_valid_bouts.py can pick it up
+        if sex_cleaning_cfg is not None and sex_cleaning_cfg.get('enabled', False):
+            sc_dict = OmegaConf.to_container(sex_cleaning_cfg, resolve=True) \
+                if isinstance(sex_cleaning_cfg, DictConfig) else dict(sex_cleaning_cfg)
+            all_bouts_dict['info']['sex_cleaning'] = sc_dict
         
         print(f"\n✓ Successfully split into {len([k for k in all_bouts_dict.keys() if k != 'info'])} bouts")
         print(f"✓ Stored fly_ids in 'info': {fly_ids}")
@@ -1333,6 +1340,7 @@ def main(cfg: DictConfig):
             filter_cfg=cfg.preprocessing.get('filtering', None),
             output_dir=output_dir,
             pair_validity_cfg=cfg.preprocessing.get('pair_validity', None),
+            sex_cleaning_cfg=cfg.preprocessing.get('sex_cleaning', None),
         )
 
         if all_bouts_dict is not None:

@@ -509,7 +509,6 @@ Pipeline Steps:
         default='',
         help='Additional Hydra config overrides for STAC'
     )
-    
     args = parser.parse_args()
     
     # Parse steps
