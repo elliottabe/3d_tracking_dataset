@@ -43,11 +43,14 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 from utils import io_dict_to_hdf5 as ioh5  # noqa: E402
 from utils.identity_relink import RelinkConfig, relink_pair_bouted  # noqa: E402
+from utils.keypoint_filter import despike_isolated_spikes, medfilt_despike  # noqa: E402
 from utils.pair_validity import (  # noqa: E402
     PairValidityConfig,
     compute_pair_validity,
     pair_validity_config_from_dict,
 )
+from utils.song_analysis import SongAnalysisConfig, analyze_fly_song  # noqa: E402
+from utils.sex_id import SexIdConfig, identify_male_female  # noqa: E402
 
 
 BUCKETS = ("fly0_only", "fly1_only", "both")
@@ -293,6 +296,139 @@ def joint_relink_shared_bouts(
     return summary
 
 
+def _apply_sex_cleaning(
+    kp: np.ndarray,
+    cfg: dict,
+) -> tuple[np.ndarray, dict]:
+    """Apply despike + optional medfilt_despike to a keypoint array.
+
+    Parameters
+    ----------
+    kp : (T, N, 3) array
+    cfg : dict with 'despike_iterations' and optional 'medfilt_despike' sub-dict
+
+    Returns
+    -------
+    cleaned : (T, N, 3) array
+    stats : dict with counts of replaced frames
+    """
+    stats: dict = {}
+    iters = int(cfg.get("despike_iterations", 1))
+    if iters > 1:
+        kp, n_fixed = despike_isolated_spikes(kp, max_iterations=iters)
+        stats["despike_replaced"] = int(n_fixed)
+
+    mfd = cfg.get("medfilt_despike", {})
+    if mfd.get("enabled", False):
+        kp, n_mfd = medfilt_despike(
+            kp,
+            kernel=int(mfd.get("kernel", 7)),
+            threshold_factor=float(mfd.get("threshold_factor", 10.0)),
+        )
+        stats["medfilt_replaced"] = int(n_mfd)
+
+    return kp, stats
+
+
+def sex_clean_shared_bouts(
+    d0: dict,
+    d1: dict,
+    shared: list[str],
+    kp_names: list[str],
+    sex_cleaning_cfg: dict,
+    verbose: bool = True,
+) -> dict:
+    """Run song analysis + sex ID on each shared bout, then apply per-sex
+    aggressive cleaning to keypoints in-place.
+
+    Mutates d0 and d1. Returns a summary dict.
+    """
+    male_cfg = sex_cleaning_cfg.get("male", {})
+    female_cfg = sex_cleaning_cfg.get("female", {})
+    per_bout: dict[str, dict] = {}
+    n_male_fly0 = 0
+    n_male_fly1 = 0
+
+    for bk in shared:
+        b0 = d0[bk]
+        b1 = d1[bk]
+
+        kp0 = np.asarray(b0.get("keypoints"))
+        kp1 = np.asarray(b1.get("keypoints"))
+        if kp0.ndim != 3 or kp1.ndim != 3:
+            continue
+
+        # Clip to common length
+        T = min(kp0.shape[0], kp1.shape[0])
+        kp0 = kp0[:T]
+        kp1 = kp1[:T]
+
+        # Song analysis (world-frame keypoints only — no xpos_ego/qpos pre-IK)
+        try:
+            song0 = analyze_fly_song(kp0, None, None, kp_names)
+            song1 = analyze_fly_song(kp1, None, None, kp_names)
+            sex = identify_male_female(song0, song1, kp0, kp1, kp_names)
+        except Exception as e:
+            if verbose:
+                print(f"  [sex-clean] {bk}: song/sex failed ({e}) — skipping")
+            continue
+
+        male_id = sex["male_id"]  # 'fly0' or 'fly1'
+        bout_info: dict = {"male_id": male_id}
+
+        if male_id == "fly0":
+            n_male_fly0 += 1
+            male_bout, female_bout = b0, b1
+        else:
+            n_male_fly1 += 1
+            male_bout, female_bout = b1, b0
+
+        # Clean female keypoints aggressively
+        fem_kp = np.asarray(female_bout["keypoints"])[:T]
+        fem_kp, fem_stats = _apply_sex_cleaning(fem_kp, female_cfg)
+        female_bout["keypoints"] = fem_kp
+        bout_info["female_stats"] = fem_stats
+
+        # Clean male keypoints conservatively (usually no-op)
+        male_kp_arr = np.asarray(male_bout["keypoints"])[:T]
+        male_kp_arr, male_stats = _apply_sex_cleaning(male_kp_arr, male_cfg)
+        male_bout["keypoints"] = male_kp_arr
+        bout_info["male_stats"] = male_stats
+
+        # Store sex_id in bout dicts for provenance
+        b0["sex_id"] = male_id
+        b1["sex_id"] = male_id
+        b0["song_fraction_fly0"] = float(song0["summary"]["song_fraction"])
+        b0["song_fraction_fly1"] = float(song1["summary"]["song_fraction"])
+        b1["song_fraction_fly0"] = b0["song_fraction_fly0"]
+        b1["song_fraction_fly1"] = b0["song_fraction_fly1"]
+
+        per_bout[bk] = bout_info
+
+    summary = {
+        "n_bouts": len(per_bout),
+        "n_male_fly0": n_male_fly0,
+        "n_male_fly1": n_male_fly1,
+        "per_bout": per_bout,
+    }
+    if verbose:
+        print(f"  [sex-clean] {len(per_bout)}/{len(shared)} bouts: "
+              f"male=fly0 in {n_male_fly0}, male=fly1 in {n_male_fly1}")
+        # Aggregate female cleaning stats
+        total_despike = sum(
+            v.get("female_stats", {}).get("despike_replaced", 0)
+            for v in per_bout.values()
+        )
+        total_medfilt = sum(
+            v.get("female_stats", {}).get("medfilt_replaced", 0)
+            for v in per_bout.values()
+        )
+        if total_despike or total_medfilt:
+            print(f"  [sex-clean] female cleaning: {total_despike} despike + "
+                  f"{total_medfilt} medfilt replacements across all bouts")
+    return summary
+
+
 def _find_folders(base_dir: Path) -> list[Path]:
     if base_dir.is_dir() and base_dir.match("Predictions_3D_*"):
         return [base_dir]
@@ -350,6 +486,7 @@ def classify_and_split(
     force: bool,
     relink_enabled: bool = True,
     relink_cfg: RelinkConfig | None = None,
+    sex_cleaning_cfg: dict | None = None,
 ) -> dict:
     """Read per-fly preprocessed h5s and emit bucket files. Returns manifest.
 
@@ -359,6 +496,11 @@ def classify_and_split(
     bucket loop. This is the only place in the pipeline where both flies
     coexist in memory, so it's the right home for the cross-fly identity
     check — see plans/concurrent-leaping-liskov.md.
+
+    When ``sex_cleaning_cfg`` is provided and enabled, we run song analysis +
+    sex ID per bout after identity relink, then apply aggressive cleaning to
+    the female fly and conservative cleaning to the male fly before pair
+    validity and bucket splitting.
     """
     if not force and all(p.exists() for p in out_paths.values()) and index_path.exists():
         with open(index_path) as fh:
@@ -375,23 +517,34 @@ def classify_and_split(
     bout_keys1 = sorted(k for k in d1.keys() if k != "info")
     shared = sorted(set(bout_keys0) & set(bout_keys1))
 
+    # Resolve kp_names once (needed by relink, sex cleaning, pair validity)
+    kp_names: list[str] | None = None
+    try:
+        kp_names = _resolve_kp_names(d0, d1)
+    except KeyError as e:
+        print(f"  [kp_names] not found ({e})")
+
     # Joint bout-aware identity relink + real pair_validity. Mutates d0/d1
     # in place so the bucket loop below sees corrected keypoints and the
     # _both.h5 we write later contains the relinked data — STAC IK then
     # runs on cross-fly-correct keypoints.
     relink_summary: dict | None = None
-    if relink_enabled and shared:
-        try:
-            kp_names = _resolve_kp_names(d0, d1)
-        except KeyError as e:
-            print(f"  [joint-relink] skipping ({e})")
-            kp_names = None
-        if kp_names is not None:
-            pv_cfg = pair_validity_config_from_dict(info0.get("pair_validity"))
-            cfg_obj = relink_cfg if relink_cfg is not None else RelinkConfig()
-            relink_summary = joint_relink_shared_bouts(
-                d0, d1, shared, kp_names, cfg_obj, pv_cfg, verbose=True,
-            )
+    if relink_enabled and shared and kp_names is not None:
+        pv_cfg = pair_validity_config_from_dict(info0.get("pair_validity"))
+        cfg_obj = relink_cfg if relink_cfg is not None else RelinkConfig()
+        relink_summary = joint_relink_shared_bouts(
+            d0, d1, shared, kp_names, cfg_obj, pv_cfg, verbose=True,
+        )
+
+    # Per-sex aggressive cleaning: song analysis → sex ID → clean female
+    sex_summary: dict | None = None
+    if (sex_cleaning_cfg is not None
+            and sex_cleaning_cfg.get("enabled", False)
+            and shared
+            and kp_names is not None):
+        sex_summary = sex_clean_shared_bouts(
+            d0, d1, shared, kp_names, sex_cleaning_cfg, verbose=True,
+        )
 
     fly_ids0 = list(info0.get("fly_ids", []))
     fly_ids1 = list(info1.get("fly_ids", []))
@@ -558,6 +711,10 @@ def classify_and_split(
         manifest["identity_relink"] = {
             k: v for k, v in relink_summary.items() if k != "per_bout"
         }
+    if sex_summary is not None:
+        manifest["sex_cleaning"] = {
+            k: v for k, v in sex_summary.items() if k != "per_bout"
+        }
     # Atomic write: json.dump to a .tmp sibling, fsync, then os.replace. This
     # keeps the manifest in lockstep with the bucket h5s — if a SLURM
     # preemption kills us mid-write we never leave a truncated index_path.
@@ -573,7 +730,8 @@ def classify_and_split(
 def process_folder(folder: Path, anatomy: str, dataset: str,
                    force: bool, dry_run: bool,
                    relink_enabled: bool = True,
-                   relink_cfg: RelinkConfig | None = None) -> dict:
+                   relink_cfg: RelinkConfig | None = None,
+                   sex_cleaning_cfg: dict | None = None) -> dict:
     preproc = folder / "preprocessing"
     result = {"folder": str(folder), "status": "skipped", "message": "", "counts": {}}
     if not preproc.exists():
@@ -604,6 +762,7 @@ def process_folder(folder: Path, anatomy: str, dataset: str,
         manifest = classify_and_split(
             fly0, fly1, out_paths, index_path, force=force,
             relink_enabled=relink_enabled, relink_cfg=relink_cfg,
+            sex_cleaning_cfg=sex_cleaning_cfg,
         )
         counts = manifest.get("counts", {})
         result["counts"] = counts
@@ -644,6 +803,13 @@ def main():
     ap.add_argument("--relink-velocity-alpha", type=float, default=0.5)
     ap.add_argument("--relink-body-length-alpha", type=float, default=0.05)
     ap.add_argument("--relink-body-length-weight", type=float, default=0.5)
+    # Per-sex aggressive cleaning (song analysis → sex ID → clean female).
+    ap.add_argument("--sex-cleaning", action="store_true", default=False,
+                    help="Enable per-sex aggressive cleaning (female gets "
+                         "multi-pass despike + medfilt, male stays conservative).")
+    ap.add_argument("--sex-cleaning-config", type=Path, default=None,
+                    help="YAML file with sex_cleaning config. If omitted, "
+                         "uses defaults or reads from the preprocessed h5 info.")
     args = ap.parse_args()
 
     relink_cfg = RelinkConfig(
@@ -656,6 +822,31 @@ def main():
         body_length_alpha=args.relink_body_length_alpha,
         body_length_weight=args.relink_body_length_weight,
     )
+
+    # Build sex_cleaning config
+    sex_cleaning_cfg: dict | None = None
+    if args.sex_cleaning:
+        if args.sex_cleaning_config is not None and args.sex_cleaning_config.exists():
+            import yaml
+            with open(args.sex_cleaning_config) as fh:
+                sex_cleaning_cfg = yaml.safe_load(fh).get("sex_cleaning", {})
+            sex_cleaning_cfg["enabled"] = True
+        else:
+            # Sensible defaults matching preprocessing.yaml
+            sex_cleaning_cfg = {
+                "enabled": True,
+                "female": {
+                    "despike_iterations": 6,
+                    "medfilt_despike": {"enabled": True, "kernel": 7, "threshold_factor": 10.0},
+                },
+                "male": {
+                    "despike_iterations": 1,
+                    "medfilt_despike": {"enabled": False},
+                },
+            }
+        print(f"[sex-cleaning] enabled: female despike_iter="
+              f"{sex_cleaning_cfg['female']['despike_iterations']}, "
+              f"medfilt={sex_cleaning_cfg['female'].get('medfilt_despike', {}).get('enabled', False)}")
 
     if not args.base_dir.exists():
         print(f"Error: base dir not found: {args.base_dir}", file=sys.stderr)
@@ -671,6 +862,7 @@ def main():
         process_folder(
             f, args.anatomy, args.dataset, args.force, args.dry_run,
             relink_enabled=args.identity_relink, relink_cfg=relink_cfg,
+            sex_cleaning_cfg=sex_cleaning_cfg,
         )
         for f in folders
     ]

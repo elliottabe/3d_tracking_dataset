@@ -365,6 +365,178 @@ def _medfilt_interpolate(
     return kp_out
 
 
+def despike_isolated_spikes(
+    arr: np.ndarray,
+    threshold_factor: float = 10.0,
+    max_iterations: int = 1,
+    verbose: bool = False,
+) -> Tuple[np.ndarray, int]:
+    """Remove tracking glitches via velocity-reversal detection.
+
+    Each pass finds frames where the jump in is large, the jump out is
+    large, and the two jumps have opposite signs (immediate reversal).
+    Flagged frames are replaced with the average of their neighbours.
+
+    With ``max_iterations=1`` (default), only true single-frame spikes are
+    fixed — safe for signals with fast oscillations like male wing song.
+
+    With ``max_iterations>1``, multi-frame glitches are peeled from the
+    outside in: a 3-frame spike becomes a 2-frame spike after pass 1,
+    then a 1-frame spike after pass 2, fully fixed by pass 3.  Use higher
+    values only for signals where multi-frame tracking errors are expected
+    and real fast oscillations are absent (e.g. non-singing flies).
+
+    Works on arrays of any shape whose first axis is time:
+    ``(T,)``, ``(T, D)``, ``(T, N, 3)``, etc.
+
+    Parameters
+    ----------
+    arr : ndarray
+        Input array.  First axis is time.
+    threshold_factor : float
+        A frame is flagged when its inward *and* outward velocity both
+        exceed ``threshold_factor × median(|diff|)`` for that signal.
+    max_iterations : int
+        Number of passes.  1 = single-frame only (conservative, safe for
+        song).  Higher values peel multi-frame glitches layer by layer.
+    verbose : bool
+        Print a summary line to stdout.
+
+    Returns
+    -------
+    (cleaned, n_fixed) : tuple[ndarray, int]
+        *cleaned* has the same shape/dtype as *arr*.  *n_fixed* is the total
+        number of spike frames replaced across all signals.
+    """
+    if arr.ndim == 0 or arr.shape[0] < 3:
+        return arr.copy(), 0
+
+    T = arr.shape[0]
+    orig_shape = arr.shape
+    # Flatten to (T, C) so we can iterate columns
+    flat = arr.reshape(T, -1).astype(np.float64, copy=True)
+    C = flat.shape[1]
+    total_fixed = 0
+
+    for c in range(C):
+        x = flat[:, c]
+
+        # Compute threshold once from the original signal's velocity scale
+        v0 = np.diff(x)
+        abs_v0 = np.abs(v0)
+        finite = np.isfinite(abs_v0)
+        if finite.sum() < 3:
+            continue
+        med_v = float(np.median(abs_v0[finite]))
+        if med_v < 1e-12:
+            continue
+        thresh = threshold_factor * med_v
+
+        for _iteration in range(max_iterations):
+            v = np.diff(x)
+            abs_v = np.abs(v)
+
+            big = abs_v > thresh
+            big_in  = big[:-1]
+            big_out = big[1:]
+            reversal = (v[:-1] * v[1:]) < 0
+            spike = big_in & big_out & reversal
+
+            idx = np.nonzero(spike)[0] + 1
+            if idx.size == 0:
+                break
+
+            n_this = 0
+            for t in idx:
+                left, right = x[t - 1], x[t + 1]
+                if np.isfinite(left) and np.isfinite(right):
+                    x[t] = (left + right) / 2.0
+                    n_this += 1
+            total_fixed += n_this
+            if n_this == 0:
+                break
+
+    out = flat.reshape(orig_shape)
+    if verbose and total_fixed:
+        tag = "single-frame" if max_iterations == 1 else f"up to {max_iterations} passes"
+        print(f"  [isolated-spike] fixed {total_fixed} spike frames ({tag}, "
+              f">{threshold_factor}\u00d7 median velocity, with reversal)")
+    return out, total_fixed
+
+
+def medfilt_despike(
+    arr: np.ndarray,
+    kernel: int = 7,
+    threshold_factor: float = 10.0,
+    max_replace_frac: float = 0.10,
+    verbose: bool = False,
+) -> Tuple[np.ndarray, int]:
+    """Replace frames that deviate from a local median by more than a
+    velocity-based threshold.
+
+    Designed for non-singing flies where multi-frame tracking excursions
+    are common (keypoint drifts to wrong feature for several frames).
+    NOT safe for fast oscillatory signals like male wing song — the median
+    filter will flatten real wing beats.
+
+    Parameters
+    ----------
+    arr : ndarray
+        Input array, shape ``(T,)``, ``(T, D)``, or ``(T, N, 3)``.
+    kernel : int
+        Median filter kernel size (must be odd).
+    threshold_factor : float
+        A frame is replaced when ``|signal - medfilt| > threshold_factor
+        × median(|diff(signal)|)``.  Uses the same velocity scale as
+        :func:`despike_isolated_spikes`.
+    max_replace_frac : float
+        Safety cap: skip a signal column if more than this fraction of
+        frames would be replaced (avoids destroying good data).
+    verbose : bool
+        Print summary.
+
+    Returns
+    -------
+    (cleaned, n_fixed) : tuple[ndarray, int]
+    """
+    from scipy.signal import medfilt as _medfilt
+
+    if arr.ndim == 0 or arr.shape[0] < kernel:
+        return arr.copy(), 0
+
+    T = arr.shape[0]
+    orig_shape = arr.shape
+    flat = arr.reshape(T, -1).astype(np.float64, copy=True)
+    C = flat.shape[1]
+    total_fixed = 0
+
+    for c in range(C):
+        sig = flat[:, c]
+        med = _medfilt(sig, kernel_size=kernel)
+        dev = np.abs(sig - med)
+
+        v = np.abs(np.diff(sig))
+        vf = v[np.isfinite(v)]
+        if len(vf) < 5:
+            continue
+        med_v = float(np.median(vf))
+        if med_v < 1e-12:
+            continue
+        thresh = threshold_factor * med_v
+
+        bad = dev > thresh
+        n_bad = int(bad.sum())
+        if n_bad > 0 and n_bad < T * max_replace_frac:
+            sig[bad] = med[bad]
+            total_fixed += n_bad
+
+    out = flat.reshape(orig_shape)
+    if verbose and total_fixed:
+        print(f"  [medfilt-despike] replaced {total_fixed} frames "
+              f"(kernel={kernel}, >{threshold_factor}\u00d7 median velocity)")
+    return out, total_fixed
+
+
 def _interpolate_nan_gaps(
     kp_array: np.ndarray,
     use_spline: bool = True,
@@ -741,6 +913,8 @@ def filter_keypoints(
     Steps (each enabled/disabled via filter_cfg sub-keys):
       1. confidence masking           (filter_cfg.confidence.enabled)
       2. bone-length outliers         (filter_cfg.bone_length.enabled, default OFF)
+     2b. centroid-jump masking        (filter_cfg.centroid_jump.enabled, default OFF)
+     2c. isolated-spike removal       (filter_cfg.isolated_spike.enabled, default ON)
       3. medfilt spike detection      (filter_cfg.medfilt.enabled, default OFF)
       4. interpolate NaN gaps         (filter_cfg.interpolation.enabled)
       5. confidence-weighted smooth   (filter_cfg.confidence_smooth.enabled)
@@ -825,6 +999,29 @@ def filter_keypoints(
         report['centroid_jumps'] = cj_report
         print(f"  [centroid jump] Flagged {cj_report['n_frames_flagged']} frames "
               f"(masked {n_masked} with window={win}) [computed on raw input]")
+
+    # Step 2c: isolated spike removal (velocity-reversal detector).
+    # With max_iterations=1 (default): single-frame only, safe for all signals.
+    # With max_iterations>1: peels multi-frame glitches from outside in.
+    if filter_cfg.get('isolated_spike', {}).get('enabled', True):
+        _iso_cfg = filter_cfg.get('isolated_spike', {})
+        _iso_thresh = _iso_cfg.get('threshold_factor', 10.0)
+        _iso_iters = _iso_cfg.get('max_iterations', 1)
+        kp, _n_iso = despike_isolated_spikes(
+            kp, threshold_factor=_iso_thresh, max_iterations=_iso_iters, verbose=True)
+        report['isolated_spikes'] = _n_iso
+
+    # Step 2d: median-filter despike (optional, default OFF).
+    # Catches multi-frame tracking excursions that lack a velocity reversal.
+    # NOT safe for fast oscillations (male wing song) — enable only for
+    # non-singing flies or when song analysis is not needed.
+    if filter_cfg.get('medfilt_despike', {}).get('enabled', False):
+        _mfd_cfg = filter_cfg.get('medfilt_despike', {})
+        _mfd_kernel = _mfd_cfg.get('kernel', 7)
+        _mfd_thresh = _mfd_cfg.get('threshold_factor', 10.0)
+        kp, _n_mfd = medfilt_despike(
+            kp, kernel=_mfd_kernel, threshold_factor=_mfd_thresh, verbose=True)
+        report['medfilt_despike'] = _n_mfd
 
     # Step 3: medfilt spike detection + spline interpolation (optional, default OFF)
     if filter_cfg.get('medfilt', {}).get('enabled', False):

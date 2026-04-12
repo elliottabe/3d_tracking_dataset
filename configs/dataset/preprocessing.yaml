@@ -54,6 +54,17 @@ filtering:
     swap_ratio: 0.7             # Swap if cost_swapped < cost_current * swap_ratio
     require_min_displacement: 0.0  # Only run swap test if max obs jump >= this
 
+  isolated_spike:
+    enabled: true               # safe for all keypoints including fast wing motion
+    threshold_factor: 10.0      # × median |frame-to-frame velocity|; only catches
+                                # single-frame glitches that immediately reverse
+    max_iterations: 1           # 1 = single-frame only; >1 peels multi-frame glitches
+
+  medfilt_despike:
+    enabled: false              # OFF by default — NOT safe for fast wing oscillations
+    kernel: 7                   # median filter kernel (must be odd)
+    threshold_factor: 10.0      # replace frames where |signal - median| > N × median velocity
+
   medfilt:
     enabled: false              # OFF by default — can flag real fast motion
     kernel: 5
@@ -113,3 +124,21 @@ pair_validity:
   # floor — override in the dataset config.
   min_pair_separation_mm: 0.0
   colocation_centroid_kp: Scutellum
+
+# Per-sex aggressive cleaning (runs in batch_split_valid_bouts.py after
+# identity relink, before pair_validity and bucket splitting).
+# Requires both per-fly h5s — only applies to shared (paired) bouts.
+sex_cleaning:
+  enabled: false              # Enable in dataset overrides (e.g. courtship)
+  # Female fly gets aggressive denoising (safe since she's not singing)
+  female:
+    despike_iterations: 6     # Multi-pass velocity-reversal peeling
+    medfilt_despike:
+      enabled: true
+      kernel: 7
+      threshold_factor: 10.0
+  # Male fly keeps conservative settings (preserves song oscillations)
+  male:
+    despike_iterations: 1     # Single-frame only (already ran in preprocessing)
+    medfilt_despike:
+      enabled: false

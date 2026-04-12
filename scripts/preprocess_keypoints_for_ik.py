@@ -410,8 +410,10 @@ def apply_procrustes_alignment(kp_array: np.ndarray,
             preserve_translation=True  # Let Procrustes handle centering internally
         )
         
-        # Apply only the scale to original keypoints (Procrustes already computed correct scale)
-        aligned_kp = kp_jax * procrustes_info['scales'][:, None, None]  # Scale only
+        # Scale body shape around per-frame centroid so inter-fly distances
+        # are determined by raw centroid positions (not distorted by per-fly scale).
+        centroid = jnp.nanmean(kp_jax, axis=1, keepdims=True)  # (T, 1, 3)
+        aligned_kp = (kp_jax - centroid) * procrustes_info['scales'][:, None, None] + centroid
     else: 
         aligned_kp, procrustes_info = jit_vectorized_procrustes_with_scaling(
             kp_jax,
@@ -437,12 +439,12 @@ def apply_procrustes_alignment(kp_array: np.ndarray,
     print(f"Scale factor applied: {alignment_info['scales']:.4f}")
     
     # Check scaling quality (nan-aware: kp_array/aligned_kp contain nans from untracked keypoints)
-    orig_center = np.nanmean(kp_array, axis=(0, 1))
-    scaled_center = np.nanmean(aligned_kp, axis=(0, 1))
+    orig_center = np.nanmean(kp_array, axis=1).mean(axis=0)   # mean centroid
+    scaled_center = np.nanmean(aligned_kp, axis=1).mean(axis=0)
     data_span = np.nanmax(aligned_kp[0], axis=0) - np.nanmin(aligned_kp[0], axis=0)
     scale_ratio = data_span / ref_span
-    print(f"Original data center: {orig_center}")
-    print(f"Scaled data center: {scaled_center} (should match original)")
+    print(f"Original centroid: {orig_center}")
+    print(f"Scaled centroid: {scaled_center} (should match original — centroid-relative scaling)")
     print(f"Data/Model span ratio: {scale_ratio} (should be ~1.0)")
     
     # Return the scaled keypoints (original position/orientation preserved)
