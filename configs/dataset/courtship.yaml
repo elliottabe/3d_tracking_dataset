@@ -34,6 +34,7 @@ preprocessing:
     # multi-peak tracker can drop one track onto the other when one fly is
     # occluded, producing two tracks on the same physical animal; this
     # threshold catches the fallout without re-running tracking.
+    ground_epsilon_mm: 0.5
     min_pair_separation_mm: 1.0
     colocation_centroid_kp: Scutellum
   sex_cleaning:

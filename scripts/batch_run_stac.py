@@ -160,6 +160,9 @@ def get_stac_environment(gpu_mem_fraction: float = 0.9) -> dict:
     env['MUJOCO_GL'] = 'egl'
     env['PYOPENGL_PLATFORM'] = 'egl'
 
+    # Force unbuffered output so progress lines appear in real-time
+    env['PYTHONUNBUFFERED'] = '1'
+
     # GPU memory management
     env['XLA_PYTHON_CLIENT_MEM_FRACTION'] = str(gpu_mem_fraction)
 

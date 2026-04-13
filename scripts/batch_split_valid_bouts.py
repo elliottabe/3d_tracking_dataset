@@ -627,29 +627,40 @@ def classify_and_split(
         }
 
         if n_both >= min_paired:
-            # 'both' wins — emit two entries (fly0 then fly1) so STAC sees both.
-            # Trim each bout to the cross-fly paired-valid frames so STAC never
-            # sees the untracked stretches. stored length == n_both.
+            # 'both' wins — emit two entries (fly0 then fly1) so STAC sees
+            # both. Trim to the filter_ok overlap (both flies well-tracked)
+            # rather than the stricter v_both (which also requires ground
+            # contact). This keeps the full temporal context for STAC while
+            # preserving the v_both/v0/v1 masks as metadata for downstream
+            # analysis that needs ground-contact filtering.
+            filt0 = np.asarray(b0.get("filter_ok", v0), dtype=bool)
+            filt1 = np.asarray(b1.get("filter_ok", v1), dtype=bool)
+            filt_both = filt0 & filt1
+            n_filt_both = int(filt_both.sum())
+            # Fall back to v_both if filter_ok is absent
+            trim_mask = filt_both if n_filt_both >= n_both else v_both
+            n_stored = int(trim_mask.sum())
+
             new_key0 = f"bout_{counters['both']:03d}"
             counters["both"] += 1
             new_key1 = f"bout_{counters['both']:03d}"
             counters["both"] += 1
 
-            bucket_data["both"][new_key0] = _apply_mask(b0, v_both)
-            bucket_data["both"][new_key1] = _apply_mask(b1, v_both)
+            bucket_data["both"][new_key0] = _apply_mask(b0, trim_mask)
+            bucket_data["both"][new_key1] = _apply_mask(b1, trim_mask)
             for new_key, base, src_fly, sf, ef in (
                 (new_key0, base_id0, "fly0", sf0, ef0),
                 (new_key1, base_id1, "fly1", sf1, ef1),
             ):
                 bucket_info["both"]["fly_ids"].append(str(base))
                 bucket_info["both"]["source_flies"].append(src_fly)
-                bucket_info["both"]["clip_lengths"].append(n_both)
+                bucket_info["both"]["clip_lengths"].append(n_stored)
                 bucket_info["both"]["start_frames"].append(int(sf))
                 bucket_info["both"]["end_frames"].append(int(ef))
                 bucket_info["both"]["bucket"].append("both")
             entry["bucket"] = "both"
             entry["out_keys"] = {"fly0": new_key0, "fly1": new_key1}
-            entry["n_stored"] = {"fly0": n_both, "fly1": n_both}
+            entry["n_stored"] = {"fly0": n_stored, "fly1": n_stored}
         else:
             if n0 >= min_solo:
                 # fly0_only: trim to frames where fly0 was valid; stored len = n0
