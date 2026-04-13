@@ -218,3 +218,16 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+'''
+CLIP_DIR=/gscratch/portia/eabe/data/Johnson_lab/Video_recordings/courtship/Session1/2026_04_02_15_25_51/clips_619962_620403
+ffmpeg -y -hide_banner -loglevel warning -stats \
+  -i "$CLIP_DIR/Cam2012630_frames_619962_620403.mp4" \
+  -i "$CLIP_DIR/Cam2012631_frames_619962_620403.mp4" \
+  -i "$CLIP_DIR/Cam2012861_frames_619962_620403.mp4" \
+  -filter_complex "[0:v]setpts=N/30/TB[v0];[1:v]setpts=N/30/TB[v1];[2:v]setpts=N/30/TB[v2];[v0][v1][v2]vstack=inputs=3[out]" \
+  -map "[out]" -r 60 \
+  -c:v libx264 -preset fast -crf 23 -pix_fmt yuv420p \
+  "$CLIP_DIR/bout_619962_620403_vstack_3cam.mp4"
+'''
