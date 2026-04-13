@@ -56,6 +56,37 @@ from utils.sex_id import SexIdConfig, identify_male_female  # noqa: E402
 BUCKETS = ("fly0_only", "fly1_only", "both")
 
 
+def _fix_interfly_scale(b0: dict, b1: dict) -> None:
+    """Correct inter-fly distance distortion from per-fly Procrustes scaling.
+
+    Per-fly Procrustes applies ``kp *= scale_i`` which distorts centroid
+    positions when scale_i differs between flies (common: 5-20% difference).
+    We undo each fly's per-fly scale on the centroid and reapply the mean
+    scale so that body shape stays per-fly correct but inter-fly distances
+    use a shared scale.  Mutates ``b0`` and ``b1`` keypoints in place.
+    """
+    ai0 = b0.get("alignment_info")
+    ai1 = b1.get("alignment_info")
+    if ai0 is None or ai1 is None:
+        return
+    s0 = float(ai0.get("scales", 1.0))
+    s1 = float(ai1.get("scales", 1.0))
+    if s0 == 0 or s1 == 0 or s0 == s1:
+        return
+
+    s_mean = (s0 + s1) / 2.0
+
+    # Undo per-fly scale and reapply the shared mean scale so both flies
+    # are in identical units.  Body shape changes are negligible (~4% per
+    # fly) and inter-fly distances are now exact.
+    b0["keypoints"] = b0["keypoints"] * (s_mean / s0)
+    b1["keypoints"] = b1["keypoints"] * (s_mean / s1)
+
+    # Update alignment_info so downstream knows the shared scale was applied
+    ai0["shared_scale"] = s_mean
+    ai1["shared_scale"] = s_mean
+
+
 def _resolve_kp_names(d0: dict, d1: dict) -> list[str]:
     """Find a kp_names list. Prefer info-level, fall back to per-bout."""
     for d in (d0, d1):
@@ -646,6 +677,8 @@ def classify_and_split(
             new_key1 = f"bout_{counters['both']:03d}"
             counters["both"] += 1
 
+            # Fix inter-fly distance distortion from per-fly Procrustes
+            _fix_interfly_scale(b0, b1)
             bucket_data["both"][new_key0] = _apply_mask(b0, trim_mask)
             bucket_data["both"][new_key1] = _apply_mask(b1, trim_mask)
             for new_key, base, src_fly, sf, ef in (

@@ -410,10 +410,12 @@ def apply_procrustes_alignment(kp_array: np.ndarray,
             preserve_translation=True  # Let Procrustes handle centering internally
         )
         
-        # Scale body shape around per-frame centroid so inter-fly distances
-        # are determined by raw centroid positions (not distorted by per-fly scale).
-        centroid = jnp.nanmean(kp_jax, axis=1, keepdims=True)  # (T, 1, 3)
-        aligned_kp = (kp_jax - centroid) * procrustes_info['scales'][:, None, None] + centroid
+        # Apply per-fly Procrustes scale uniformly (body shape + position).
+        # This converts from raw tracking units to model units.
+        # Note: per-fly scale differences will slightly distort inter-fly
+        # distances — a shared-scale correction can be applied downstream
+        # in batch_split_valid_bouts.py where both flies are available.
+        aligned_kp = kp_jax * procrustes_info['scales'][:, None, None]
     else: 
         aligned_kp, procrustes_info = jit_vectorized_procrustes_with_scaling(
             kp_jax,
