@@ -582,11 +582,6 @@ def aggregate_per_bout_predictions(folder: Path,
         print("  [aggregate] no calibration/ found — skipping SAM-CoM "
               "Scutellum injection")
 
-    P_all = _load_projection_matrices(folder)
-    if P_all is None:
-        print("  [aggregate] no calibration/ found — skipping SAM-CoM "
-              "Scutellum injection")
-
     for bout_dir in bout_dirs:
         swap, a0, a1 = _decide_sex_swap(bout_dir / "sam3_masks.npz")
         sex_swaps.append(swap)
@@ -618,6 +613,14 @@ def aggregate_per_bout_predictions(folder: Path,
 
         fly_frames[0].append(df0)
         fly_frames[1].append(df1)
+
+        m_head, m_cent = _compute_heading(df0)
+        f_head, f_cent = _compute_heading(df1)
+        male_headings.append(m_head)
+        female_headings.append(f_head)
+        male_centroids.append(m_cent)
+        female_centroids.append(f_cent)
+
         print(f"  [aggregate] {bout_dir.name}: frames=[{start},{end}] "
               f"area0={a0:.0f} area1={a1:.0f} swap={swap} {inj_msg}")
 

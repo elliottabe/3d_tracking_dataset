@@ -290,6 +290,7 @@ squeue -u $USER -h -o "%i %j" | awk '/pipe_courtship|combine_courtship/ {print $
 
 python ./scripts/slurm_run.py --dataset free_walking --anatomy v1 --paths hyak --base-dir /gscratch/portia/eabe/data/Johnson_lab/free_walking/session11
 python ./scripts/slurm_run.py --dataset courtship --anatomy v1 --paths hyak --base-dir /gscratch/portia/eabe/data/Johnson_lab/courtship/04092026_bouts --extra=--force --partition ckpt-g2 --dry-run
+python ./scripts/slurm_run.py --dataset courtship --anatomy v1 --paths hyak --base-dir /gscratch/portia/eabe/data/Johnson_lab/courtship/Session1_bouts_04172026 --extra=--force --dry-run
 
 
 
