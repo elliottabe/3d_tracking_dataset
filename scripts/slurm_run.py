@@ -44,16 +44,21 @@ def slurm_submit(script: str) -> str:
 
 
 def find_folders(base_dir: Path, dataset: str) -> list[Path]:
-    """Find every Predictions_3D_* folder containing a <dataset>_bouts*summary.csv.
+    """Find every Predictions_3D_* folder containing either legacy bouts-summary
+    files or the newer bout_*/fly*.csv layout.
 
-    Matches both single-animal (`<dataset>_bouts_summary.csv`) and multi-animal
-    per-fly (`<dataset>_bouts_fly0_summary.csv`, `_fly1_summary.csv`, ...) layouts.
-    Folders containing multiple per-fly summaries are de-duplicated.
+    - Legacy: matches both single-animal (`<dataset>_bouts_summary.csv`) and
+      multi-animal per-fly (`<dataset>_bouts_fly0_summary.csv`, `_fly1_summary.csv`, ...).
+    - New-format: folders that only contain `bout_*/fly0.csv` subdirs are also
+      picked up — the `convert` pipeline step materialises their legacy files.
+    Folders containing multiple markers are de-duplicated.
     """
     pattern = f"{dataset}_bouts*summary.csv"
-    folders = sorted({p.parent for p in base_dir.rglob(pattern)
-                      if p.parent.match("Predictions_3D_*")})
-    return folders
+    legacy = {p.parent for p in base_dir.rglob(pattern)
+              if p.parent.match("Predictions_3D_*")}
+    new_fmt = {p.parent.parent for p in base_dir.rglob("Predictions_3D_*/bout_*/fly0.csv")
+               if p.parent.parent.match("Predictions_3D_*")}
+    return sorted(legacy | new_fmt)
 
 
 def build_script(
@@ -173,8 +178,10 @@ def main():
     p.add_argument('--paths', default='hyak', help='Paths config (hyak, workstation, ...)')
     p.add_argument('--base-dir', type=Path, default=None,
                    help='Dataset root to search (default: DATA_ROOT/<dataset>)')
-    p.add_argument('--steps', default='preprocess,split_valid,stac,postprocess',
-                   help='Per-folder steps to run (combine is submitted as a separate job)')
+    p.add_argument('--steps', default='convert,preprocess,split_valid,stac,postprocess',
+                   help='Per-folder steps to run (combine is submitted as a separate job). '
+                        '"convert" is a no-op for legacy folders and materialises '
+                        'data3D_fly*.csv / bouts summaries for new bout_*/ folders.')
     p.add_argument('--no-combine', action='store_true',
                    help='Do not submit a final combine job after the per-folder jobs')
     p.add_argument('--conda-env', default='3d_tracking', help='Conda environment to use')
@@ -207,7 +214,7 @@ def main():
     folders = find_folders(base_dir, args.dataset)
     if not folders:
         print(f"No Predictions_3D_* folders with {args.dataset}_bouts*summary.csv "
-              f"under {base_dir} — nothing to submit, skipping.")
+              f"or bout_*/fly0.csv layout under {base_dir} — nothing to submit, skipping.")
         return
 
     print(f"Found {len(folders)} folder(s) under {base_dir}:")

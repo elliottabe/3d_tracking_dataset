@@ -143,6 +143,39 @@ def _find_unified_bouts_csv(folder: Path, dataset: str) -> Optional[Path]:
     return None
 
 
+def _synthesize_unified_from_bouts(folder: Path,
+                                   bout_dirs: List[Path]) -> pd.DataFrame:
+    """Build a unified bouts DataFrame from the per-bout CSV frame columns.
+
+    Used for new-format folders that have bout_*/fly{0,1}.csv but no
+    pre-existing <dataset>_bouts_unified_summary.csv. The fly_id is derived
+    from folder path components (``<SessionX>/<timestamp>``), matching the
+    convention used by build_unified_bouts_csv. source_fly is always 'both'
+    since every bout dir carries both fly0 and fly1 CSVs.
+    """
+    fly_id = f"{folder.parent.parent.name}/{folder.parent.name}"
+    rows = []
+    for i, bout_dir in enumerate(bout_dirs, start=1):
+        probe = pd.read_csv(bout_dir / "fly0.csv", header=[0, 1])
+        frame_col = [c for c in probe.columns if c[0] == 'frame']
+        if not frame_col:
+            raise ValueError(
+                f"No 'frame' column found in {bout_dir}/fly0.csv — cannot "
+                f"synthesize bouts summary for new-format folder {folder}."
+            )
+        frames = probe[frame_col[0]].values
+        rows.append({
+            'fly_id': fly_id,
+            'bout_idx': i,
+            'start_frame': int(frames.min()),
+            'end_frame': int(frames.max()),
+            'source_fly': 'both',
+        })
+    return pd.DataFrame(rows,
+                        columns=['fly_id', 'bout_idx', 'start_frame',
+                                 'end_frame', 'source_fly'])
+
+
 def _concat_per_bout_csvs(bout_csvs: List[Path]) -> pd.DataFrame:
     """
     Read bout_*/flyX.csv (per-bout compact CSVs with 2-row MultiIndex header)
@@ -219,11 +252,9 @@ def aggregate_per_bout_predictions(folder: Path,
 
     unified_src = _find_unified_bouts_csv(folder, dataset)
     if unified_src is None:
-        raise FileNotFoundError(
-            f"Cannot find {dataset}_bouts_unified_summary.csv in {folder} "
-            f"or any parent dir; required to build per-fly bouts summaries."
-        )
-    unified_df = pd.read_csv(unified_src)
+        unified_df = _synthesize_unified_from_bouts(folder, bout_dirs)
+    else:
+        unified_df = pd.read_csv(unified_src)
 
     bouts_info: List[Dict[str, int]] = []
     sex_swaps: List[bool] = []
