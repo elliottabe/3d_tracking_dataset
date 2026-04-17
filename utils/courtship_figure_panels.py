@@ -1101,6 +1101,7 @@ def panel_wing_z_traces(
     line_kwargs: Optional[Dict] = None,
     legend_kwargs: Optional[Dict] = None,
     pulse_vline_kwargs: Optional[Dict] = None,
+    min_segment_ms: float = 0.0,
 ) -> None:
     """Plot left/right wing-V13 z-position with song shading + per-pulse markers.
 
@@ -1128,6 +1129,10 @@ def panel_wing_z_traces(
 
     seen: set = set()
     merged = _merge_segments_by_type([segments_L, segments_R])
+    if min_segment_ms > 0:
+        min_frames = max(1, int(round(float(min_segment_ms) * fs / 1000.0)))
+        merged = [s for s in merged
+                  if (int(s['end']) - int(s['start'])) >= min_frames]
     _shade_segments(ax, merged, fs, frame_range=frame_range, seen_labels=seen)
 
     peaks_all: List[np.ndarray] = []
@@ -1198,6 +1203,60 @@ def panel_scutellum_z_trace(
     ax.plot(t_ms, scutellum_z, color=line_color, **lk)
     ax.set_xlabel('Time (ms)')
     ax.set_ylabel('Scutellum\nz (mm)')
+
+
+# -----------------------------------------------------------------------------
+# Row 4 right: male body pitch vs. target pitch
+# -----------------------------------------------------------------------------
+
+def panel_male_pitch(
+    ax: plt.Axes,
+    t_ms: np.ndarray,
+    male_body_pitch_deg: np.ndarray,
+    target_pitch_deg: np.ndarray,
+    segments: Optional[Iterable[dict]] = None,
+    fs: float = 800.0,
+    frame_range: Optional[Tuple[int, int]] = None,
+    min_segment_ms: float = 10.0,
+    body_color: str = '#111111',
+    target_color: str = '#888888',
+    line_kwargs: Optional[Dict] = None,
+    legend_kwargs: Optional[Dict] = None,
+    title: str = '',
+) -> None:
+    """Overlay the male body-axis pitch and target pitch (to female COM).
+
+    ``male_body_pitch_deg`` is the solid trace (body-axis elevation, degrees);
+    ``target_pitch_deg`` is the dashed trace (elevation from male Scutellum to
+    female COM). Where both overlap visually, the male is aimed at the female.
+
+    Song segments (pulse/sine) are shaded behind the traces using the same
+    `_shade_segments` helper as Panel B, optionally filtered by
+    ``min_segment_ms`` to suppress ultra-short false detections.
+    """
+    lk = {'lw': 0.8, **(line_kwargs or {})}
+    lg = {'loc': 'upper right', 'ncols': 2,
+          'columnspacing': 0.6, **(legend_kwargs or {})}
+
+    if segments is not None:
+        segs = list(segments)
+        if min_segment_ms > 0:
+            min_frames = max(1, int(round(float(min_segment_ms) * fs / 1000.0)))
+            segs = [s for s in segs
+                    if (int(s['end']) - int(s['start'])) >= min_frames]
+        _shade_segments(ax, segs, fs, frame_range=frame_range)
+
+    ax.plot(t_ms, male_body_pitch_deg, color=body_color, linestyle='-',
+            label='Male body', **lk)
+    ax.plot(t_ms, target_pitch_deg, color=target_color, linestyle='--',
+            label='Target', **lk)
+    ax.set_xlabel('Time (ms)')
+    ax.set_ylabel('Pitch (°)')
+    if len(t_ms):
+        ax.set_xlim(0.0, float(t_ms[-1]))
+    if title:
+        ax.set_title(title, pad=2)
+    _colored_text_legend(ax, **lg)
 
 
 # -----------------------------------------------------------------------------
@@ -1316,14 +1375,10 @@ def panel_sine_wing_inphase(
     lk = {'lw': 0.8, **(line_kwargs or {})}
     lg = {'loc': 'upper right', **(legend_kwargs or {})}
 
-    if sine_segments is not None:
-        sine_only = [s for s in sine_segments if s.get('type') == 'sine']
-        _shade_segments(ax, sine_only, fs, frame_range=frame_range)
-
     ax.plot(t_ms, wing_extended_z, color=cc['extended'],
-            label='Extended', **lk)
+            label='Extending', **lk)
     ax.plot(t_ms, wing_folded_z, color=cc['folded'],
-            label='Folded', **lk)
+            label='Folding', **lk)
     ax.set_xlabel('Time (ms)')
     ax.set_ylabel('Wing V13 z (mm)')
     ax.set_title(title, pad=2)
