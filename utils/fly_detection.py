@@ -11,6 +11,35 @@ from typing import List, Dict, Optional
 import pandas as pd
 
 
+def build_compact_frame_map(tracking_info_path: Path,
+                            n_csv_rows: int) -> Optional[Dict[int, int]]:
+    """If the CSV is compact (bouts-mode JARVIS output), build a mapping from
+    original video frame number -> compact CSV row index.
+
+    Returns None if the CSV is sparse (legacy full-video output).
+    Detection: if tracking_info.json exists, has a 'bouts' array, and the sum
+    of bout lengths matches n_csv_rows, the CSV is compact.
+    """
+    if not tracking_info_path.exists():
+        return None
+    import json
+    with open(tracking_info_path) as f:
+        info = json.load(f)
+    bouts = info.get('bouts')
+    if not bouts:
+        return None
+    compact_total = sum(b['end'] - b['start'] + 1 for b in bouts)
+    if compact_total != n_csv_rows:
+        return None
+    frame_map: Dict[int, int] = {}
+    row = 0
+    for b in bouts:
+        for frame in range(b['start'], b['end'] + 1):
+            frame_map[frame] = row
+            row += 1
+    return frame_map
+
+
 def build_unified_bouts_csv(folder: Path, dataset: str,
                             force: bool = False) -> Optional[Path]:
     """

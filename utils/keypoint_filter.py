@@ -1148,6 +1148,8 @@ def load_confidence_concatenated(
         columns found.
     """
     import pandas as pd
+    from pathlib import Path
+    from utils.fly_detection import build_compact_frame_map
 
     df = pd.read_csv(csv_path, header=[0, 1])
     df.columns = ['_'.join(col).strip() if isinstance(col, tuple) else col
@@ -1163,11 +1165,21 @@ def load_confidence_concatenated(
     N = len(filtered_node_names)
     conf_bouts = []
 
+    tracking_info_path = Path(csv_path).parent / "tracking_info.json"
+    compact_map = build_compact_frame_map(tracking_info_path, n_frames_available)
+
     for bout in bouts:
-        # Mirror the same bounds check as load_concatenated_bouts
-        if bout['start_frame'] >= n_frames_available or bout['end_frame'] > n_frames_available:
-            continue
-        frame_idx = np.arange(bout['start_frame'], bout['end_frame'])
+        if compact_map is not None:
+            rows = [compact_map[f]
+                    for f in range(bout['start_frame'], bout['end_frame'])
+                    if f in compact_map]
+            if not rows:
+                continue
+            frame_idx = np.array(rows)
+        else:
+            if bout['start_frame'] >= n_frames_available or bout['end_frame'] > n_frames_available:
+                continue
+            frame_idx = np.arange(bout['start_frame'], bout['end_frame'])
         bout_conf_raw = conf_data.iloc[frame_idx].values.astype(float)
         T_bout = len(frame_idx)
         bout_conf = np.ones((T_bout, N), dtype=float)

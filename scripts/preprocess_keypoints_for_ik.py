@@ -56,6 +56,7 @@ try:
         match_csv_to_skeleton,
         reorder_keypoints_array,
         reorder_skeleton_edges)
+    from utils.fly_detection import build_compact_frame_map
     from utils.keypoint_filter import filter_keypoints, load_confidence_from_csv, load_confidence_concatenated
     from utils.pair_validity import (
         compute_pair_validity,
@@ -496,7 +497,7 @@ def load_bouts_from_csv(bouts_csv_path: Path,
         if fly_label is not None and not fid.endswith(('_fly0', '_fly1')):
             fid = f"{fid}_{fly_label}"
         bout_info = {
-            'bout_idx': int(row['bout_idx']-1),
+            'bout_idx': int(row['bout_idx'])-1,
             'start_frame': int(row['start_frame']),
             'end_frame': int(row['end_frame']),
             'fly_id': fid,
@@ -510,34 +511,6 @@ def load_bouts_from_csv(bouts_csv_path: Path,
         print(f"  Last bout:  idx={bouts[-1]['bout_idx']}, fly_id={bouts[-1]['fly_id']}, frames {bouts[-1]['start_frame']}-{bouts[-1]['end_frame']}")
     
     return bouts
-
-
-def _build_compact_frame_map(tracking_info_path: Path, n_csv_rows: int) -> Optional[Dict[int, int]]:
-    """If the CSV is compact (bouts-mode JARVIS output), build a mapping from
-    original video frame number -> compact CSV row index.
-
-    Returns None if the CSV is sparse (legacy full-video output).
-    Detection: if tracking_info.json exists, has a 'bouts' array, and the sum
-    of bout lengths matches n_csv_rows, the CSV is compact.
-    """
-    if not tracking_info_path.exists():
-        return None
-    import json
-    with open(tracking_info_path) as f:
-        info = json.load(f)
-    bouts = info.get('bouts')
-    if not bouts:
-        return None
-    compact_total = sum(b['end'] - b['start'] + 1 for b in bouts)
-    if compact_total != n_csv_rows:
-        return None  # sparse format, no remapping needed
-    frame_map = {}
-    row = 0
-    for b in bouts:
-        for frame in range(b['start'], b['end'] + 1):
-            frame_map[frame] = row
-            row += 1
-    return frame_map
 
 
 def load_concatenated_bouts(csv_path: Path, 
@@ -573,7 +546,7 @@ def load_concatenated_bouts(csv_path: Path,
 
     # Detect compact (bouts-mode) CSV and build frame remapping if needed
     tracking_info_path = csv_path.parent / "tracking_info.json"
-    compact_map = _build_compact_frame_map(tracking_info_path, n_frames_available)
+    compact_map = build_compact_frame_map(tracking_info_path, n_frames_available)
     if compact_map is not None:
         print(f"  Detected compact (bouts-mode) CSV — remapping {len(compact_map)} frames")
 
@@ -683,7 +656,7 @@ def load_sibling_concatenated(sibling_csv_path: Path,
 
     # Detect compact (bouts-mode) CSV
     tracking_info_path = sibling_csv_path.parent / "tracking_info.json"
-    compact_map = _build_compact_frame_map(tracking_info_path, n_frames_available)
+    compact_map = build_compact_frame_map(tracking_info_path, n_frames_available)
 
     arrays = []
     for bout in bouts:
@@ -1214,7 +1187,7 @@ def process_bouts_batch(csv_path: Path,
             all_bouts_dict[f'bout_{bout_idx:03d}'] = bout_data
             
             scale_str = f", scale={alignment_info['scales']:.6f}" if alignment_info else ""
-            fly_id_str = f", fly_id={fly_ids[bout_idx]}"
+            fly_id_str = f", fly_id={clip['fly_id']}"
             print(f"  ✓ bout_{bout_idx:03d}: {bout_data['keypoints'].shape[0]} frames{scale_str}{fly_id_str}")
         
         # Add info dictionary with fly_ids and clip_lengths
