@@ -119,3 +119,68 @@ def test_triangulate_sam3_female_com_nan_where_valid_below_min_cams(tmp_path):
     com = triangulate_sam3_female_com(npz_path, calib_dir, fly_idx=0, min_cams=2)
     assert np.all(np.isnan(com[1]))
     assert not np.any(np.isnan(com[0]))
+
+
+def test_triangulate_sam3_female_com_nan_centroid_with_valid_true(tmp_path):
+    # valid[0, 1, 1] is True but centroids[0, 1, 1] is NaN. The finite-guard in
+    # the function ANDs valid_t & finite_t, so only 1 camera is usable on frame
+    # 1, and the output row should be NaN. Frame 0 should still be finite.
+    L1 = _synthetic_dlt(cam_xyz=(0.0, 0.0, 40.0))
+    L2 = _synthetic_dlt(cam_xyz=(0.0, 0.0, 60.0))
+    calib_dir = tmp_path / 'calib'
+    calib_dir.mkdir()
+    np.savetxt(calib_dir / 'Cam01_dlt.csv', L1)
+    np.savetxt(calib_dir / 'Cam02_dlt.csv', L2)
+
+    target = np.array([0.5, 0.3, 1.2])
+    uv1 = _project(L1, target)
+    uv2 = _project(L2, target)
+    T = 3
+    centroids = np.zeros((1, 2, T, 2), dtype=np.float64)
+    centroids[0, 0, :, :] = uv1
+    centroids[0, 1, :, :] = uv2
+    centroids[0, 1, 1, :] = [np.nan, np.nan]  # valid stays True, but not finite
+    valid = np.ones((1, 2, T), dtype=bool)
+    packed = np.zeros((1, 2, T, 4, 4), dtype=np.uint8)
+    npz_path = tmp_path / 'sam3_masks.npz'
+    np.savez(npz_path, packed=packed, valid=valid, centroids=centroids)
+
+    com = triangulate_sam3_female_com(npz_path, calib_dir, fly_idx=0, min_cams=2)
+    assert np.all(np.isnan(com[1]))
+    assert not np.any(np.isnan(com[0]))
+
+
+def test_triangulate_sam3_female_com_respects_camera_order(tmp_path):
+    # Two cameras with distinguishable geometries; if camera_order is swapped,
+    # the DLT coefficient order no longer matches the centroid axis order and
+    # triangulation should land on a different 3D point than the synthetic target.
+    LA = _synthetic_dlt(cam_xyz=(0.0, 0.0, 40.0))
+    LB = _synthetic_dlt(cam_xyz=(0.0, 0.0, 60.0))
+    calib_dir = tmp_path / 'calib'
+    calib_dir.mkdir()
+    np.savetxt(calib_dir / 'CamA_dlt.csv', LA)
+    np.savetxt(calib_dir / 'CamB_dlt.csv', LB)
+
+    target = np.array([1.5, -0.8, 2.0])
+    uvA = _project(LA, target)
+    uvB = _project(LB, target)
+    T = 2
+    centroids = np.zeros((1, 2, T, 2), dtype=np.float64)
+    centroids[0, 0, :, :] = uvA  # axis-0 of SAM3 cams corresponds to CamA
+    centroids[0, 1, :, :] = uvB  # axis-1 of SAM3 cams corresponds to CamB
+    valid = np.ones((1, 2, T), dtype=bool)
+    packed = np.zeros((1, 2, T, 4, 4), dtype=np.uint8)
+    npz_path = tmp_path / 'sam3_masks.npz'
+    np.savez(npz_path, packed=packed, valid=valid, centroids=centroids)
+
+    com_default = triangulate_sam3_female_com(
+        npz_path, calib_dir, fly_idx=0, min_cams=2,
+    )
+    com_swapped = triangulate_sam3_female_com(
+        npz_path, calib_dir, fly_idx=0, min_cams=2,
+        camera_order=['CamB_dlt.csv', 'CamA_dlt.csv'],
+    )
+    # Default (sorted) order gives CamA, CamB -> matches target.
+    np.testing.assert_allclose(com_default[0], target, atol=1e-6)
+    # Swapped order mismatches centroid<->DLT alignment and should NOT match.
+    assert not np.allclose(com_swapped[0], target, atol=1e-3)

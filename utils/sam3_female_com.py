@@ -6,6 +6,11 @@ centroid per frame. Used to recover a robust female COM trajectory in frames
 where the pose model (and therefore 3D keypoints) is unreliable (e.g. on the
 arena wall).
 """
+# Note: utils/fly_detection.py has a sibling _triangulate_dlt that consumes
+# OpenCV-YAML (C, 3, 4) projection matrices. This module is separate because
+# it loads 11-parameter DLT CSV coefficients (via _dlt_load from
+# utils/courtship_figure_panels.py). If the calibration pipeline is ever
+# unified on a single format, these two helpers should be collapsed.
 from __future__ import annotations
 
 from pathlib import Path
@@ -65,6 +70,7 @@ def triangulate_sam3_female_com(
     fly_idx: int = 0,
     camera_order: Optional[Sequence[str]] = None,
     min_cams: int = 2,
+    verbose: bool = True,
 ) -> np.ndarray:
     """Triangulate per-frame female COM from SAM3 mask centroids.
 
@@ -78,6 +84,8 @@ def triangulate_sam3_female_com(
     camera_order : optional explicit filename order (e.g. ``['Cam2012630_dlt.csv',
         ...]``); when ``None``, ``sorted(glob('Cam*_dlt.csv'))`` is used.
     min_cams : minimum valid cameras to attempt triangulation (default 2).
+    verbose : if True (default), print the resolved camera order to stdout.
+        Set to False to suppress the side-effect in library/batch use.
 
     Returns
     -------
@@ -94,9 +102,10 @@ def triangulate_sam3_female_com(
         raise FileNotFoundError(f'no Cam*_dlt.csv files found in {calib_dir}')
 
     coeffs = np.stack([_dlt_load(f) for f in dlt_files], axis=0)  # (n_cams, 11)
-    print(f'[sam3_female_com] camera order:')
-    for idx, f in enumerate(dlt_files):
-        print(f'  cam {idx}: {f.name}')
+    if verbose:
+        print(f'[sam3_female_com] camera order:')
+        for idx, f in enumerate(dlt_files):
+            print(f'  cam {idx}: {f.name}')
 
     with np.load(npz_path) as npz:
         valid = np.asarray(npz['valid'])                            # (n_flies, n_cams, T)
