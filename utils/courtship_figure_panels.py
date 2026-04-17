@@ -107,6 +107,7 @@ def assemble_figure(
     fig_width_mm: float = 183.0,
     fig_height_mm: float = 130.0,
     n_frames_strip: int = 6,
+    n_render_strip: int = 4,
 ) -> Tuple[plt.Figure, Dict[str, object]]:
     """Build the 4-row consolidated layout. Returns (fig, axes_dict).
 
@@ -115,7 +116,7 @@ def assemble_figure(
         Row 2  6 video frames with all keypoints overlayed
         Row 3 [sine in-phase] | [joint angle density] | [Pslow/Pfast wave]
               | [scutellum z courtship vs free walking]
-        Row 4  6 MuJoCo render frames
+        Row 4  [N MuJoCo render frames] | [male pitch panel]
 
     axes_dict keys:
         'kp_label'    : axes (Row 1 left)
@@ -126,7 +127,8 @@ def assemble_figure(
         'angle_2d'    : axes (Row 3 col 1)
         'pulse_class' : axes (Row 3 col 2)
         'zheight'     : axes (Row 3 col 3)
-        'render'      : list of N axes (Row 4)
+        'render'      : list of N axes (Row 4 left)
+        'pitch'       : axes (Row 4 right)
     """
     apply_paper_style()
     fig = plt.figure(figsize=(fig_width_mm / 25.4, fig_height_mm / 25.4))
@@ -187,14 +189,23 @@ def assemble_figure(
         left=0.06, right=0.97, top=0.90, bottom=0.22, wspace=0.48,
     )
 
-    # Row 4: render strip
-    ax_render = list(sub_render.subplots(1, n_frames_strip))
+    # Row 4: render strip (left) + male-pitch panel (right)
+    sub_render_left, sub_render_right = sub_render.subfigures(
+        1, 2, width_ratios=[int(n_render_strip), 2], wspace=0.08,
+    )
+    ax_render = list(sub_render_left.subplots(1, int(n_render_strip)))
+    if int(n_render_strip) == 1:
+        ax_render = [ax_render[0]] if not isinstance(ax_render, list) else ax_render
     for ax in ax_render:
         ax.set_xticks([]); ax.set_yticks([])
         for spine in ax.spines.values():
             spine.set_visible(False)
-    sub_render.subplots_adjust(
-        wspace=0.06, left=0.05, right=0.97, top=0.94, bottom=0.06,
+    sub_render_left.subplots_adjust(
+        wspace=0.06, left=0.05, right=0.98, top=0.94, bottom=0.06,
+    )
+    ax_pitch = sub_render_right.subplots(1, 1)
+    sub_render_right.subplots_adjust(
+        left=0.18, right=0.96, top=0.90, bottom=0.26,
     )
 
     return fig, {
@@ -208,6 +219,7 @@ def assemble_figure(
         'pulse_class':      ax_pulse,
         'zheight':          ax_zheight,
         'render':           ax_render,
+        'pitch':            ax_pitch,
     }
 
 
@@ -221,6 +233,7 @@ DEFAULT_PANEL_LETTERS: Sequence[Tuple[str, str]] = (
     ('pulse_class',      'G'),
     ('zheight',          'H'),
     ('render',           'I'),
+    ('pitch',            'J'),
 )
 
 
