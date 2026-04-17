@@ -45,7 +45,7 @@ sys.path.insert(0, str(project_root))
 
 from utils import io_dict_to_hdf5 as ioh5
 from utils.stac_data_utils import (
-    reorganize_stac_by_bouts, 
+    reorganize_stac_by_bouts,
     print_bout_dict_structure,
     interpolate_trajectory,
     adjust_root_z_for_floor
@@ -54,6 +54,7 @@ from utils.path_utils import load_config_with_path_template, convert_dict_to_pat
 from utils.io import load_stac_data
 from utils.mjx_preprocess import process_clip, ReferenceClip
 from utils.stac_data_utils import concatenate_bout_dicts
+from utils.mask_combine import concatenate_per_folder_masks
 
 
 
@@ -264,6 +265,24 @@ def main(cfg: DictConfig):
             base_out = output_file.with_name(f"{stem}_{bucket}.h5")
             interp_out = output_file.with_name(f"{stem}_{bucket}_interpolated.h5")
         _save_one(sub, base_out, interp_out)
+
+    # Cross-folder SAM3 mask concatenation. Per-folder sam3_aligned.h5 files are
+    # written by the `convert` step when bout_*/sam3_masks.npz data is present.
+    # The combined file is a sibling of ik_output_combined*.h5 so postprocess
+    # readers that glob for ik_output_*.h5 don't pick it up.
+    mask_files = sorted(base_dir.rglob("sam3_aligned.h5"))
+    if mask_files:
+        stem = output_file.name[:-3] if output_file.name.endswith('.h5') \
+            else output_file.name
+        mask_out = output_file.with_name(f"{stem}_masks.h5")
+        print("\n" + "=" * 80)
+        print(f"CONCATENATING {len(mask_files)} sam3_aligned.h5 → {mask_out.name}")
+        print("=" * 80)
+        concatenate_per_folder_masks(mask_files, mask_out)
+        print(f"✓ Wrote {mask_out} "
+              f"({mask_out.stat().st_size / 1024 / 1024:.1f} MB)")
+    else:
+        print("\n(no sam3_aligned.h5 files under base_dir — skipping mask combine)")
 
     cfg_temp = cfg.copy()
     cfg_temp.paths = convert_dict_to_string(cfg_temp.paths)

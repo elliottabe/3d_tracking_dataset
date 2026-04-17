@@ -9,11 +9,16 @@ import json
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
 
+import h5py
 import numpy as np
 import pandas as pd
 
 
 _POPCOUNT = np.array([bin(i).count('1') for i in range(256)], dtype=np.uint32)
+
+# Keypoints used to derive body heading from per-bout 3D CSVs.
+_HEADING_ANTERIOR_KP = 'Antenna_Base'
+_HEADING_POSTERIOR_KP = 'Scutellum'
 
 
 def build_compact_frame_map(tracking_info_path: Path,
@@ -143,6 +148,39 @@ def _find_unified_bouts_csv(folder: Path, dataset: str) -> Optional[Path]:
     return None
 
 
+def _synthesize_unified_from_bouts(folder: Path,
+                                   bout_dirs: List[Path]) -> pd.DataFrame:
+    """Build a unified bouts DataFrame from the per-bout CSV frame columns.
+
+    Used for new-format folders that have bout_*/fly{0,1}.csv but no
+    pre-existing <dataset>_bouts_unified_summary.csv. The fly_id is derived
+    from folder path components (``<SessionX>/<timestamp>``), matching the
+    convention used by build_unified_bouts_csv. source_fly is always 'both'
+    since every bout dir carries both fly0 and fly1 CSVs.
+    """
+    fly_id = f"{folder.parent.parent.name}/{folder.parent.name}"
+    rows = []
+    for i, bout_dir in enumerate(bout_dirs, start=1):
+        probe = pd.read_csv(bout_dir / "fly0.csv", header=[0, 1])
+        frame_col = [c for c in probe.columns if c[0] == 'frame']
+        if not frame_col:
+            raise ValueError(
+                f"No 'frame' column found in {bout_dir}/fly0.csv — cannot "
+                f"synthesize bouts summary for new-format folder {folder}."
+            )
+        frames = probe[frame_col[0]].values
+        rows.append({
+            'fly_id': fly_id,
+            'bout_idx': i,
+            'start_frame': int(frames.min()),
+            'end_frame': int(frames.max()),
+            'source_fly': 'both',
+        })
+    return pd.DataFrame(rows,
+                        columns=['fly_id', 'bout_idx', 'start_frame',
+                                 'end_frame', 'source_fly'])
+
+
 def _concat_per_bout_csvs(bout_csvs: List[Path]) -> pd.DataFrame:
     """
     Read bout_*/flyX.csv (per-bout compact CSVs with 2-row MultiIndex header)
@@ -167,6 +205,164 @@ def _concat_per_bout_csvs(bout_csvs: List[Path]) -> pd.DataFrame:
         )
         frames.append(df)
     return pd.concat(frames, ignore_index=True)
+
+
+def _extract_xyz_from_df(df: pd.DataFrame, kp: str) -> np.ndarray:
+    """Return [F, 3] float32 xyz for one keypoint from a 2-row MultiIndex CSV DataFrame."""
+    return np.stack([
+        df[(kp, 'x')].values.astype(np.float32),
+        df[(kp, 'y')].values.astype(np.float32),
+        df[(kp, 'z')].values.astype(np.float32),
+    ], axis=-1)
+
+
+def _compute_heading(df: pd.DataFrame,
+                     anterior: str = _HEADING_ANTERIOR_KP,
+                     posterior: str = _HEADING_POSTERIOR_KP,
+                     ) -> Tuple[np.ndarray, np.ndarray]:
+    """Compute per-frame xy-plane heading and centroid for one fly.
+
+    heading [F, 3]: unit vector (anterior - posterior) with z zeroed.
+                     Zero vector where the xy-norm is numerically zero.
+    centroid [F, 3]: 3D position of the posterior keypoint (thorax anchor).
+    """
+    ant = _extract_xyz_from_df(df, anterior)
+    post = _extract_xyz_from_df(df, posterior)
+    vec = ant - post
+    vec[..., 2] = 0.0
+    norms = np.linalg.norm(vec, axis=-1, keepdims=True)
+    safe = np.where(norms > 1e-6, norms, 1.0)
+    heading = np.where(norms > 1e-6, vec / safe, 0.0).astype(np.float32)
+    return heading, post
+
+
+def _signed_xy_angle(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """Signed angle (rad) in the xy-plane from `a` to `b`, both [F, 3] unit vectors."""
+    dot = (a * b).sum(axis=-1)
+    cross_z = a[..., 0] * b[..., 1] - a[..., 1] * b[..., 0]
+    return np.arctan2(cross_z, dot).astype(np.float32)
+
+
+def _write_sam3_aligned_h5(
+    out_path: Path,
+    bout_dirs: List[Path],
+    sex_swaps: List[bool],
+    bouts_info: List[Dict],
+    male_headings: List[np.ndarray],
+    female_headings: List[np.ndarray],
+    male_centroids: List[np.ndarray],
+    female_centroids: List[np.ndarray],
+) -> None:
+    """Stream-write a per-folder sam3_aligned.h5 containing masks + derived arrays.
+
+    After applying the per-bout sex swap, ``[A=0] = male`` and ``[A=1] = female``.
+    Masks / centroids / valid flags are concatenated along the frame axis in
+    bout order; per-bout row boundaries are stored in ``/bout_boundaries`` so
+    downstream code can recover bout ranges without re-reading the NPZs.
+
+    Derived arrays under ``/derived/`` are aligned frame-for-frame with the
+    concatenated masks.
+    """
+    all_male_h = np.concatenate(male_headings, axis=0)
+    all_female_h = np.concatenate(female_headings, axis=0)
+    all_male_c = np.concatenate(male_centroids, axis=0)
+    all_female_c = np.concatenate(female_centroids, axis=0)
+
+    centroid_vec = (all_female_c - all_male_c).astype(np.float32)
+    cv_xy = centroid_vec.copy()
+    cv_xy[..., 2] = 0.0
+    cv_norm = np.linalg.norm(cv_xy, axis=-1, keepdims=True)
+    cv_safe = np.where(cv_norm > 1e-6, cv_norm, 1.0)
+    cv_unit = np.where(cv_norm > 1e-6, cv_xy / cv_safe, 0.0).astype(np.float32)
+    relative_angle = _signed_xy_angle(all_male_h, cv_unit)
+
+    row_offset = 0
+    row_starts: List[int] = []
+    row_ends: List[int] = []
+
+    with h5py.File(out_path, 'w') as f:
+        mask_ds = cent_ds = valid_ds = None
+
+        for bout_dir, swap in zip(bout_dirs, sex_swaps):
+            with np.load(bout_dir / "sam3_masks.npz") as d:
+                packed = np.asarray(d['packed'])
+                centroids = np.asarray(d['centroids'])
+                valid = np.asarray(d['valid'])
+                shape_arr = np.asarray(d['shape']) if 'shape' in d else None
+
+            if swap:
+                packed = np.ascontiguousarray(packed[::-1])
+                centroids = np.ascontiguousarray(centroids[::-1])
+                valid = np.ascontiguousarray(valid[::-1])
+
+            A, C, F, H, W_pack = packed.shape
+
+            if mask_ds is None:
+                mask_ds = f.create_dataset(
+                    'mask_packed', shape=(A, C, 0, H, W_pack),
+                    maxshape=(A, C, None, H, W_pack),
+                    dtype='uint8', compression='gzip', compression_opts=4,
+                    chunks=(A, C, max(1, min(64, F)), H, W_pack),
+                )
+                cent_ds = f.create_dataset(
+                    'centroids', shape=(A, C, 0, 2),
+                    maxshape=(A, C, None, 2), dtype='float32',
+                )
+                valid_ds = f.create_dataset(
+                    'valid', shape=(A, C, 0),
+                    maxshape=(A, C, None), dtype='bool',
+                )
+                if shape_arr is not None and shape_arr.size >= 2:
+                    f.attrs['H'] = int(shape_arr[0])
+                    f.attrs['W'] = int(shape_arr[1])
+                else:
+                    f.attrs['H'] = int(H)
+                    f.attrs['W'] = int(W_pack) * 8
+                f.attrs['W_packed'] = int(W_pack)
+                f.attrs['fps'] = 800
+                f.attrs['layout'] = (
+                    'packed bits along last axis; [A=0]=male, [A=1]=female '
+                    'after per-bout sex swap'
+                )
+
+            new_size = row_offset + F
+            mask_ds.resize((A, C, new_size, H, W_pack))
+            mask_ds[:, :, row_offset:new_size, :, :] = packed
+            cent_ds.resize((A, C, new_size, 2))
+            cent_ds[:, :, row_offset:new_size, :] = centroids
+            valid_ds.resize((A, C, new_size))
+            valid_ds[:, :, row_offset:new_size] = valid
+
+            row_starts.append(row_offset)
+            row_ends.append(new_size - 1)
+            row_offset = new_size
+
+        f.create_dataset(
+            'bout_boundaries',
+            data=np.stack([np.asarray(row_starts, dtype=np.int64),
+                           np.asarray(row_ends, dtype=np.int64)], axis=1),
+        )
+        f.create_dataset(
+            'bout_frames',
+            data=np.asarray([[b['start'], b['end']] for b in bouts_info],
+                            dtype=np.int64),
+        )
+        f.create_dataset('sex_swaps',
+                         data=np.asarray(sex_swaps, dtype=bool))
+
+        g = f.create_group('derived')
+        g.create_dataset('male_heading', data=all_male_h, compression='gzip')
+        g.create_dataset('female_heading', data=all_female_h, compression='gzip')
+        g.create_dataset('male_centroid', data=all_male_c, compression='gzip')
+        g.create_dataset('female_centroid', data=all_female_c, compression='gzip')
+        g.create_dataset('centroid_vec', data=centroid_vec, compression='gzip')
+        g.create_dataset('relative_angle', data=relative_angle, compression='gzip')
+        g.attrs['heading_anterior_kp'] = _HEADING_ANTERIOR_KP
+        g.attrs['heading_posterior_kp'] = _HEADING_POSTERIOR_KP
+        g.attrs['relative_angle_convention'] = (
+            'atan2(cross_z, dot) in xy-plane; 0 rad = male heading parallel '
+            'to the male->female centroid vector'
+        )
 
 
 def aggregate_per_bout_predictions(folder: Path,
@@ -206,7 +402,9 @@ def aggregate_per_bout_predictions(folder: Path,
                      for n in (0, 1)]
     unified_out = folder / f"{dataset}_bouts_unified_summary.csv"
     tracking_info = folder / "tracking_info.json"
-    outputs = [*data3d_paths, *summary_paths, unified_out, tracking_info]
+    sam3_aligned_out = folder / "sam3_aligned.h5"
+    outputs = [*data3d_paths, *summary_paths, unified_out, tracking_info,
+               sam3_aligned_out]
 
     if not force and all(p.exists() for p in outputs):
         newest_input = max(
@@ -219,16 +417,19 @@ def aggregate_per_bout_predictions(folder: Path,
 
     unified_src = _find_unified_bouts_csv(folder, dataset)
     if unified_src is None:
-        raise FileNotFoundError(
-            f"Cannot find {dataset}_bouts_unified_summary.csv in {folder} "
-            f"or any parent dir; required to build per-fly bouts summaries."
-        )
-    unified_df = pd.read_csv(unified_src)
+        unified_df = _synthesize_unified_from_bouts(folder, bout_dirs)
+    else:
+        unified_df = pd.read_csv(unified_src)
 
     bouts_info: List[Dict[str, int]] = []
     sex_swaps: List[bool] = []
     # Concatenated DataFrames per OUTPUT fly index after sex-swap applied.
     fly_frames: List[List[pd.DataFrame]] = [[], []]
+    # Per-bout heading / centroid arrays aligned to mask concat order.
+    male_headings: List[np.ndarray] = []
+    female_headings: List[np.ndarray] = []
+    male_centroids: List[np.ndarray] = []
+    female_centroids: List[np.ndarray] = []
 
     for bout_dir in bout_dirs:
         swap, a0, a1 = _decide_sex_swap(bout_dir / "sam3_masks.npz")
@@ -244,14 +445,36 @@ def aggregate_per_bout_predictions(folder: Path,
 
         out_fly0_src = bout_dir / ("fly1.csv" if swap else "fly0.csv")
         out_fly1_src = bout_dir / ("fly0.csv" if swap else "fly1.csv")
-        fly_frames[0].append(_concat_per_bout_csvs([out_fly0_src]))
-        fly_frames[1].append(_concat_per_bout_csvs([out_fly1_src]))
+        fly0_df = _concat_per_bout_csvs([out_fly0_src])
+        fly1_df = _concat_per_bout_csvs([out_fly1_src])
+        fly_frames[0].append(fly0_df)
+        fly_frames[1].append(fly1_df)
+        # After swap application: fly_frames[0] = male, fly_frames[1] = female.
+        mh, mc = _compute_heading(fly0_df)
+        fh, fc = _compute_heading(fly1_df)
+        male_headings.append(mh)
+        female_headings.append(fh)
+        male_centroids.append(mc)
+        female_centroids.append(fc)
         print(f"  [aggregate] {bout_dir.name}: frames=[{start},{end}] "
               f"area0={a0:.0f} area1={a1:.0f} swap={swap}")
 
     for n in (0, 1):
         combined = pd.concat(fly_frames[n], ignore_index=True)
         combined.to_csv(data3d_paths[n], index=False)
+
+    _write_sam3_aligned_h5(
+        sam3_aligned_out,
+        bout_dirs=bout_dirs,
+        sex_swaps=sex_swaps,
+        bouts_info=bouts_info,
+        male_headings=male_headings,
+        female_headings=female_headings,
+        male_centroids=male_centroids,
+        female_centroids=female_centroids,
+    )
+    print(f"  [aggregate] wrote {sam3_aligned_out.name} "
+          f"({sam3_aligned_out.stat().st_size / 1024 / 1024:.1f} MB)")
 
     # tracking_info.json — compact-frame-map schema
     tracking_info.write_text(json.dumps({

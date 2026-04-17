@@ -27,7 +27,7 @@ from pathlib import Path
 
 
 def _discover_clips(clip_dir: Path) -> list[Path]:
-    clips = sorted(clip_dir.glob("Cam*_frames_*.mp4"))
+    clips = sorted(clip_dir.glob("Cam*.mp4"))
     if not clips:
         raise SystemExit(f"No Cam*_frames_*.mp4 files found in {clip_dir}")
     return clips
