@@ -32,8 +32,8 @@ import numpy as np
 # -----------------------------------------------------------------------------
 
 SONG_COLORS: Dict[str, str] = {
-    'pulse':  '#d62728',
-    'sine':   '#1f77b4',
+    'pulse':  '#F97316',  # warm orange  (pulse song → F, H)
+    'sine':   '#14B8A6',  # teal         (sine song  → F, H)
     'waggle': '#9467bd',
     'quiet':  '#bdbdbd',
 }
@@ -75,8 +75,9 @@ def apply_paper_style(min_font_pt: float = 6.0) -> None:
     mpl.rcParams.update({
         'pdf.fonttype':    42,
         'ps.fonttype':     42,
+        'svg.fonttype':    'none',
         'font.family':     'sans-serif',
-        'font.sans-serif': ['DejaVu Sans', 'Arial', 'Helvetica'],
+        'font.sans-serif': ['Arial', 'Helvetica'],
         'font.size':       base,
         'axes.labelsize':  base,
         'axes.titlesize':  base,
@@ -85,11 +86,13 @@ def apply_paper_style(min_font_pt: float = 6.0) -> None:
         'legend.fontsize': tick,
         'axes.spines.right': False,
         'axes.spines.top':   False,
-        'axes.linewidth':  0.6,
-        'xtick.major.width': 0.6,
-        'ytick.major.width': 0.6,
-        'xtick.major.size': 2.5,
-        'ytick.major.size': 2.5,
+        'axes.linewidth':  1.0,
+        'xtick.major.width': 1.0,
+        'ytick.major.width': 1.0,
+        'xtick.minor.width': 0.8,
+        'ytick.minor.width': 0.8,
+        'xtick.major.size': 3.5,
+        'ytick.major.size': 3.5,
         'figure.dpi':     150,
         'savefig.dpi':    300,
         'savefig.bbox':   'standard',
@@ -129,29 +132,29 @@ def assemble_figure(
     fig = plt.figure(figsize=(fig_width_mm / 25.4, fig_height_mm / 25.4))
 
     sub_row1, sub_video, sub_row3, sub_render = fig.subfigures(
-        4, 1, height_ratios=[1.4, 1.0, 1.6, 1.0], hspace=0.05,
+        4, 1, height_ratios=[1.4, 1.0, 1.6, 1.0], hspace=0.10,
     )
 
     # Row 1: labeled keypoint frame (left) + wing/scut traces (right)
     sf1_left, sf1_right = sub_row1.subfigures(
-        1, 2, width_ratios=[1, 5], wspace=0.05,
+        1, 2, width_ratios=[1, 5], wspace=0.12,
     )
     ax_kp_label = sf1_left.subplots(1, 1)
     ax_kp_label.set_xticks([]); ax_kp_label.set_yticks([])
     for spine in ax_kp_label.spines.values():
         spine.set_visible(False)
-    sf1_left.subplots_adjust(left=0.02, right=0.98, top=0.94, bottom=0.04)
+    sf1_left.subplots_adjust(left=0.05, right=0.96, top=0.92, bottom=0.06)
 
     ax_wing, ax_scut = sf1_right.subplots(
         2, 1, sharex=True, height_ratios=[2, 1],
     )
     sf1_right.subplots_adjust(
-        left=0.06, right=0.99, top=0.94, bottom=0.18, hspace=0.10,
+        left=0.07, right=0.97, top=0.92, bottom=0.20, hspace=0.14,
     )
 
     # Row 2: (n_frames_strip - 1) video frames + exemplar sine in-phase trace
     sf2_left, sf2_right = sub_video.subfigures(
-        1, 2, width_ratios=[5.0, 1.4], wspace=0.04,
+        1, 2, width_ratios=[5.0, 1.4], wspace=0.06,
     )
     n_video = max(1, int(n_frames_strip) - 1)
     ax_video = list(sf2_left.subplots(1, n_video))
@@ -162,26 +165,26 @@ def assemble_figure(
         for spine in ax.spines.values():
             spine.set_visible(False)
     sf2_left.subplots_adjust(
-        wspace=0.04, left=0.03, right=0.99, top=0.92, bottom=0.04,
+        wspace=0.06, left=0.05, right=0.97, top=0.90, bottom=0.06,
     )
     ax_sine_phase = sf2_right.subplots(1, 1)
     sf2_right.subplots_adjust(
-        left=0.16, right=0.97, top=0.92, bottom=0.22,
+        left=0.18, right=0.96, top=0.90, bottom=0.24,
     )
 
     # Row 3: 4 mechanism panels (col 0 = polar, cols 1-3 = cartesian)
     sf3_polar, sf3_rest = sub_row3.subfigures(
-        1, 2, width_ratios=[1.0, 3.0], wspace=0.05,
+        1, 2, width_ratios=[1.0, 3.0], wspace=0.06,
     )
     ax_wing_phase_polar = sf3_polar.subplots(
         1, 1, subplot_kw={'projection': 'polar'},
     )
     sf3_polar.subplots_adjust(
-        left=0.18, right=0.88, top=0.82, bottom=0.22,
+        left=0.20, right=0.88, top=0.82, bottom=0.22,
     )
     ax_angle_2d, ax_pulse, ax_zheight = sf3_rest.subplots(1, 3)
     sf3_rest.subplots_adjust(
-        left=0.05, right=0.99, top=0.92, bottom=0.20, wspace=0.45,
+        left=0.06, right=0.97, top=0.90, bottom=0.22, wspace=0.48,
     )
 
     # Row 4: render strip
@@ -191,7 +194,7 @@ def assemble_figure(
         for spine in ax.spines.values():
             spine.set_visible(False)
     sub_render.subplots_adjust(
-        wspace=0.04, left=0.03, right=0.99, top=0.96, bottom=0.04,
+        wspace=0.06, left=0.05, right=0.97, top=0.94, bottom=0.06,
     )
 
     return fig, {
@@ -206,6 +209,47 @@ def assemble_figure(
         'zheight':          ax_zheight,
         'render':           ax_render,
     }
+
+
+DEFAULT_PANEL_LETTERS: Sequence[Tuple[str, str]] = (
+    ('kp_label',         'A'),
+    ('wing',             'B'),
+    ('video',            'C'),
+    ('sine_phase',       'D'),
+    ('wing_phase_polar', 'E'),
+    ('angle_2d',         'F'),
+    ('pulse_class',      'G'),
+    ('zheight',          'H'),
+    ('render',           'I'),
+)
+
+
+def add_panel_letters(
+    axd: Dict[str, object],
+    letters: Sequence[Tuple[str, str]] = DEFAULT_PANEL_LETTERS,
+    x: float = -0.02,
+    y: float = 1.05,
+    fontsize: float = 10.0,
+    fontweight: str = 'bold',
+) -> None:
+    """Stamp bold panel letters (A, B, C, ...) in the top-left of each panel.
+
+    ``letters`` is a sequence of ``(axd_key, letter)`` pairs. For list-valued
+    entries (``'video'``, ``'render'``), the letter lands on the first axes.
+    Coordinates are in axes fractions (``transAxes``); negative ``x`` nudges
+    the letter just outside the axes spine.
+    """
+    for key, ch in letters:
+        ax = axd.get(key)
+        if ax is None:
+            continue
+        if isinstance(ax, (list, tuple)):
+            if not ax:
+                continue
+            ax = ax[0]
+        ax.text(x, y, ch, transform=ax.transAxes,
+                fontsize=fontsize, fontweight=fontweight,
+                ha='left', va='bottom', clip_on=False)
 
 
 # -----------------------------------------------------------------------------
@@ -379,6 +423,8 @@ def panel_kp_label_frame(
     scatter_kwargs: Optional[Dict] = None,
     center_xyz: Optional[np.ndarray] = None,
     crop_wh: Optional[Tuple[int, int]] = None,
+    kp_xyz_fly1: Optional[np.ndarray] = None,
+    kp_color_fly1: str = '#3a7bff',
 ) -> None:
     """Single video frame with selected keypoints drawn + labeled.
 
@@ -390,6 +436,9 @@ def panel_kp_label_frame(
     are both given, the ROI is computed dynamically by projecting the center
     through DLT and centering a ``(w, h)`` crop on the resulting pixel,
     clamped to the raw video bounds.
+
+    When ``kp_xyz_fly1`` is given it is drawn in ``kp_color_fly1`` on top of
+    the fly0 dots (same ``label_kps``), and fly0 gets its own labeled dots.
     """
     import cv2
     sk = {'s': 14, 'edgecolors': 'k', 'linewidths': 0.4,
@@ -421,26 +470,33 @@ def panel_kp_label_frame(
     ax.imshow(frame)
 
     name_to_idx = {n: i for i, n in enumerate(kp_names)}
-    kp_arr = np.asarray(kp_xyz)
-    if kp_arr.ndim == 2 and kp_arr.shape[-1] != 3:
-        kp_arr = kp_arr.reshape(kp_arr.shape[0], -1, 3)
-    pts3 = kp_arr[int(frame_index)] * float(kp_scale)
-    uv = _dlt_project(dlt_coeffs, pts3)
-    if roi_t is not None:
-        uv = uv - np.array([roi_t[0], roi_t[1]], dtype=float)
 
-    xs, ys = [], []
-    for name in label_kps:
-        if name not in name_to_idx:
-            continue
-        u, v = uv[name_to_idx[name]]
-        if not (np.isfinite(u) and np.isfinite(v)):
-            continue
-        xs.append(u); ys.append(v)
-        dx, dy = label_offsets.get(name, (8, -4))
-        ax.annotate(name, xy=(u, v), xytext=(u + dx, v + dy), **tk)
-    if xs:
-        ax.scatter(xs, ys, c=kp_color, **sk)
+    def _project_and_label(kp_source, color, annotate):
+        arr = np.asarray(kp_source)
+        if arr.ndim == 2 and arr.shape[-1] != 3:
+            arr = arr.reshape(arr.shape[0], -1, 3)
+        pts = arr[int(frame_index)] * float(kp_scale)
+        uv_ = _dlt_project(dlt_coeffs, pts)
+        if roi_t is not None:
+            uv_ = uv_ - np.array([roi_t[0], roi_t[1]], dtype=float)
+        xs, ys = [], []
+        for name in label_kps:
+            if name not in name_to_idx:
+                continue
+            u, v = uv_[name_to_idx[name]]
+            if not (np.isfinite(u) and np.isfinite(v)):
+                continue
+            xs.append(u); ys.append(v)
+            if annotate:
+                dx, dy = label_offsets.get(name, (8, -4))
+                tk_local = {**tk, 'color': color}
+                ax.annotate(name, xy=(u, v), xytext=(u + dx, v + dy), **tk_local)
+        if xs:
+            ax.scatter(xs, ys, c=color, **sk)
+
+    _project_and_label(kp_xyz, kp_color, annotate=True)
+    if kp_xyz_fly1 is not None:
+        _project_and_label(kp_xyz_fly1, kp_color_fly1, annotate=False)
 
 
 def panel_video_strip_with_kp(
@@ -460,6 +516,8 @@ def panel_video_strip_with_kp(
     scatter_kwargs: Optional[Dict] = None,
     center_xyz: Optional[np.ndarray] = None,
     crop_wh: Optional[Tuple[int, int]] = None,
+    kp_xyz_fly1_per_frame: Optional[np.ndarray] = None,
+    kp_color_fly1: str = '#3a7bff',
 ) -> None:
     """Same as :func:`panel_video_strip` but draws projected keypoint dots
     on every frame.
@@ -493,9 +551,14 @@ def panel_video_strip_with_kp(
         kp_idx = np.array([name_to_idx[n] for n in overlay_kps if n in name_to_idx],
                           dtype=int)
 
-    kp_arr = np.asarray(kp_xyz_per_frame)
-    if kp_arr.ndim == 2 and kp_arr.shape[-1] != 3:
-        kp_arr = kp_arr.reshape(kp_arr.shape[0], -1, 3)
+    def _as_3d(a):
+        a = np.asarray(a)
+        if a.ndim == 2 and a.shape[-1] != 3:
+            a = a.reshape(a.shape[0], -1, 3)
+        return a
+
+    kp_arr = _as_3d(kp_xyz_per_frame)
+    kp_arr1 = _as_3d(kp_xyz_fly1_per_frame) if kp_xyz_fly1_per_frame is not None else None
 
     dynamic_roi = center_xyz is not None and crop_wh is not None
     center_arr = np.asarray(center_xyz) if dynamic_roi else None
@@ -521,16 +584,22 @@ def panel_video_strip_with_kp(
                 continue
             ax.imshow(frame)
             ax.set_title(title, pad=2)
-            pts3 = kp_arr[int(fidx)][kp_idx] * float(kp_scale)
-            uv = _dlt_project(dlt_coeffs, pts3)
-            if roi_t is not None:
-                uv = uv - np.array([roi_t[0], roi_t[1]], dtype=float)
             H, W = frame.shape[:2]
-            m = (np.isfinite(uv[:, 0]) & np.isfinite(uv[:, 1])
-                 & (uv[:, 0] >= 0) & (uv[:, 0] < W)
-                 & (uv[:, 1] >= 0) & (uv[:, 1] < H))
-            if m.any():
-                ax.scatter(uv[m, 0], uv[m, 1], c=kp_color, **sk)
+
+            def _scatter(arr, color):
+                pts3 = arr[int(fidx)][kp_idx] * float(kp_scale)
+                uv = _dlt_project(dlt_coeffs, pts3)
+                if roi_t is not None:
+                    uv = uv - np.array([roi_t[0], roi_t[1]], dtype=float)
+                m = (np.isfinite(uv[:, 0]) & np.isfinite(uv[:, 1])
+                     & (uv[:, 0] >= 0) & (uv[:, 0] < W)
+                     & (uv[:, 1] >= 0) & (uv[:, 1] < H))
+                if m.any():
+                    ax.scatter(uv[m, 0], uv[m, 1], c=color, **sk)
+
+            _scatter(kp_arr, kp_color)
+            if kp_arr1 is not None:
+                _scatter(kp_arr1, kp_color_fly1)
     finally:
         cap.release()
 
@@ -538,6 +607,74 @@ def panel_video_strip_with_kp(
 # -----------------------------------------------------------------------------
 # Row 2: MuJoCo render strip
 # -----------------------------------------------------------------------------
+
+def floor_align_qpos_pair(
+    model,
+    qpos_pair: np.ndarray,
+    floor_z: Optional[float] = None,
+    fly_nq: Optional[int] = None,
+    fly_suffixes: Sequence[str] = ('_fly0', '_fly1'),
+    floor_geom_name: str = 'floor',
+) -> np.ndarray:
+    """Return a copy of ``qpos_pair`` with each fly's free-joint root-z shifted
+    so its lowest-standing geom surface touches ``floor_z`` in every frame.
+
+    ``qpos_pair`` is laid out as ``[fly0_qpos | fly1_qpos]`` with each fly
+    starting in a 7-dof free joint (xyz + quat), so root-z lives at index
+    ``fly_nq * k + 2`` for fly ``k``. ``fly_nq`` defaults to ``model.nq // 2``.
+
+    Geoms are assigned to a fly by a case-insensitive substring match on their
+    parent body name against ``fly_suffixes`` (e.g. ``'_fly0'``). The lowest
+    surface per fly is ``min(geom_xpos[:, 2] - geom_rbound[:])`` — i.e. the
+    bottom of each geom's bounding sphere — which works for mesh feet.
+
+    When ``floor_z`` is ``None`` it is auto-detected from the z of the geom
+    named ``floor_geom_name`` (plane geoms store z in ``geom_pos``).
+    """
+    import mujoco
+
+    qpos_pair = np.asarray(qpos_pair, dtype=float).copy()
+    if qpos_pair.ndim != 2:
+        raise ValueError(f'qpos_pair must be (T, nq); got {qpos_pair.shape}')
+    T, nq = qpos_pair.shape
+    if nq != model.nq:
+        raise ValueError(f'qpos_pair nq={nq} != model.nq={model.nq}')
+    fly_nq = int(fly_nq or (model.nq // len(fly_suffixes)))
+    if len(fly_suffixes) * fly_nq != model.nq:
+        raise ValueError(f'{len(fly_suffixes)}*{fly_nq} != model.nq={model.nq}')
+
+    if floor_z is None:
+        gid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, floor_geom_name)
+        floor_z = float(model.geom_pos[gid, 2]) if gid >= 0 else 0.0
+
+    body_names = [mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, b) or ''
+                  for b in range(model.nbody)]
+    geom_fly = np.full(model.ngeom, -1, dtype=int)
+    for g in range(model.ngeom):
+        bname = body_names[model.geom_bodyid[g]].lower()
+        for fi, suf in enumerate(fly_suffixes):
+            if suf.lower() in bname:
+                geom_fly[g] = fi
+                break
+
+    rbound = np.asarray(model.geom_rbound, dtype=float)
+    data = mujoco.MjData(model)
+    for t in range(T):
+        data.qpos[:] = qpos_pair[t]
+        mujoco.mj_forward(model, data)
+        geom_bottom = data.geom_xpos[:, 2] - rbound
+        for fi in range(len(fly_suffixes)):
+            mask = geom_fly == fi
+            if not mask.any():
+                continue
+            zs = geom_bottom[mask]
+            zs = zs[np.isfinite(zs)]
+            if zs.size == 0:
+                continue
+            shift = float(floor_z - zs.min())
+            qpos_pair[t, fi * fly_nq + 2] += shift
+    return qpos_pair
+
 
 def panel_render_strip(
     axes: Sequence[plt.Axes],
@@ -550,6 +687,12 @@ def panel_render_strip(
     width_px: int = 256,
     crop: Optional[Tuple[int, int, int, int]] = None,
     titles: Optional[Sequence[str]] = None,
+    track_midpoint: bool = False,
+    fly_nq: Optional[int] = None,
+    cam_distance: float = 0.03,
+    cam_azimuth: float = 90.0,
+    cam_elevation: float = -20.0,
+    cam_lookat_offset: Tuple[float, float, float] = (0.0, 0.0, 0.0),
 ) -> None:
     """Render N frames from a qpos array into the given axes.
 
@@ -585,11 +728,28 @@ def panel_render_strip(
         x, y, w, h = crop
         return img[y:y + h, x:x + w]
 
+    def _midpoint_cam(q_row):
+        import mujoco
+        nq_total = q_row.shape[0]
+        n_per = int(fly_nq or (nq_total // 2))
+        p0 = q_row[0:3]
+        p1 = q_row[n_per:n_per + 3]
+        mid = 0.5 * (p0 + p1) + np.asarray(cam_lookat_offset, dtype=float)
+        cam = mujoco.MjvCamera()
+        cam.type = mujoco.mjtCamera.mjCAMERA_FREE
+        cam.lookat[:] = mid
+        cam.distance = float(cam_distance)
+        cam.azimuth = float(cam_azimuth)
+        cam.elevation = float(cam_elevation)
+        return cam
+
     if viz is not None:
         for i, (ax, fidx) in enumerate(zip(axes, frame_indices)):
+            q_row = qpos_array[int(fidx)]
+            cam_arg = _midpoint_cam(q_row) if track_midpoint else camera
             pixels = viz.render_frame(
-                qpos_array[int(fidx)],
-                camera=camera, height=height_px, width=width_px,
+                q_row,
+                camera=cam_arg, height=height_px, width=width_px,
             )
             ax.imshow(_crop(pixels))
             if titles is not None:
@@ -600,9 +760,11 @@ def panel_render_strip(
     mj_data = mujoco.MjData(mj_model)
     with mujoco.Renderer(mj_model, height=height_px, width=width_px) as renderer:
         for i, (ax, fidx) in enumerate(zip(axes, frame_indices)):
-            mj_data.qpos[:] = qpos_array[int(fidx)]
+            q_row = qpos_array[int(fidx)]
+            mj_data.qpos[:] = q_row
             mujoco.mj_forward(mj_model, mj_data)
-            renderer.update_scene(mj_data, camera=camera)
+            cam_arg = _midpoint_cam(q_row) if track_midpoint else camera
+            renderer.update_scene(mj_data, camera=cam_arg)
             renderer.scene.flags[mujoco.mjtRndFlag.mjRND_SHADOW] = False
             pixels = renderer.render()
             ax.imshow(_crop(pixels))
@@ -960,7 +1122,7 @@ def panel_wing_z_traces(
     wc = {**WING_COLORS, **(wing_colors or {})}
     pt = {**PULSE_TYPE_COLORS, **(pulse_type_colors or {})}
     lk = {'lw': 0.7, **(line_kwargs or {})}
-    vk = {'lw': 0.5, 'alpha': 0.8, 'zorder': 1, **(pulse_vline_kwargs or {})}
+    vk = {'lw': 1.0, 'alpha': 0.9, 'zorder': 4, **(pulse_vline_kwargs or {})}
     lg = {'loc': 'upper right', 'ncols': 2,
           'columnspacing': 0.6, **(legend_kwargs or {})}
 
@@ -1000,6 +1162,8 @@ def panel_wing_z_traces(
     ax.plot(t_ms, wingL_z, color=wc['WingL_V13'], label='Wing L V13', **lk)
     ax.plot(t_ms, wingR_z, color=wc['WingR_V13'], label='Wing R V13', **lk)
     ax.set_ylabel('Wing V13\nz (mm)')
+    if len(t_ms):
+        ax.set_xlim(0.0, float(t_ms[-1]))
     _colored_text_legend(ax, **lg)
 
 
@@ -1124,8 +1288,8 @@ def panel_z_height_singing_vs_walking(
 # -----------------------------------------------------------------------------
 
 WING_PHASE_COLORS: Dict[str, str] = {
-    'extended': '#1f77b4',
-    'folded':   '#d62728',
+    'extended': WING_COLORS['WingR_V13'],  # blue   (matches Wing R)
+    'folded':   WING_COLORS['WingL_V13'],  # purple (matches Wing L)
 }
 
 

@@ -21,6 +21,11 @@ dataset:
 # script picks them up.
 preprocessing:
   filtering:
+    confidence:
+      threshold: 0.3            # Relaxed from 0.5 — male fly KP conf is systematically
+                                # lower during courtship (smaller body, frequent
+                                # occlusion by female); 0.5 blanks ~40% of male
+                                # frame-kps and collapses STAC to NaN.
     identity_relink:
       enabled: true
     centroid_jump:
