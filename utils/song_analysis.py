@@ -91,10 +91,12 @@ class SongAnalysisConfig:
     # Max gap between consecutive detected peaks that still counts as the
     # same pulse train. Normal D. melanogaster inter-pulse intervals are
     # ~35 ms; a single missed peak doubles that to ~70 ms, two missed peaks
-    # gives ~105 ms. 150 ms tolerates up to ~3 dropped peaks in a row
-    # while still being well below the typical >300 ms inter-train pause,
-    # so it never accidentally merges two distinct pulse trains.
-    pulse_train_max_gap_ms: float = 150.0
+    # gives ~105 ms, three gives ~140 ms. 135 ms tolerates up to 3 dropped
+    # peaks while staying below the shortest observed sine-straddling gap
+    # (148.8 ms in pair bout 23 — last pulse before and first pulse after a
+    # sine passage). True inter-train silences are typically >250 ms, so
+    # 135 ms stays well below that floor.
+    pulse_train_max_gap_ms: float = 135.0
     # Minimum ratio of peak height to local baseline |dZ/dt|. True pulses
     # stand ≥3-4× above the inter-pulse baseline; individual sine-carrier
     # cycles only rise ~1.5-2.5× above the sustained carrier energy, so

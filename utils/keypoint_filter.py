@@ -22,7 +22,7 @@ Usage::
 import numpy as np
 from scipy import signal
 from scipy.interpolate import PchipInterpolator
-from typing import Optional, Tuple, Dict, List
+from typing import Optional, Sequence, Tuple, Dict, List
 from omegaconf import DictConfig
 import traceback as _traceback
 from utils.centroid_jump_check import mask_centroid_jumps
@@ -462,6 +462,152 @@ def despike_isolated_spikes(
         print(f"  [isolated-spike] fixed {total_fixed} spike frames ({tag}, "
               f">{threshold_factor}\u00d7 median velocity, with reversal)")
     return out, total_fixed
+
+
+def repair_wing_tip_identity_swaps(
+    kp0: np.ndarray,
+    kp1: np.ndarray,
+    kp_names: Sequence[str],
+    wing_kps: Tuple[str, str] = ('WingL_V13', 'WingR_V13'),
+    threshold_mm: float = 0.10,
+    max_flicker_frames: int = 30,
+    max_iterations: int = 3,
+    verbose: bool = False,
+) -> Tuple[np.ndarray, np.ndarray, int]:
+    """Fix short-run wing-tip identity swaps between two tracked flies.
+
+    During close-contact courtship the JARVIS multi-animal tracker occasionally
+    assigns fly0's wing-tip to fly1 (or vice versa) for a short contiguous run
+    of frames ("flicker").  Per-fly despike can't remove this because each
+    fly's trajectory contains a real wing-tip position — just the wrong one.
+
+    Each wing is handled independently.  For every transition ``i`` (between
+    frames ``i`` and ``i+1``) we compare two hypotheses for this single wing:
+
+    * ``keep``  — the two tracks continue as-is
+    * ``swap``  — fly0's and fly1's wing identities switch at frame ``i+1``
+
+    Transitions where ``cost(keep) − cost(swap) > threshold_mm`` are marked
+    as flip events.  The per-transition cost is label-symmetric under a
+    global swap, so absolute parity can't be recovered from cost alone.
+    To avoid any global-parity ambiguity, we only act on **short** runs
+    between consecutive flip events: when two flip events at ``t_a < t_b``
+    are separated by ``t_b − t_a <= max_flicker_frames`` frames, the region
+    ``[t_a+1, t_b]`` is treated as a flicker and its wing identities are
+    exchanged.  Long regions are left untouched — if the tracker held a
+    state for hundreds of frames, we trust that state.
+
+    Only the two wing-tip keypoints are modified; all other keypoints pass
+    through unchanged.  ``max_iterations`` is retained for symmetry with
+    :func:`despike_isolated_spikes`; iterations exit early once no further
+    flips qualify.
+
+    Parameters
+    ----------
+    kp0, kp1 : ndarray, shape (T, N, 3)
+        Per-fly keypoints, aligned in time.
+    kp_names : sequence of str
+        Keypoint names; must contain both entries of ``wing_kps``.
+    wing_kps : (str, str)
+        Names of the left and right wing-tip keypoints to repair.
+    threshold_mm : float
+        Minimum cost reduction (in position units, typically mm) required
+        for a transition to count as a flip event.
+    max_flicker_frames : int
+        Maximum length (in frames) of a swapped run to repair.  Runs longer
+        than this are assumed to be persistent states and left alone.
+    max_iterations : int
+        Maximum repair passes.  Exits early once a pass produces no flips.
+    verbose : bool
+        Print a summary line.
+
+    Returns
+    -------
+    (kp0_out, kp1_out, n_frames_swapped) : tuple[ndarray, ndarray, int]
+        Repaired keypoint arrays and total number of frame-level wing
+        identity swaps applied across both wings and all iterations.
+    """
+    if kp0.shape != kp1.shape:
+        raise ValueError(
+            f"kp0/kp1 shape mismatch: {kp0.shape} vs {kp1.shape}")
+    if kp0.ndim != 3 or kp0.shape[-1] != 3:
+        raise ValueError(
+            f"expected (T, N, 3) arrays, got kp0.shape={kp0.shape}")
+    T = kp0.shape[0]
+    if T < 3:
+        return kp0.copy(), kp1.copy(), 0
+
+    try:
+        i_tips = [kp_names.index(n) for n in wing_kps]
+    except ValueError as e:
+        raise ValueError(
+            f"wing keypoints {wing_kps} not in kp_names") from e
+
+    out0 = kp0.astype(np.float64, copy=True)
+    out1 = kp1.astype(np.float64, copy=True)
+    total_swaps = 0
+
+    def _dist(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+        d = np.linalg.norm(a - b, axis=-1)
+        return np.where(np.isfinite(d), d, np.inf)
+
+    def _short_run_assignment(parity: np.ndarray) -> np.ndarray:
+        """True in every contiguous ``parity==True`` run of length
+        ``<= max_flicker_frames``; False elsewhere."""
+        assign = np.zeros(T, dtype=bool)
+        in_run = False
+        run_start = 0
+        for t in range(T):
+            if parity[t] and not in_run:
+                in_run = True
+                run_start = t
+            elif not parity[t] and in_run:
+                if t - run_start <= max_flicker_frames:
+                    assign[run_start:t] = True
+                in_run = False
+        if in_run and (T - run_start) <= max_flicker_frames:
+            assign[run_start:T] = True
+        return assign
+
+    def _assignment_for_wing(tip_idx: int) -> Tuple[np.ndarray, int]:
+        """Return (per-frame assignment bool, n_frames_swapped) for one wing."""
+        tip0 = out0[:, tip_idx]
+        tip1 = out1[:, tip_idx]
+        keep = _dist(tip0[1:], tip0[:-1]) + _dist(tip1[1:], tip1[:-1])
+        swap = _dist(tip1[1:], tip0[:-1]) + _dist(tip0[1:], tip1[:-1])
+        flip = (keep - swap) > threshold_mm
+        if not flip.any():
+            return np.zeros(T, dtype=bool), 0
+        # Absolute parity is unrecoverable from cost alone, so we evaluate
+        # both interpretations and take whichever places more short runs —
+        # i.e., covers more plausible flicker frames.  The short-run length
+        # cap ensures neither parity ever proposes flipping a long region.
+        parity0 = np.concatenate(([False], np.cumsum(flip) % 2 == 1))
+        assign0 = _short_run_assignment(parity0)
+        assign1 = _short_run_assignment(~parity0)
+        chosen = assign0 if assign0.sum() >= assign1.sum() else assign1
+        return chosen, int(chosen.sum())
+
+    for _it in range(max_iterations):
+        n_this = 0
+        for tip_idx in i_tips:
+            assign, n = _assignment_for_wing(tip_idx)
+            if n == 0:
+                continue
+            tmp = out0[assign, tip_idx].copy()
+            out0[assign, tip_idx] = out1[assign, tip_idx]
+            out1[assign, tip_idx] = tmp
+            n_this += n
+        if n_this == 0:
+            break
+        total_swaps += n_this
+
+    if verbose and total_swaps:
+        print(f"  [wing-tip swap repair] swapped {total_swaps} frame-wing "
+              f"identities (>{threshold_mm:.3f} mm per-transition gain, "
+              f"runs \u2264 {max_flicker_frames} frames, "
+              f"{'/'.join(wing_kps)})")
+    return out0.astype(kp0.dtype, copy=False), out1.astype(kp1.dtype, copy=False), total_swaps
 
 
 def medfilt_despike(

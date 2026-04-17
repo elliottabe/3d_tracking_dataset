@@ -17,12 +17,14 @@ from __future__ import annotations
 
 import pickle
 from pathlib import Path
-from typing import List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
 from utils.io_dict_to_hdf5 import load as h5_load
-from utils.keypoint_filter import despike_isolated_spikes, medfilt_despike
+from utils.keypoint_filter import (
+    despike_isolated_spikes, medfilt_despike, repair_wing_tip_identity_swaps,
+)
 from utils.pair_validity import PairValidityConfig, compute_pair_validity
 from utils.song_analysis import SongAnalysisConfig, analyze_fly_song
 from utils.sex_id import SexIdConfig, identify_male_female
@@ -33,6 +35,97 @@ from utils.locomotion import (
     classify_walking_state,
     summarize_by_song,
 )
+
+
+def load_orig_keypoints_index(
+    preproc_search_paths: str | Path | Sequence[str | Path],
+    glob_pattern: str = 'Predictions_3D_*/preprocessing/preprocessed_bout_v1_*_merged.h5',
+    enable_jax: bool = False,
+) -> Dict[Tuple[str, int], np.ndarray]:
+    """Build a ``{(fly_id, start_frame): orig_keypoints}`` index across one or
+    more preprocessed-h5 directories.
+
+    The combined courtship h5 stores only the body-model-rescaled ``kp_data``,
+    which is intentionally distorted to match the IK target. For tasks like
+    re-projecting tracked points onto camera frames, the **un-rescaled**
+    ``orig_keypoints`` (saved per-bout in the per-prediction ``preprocessing/``
+    h5s) are the correct input.
+
+    Parameters
+    ----------
+    preproc_search_paths : path or sequence of paths
+        Either (a) one or more direct paths to preprocessed
+        ``preprocessed_bout_*.h5`` files, or (b) a parent directory containing
+        ``Predictions_3D_*/preprocessing/...`` subtrees that should be
+        globbed via ``glob_pattern``.
+    glob_pattern : str
+        Glob pattern relative to each search-path directory; ignored when the
+        path itself points at an .h5 file.
+
+    Returns
+    -------
+    dict ``{(fly_id, start_frame): np.ndarray (T, N, 3)}``
+        Look up by the same ``(fly_id, start_frame)`` tuple recorded for each
+        combined-h5 bout in ``info['fly_ids']`` / ``info['start_frames']``.
+    """
+    paths = (
+        [preproc_search_paths]
+        if isinstance(preproc_search_paths, (str, Path))
+        else list(preproc_search_paths)
+    )
+
+    h5_files: List[Path] = []
+    for p in paths:
+        pp = Path(p)
+        if pp.is_file() and pp.suffix == '.h5':
+            h5_files.append(pp)
+        elif pp.is_dir():
+            h5_files.extend(sorted(pp.glob(glob_pattern)))
+
+    out: Dict[Tuple[str, int], np.ndarray] = {}
+    for h5_file in h5_files:
+        try:
+            data = h5_load(str(h5_file), enable_jax=enable_jax)
+        except (OSError, KeyError):
+            continue
+        info = data.get('info', {}) or {}
+        fly_ids = list(info.get('fly_ids', []))
+        starts = list(info.get('start_frames', []))
+        bout_keys = sorted(k for k in data.keys() if k != 'info')
+        for i, k in enumerate(bout_keys):
+            if i >= len(fly_ids) or i >= len(starts):
+                break
+            bout = data[k]
+            if 'orig_keypoints' not in bout:
+                continue
+            kp = np.asarray(bout['orig_keypoints'])
+            if kp.ndim == 2 and kp.shape[-1] != 3:
+                kp = kp.reshape(kp.shape[0], -1, 3)
+            out[(str(fly_ids[i]), int(starts[i]))] = kp
+    return out
+
+
+def get_orig_keypoints_for_combined_bout(
+    orig_index: Dict[Tuple[str, int], np.ndarray],
+    info: dict,
+    bout_keys: Sequence[str],
+    bout_key: str,
+) -> Optional[np.ndarray]:
+    """Look up the orig-keypoints array for a combined-h5 bout.
+
+    Uses ``info['fly_ids']`` / ``info['start_frames']`` (parallel to
+    ``bout_keys``) to find the matching ``(fly_id, start_frame)`` entry in an
+    index built by :func:`load_orig_keypoints_index`. Returns ``None`` when
+    no match exists.
+    """
+    fly_ids = list(info.get('fly_ids', []))
+    starts = list(info.get('start_frames', []))
+    if bout_key not in bout_keys:
+        return None
+    idx = list(bout_keys).index(bout_key)
+    if idx >= len(fly_ids) or idx >= len(starts):
+        return None
+    return orig_index.get((str(fly_ids[idx]), int(starts[idx])))
 
 
 def load_courtship_h5(
@@ -64,6 +157,100 @@ def load_courtship_h5(
 
     bout_keys = sorted(k for k in data.keys() if k != 'info')
     return data, info, kp_names, bout_keys
+
+
+def _info_to_list(v):
+    """Coerce an info entry stored as list/tuple/ndarray or numeric-keyed dict
+    to a plain list, preserving order."""
+    if v is None:
+        return []
+    if isinstance(v, dict):
+        return [v[k] for k in sorted(v.keys(), key=lambda x: int(x))]
+    return list(v)
+
+
+_PER_BOUT_INFO_KEYS = (
+    'bucket', 'clip_lengths', 'end_frames', 'fly_ids',
+    'source_flies', 'start_frames',
+)
+_GLOBAL_INFO_KEYS = (
+    'kp_names', 'names_qpos', 'names_xpos', 'offsets', 'site_names_egocentric',
+)
+
+
+def load_and_merge_courtship_h5(
+    h5_paths: Sequence[str | Path],
+    enable_jax: bool = False,
+) -> Tuple[dict, dict, List[str], List[str]]:
+    """Load multiple courtship h5 files and merge into one combined structure.
+
+    Bouts from the first path keep their order; subsequent paths are appended.
+    Bout keys in the merged result are renumbered with zero-padded indices so
+    string sort matches load order. Per-bout ``info`` arrays (``source_flies``,
+    ``clip_lengths``, ``fly_ids``, ...) are concatenated in the same order.
+
+    Global info fields (``kp_names``, ``offsets``, ``names_qpos``,
+    ``names_xpos``, ``site_names_egocentric``) must match across all files.
+
+    Two extra provenance fields are added to ``info``:
+
+    - ``source_path`` : per-bout list of source h5 paths
+    - ``orig_bout_key`` : per-bout list of original bout keys in their source file
+
+    Returns the same ``(data, info, kp_names, bout_keys)`` tuple as
+    :func:`load_courtship_h5`, so downstream code is unchanged.
+    """
+    if isinstance(h5_paths, (str, Path)):
+        h5_paths = [h5_paths]
+    h5_paths = [Path(p) for p in h5_paths]
+    if not h5_paths:
+        raise ValueError('h5_paths is empty')
+
+    loaded = [load_courtship_h5(p, enable_jax=enable_jax) for p in h5_paths]
+    total_bouts = sum(len(bk) for _, _, _, bk in loaded)
+    pad = max(3, len(str(max(total_bouts - 1, 0))))
+
+    merged_data: dict = {}
+    merged_per_bout: Dict[str, list] = {k: [] for k in _PER_BOUT_INFO_KEYS}
+    merged_per_bout['source_path'] = []
+    merged_per_bout['orig_bout_key'] = []
+
+    kp_names: Optional[List[str]] = None
+    global_info: Dict[str, object] = {}
+
+    cursor = 0
+    for path, (d, info, knames, bkeys) in zip(h5_paths, loaded):
+        if kp_names is None:
+            kp_names = list(knames)
+            global_info = {k: info[k] for k in _GLOBAL_INFO_KEYS if k in info}
+        elif list(knames) != kp_names:
+            raise ValueError(f'kp_names mismatch in {path}')
+
+        per_bout = {k: _info_to_list(info.get(k)) for k in _PER_BOUT_INFO_KEYS}
+        for k, seq in per_bout.items():
+            if seq and len(seq) != len(bkeys):
+                raise ValueError(
+                    f"info['{k}'] length {len(seq)} != n_bouts {len(bkeys)} "
+                    f"in {path}"
+                )
+
+        for j, old_key in enumerate(bkeys):
+            new_key = f'bout_{cursor:0{pad}d}'
+            if new_key in merged_data:
+                raise RuntimeError(f'bout key collision: {new_key}')
+            merged_data[new_key] = d[old_key]
+            cursor += 1
+            merged_per_bout['source_path'].append(str(path))
+            merged_per_bout['orig_bout_key'].append(old_key)
+
+        for k in _PER_BOUT_INFO_KEYS:
+            merged_per_bout[k].extend(per_bout[k])
+
+    merged_info: Dict[str, object] = dict(global_info)
+    merged_info.update(merged_per_bout)
+    merged_data['info'] = merged_info
+    merged_bout_keys = sorted(k for k in merged_data if k != 'info')
+    return merged_data, merged_info, kp_names or [], merged_bout_keys
 
 
 def pair_bouts(
@@ -167,6 +354,7 @@ def analyze_pair(
     loc_cfg: Optional[LocomotionConfig] = None,
     pair_cfg: Optional[PairValidityConfig] = None,
     despike: bool = True,
+    repair_wing_swaps: bool = True,
 ) -> dict:
     """Run full per-pair analysis: song, sex ID, male-first reorder, locomotion.
 
@@ -212,6 +400,13 @@ def analyze_pair(
     if xp1 is not None: xp1 = xp1[:T]
     if q0  is not None: q0  = q0[:T]
     if q1  is not None: q1  = q1[:T]
+
+    # Inter-fly wing-tip identity repair — fixes short-run JARVIS
+    # multi-animal swaps where fly0's wing tip was briefly assigned to fly1
+    # (or vice versa) during close contact.  Only modifies WingL_V13 /
+    # WingR_V13; all other keypoints pass through.
+    if repair_wing_swaps:
+        kp0, kp1, _ = repair_wing_tip_identity_swaps(kp0, kp1, kp_names)
 
     # Pair validity
     pv = compute_pair_validity(kp0, kp1, kp_names, cfg=pair_cfg)
@@ -297,6 +492,9 @@ def analyze_all_pairs(
     loc_cfg: Optional[LocomotionConfig] = None,
     pair_cfg: Optional[PairValidityConfig] = None,
     despike: bool = True,
+    repair_wing_swaps: bool = True,
+    min_song_bout_frames: Optional[int] = 100,
+    min_bilateral_dz_p95: Optional[float] = 12.0,
     verbose: bool = True,
 ) -> List[dict]:
     """Analyze all pairs with optional pickle caching.
@@ -313,8 +511,15 @@ def analyze_all_pairs(
         Pickle cache location. Loads from cache if it exists and force=False.
     force : bool
         Re-run analysis even if cache exists.
+    min_song_bout_frames : int, optional
+        Drop bouts shorter than this many frames (125 frames = 156 ms at
+        800 Hz). Set to ``None`` or 0 to disable.
+    min_bilateral_dz_p95 : float, optional
+        Drop bouts whose 95th percentile of ``max(|dZ/dt|_L, |dZ/dt|_R)`` on
+        the male's wing tips falls below this (mm/s). Filters out bouts with
+        no meaningful wing-extension activity. Set to ``None`` to disable.
     verbose : bool
-        Print progress every 25 pairs.
+        Print progress every 25 pairs and emit a filter summary at the end.
 
     Returns
     -------
@@ -329,7 +534,11 @@ def analyze_all_pairs(
             with open(cache_path, 'rb') as f:
                 return pickle.load(f)
 
+    _song_cfg_eff = song_cfg if song_cfg is not None else SongAnalysisConfig()
+    fs = float(_song_cfg_eff.fs)
+
     results = []
+    dropped: list[tuple[int, str, str, str]] = []
     for i, (k0, k1) in enumerate(pairs):
         try:
             r = analyze_pair(
@@ -337,14 +546,45 @@ def analyze_all_pairs(
                 song_cfg=song_cfg, sex_cfg=sex_cfg,
                 loc_cfg=loc_cfg, pair_cfg=pair_cfg,
                 despike=despike,
+                repair_wing_swaps=repair_wing_swaps,
             )
             r['pair_idx'] = i
-            results.append(r)
+
+            reason: Optional[str] = None
+            T = int(r.get('T', 0))
+            if min_song_bout_frames and T < int(min_song_bout_frames):
+                reason = f'T={T} < {int(min_song_bout_frames)}'
+            elif min_bilateral_dz_p95 is not None:
+                wd = r['song0']['wing_data']
+                z_L = np.asarray(wd[_song_cfg_eff.left_tip ]['z'], dtype=float)
+                z_R = np.asarray(wd[_song_cfg_eff.right_tip]['z'], dtype=float)
+                if z_L.size and z_R.size:
+                    dz_L = np.abs(np.diff(z_L, prepend=z_L[0]) * fs)
+                    dz_R = np.abs(np.diff(z_R, prepend=z_R[0]) * fs)
+                    dz_max = np.maximum(dz_L, dz_R)
+                    finite = dz_max[np.isfinite(dz_max)]
+                    p95 = float(np.percentile(finite, 95)) if finite.size else 0.0
+                    r['bilateral_dz_p95'] = p95
+                    if p95 < float(min_bilateral_dz_p95):
+                        reason = f'dz_p95={p95:.2f} < {float(min_bilateral_dz_p95):.2f}'
+
+            if reason is None:
+                r['filtered_idx'] = len(results)
+                results.append(r)
+            else:
+                dropped.append((i, k0, k1, reason))
         except Exception as e:
             if verbose:
                 print(f'  pair {i} ({k0}/{k1}): {type(e).__name__}: {e}')
         if verbose and (i + 1) % 25 == 0:
             print(f'  processed {i + 1}/{len(pairs)}')
+
+    if verbose and dropped:
+        print(f'  filtered out {len(dropped)}/{len(pairs)} non-singing pairs '
+              f'(min_T={min_song_bout_frames}, '
+              f'min_dz_p95={min_bilateral_dz_p95}):')
+        for i, k0, k1, why in dropped:
+            print(f'    pair {i:>3d} ({k0}/{k1}): {why}')
 
     if cache_path is not None:
         cache_path.parent.mkdir(parents=True, exist_ok=True)
