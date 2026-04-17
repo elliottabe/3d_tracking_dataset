@@ -165,6 +165,70 @@ def _nan_medfilt1d(vals: np.ndarray, kernel_size: int) -> np.ndarray:
     return out
 
 
+def _nearest_fill_nan(kp_array: np.ndarray,
+                      min_valid_frac: float = 0.05,
+                      verbose: bool = True) -> Tuple[np.ndarray, Dict]:
+    """Per-coordinate temporal nearest-valid fill (LOCF + BOCF).
+
+    For each (keypoint, coord) column, NaN samples are replaced with the
+    temporally nearest finite value (forward-fill first, then backward-fill
+    for any leading NaN run). Columns with fewer than ``min_valid_frac`` of
+    finite samples are left untouched — filling a near-empty column would
+    plant a constant phantom trajectory that misleads STAC.
+
+    Purpose: downstream solvers (e.g. stac-mjx jaxls LM trajectory solve)
+    reject steps with NaN in the residual, so any NaN anywhere in a clip
+    freezes the entire clip at its initial guess. This is the last-resort
+    gap-fill used after spline interpolation has handled interior gaps.
+
+    Returns (kp_filled, report).
+    """
+    T, N, D = kp_array.shape
+    out = kp_array.astype(float).copy()
+    flat = out.reshape(T, -1)
+    report = {
+        'columns_filled': 0,
+        'values_filled': 0,
+        'columns_skipped_sparse': 0,
+        'columns_fully_nan': 0,
+    }
+    for c in range(flat.shape[1]):
+        col = flat[:, c]
+        finite = np.isfinite(col)
+        n_valid = int(finite.sum())
+        if n_valid == 0:
+            report['columns_fully_nan'] += 1
+            continue
+        if n_valid / T < min_valid_frac:
+            report['columns_skipped_sparse'] += 1
+            continue
+        if finite.all():
+            continue
+        idx = np.arange(T)
+        valid_idx = idx[finite]
+        # np.searchsorted to find nearest prior valid index per frame
+        right = np.searchsorted(valid_idx, idx, side='right') - 1
+        left = np.clip(right + 1, 0, valid_idx.size - 1)
+        right = np.clip(right, 0, valid_idx.size - 1)
+        prev_idx = valid_idx[right]
+        next_idx = valid_idx[left]
+        # nearest of (prev, next) by distance
+        dist_prev = np.abs(idx - prev_idx)
+        dist_next = np.abs(idx - next_idx)
+        use_next = dist_next < dist_prev
+        nearest = np.where(use_next, next_idx, prev_idx)
+        n_before = int(np.sum(~finite))
+        flat[:, c] = col[nearest]
+        report['columns_filled'] += 1
+        report['values_filled'] += n_before
+    if verbose:
+        print(f"  [nearest_fill] filled {report['values_filled']} NaN "
+              f"samples across {report['columns_filled']} columns; "
+              f"skipped {report['columns_skipped_sparse']} too-sparse, "
+              f"{report['columns_fully_nan']} fully-NaN")
+    return out, report
+
+
 def _mask_low_confidence(
     kp_array: np.ndarray,
     confidence: np.ndarray,

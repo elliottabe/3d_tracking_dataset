@@ -32,6 +32,14 @@ preprocessing:
       enabled: true
       window: 3                 # Mask 3 frames on each side of a jump
       threshold_mm: 1.5         # Tightened from 2.0 for courtship
+    nearest_fill:
+      enabled: true             # STAC-mjx trajectory LM rejects any step with
+                                # NaN in residual; long edge-NaN runs on
+                                # occluded male limbs poison the whole clip
+                                # and freeze joint DOFs at zero. Backstop:
+                                # LOCF/BOCF per KP after spline interpolation.
+      min_valid_frac: 0.05      # Skip KPs with <5% finite frames — filling
+                                # those would plant a constant phantom.
   pair_validity:
     enabled: true
     # Identity-collapse detector: flag frames where fly0 and fly1 Scutellum

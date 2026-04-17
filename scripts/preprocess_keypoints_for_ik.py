@@ -57,7 +57,10 @@ try:
         reorder_keypoints_array,
         reorder_skeleton_edges)
     from utils.fly_detection import build_compact_frame_map
-    from utils.keypoint_filter import filter_keypoints, load_confidence_from_csv, load_confidence_concatenated
+    from utils.keypoint_filter import (
+        filter_keypoints, load_confidence_from_csv, load_confidence_concatenated,
+        _nearest_fill_nan,
+    )
     from utils.pair_validity import (
         compute_pair_validity,
         compute_single_fly_validity,
@@ -1141,6 +1144,12 @@ def process_bouts_batch(csv_path: Path,
                 )
 
             # Apply Procrustes alignment PER BOUT (like the notebook does)
+            # IMPORTANT: Procrustes uses nanmean to build the clip-average
+            # target pose. Any pre-alignment gap-fill (e.g. nearest-valid
+            # LOCF/BOCF) plants "ghost" keypoints across long occlusion runs
+            # and biases that average, which throws off the per-fly scale.
+            # So we run Procrustes on the filter output *with NaN still in
+            # place*, then do the NaN fill below.
             alignment_info = None
             if apply_alignment:
                 print(f"\n  Processing bout_{bout_idx:03d} ({bout_kp.shape[0]} frames)...")
@@ -1150,6 +1159,20 @@ def process_bouts_batch(csv_path: Path,
                 )
             else:
                 aligned_bout_kp = bout_kp
+
+            # Post-alignment NaN backstop. STAC-mjx's trajectory LM rejects
+            # any step whose residual contains NaN, so long edge-NaN runs on
+            # occluded limbs freeze the entire clip at its initial guess.
+            # Running this *after* Procrustes keeps the scale clean while
+            # still handing STAC a finite target.
+            if (filter_cfg is not None
+                    and filter_cfg.get('nearest_fill', {}).get('enabled', False)):
+                nf_cfg = filter_cfg.get('nearest_fill', {})
+                min_valid = float(nf_cfg.get('min_valid_frac', 0.05))
+                aligned_bout_kp_np = np.asarray(aligned_bout_kp)
+                aligned_bout_kp_np, _ = _nearest_fill_nan(
+                    aligned_bout_kp_np, min_valid_frac=min_valid)
+                aligned_bout_kp = aligned_bout_kp_np
 
             bout_data = {
                 'keypoints': aligned_bout_kp,

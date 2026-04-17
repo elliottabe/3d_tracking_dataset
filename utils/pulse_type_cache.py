@@ -31,7 +31,7 @@ from utils.pulse_types import (
 )
 
 
-CACHE_VERSION = 2  # bump when the cached dict schema changes
+CACHE_VERSION = 3  # bump when the cached dict schema changes
 
 
 def _gather_waveforms(results: Sequence[dict]) -> tuple[np.ndarray, np.ndarray]:

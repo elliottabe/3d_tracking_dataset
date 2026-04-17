@@ -148,6 +148,152 @@ def _find_unified_bouts_csv(folder: Path, dataset: str) -> Optional[Path]:
     return None
 
 
+def _load_projection_matrices(folder: Path) -> Optional[np.ndarray]:
+    """Walk up from folder looking for a calibration/ dir with Cam*.yaml,
+    read each file's ``projectionMatrix`` (3x4) via cv2 FileStorage, and
+    return a stacked (C, 3, 4) array ordered by camera-name sort.
+
+    Returns None if no usable calibration dir is found.
+    """
+    import cv2  # lazy — only needed when per-bout layout is materialized
+    for candidate in [folder, *folder.parents]:
+        calib_dir = candidate / 'calibration'
+        if not calib_dir.is_dir():
+            continue
+        yaml_files = sorted(calib_dir.glob('Cam*.yaml'))
+        if len(yaml_files) < 2:
+            continue
+        mats = []
+        for p in yaml_files:
+            fs = cv2.FileStorage(str(p), cv2.FILE_STORAGE_READ)
+            node = fs.getNode('projectionMatrix')
+            if node.empty():
+                fs.release()
+                return None
+            mats.append(np.asarray(node.mat(), dtype=np.float64))
+            fs.release()
+        return np.stack(mats, axis=0)
+    return None
+
+
+def _triangulate_dlt(pts_xy: np.ndarray,
+                     P: np.ndarray) -> np.ndarray:
+    """DLT triangulate one 3D point from N 2D observations.
+
+    ``pts_xy`` is (N, 2); ``P`` is (N, 3, 4) projection matrices for the same
+    N cameras. Returns (3,) in the calibration's world frame (mm for this
+    setup). Assumes N >= 2. Uses SVD on the 2N x 4 constraint stack.
+    """
+    u = pts_xy[:, 0]
+    v = pts_xy[:, 1]
+    A = np.empty((2 * len(pts_xy), 4), dtype=np.float64)
+    A[0::2] = u[:, None] * P[:, 2, :] - P[:, 0, :]
+    A[1::2] = v[:, None] * P[:, 2, :] - P[:, 1, :]
+    _, _, vh = np.linalg.svd(A)
+    X = vh[-1]
+    return (X[:3] / X[3]).astype(np.float32)
+
+
+def _triangulate_sam_com_per_bout(bout_dir: Path,
+                                   P_all: np.ndarray) -> Optional[np.ndarray]:
+    """Triangulate per-frame, per-fly 3D body CoM from the bout's SAM masks.
+
+    ``P_all`` is a (C, 3, 4) projection-matrix stack matching the NPZ's
+    camera axis order. Returns (A, F, 3) float mm-array, NaN where <2
+    cameras have a valid mask centroid at that frame. Returns None if the
+    NPZ is missing or its camera axis length disagrees with the calibration.
+    """
+    npz = bout_dir / 'sam3_masks.npz'
+    if not npz.exists():
+        return None
+    with np.load(str(npz)) as d:
+        if 'centroids' not in d or 'valid' not in d:
+            return None
+        centroids = np.asarray(d['centroids'], dtype=np.float64)
+        valid = np.asarray(d['valid'], dtype=bool)
+    A, C, F = valid.shape[:3]
+    if C != P_all.shape[0]:
+        return None
+
+    coms = np.full((A, F, 3), np.nan, dtype=np.float32)
+    for a in range(A):
+        for f in range(F):
+            ok_cams = np.where(valid[a, :, f])[0]
+            if ok_cams.size < 2:
+                continue
+            coms[a, f] = _triangulate_dlt(centroids[a, ok_cams, f],
+                                           P_all[ok_cams])
+    return coms
+
+
+def _inject_scutellum_from_sam_com(df: pd.DataFrame,
+                                    coms_fly: np.ndarray,
+                                    *,
+                                    conf_low: float = 0.3,
+                                    conf_high: float = 0.8,
+                                    min_anchor_frames: int = 30,
+                                    ) -> Tuple[int, int]:
+    """Replace Scutellum xyz with SAM-CoM + rigid offset on low-conf frames.
+
+    The rigid offset is the per-bout median of ``Scutellum_KP - SAM_CoM`` over
+    frames where Scutellum confidence >= conf_high and both are finite. On fill
+    frames, Scutellum xyz <- SAM_CoM + offset and Scutellum confidence <- 1.0.
+
+    If fewer than min_anchor_frames anchor frames exist, the injection is
+    skipped for this fly.
+
+    Mutates df. Returns (n_anchor_frames, n_filled_frames).
+    """
+    cols = {
+        'x': ('Scutellum', 'x'),
+        'y': ('Scutellum', 'y'),
+        'z': ('Scutellum', 'z'),
+        'c': ('Scutellum', 'confidence'),
+    }
+    for v in cols.values():
+        if v not in df.columns:
+            return (0, 0)
+    F = len(df)
+    if coms_fly.shape[0] != F or coms_fly.shape[1] != 3:
+        return (0, 0)
+
+    sx = df[cols['x']].to_numpy(np.float32)
+    sy = df[cols['y']].to_numpy(np.float32)
+    sz = df[cols['z']].to_numpy(np.float32)
+    sc = df[cols['c']].to_numpy(np.float32)
+
+    com_finite = np.isfinite(coms_fly).all(-1)
+    anchor = (
+        (sc >= conf_high) & com_finite
+        & np.isfinite(sx) & np.isfinite(sy) & np.isfinite(sz)
+    )
+    n_anchor = int(anchor.sum())
+    if n_anchor < min_anchor_frames:
+        return (n_anchor, 0)
+
+    offset = np.array([
+        float(np.median(sx[anchor] - coms_fly[anchor, 0])),
+        float(np.median(sy[anchor] - coms_fly[anchor, 1])),
+        float(np.median(sz[anchor] - coms_fly[anchor, 2])),
+    ], dtype=np.float32)
+
+    fill = (sc < conf_low) & com_finite
+    n_fill = int(fill.sum())
+    if n_fill == 0:
+        return (n_anchor, 0)
+
+    sx[fill] = coms_fly[fill, 0] + offset[0]
+    sy[fill] = coms_fly[fill, 1] + offset[1]
+    sz[fill] = coms_fly[fill, 2] + offset[2]
+    sc[fill] = 1.0
+
+    df[cols['x']] = sx
+    df[cols['y']] = sy
+    df[cols['z']] = sz
+    df[cols['c']] = sc
+    return (n_anchor, n_fill)
+
+
 def _synthesize_unified_from_bouts(folder: Path,
                                    bout_dirs: List[Path]) -> pd.DataFrame:
     """Build a unified bouts DataFrame from the per-bout CSV frame columns.
@@ -430,6 +576,16 @@ def aggregate_per_bout_predictions(folder: Path,
     female_headings: List[np.ndarray] = []
     male_centroids: List[np.ndarray] = []
     female_centroids: List[np.ndarray] = []
+    
+    P_all = _load_projection_matrices(folder)
+    if P_all is None:
+        print("  [aggregate] no calibration/ found — skipping SAM-CoM "
+              "Scutellum injection")
+
+    P_all = _load_projection_matrices(folder)
+    if P_all is None:
+        print("  [aggregate] no calibration/ found — skipping SAM-CoM "
+              "Scutellum injection")
 
     for bout_dir in bout_dirs:
         swap, a0, a1 = _decide_sex_swap(bout_dir / "sam3_masks.npz")
@@ -445,19 +601,25 @@ def aggregate_per_bout_predictions(folder: Path,
 
         out_fly0_src = bout_dir / ("fly1.csv" if swap else "fly0.csv")
         out_fly1_src = bout_dir / ("fly0.csv" if swap else "fly1.csv")
-        fly0_df = _concat_per_bout_csvs([out_fly0_src])
-        fly1_df = _concat_per_bout_csvs([out_fly1_src])
-        fly_frames[0].append(fly0_df)
-        fly_frames[1].append(fly1_df)
-        # After swap application: fly_frames[0] = male, fly_frames[1] = female.
-        mh, mc = _compute_heading(fly0_df)
-        fh, fc = _compute_heading(fly1_df)
-        male_headings.append(mh)
-        female_headings.append(fh)
-        male_centroids.append(mc)
-        female_centroids.append(fc)
+        df0 = _concat_per_bout_csvs([out_fly0_src])
+        df1 = _concat_per_bout_csvs([out_fly1_src])
+
+        inj_msg = "scut-inject=skipped"
+        if P_all is not None:
+            coms = _triangulate_sam_com_per_bout(bout_dir, P_all)
+            if coms is not None and coms.shape[0] >= 2:
+                # Output fly0 corresponds to input fly_idx=1 if swap, else 0.
+                com0 = coms[1 if swap else 0]
+                com1 = coms[0 if swap else 1]
+                n_a0, n_f0 = _inject_scutellum_from_sam_com(df0, com0)
+                n_a1, n_f1 = _inject_scutellum_from_sam_com(df1, com1)
+                inj_msg = (f"scut-inject fly0:({n_a0}anch,{n_f0}fill) "
+                           f"fly1:({n_a1}anch,{n_f1}fill)")
+
+        fly_frames[0].append(df0)
+        fly_frames[1].append(df1)
         print(f"  [aggregate] {bout_dir.name}: frames=[{start},{end}] "
-              f"area0={a0:.0f} area1={a1:.0f} swap={swap}")
+              f"area0={a0:.0f} area1={a1:.0f} swap={swap} {inj_msg}")
 
     for n in (0, 1):
         combined = pd.concat(fly_frames[n], ignore_index=True)
