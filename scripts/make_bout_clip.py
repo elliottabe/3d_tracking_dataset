@@ -198,7 +198,7 @@ def main() -> None:
                     help="First frame of the bout (inclusive, 0-based).")
     ap.add_argument("--end-frame", type=int, required=True,
                     help="Last frame of the bout (inclusive).")
-    ap.add_argument("--cameras", nargs="+", default=None,
+    ap.add_argument("--cameras", nargs="+", default=["Cam2012630", "Cam2012631", "Cam2012861"],
                     help="Camera basenames without extension, e.g. "
                          "Cam2012630. Defaults to every Cam*.mp4 in --video-dir.")
     ap.add_argument("--output", default=None,

@@ -47,6 +47,78 @@ def _build_filter(n: int, playback_fps: int) -> str:
     return ";".join(parts)
 
 
+def stack_clips(
+    clip_dir: Path,
+    cameras: list[str] | None = None,
+    output: str | Path | None = None,
+    playback_fps: int = 30,
+    crf: int = 23,
+    preset: str = "fast",
+    dry_run: bool = False,
+) -> Path:
+    """Vstack Cam*.mp4 clips in ``clip_dir``. Returns the output path.
+
+    ``cameras=None`` uses every ``Cam*.mp4`` in the directory sorted by
+    filename; otherwise the given list defines the top→bottom order.
+    """
+    if shutil.which("ffmpeg") is None:
+        raise SystemExit("ffmpeg not found on PATH.")
+
+    clip_dir = Path(clip_dir).resolve()
+    if not clip_dir.is_dir():
+        raise SystemExit(f"Not a directory: {clip_dir}")
+
+    all_clips = _discover_clips(clip_dir)
+
+    if cameras:
+        clip_by_cam = {_cam_name(p): p for p in all_clips}
+        missing = [c for c in cameras if c not in clip_by_cam]
+        if missing:
+            raise SystemExit(
+                "Cameras not found in clip_dir: " + ", ".join(missing)
+                + f"\nAvailable: {', '.join(sorted(clip_by_cam))}"
+            )
+        selected = [clip_by_cam[c] for c in cameras]
+    else:
+        selected = all_clips
+
+    out_name = output or f"{clip_dir.name}_vstack.mp4"
+    out_path = Path(out_name) if Path(out_name).is_absolute() else clip_dir / out_name
+
+    cam_names = [_cam_name(p) for p in selected]
+    print(f"Cameras (top→bottom): {', '.join(cam_names)}")
+    print(f"Playback fps        : {playback_fps}")
+    print(f"Output              : {out_path}")
+
+    cmd: list[str] = [
+        "ffmpeg", "-y", "-hide_banner", "-loglevel", "warning", "-stats",
+    ]
+    for p in selected:
+        cmd += ["-i", str(p)]
+    cmd += [
+        "-filter_complex", _build_filter(len(selected), playback_fps),
+        "-map", "[out]",
+        "-r", str(playback_fps),
+        "-c:v", "libx264",
+        "-preset", preset,
+        "-crf", str(crf),
+        "-pix_fmt", "yuv420p",
+        str(out_path),
+    ]
+
+    if dry_run:
+        print("\n" + " ".join(shlex.quote(x) for x in cmd))
+        return out_path
+
+    try:
+        subprocess.run(cmd, check=True)
+    except subprocess.CalledProcessError as e:
+        sys.exit(e.returncode)
+
+    print(f"Wrote {out_path}")
+    return out_path
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(
         description="Vertically stack pre-cut camera clips.",
@@ -69,61 +141,15 @@ def main() -> None:
                     help="Print the ffmpeg command without executing.")
     args = ap.parse_args()
 
-    if shutil.which("ffmpeg") is None:
-        raise SystemExit("ffmpeg not found on PATH.")
-
-    clip_dir: Path = args.clip_dir.resolve()
-    if not clip_dir.is_dir():
-        raise SystemExit(f"Not a directory: {clip_dir}")
-
-    all_clips = _discover_clips(clip_dir)
-
-    if args.cameras:
-        clip_by_cam = {_cam_name(p): p for p in all_clips}
-        missing = [c for c in args.cameras if c not in clip_by_cam]
-        if missing:
-            raise SystemExit(
-                "Cameras not found in clip_dir: " + ", ".join(missing)
-                + f"\nAvailable: {', '.join(sorted(clip_by_cam))}"
-            )
-        selected = [clip_by_cam[c] for c in args.cameras]
-    else:
-        selected = all_clips
-
-    out_name = args.output or f"{clip_dir.name}_vstack.mp4"
-    out_path = Path(out_name) if Path(out_name).is_absolute() else clip_dir / out_name
-
-    cam_names = [_cam_name(p) for p in selected]
-    print(f"Cameras (top→bottom): {', '.join(cam_names)}")
-    print(f"Playback fps        : {args.playback_fps}")
-    print(f"Output              : {out_path}")
-
-    cmd: list[str] = [
-        "ffmpeg", "-y", "-hide_banner", "-loglevel", "warning", "-stats",
-    ]
-    for p in selected:
-        cmd += ["-i", str(p)]
-    cmd += [
-        "-filter_complex", _build_filter(len(selected), args.playback_fps),
-        "-map", "[out]",
-        "-r", str(args.playback_fps),
-        "-c:v", "libx264",
-        "-preset", args.preset,
-        "-crf", str(args.crf),
-        "-pix_fmt", "yuv420p",
-        str(out_path),
-    ]
-
-    if args.dry_run:
-        print("\n" + " ".join(shlex.quote(x) for x in cmd))
-        return
-
-    try:
-        subprocess.run(cmd, check=True)
-    except subprocess.CalledProcessError as e:
-        sys.exit(e.returncode)
-
-    print(f"Wrote {out_path}")
+    stack_clips(
+        clip_dir=args.clip_dir,
+        cameras=args.cameras,
+        output=args.output,
+        playback_fps=args.playback_fps,
+        crf=args.crf,
+        preset=args.preset,
+        dry_run=args.dry_run,
+    )
 
 
 if __name__ == "__main__":
