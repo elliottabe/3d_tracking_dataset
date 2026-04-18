@@ -570,7 +570,7 @@ def load_concatenated_bouts(csv_path: Path,
         if compact_map is not None:
             # Map original video frames -> compact CSV rows
             rows = []
-            for f in range(bout['start_frame'], bout['end_frame']):
+            for f in range(bout['start_frame'], bout['end_frame'] + 1):
                 r = compact_map.get(f)
                 if r is not None:
                     rows.append(r)
@@ -583,15 +583,15 @@ def load_concatenated_bouts(csv_path: Path,
                 continue
             frame_indices = np.array(rows)
         else:
-            # Validate frame indices are within CSV bounds
-            if bout['start_frame'] >= n_frames_available or bout['end_frame'] > n_frames_available:
+            # Validate frame indices are within CSV bounds (end_frame is inclusive)
+            if bout['start_frame'] >= n_frames_available or bout['end_frame'] >= n_frames_available:
                 warning_msg = (f"Skipping bout {bout['bout_idx']}: "
                               f"frames {bout['start_frame']}-{bout['end_frame']} "
                               f"out of bounds (CSV has {n_frames_available} frames)")
                 print(warning_msg)
                 skipped_bouts.append((bout['bout_idx'], warning_msg))
                 continue
-            frame_indices = np.arange(bout['start_frame'], bout['end_frame'])
+            frame_indices = np.arange(bout['start_frame'], bout['end_frame'] + 1)
         bout_data = kp_data.iloc[frame_indices][reordered_cols]
         bout_array = np.array(bout_data.values).reshape(-1, len(filtered_node_names), 3)
         
@@ -665,7 +665,7 @@ def load_sibling_concatenated(sibling_csv_path: Path,
     for bout in bouts:
         if compact_map is not None:
             rows = []
-            for f in range(bout['start_frame'], bout['end_frame']):
+            for f in range(bout['start_frame'], bout['end_frame'] + 1):
                 r = compact_map.get(f)
                 if r is not None:
                     rows.append(r)
@@ -673,9 +673,9 @@ def load_sibling_concatenated(sibling_csv_path: Path,
                 continue
             frame_indices = np.array(rows)
         else:
-            if bout['start_frame'] >= n_frames_available or bout['end_frame'] > n_frames_available:
+            if bout['start_frame'] >= n_frames_available or bout['end_frame'] >= n_frames_available:
                 continue
-            frame_indices = np.arange(bout['start_frame'], bout['end_frame'])
+            frame_indices = np.arange(bout['start_frame'], bout['end_frame'] + 1)
         sub = df.iloc[frame_indices][reordered_cols]
         arr = np.array(sub.values).reshape(-1, len(filtered_node_names), 3)
         arrays.append(arr)

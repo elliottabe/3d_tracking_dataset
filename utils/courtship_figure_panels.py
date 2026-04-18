@@ -116,19 +116,20 @@ def assemble_figure(
         Row 2  6 video frames with all keypoints overlayed
         Row 3 [sine in-phase] | [joint angle density] | [Pslow/Pfast wave]
               | [scutellum z courtship vs free walking]
-        Row 4  [N MuJoCo render frames] | [male pitch panel]
+        Row 4  [N MuJoCo render frames] | [pitch align] | [per-bout violin]
 
     axes_dict keys:
-        'kp_label'    : axes (Row 1 left)
-        'wing'        : axes (Row 1 right top)
-        'scut'        : axes (Row 1 right bottom, sharex with wing)
-        'video'       : list of N axes (Row 2)
-        'sine_phase'  : axes (Row 3 col 0)
-        'angle_2d'    : axes (Row 3 col 1)
-        'pulse_class' : axes (Row 3 col 2)
-        'zheight'     : axes (Row 3 col 3)
-        'render'      : list of N axes (Row 4 left)
-        'pitch'       : axes (Row 4 right)
+        'kp_label'     : axes (Row 1 left)
+        'wing'         : axes (Row 1 right top)
+        'scut'         : axes (Row 1 right bottom, sharex with wing)
+        'video'        : list of N axes (Row 2)
+        'sine_phase'   : axes (Row 3 col 0)
+        'angle_2d'     : axes (Row 3 col 1)
+        'pulse_class'  : axes (Row 3 col 2)
+        'zheight'      : axes (Row 3 col 3)
+        'render'       : list of N axes (Row 4 left)
+        'pitch'        : axes (Row 4 middle)
+        'align_violin' : axes (Row 4 right)
     """
     apply_paper_style()
     fig = plt.figure(figsize=(fig_width_mm / 25.4, fig_height_mm / 25.4))
@@ -189,9 +190,9 @@ def assemble_figure(
         left=0.06, right=0.97, top=0.90, bottom=0.22, wspace=0.48,
     )
 
-    # Row 4: render strip (left) + male-pitch panel (right)
-    sub_render_left, sub_render_right = sub_render.subfigures(
-        1, 2, width_ratios=[int(n_render_strip), 2], wspace=0.08,
+    # Row 4: render strip (left) + pitch-align trace (middle) + violin (right)
+    sub_render_left, sub_render_mid, sub_render_right = sub_render.subfigures(
+        1, 3, width_ratios=[int(n_render_strip), 2.0, 1.2], wspace=0.08,
     )
     ax_render = list(sub_render_left.subplots(1, int(n_render_strip)))
     if int(n_render_strip) == 1:
@@ -203,9 +204,13 @@ def assemble_figure(
     sub_render_left.subplots_adjust(
         wspace=0.06, left=0.05, right=0.98, top=0.94, bottom=0.06,
     )
-    ax_pitch = sub_render_right.subplots(1, 1)
-    sub_render_right.subplots_adjust(
+    ax_pitch = sub_render_mid.subplots(1, 1)
+    sub_render_mid.subplots_adjust(
         left=0.18, right=0.96, top=0.90, bottom=0.26,
+    )
+    ax_align_violin = sub_render_right.subplots(1, 1)
+    sub_render_right.subplots_adjust(
+        left=0.28, right=0.92, top=0.90, bottom=0.26,
     )
 
     return fig, {
@@ -220,6 +225,7 @@ def assemble_figure(
         'zheight':          ax_zheight,
         'render':           ax_render,
         'pitch':            ax_pitch,
+        'align_violin':     ax_align_violin,
     }
 
 
@@ -234,6 +240,7 @@ DEFAULT_PANEL_LETTERS: Sequence[Tuple[str, str]] = (
     ('zheight',          'H'),
     ('render',           'I'),
     ('pitch',            'J'),
+    ('align_violin',     'K'),
 )
 
 
@@ -1225,31 +1232,24 @@ def panel_scutellum_z_trace(
 def panel_male_pitch(
     ax: plt.Axes,
     t_ms: np.ndarray,
-    male_body_pitch_deg: np.ndarray,
-    target_pitch_deg: np.ndarray,
+    alignment_deg: np.ndarray,
     segments: Optional[Iterable[dict]] = None,
     fs: float = 800.0,
     frame_range: Optional[Tuple[int, int]] = None,
     min_segment_ms: float = 10.0,
-    body_color: str = '#111111',
-    target_color: str = '#888888',
+    line_color: str = '#111111',
+    zero_line_color: str = '#bdbdbd',
     line_kwargs: Optional[Dict] = None,
-    legend_kwargs: Optional[Dict] = None,
     title: str = '',
 ) -> None:
-    """Overlay the male body-axis pitch and target pitch (to female COM).
+    """Plot the male-body-to-target pitch alignment (degrees) over time.
 
-    ``male_body_pitch_deg`` is the solid trace (body-axis elevation, degrees);
-    ``target_pitch_deg`` is the dashed trace (elevation from male Scutellum to
-    female COM). Where both overlap visually, the male is aimed at the female.
-
-    Song segments (pulse/sine) are shaded behind the traces using the same
-    `_shade_segments` helper as Panel B, optionally filtered by
-    ``min_segment_ms`` to suppress ultra-short false detections.
+    ``alignment_deg`` is ``body_pitch − target_pitch``: zero means the male
+    body axis is aimed at the female COM. Song segments (pulse/sine) are
+    shaded behind the trace via the same `_shade_segments` helper as Panel
+    B; ``min_segment_ms`` suppresses ultra-short false detections.
     """
     lk = {'lw': 0.8, **(line_kwargs or {})}
-    lg = {'loc': 'upper right', 'ncols': 2,
-          'columnspacing': 0.6, **(legend_kwargs or {})}
 
     if segments is not None:
         segs = list(segments)
@@ -1259,17 +1259,79 @@ def panel_male_pitch(
                     if (int(s['end']) - int(s['start'])) >= min_frames]
         _shade_segments(ax, segs, fs, frame_range=frame_range)
 
-    ax.plot(t_ms, male_body_pitch_deg, color=body_color, linestyle='-',
-            label='Male body', **lk)
-    ax.plot(t_ms, target_pitch_deg, color=target_color, linestyle='--',
-            label='Target', **lk)
+    ax.axhline(0.0, color=zero_line_color, lw=0.6, zorder=1)
+    ax.plot(t_ms, alignment_deg, color=line_color, linestyle='-',
+            zorder=2, **lk)
     ax.set_xlabel('Time (ms)')
-    ax.set_ylabel('Pitch (°)')
+    ax.set_ylabel('Pitch align (°)')
     if len(t_ms):
         ax.set_xlim(0.0, float(t_ms[-1]))
     if title:
         ax.set_title(title, pad=2)
-    _colored_text_legend(ax, **lg)
+
+
+def panel_pitch_alignment_violin(
+    ax: plt.Axes,
+    per_bout_values: Sequence[float],
+    exemplar_idx: Optional[int] = None,
+    violin_color: str = '#c0c0c0',
+    dot_color: str = '#555555',
+    exemplar_color: str = '#d62728',
+    jitter_width: float = 0.12,
+    rng_seed: int = 0,
+    title: str = '',
+) -> None:
+    """Violin + per-bout dots of median |pitch alignment| across bouts.
+
+    Each dot is one bout's median absolute alignment (degrees); the
+    violin shows the distribution across all bouts. ``exemplar_idx``
+    highlights that bout in ``exemplar_color``.
+    """
+    vals = np.asarray(per_bout_values, dtype=float)
+    finite_mask = np.isfinite(vals)
+    finite = vals[finite_mask]
+    if finite.size >= 2:
+        parts = ax.violinplot(
+            finite, positions=[0], widths=0.7, showextrema=False,
+            showmedians=False,
+        )
+        for body in parts['bodies']:
+            body.set_facecolor(violin_color)
+            body.set_edgecolor('none')
+            body.set_alpha(0.55)
+    rng = np.random.default_rng(rng_seed)
+    jitter = rng.uniform(-jitter_width, jitter_width, size=vals.size)
+    colors = [
+        exemplar_color if (exemplar_idx is not None and i == int(exemplar_idx))
+        else dot_color
+        for i in range(vals.size)
+    ]
+    sizes = [
+        20.0 if (exemplar_idx is not None and i == int(exemplar_idx))
+        else 10.0
+        for i in range(vals.size)
+    ]
+    zorders = [
+        4 if (exemplar_idx is not None and i == int(exemplar_idx))
+        else 3
+        for i in range(vals.size)
+    ]
+    for i in range(vals.size):
+        if not finite_mask[i]:
+            continue
+        ax.scatter(
+            jitter[i], vals[i], s=sizes[i], c=colors[i],
+            edgecolors='k', linewidths=0.3, zorder=zorders[i],
+        )
+    if finite.size:
+        med = float(np.median(finite))
+        ax.hlines(med, -0.35, 0.35, color='k', lw=0.8, zorder=5)
+    ax.set_xticks([0])
+    ax.set_xticklabels([f'n={int(finite.size)}'])
+    ax.set_xlim(-0.6, 0.6)
+    ax.set_ylabel('|Pitch align| (°)')
+    if title:
+        ax.set_title(title, pad=2)
 
 
 # -----------------------------------------------------------------------------

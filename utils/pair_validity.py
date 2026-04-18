@@ -28,14 +28,14 @@ class PairValidityConfig:
     enabled: bool = True
     critical_kp_patterns: Sequence[str] = field(
         default_factory=lambda: [
-            "*Tarsus*",
-            "*Claw*",
-            "*Scutellum*",
-            "*Scutum*",
+            "Scutellum",
+            "Scutum",
+            "*_ThxCx",
+            "*_FeTi",
         ]
     )
     ground_kp_patterns: Sequence[str] = field(
-        default_factory=lambda: ["*Tarsus*", "*Claw*"]
+        default_factory=lambda: ["*_TaTip", "*_TaT3"]
     )
     ground_epsilon_mm: float = 0.05
     floor_percentile: float = 5.0
@@ -195,8 +195,13 @@ def compute_single_fly_validity(
     if edge_nan_mask is not None:
         edge_bad = np.asarray(edge_nan_mask, dtype=bool)
         if edge_bad.shape == (T, fly_kp.shape[1]):
-            # A frame is phantom if ANY keypoint sat in an edge NaN run.
-            filt = filt & ~edge_bad.any(axis=1)
+            # A frame is phantom if a *critical* keypoint sat in an edge NaN
+            # run — peripheral kps (tarsal tips, antennae, wing veins) drop in
+            # and out routinely and must not kill otherwise-valid poses.
+            if critical_idx:
+                filt = filt & ~edge_bad[:, list(critical_idx)].any(axis=1)
+            else:
+                filt = filt & ~edge_bad.any(axis=1)
     return dict(
         valid_fly=filt & grd,
         filter_ok=filt,
@@ -270,6 +275,8 @@ def compute_pair_validity(
         arr = np.asarray(mask, dtype=bool)
         if arr.shape != (T, fly_kp.shape[1]):
             return None
+        if critical_idx:
+            return arr[:, list(critical_idx)].any(axis=1)
         return arr.any(axis=1)
 
     edge_bad0 = _edge_bad(edge_nan_mask_fly0, fly0_kp)

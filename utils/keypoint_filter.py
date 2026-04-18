@@ -1381,15 +1381,15 @@ def load_confidence_concatenated(
     for bout in bouts:
         if compact_map is not None:
             rows = [compact_map[f]
-                    for f in range(bout['start_frame'], bout['end_frame'])
+                    for f in range(bout['start_frame'], bout['end_frame'] + 1)
                     if f in compact_map]
             if not rows:
                 continue
             frame_idx = np.array(rows)
         else:
-            if bout['start_frame'] >= n_frames_available or bout['end_frame'] > n_frames_available:
+            if bout['start_frame'] >= n_frames_available or bout['end_frame'] >= n_frames_available:
                 continue
-            frame_idx = np.arange(bout['start_frame'], bout['end_frame'])
+            frame_idx = np.arange(bout['start_frame'], bout['end_frame'] + 1)
         bout_conf_raw = conf_data.iloc[frame_idx].values.astype(float)
         T_bout = len(frame_idx)
         bout_conf = np.ones((T_bout, N), dtype=float)
