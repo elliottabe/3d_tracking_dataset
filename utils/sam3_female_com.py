@@ -129,3 +129,50 @@ def triangulate_sam3_female_com(
         out[t] = _triangulate_point(coeffs, uv_t, valid_t & finite_t,
                                     min_cams=min_cams)
     return out
+
+
+def sam3_camera_index(calib_dir: str | Path, cam_csv_name: str) -> int:
+    """Return the SAM3-axis index for ``cam_csv_name`` in ``sorted(calib_dir)``.
+
+    The SAM3 ``packed``/``valid``/``centroids`` arrays are stored with cameras
+    in ``sorted(glob('Cam*_dlt.csv'))`` order (same convention as
+    :func:`triangulate_sam3_female_com`). This helper converts a camera CSV
+    filename (e.g. ``'Cam2012630_dlt.csv'``) into its SAM3 camera-axis slot.
+    """
+    files = sorted(Path(calib_dir).glob('Cam*_dlt.csv'))
+    names = [f.name for f in files]
+    if cam_csv_name not in names:
+        raise ValueError(f'{cam_csv_name!r} not in {names}')
+    return names.index(cam_csv_name)
+
+
+def unpack_sam3_masks_for_frames(
+    npz_path: str | Path,
+    cam_idx: int,
+    fly_indices: Sequence[int],
+    frame_indices: Sequence[int],
+) -> list:
+    """Return one unpacked mask stack per fly, indexed by ``frame_indices``.
+
+    Output is ``[mask_fly0, mask_fly1, ...]`` where each element has shape
+    ``(len(frame_indices), H_full, W_full)`` of ``bool``. Invalid frames (per
+    the npz ``valid`` array) return an all-False mask for that slot.
+    """
+    with np.load(npz_path) as npz:
+        packed = npz['packed']           # (n_flies, n_cams, T, H, W/8)
+        valid = npz['valid']             # (n_flies, n_cams, T)
+        shape = tuple(int(x) for x in npz['shape'])  # (H, W_full)
+    H, W = shape
+    fidx = np.asarray(frame_indices, dtype=int)
+    out = []
+    for fi in fly_indices:
+        stack = np.zeros((len(fidx), H, W), dtype=bool)
+        for k, t in enumerate(fidx):
+            if not bool(valid[int(fi), int(cam_idx), int(t)]):
+                continue
+            bits = np.unpackbits(
+                packed[int(fi), int(cam_idx), int(t)], axis=-1,
+            )
+            stack[k] = bits[:H, :W].astype(bool)
+        out.append(stack)
+    return out

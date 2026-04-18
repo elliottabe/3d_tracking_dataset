@@ -23,7 +23,9 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 import matplotlib as mpl
+import matplotlib.offsetbox as offsetbox
 import matplotlib.pyplot as plt
+import matplotlib.transforms as mtransforms
 import numpy as np
 
 
@@ -108,6 +110,7 @@ def assemble_figure(
     fig_height_mm: float = 130.0,
     n_frames_strip: int = 6,
     n_render_strip: int = 4,
+    n_video_frames: Optional[int] = None,
 ) -> Tuple[plt.Figure, Dict[str, object]]:
     """Build the 4-row consolidated layout. Returns (fig, axes_dict).
 
@@ -135,7 +138,7 @@ def assemble_figure(
     fig = plt.figure(figsize=(fig_width_mm / 25.4, fig_height_mm / 25.4))
 
     sub_row1, sub_video, sub_row3, sub_render = fig.subfigures(
-        4, 1, height_ratios=[1.4, 1.0, 1.6, 1.0], hspace=0.10,
+        4, 1, height_ratios=[1.15, 1.0, 1.6, 1.0], hspace=0.10,
     )
 
     # Row 1: labeled keypoint frame (left) + wing/scut traces (right)
@@ -146,20 +149,26 @@ def assemble_figure(
     ax_kp_label.set_xticks([]); ax_kp_label.set_yticks([])
     for spine in ax_kp_label.spines.values():
         spine.set_visible(False)
-    sf1_left.subplots_adjust(left=0.05, right=0.96, top=0.92, bottom=0.06)
+    sf1_left.subplots_adjust(left=0.05, right=0.96, top=0.86, bottom=0.06)
 
     ax_wing, ax_scut = sf1_right.subplots(
-        2, 1, sharex=True, height_ratios=[2, 1],
+        2, 1, sharex=True, height_ratios=[1.4, 1.0],
     )
     sf1_right.subplots_adjust(
-        left=0.07, right=0.97, top=0.92, bottom=0.20, hspace=0.14,
+        left=0.07, right=0.97, top=0.86, bottom=0.20, hspace=0.16,
     )
 
-    # Row 2: (n_frames_strip - 1) video frames + exemplar sine in-phase trace
+    # Row 2: video frames (left) + exemplar sine in-phase trace (right). When
+    # ``n_video_frames`` is set, the sine panel expands into the reclaimed
+    # width so per-frame width stays roughly constant.
+    orig_n_video = max(1, int(n_frames_strip) - 1)
+    n_video = max(1, int(n_video_frames if n_video_frames is not None
+                         else orig_n_video))
+    sf2_left_ratio = 5.0 * (n_video / orig_n_video)
+    sf2_right_ratio = 1.4 + (5.0 - sf2_left_ratio)
     sf2_left, sf2_right = sub_video.subfigures(
-        1, 2, width_ratios=[5.0, 1.4], wspace=0.06,
+        1, 2, width_ratios=[sf2_left_ratio, sf2_right_ratio], wspace=0.06,
     )
-    n_video = max(1, int(n_frames_strip) - 1)
     ax_video = list(sf2_left.subplots(1, n_video))
     if n_video == 1:
         ax_video = [ax_video[0]] if not isinstance(ax_video, list) else ax_video
@@ -231,34 +240,86 @@ def assemble_figure(
 
 DEFAULT_PANEL_LETTERS: Sequence[Tuple[str, str]] = (
     ('kp_label',         'A'),
-    ('wing',             'B'),
-    ('video',            'C'),
-    ('sine_phase',       'D'),
-    ('wing_phase_polar', 'E'),
-    ('angle_2d',         'F'),
-    ('pulse_class',      'G'),
-    ('zheight',          'H'),
-    ('render',           'I'),
-    ('pitch',            'J'),
-    ('align_violin',     'K'),
+    # 'wing' / 'scut' share Panel A with 'kp_label' (single top-row panel)
+    ('video',            'B'),
+    ('sine_phase',       'C'),
+    ('wing_phase_polar', 'D'),
+    ('angle_2d',         'E'),
+    ('pulse_class',      'F'),
+    ('zheight',          'G'),
+    ('render',           'H'),
+    ('pitch',            'I'),
+    ('align_violin',     'J'),
 )
+
+
+DEFAULT_PANEL_POSITIONS: Dict[str, Tuple[float, float]] = {
+    # Per-key (x, y) in axes fractions for the panel-letter anchor.
+    # Panels with y-tick labels use more negative x so the letter clears them
+    # and sits at the panel's upper-left (everything else to the right).
+    'kp_label':         (-0.02, 1.04),
+    'video':            (-0.02, 1.08),
+    'sine_phase':       (-0.28, 1.04),
+    'wing_phase_polar': (-0.22, 1.20),
+    'angle_2d':         (-0.40, 1.06),
+    'pulse_class':      (-0.40, 1.06),
+    'zheight':          (-0.45, 1.06),
+    'render':           (-0.02, 1.08),
+    'pitch':            (-0.40, 1.06),
+    'align_violin':     (-0.60, 1.06),
+}
+
+
+# Letters for row-leading panels (A, B, D, H) all land at the same figure-x
+# so they line up vertically down the left edge of the figure. y still comes
+# from DEFAULT_PANEL_POSITIONS (axes fraction).
+DEFAULT_PANEL_FIG_X: Dict[str, float] = {
+    'kp_label':         0.010,
+    'video':            0.010,
+    'wing_phase_polar': 0.010,
+    'render':           0.010,
+}
+
+
+def _root_figure(ax) -> plt.Figure:
+    """Return the top-level Figure for an axes, walking up nested SubFigures."""
+    f = ax.figure
+    while getattr(f, 'figure', None) is not None and f.figure is not f:
+        f = f.figure
+    return f
 
 
 def add_panel_letters(
     axd: Dict[str, object],
     letters: Sequence[Tuple[str, str]] = DEFAULT_PANEL_LETTERS,
-    x: float = -0.02,
+    x: float = -0.12,
     y: float = 1.05,
     fontsize: float = 10.0,
     fontweight: str = 'bold',
+    titles: Optional[Dict[str, str]] = None,
+    title_fontsize: Optional[float] = None,
+    title_fontweight: str = 'normal',
+    title_sep: float = 4.0,
+    positions: Optional[Dict[str, Tuple[float, float]]] = None,
+    fig_x: Optional[Dict[str, float]] = None,
 ) -> None:
     """Stamp bold panel letters (A, B, C, ...) in the top-left of each panel.
 
     ``letters`` is a sequence of ``(axd_key, letter)`` pairs. For list-valued
     entries (``'video'``, ``'render'``), the letter lands on the first axes.
     Coordinates are in axes fractions (``transAxes``); negative ``x`` nudges
-    the letter just outside the axes spine.
+    the letter outside the axes spine so it clears y-tick labels.
+
+    When ``titles`` maps panel keys to short descriptive strings, each title
+    is rendered in regular weight on the same baseline just right of the
+    letter (``HPacker`` auto-spaces so the gap is constant regardless of
+    letter-width). Per-key position overrides come from ``positions`` (falls
+    back to ``DEFAULT_PANEL_POSITIONS``, then to the ``x, y`` arguments).
     """
+    title_fs = title_fontsize if title_fontsize is not None else fontsize * 0.85
+    pos = {**DEFAULT_PANEL_POSITIONS, **(positions or {})}
+    fx_map = {**DEFAULT_PANEL_FIG_X, **(fig_x or {})}
+
     for key, ch in letters:
         ax = axd.get(key)
         if ax is None:
@@ -267,9 +328,42 @@ def add_panel_letters(
             if not ax:
                 continue
             ax = ax[0]
-        ax.text(x, y, ch, transform=ax.transAxes,
-                fontsize=fontsize, fontweight=fontweight,
-                ha='left', va='bottom', clip_on=False)
+        px, py = pos.get(key, (x, y))
+        # Row-leading panels anchor x in figure coords (aligning A/B/D/H down
+        # the left edge) while keeping y in axes fraction.
+        if key in fx_map:
+            root_fig = _root_figure(ax)
+            anchor_x = fx_map[key]
+            transform = mtransforms.blended_transform_factory(
+                root_fig.transFigure, ax.transAxes,
+            )
+        else:
+            anchor_x = px
+            transform = ax.transAxes
+        title = titles.get(key) if titles else None
+        if title:
+            letter_ta = offsetbox.TextArea(
+                ch, textprops=dict(fontsize=fontsize, fontweight=fontweight),
+            )
+            title_ta = offsetbox.TextArea(
+                title,
+                textprops=dict(fontsize=title_fs, fontweight=title_fontweight),
+            )
+            box = offsetbox.HPacker(
+                children=[letter_ta, title_ta],
+                align='baseline', pad=0, sep=title_sep,
+            )
+            aob = offsetbox.AnchoredOffsetbox(
+                loc='lower left', child=box, pad=0, borderpad=0,
+                frameon=False,
+                bbox_to_anchor=(anchor_x, py), bbox_transform=transform,
+            )
+            aob.set_clip_on(False)
+            ax.add_artist(aob)
+        else:
+            ax.text(anchor_x, py, ch, transform=transform,
+                    fontsize=fontsize, fontweight=fontweight,
+                    ha='left', va='bottom', clip_on=False)
 
 
 # -----------------------------------------------------------------------------
@@ -392,7 +486,7 @@ def panel_video_strip(
     """
     import cv2
     if titles is None:
-        titles = [f't = {int(round(f / fs * 1000))} ms' for f in frame_indices]
+        titles = [f'{int(round(f / fs * 1000))} ms' for f in frame_indices]
     if len(titles) != len(axes) or len(frame_indices) != len(axes):
         raise ValueError('axes, frame_indices, titles must all be the same length')
 
@@ -421,7 +515,16 @@ def panel_video_strip(
                         ha='center', va='center', transform=ax.transAxes)
                 continue
             ax.imshow(frame)
-            ax.set_title(title, pad=2)
+            _tb = offsetbox.AnchoredText(
+                title, loc='lower left', pad=0.0, borderpad=0.0,
+                frameon=True, prop=dict(fontsize=7, color='black'),
+            )
+            _tb.patch.set_boxstyle('square,pad=0.25')
+            _tb.patch.set_facecolor('white')
+            _tb.patch.set_edgecolor('none')
+            _tb.patch.set_alpha(0.9)
+            _tb.set_zorder(5)
+            ax.add_artist(_tb)
     finally:
         cap.release()
 
@@ -445,6 +548,7 @@ def panel_kp_label_frame(
     crop_wh: Optional[Tuple[int, int]] = None,
     kp_xyz_fly1: Optional[np.ndarray] = None,
     kp_color_fly1: str = '#3a7bff',
+    label_kp_colors: Optional[Dict[str, str]] = None,
 ) -> None:
     """Single video frame with selected keypoints drawn + labeled.
 
@@ -459,9 +563,13 @@ def panel_kp_label_frame(
 
     When ``kp_xyz_fly1`` is given it is drawn in ``kp_color_fly1`` on top of
     the fly0 dots (same ``label_kps``), and fly0 gets its own labeled dots.
+
+    When ``label_kp_colors`` is given (``{kp_name: color}``) those per-keypoint
+    colors override ``kp_color`` for the fly0 dots + text (useful for matching
+    the wing-trace panel colors — purple WingL, blue WingR, black Scutellum).
     """
     import cv2
-    sk = {'s': 14, 'edgecolors': 'k', 'linewidths': 0.4,
+    sk = {'s': 14, 'edgecolors': 'white', 'linewidths': 0.8,
           'zorder': 3, **(scatter_kwargs or {})}
     tk = {'fontsize': 6, 'color': kp_color,
           'path_effects': [], **(text_kwargs or {})}
@@ -491,7 +599,7 @@ def panel_kp_label_frame(
 
     name_to_idx = {n: i for i, n in enumerate(kp_names)}
 
-    def _project_and_label(kp_source, color, annotate):
+    def _project_and_label(kp_source, color, annotate, per_kp_colors=None):
         arr = np.asarray(kp_source)
         if arr.ndim == 2 and arr.shape[-1] != 3:
             arr = arr.reshape(arr.shape[0], -1, 3)
@@ -499,22 +607,24 @@ def panel_kp_label_frame(
         uv_ = _dlt_project(dlt_coeffs, pts)
         if roi_t is not None:
             uv_ = uv_ - np.array([roi_t[0], roi_t[1]], dtype=float)
-        xs, ys = [], []
+        xs, ys, cs = [], [], []
         for name in label_kps:
             if name not in name_to_idx:
                 continue
             u, v = uv_[name_to_idx[name]]
             if not (np.isfinite(u) and np.isfinite(v)):
                 continue
-            xs.append(u); ys.append(v)
+            c_kp = (per_kp_colors or {}).get(name, color)
+            xs.append(u); ys.append(v); cs.append(c_kp)
             if annotate:
                 dx, dy = label_offsets.get(name, (8, -4))
-                tk_local = {**tk, 'color': color}
+                tk_local = {**tk, 'color': c_kp}
                 ax.annotate(name, xy=(u, v), xytext=(u + dx, v + dy), **tk_local)
         if xs:
-            ax.scatter(xs, ys, c=color, **sk)
+            ax.scatter(xs, ys, c=cs, **sk)
 
-    _project_and_label(kp_xyz, kp_color, annotate=True)
+    _project_and_label(kp_xyz, kp_color, annotate=True,
+                       per_kp_colors=label_kp_colors)
     if kp_xyz_fly1 is not None:
         _project_and_label(kp_xyz_fly1, kp_color_fly1, annotate=False)
 
@@ -538,9 +648,18 @@ def panel_video_strip_with_kp(
     crop_wh: Optional[Tuple[int, int]] = None,
     kp_xyz_fly1_per_frame: Optional[np.ndarray] = None,
     kp_color_fly1: str = '#3a7bff',
+    masks_per_fly: Optional[Sequence[np.ndarray]] = None,
+    mask_colors: Optional[Sequence[str]] = None,
+    mask_alpha: float = 0.35,
 ) -> None:
     """Same as :func:`panel_video_strip` but draws projected keypoint dots
     on every frame.
+
+    When ``masks_per_fly`` is given it is a sequence of ``(len(frame_indices),
+    H_full, W_full)`` bool arrays (one per fly, same order as
+    ``[kp_xyz_per_frame, kp_xyz_fly1_per_frame]``). Each mask is cropped to the
+    current frame ROI and blended onto the frame with ``mask_colors[i]`` at
+    ``mask_alpha``. ``mask_colors`` defaults to ``[kp_color, kp_color_fly1]``.
 
     ``frame_indices`` are bout-relative — used as-is to index
     ``kp_xyz_per_frame``. The video seek uses ``video_frame_offset + fidx`` so
@@ -560,7 +679,7 @@ def panel_video_strip_with_kp(
     sk = {'s': 4, 'edgecolors': 'none', 'linewidths': 0,
           'zorder': 3, **(scatter_kwargs or {})}
     if titles is None:
-        titles = [f't = {int(round(f / fs * 1000))} ms' for f in frame_indices]
+        titles = [f'{int(round(f / fs * 1000))} ms' for f in frame_indices]
     if len(titles) != len(axes) or len(frame_indices) != len(axes):
         raise ValueError('axes, frame_indices, titles must all be the same length')
 
@@ -580,6 +699,20 @@ def panel_video_strip_with_kp(
     kp_arr = _as_3d(kp_xyz_per_frame)
     kp_arr1 = _as_3d(kp_xyz_fly1_per_frame) if kp_xyz_fly1_per_frame is not None else None
 
+    mask_seq: List[np.ndarray] = list(masks_per_fly or [])
+    if mask_seq:
+        mc = list(mask_colors or [kp_color, kp_color_fly1])[: len(mask_seq)]
+        if len(mc) < len(mask_seq):
+            mc = mc + [kp_color] * (len(mask_seq) - len(mc))
+        mask_rgba = [
+            np.array(
+                [int(c.lstrip('#')[i:i+2], 16) / 255.0 for i in (0, 2, 4)]
+                + [float(mask_alpha)],
+                dtype=float,
+            )
+            for c in mc
+        ]
+
     dynamic_roi = center_xyz is not None and crop_wh is not None
     center_arr = np.asarray(center_xyz) if dynamic_roi else None
 
@@ -587,7 +720,7 @@ def panel_video_strip_with_kp(
     frame_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     frame_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     try:
-        for ax, fidx, title in zip(axes, frame_indices, titles):
+        for i_ax, (ax, fidx, title) in enumerate(zip(axes, frame_indices, titles)):
             if dynamic_roi:
                 roi_t = _center_xyz_to_roi(
                     center_arr[int(fidx)], dlt_coeffs, crop_wh,
@@ -603,8 +736,30 @@ def panel_video_strip_with_kp(
                         ha='center', va='center', transform=ax.transAxes)
                 continue
             ax.imshow(frame)
-            ax.set_title(title, pad=2)
+            _tb = offsetbox.AnchoredText(
+                title, loc='lower left', pad=0.0, borderpad=0.0,
+                frameon=True, prop=dict(fontsize=7, color='black'),
+            )
+            _tb.patch.set_boxstyle('square,pad=0.25')
+            _tb.patch.set_facecolor('white')
+            _tb.patch.set_edgecolor('none')
+            _tb.patch.set_alpha(0.9)
+            _tb.set_zorder(5)
+            ax.add_artist(_tb)
             H, W = frame.shape[:2]
+
+            for fi, mask_stack in enumerate(mask_seq):
+                m_full = np.asarray(mask_stack[i_ax], dtype=bool)
+                if roi_t is not None:
+                    x0, y0, w_roi, h_roi = roi_t
+                    m_crop = m_full[y0:y0 + h_roi, x0:x0 + w_roi]
+                else:
+                    m_crop = m_full
+                if m_crop.shape[0] != H or m_crop.shape[1] != W:
+                    continue
+                overlay = np.zeros((H, W, 4), dtype=float)
+                overlay[m_crop] = mask_rgba[fi]
+                ax.imshow(overlay, interpolation='nearest', zorder=2)
 
             def _scatter(arr, color):
                 pts3 = arr[int(fidx)][kp_idx] * float(kp_scale)
@@ -635,9 +790,14 @@ def floor_align_qpos_pair(
     fly_nq: Optional[int] = None,
     fly_suffixes: Sequence[str] = ('_fly0', '_fly1'),
     floor_geom_name: str = 'floor',
+    floor_z_offset: float = 0.0,
 ) -> np.ndarray:
     """Return a copy of ``qpos_pair`` with each fly's free-joint root-z shifted
     so its lowest-standing geom surface touches ``floor_z`` in every frame.
+
+    ``floor_z_offset`` (default 0) is added to the per-frame shift, so a
+    positive value pushes the fly further down into the floor (useful when
+    the claw-tip touches visually read as floating at grazing camera angles).
 
     ``qpos_pair`` is laid out as ``[fly0_qpos | fly1_qpos]`` with each fly
     starting in a 7-dof free joint (xyz + quat), so root-z lives at index
@@ -677,21 +837,39 @@ def floor_align_qpos_pair(
                 geom_fly[g] = fi
                 break
 
+    # Local AABB corner offsets (8 corners of a unit box in ±1 space). The
+    # true world-frame bottom of each geom comes from transforming these by
+    # its rotation. Tighter than geom_rbound, so feet actually touch the floor.
+    corner_signs = np.array([
+        [+1, +1, +1], [+1, +1, -1], [+1, -1, +1], [+1, -1, -1],
+        [-1, +1, +1], [-1, +1, -1], [-1, -1, +1], [-1, -1, -1],
+    ], dtype=float)
+    local_aabb = np.asarray(model.geom_aabb, dtype=float)  # (ngeom, 6)
     rbound = np.asarray(model.geom_rbound, dtype=float)
     data = mujoco.MjData(model)
     for t in range(T):
         data.qpos[:] = qpos_pair[t]
         mujoco.mj_forward(model, data)
-        geom_bottom = data.geom_xpos[:, 2] - rbound
         for fi in range(len(fly_suffixes)):
-            mask = geom_fly == fi
-            if not mask.any():
+            mask = np.nonzero(geom_fly == fi)[0]
+            if mask.size == 0:
                 continue
-            zs = geom_bottom[mask]
-            zs = zs[np.isfinite(zs)]
-            if zs.size == 0:
+            bottoms = np.full(mask.size, np.inf, dtype=float)
+            for k, g in enumerate(mask):
+                c = local_aabb[g, :3]
+                s = local_aabb[g, 3:]
+                if not (np.all(np.isfinite(c)) and np.all(np.isfinite(s))):
+                    # Fall back to bounding sphere for geoms with no AABB.
+                    bottoms[k] = data.geom_xpos[g, 2] - rbound[g]
+                    continue
+                corners_local = c + corner_signs * s            # (8, 3)
+                R = data.geom_xmat[g].reshape(3, 3)
+                corners_world_z = corners_local @ R.T[:, 2] + data.geom_xpos[g, 2]
+                bottoms[k] = float(corners_world_z.min())
+            bottoms = bottoms[np.isfinite(bottoms)]
+            if bottoms.size == 0:
                 continue
-            shift = float(floor_z - zs.min())
+            shift = float(floor_z - bottoms.min()) - float(floor_z_offset)
             qpos_pair[t, fi * fly_nq + 2] += shift
     return qpos_pair
 
@@ -973,7 +1151,9 @@ def _colored_text_legend(
     colors = []
     for h in handles:
         c = None
-        for getter in ('get_color', 'get_facecolor', 'get_edgecolor'):
+        # axvspan Patches use a very pale fill but a saturated edgecolor —
+        # prefer edgecolor so the legend text reads at full strength.
+        for getter in ('get_color', 'get_edgecolor', 'get_facecolor'):
             if hasattr(h, getter):
                 try:
                     c = getattr(h, getter)()
@@ -983,7 +1163,16 @@ def _colored_text_legend(
                     break
         colors.append(c if c is not None else 'k')
 
-    for txt, color in zip(leg.get_texts(), colors):
+    # Strip alpha so labels render at full opacity even when derived from
+    # semi-transparent shading (facecolor 0x33) or invisible edgelines.
+    solid_colors = []
+    for c in colors:
+        rgba = mpl.colors.to_rgba(c)
+        if rgba[3] <= 0.0:
+            solid_colors.append('k')
+        else:
+            solid_colors.append((rgba[0], rgba[1], rgba[2], 1.0))
+    for txt, color in zip(leg.get_texts(), solid_colors):
         txt.set_color(color)
     for h in leg.legend_handles if hasattr(leg, 'legend_handles') else leg.legendHandles:
         try:
@@ -1144,8 +1333,8 @@ def panel_wing_z_traces(
     pt = {**PULSE_TYPE_COLORS, **(pulse_type_colors or {})}
     lk = {'lw': 0.7, **(line_kwargs or {})}
     vk = {'lw': 1.0, 'alpha': 0.9, 'zorder': 4, **(pulse_vline_kwargs or {})}
-    lg = {'loc': 'upper right', 'ncols': 2,
-          'columnspacing': 0.6, **(legend_kwargs or {})}
+    lg = {'loc': 'lower left', 'bbox_to_anchor': (0.38, 0.02),
+          'ncols': 1, 'columnspacing': 0.6, **(legend_kwargs or {})}
 
     seen: set = set()
     merged = _merge_segments_by_type([segments_L, segments_R])
@@ -1189,7 +1378,17 @@ def panel_wing_z_traces(
     ax.set_ylabel('Wing V13\nz (mm)')
     if len(t_ms):
         ax.set_xlim(0.0, float(t_ms[-1]))
-    _colored_text_legend(ax, **lg)
+
+    # Keep only song-type (Sine/Pulse) and wing-trace labels; Pslow/Pfast
+    # per-pulse markers are visible as vertical lines but not in the legend.
+    _keep = {'Sine', 'Pulse', 'Wing L V13', 'Wing R V13'}
+    _h, _l = ax.get_legend_handles_labels()
+    _pairs = [(h, l) for h, l in zip(_h, _l) if l in _keep]
+    if _pairs:
+        _hs, _ls = zip(*_pairs)
+        _colored_text_legend(ax, handles_labels=(list(_hs), list(_ls)), **lg)
+    else:
+        _colored_text_legend(ax, **lg)
 
 
 # -----------------------------------------------------------------------------
@@ -1229,27 +1428,47 @@ def panel_scutellum_z_trace(
 # Row 4 right: male body pitch vs. target pitch
 # -----------------------------------------------------------------------------
 
+def body_pitch_deg_from_quat(quat_wxyz: np.ndarray) -> np.ndarray:
+    """Body-axis elevation in world frame from a MuJoCo quaternion.
+
+    ``quat_wxyz`` is ``(..., 4)`` in ``[w, x, y, z]`` order (MuJoCo free-joint
+    convention). The fly model's local ``+X`` is anterior, so the world-frame
+    forward vector's z component is ``2*(qx*qz - qw*qy)``; its arcsin is the
+    pitch-up angle of the thorax (positive = nose up).
+    """
+    q = np.asarray(quat_wxyz, dtype=float)
+    sin_p = 2.0 * (q[..., 1] * q[..., 3] - q[..., 0] * q[..., 2])
+    return np.degrees(np.arcsin(np.clip(sin_p, -1.0, 1.0)))
+
+
 def panel_male_pitch(
     ax: plt.Axes,
     t_ms: np.ndarray,
-    alignment_deg: np.ndarray,
+    male_pitch_deg: np.ndarray,
+    target_pitch_deg: np.ndarray,
     segments: Optional[Iterable[dict]] = None,
     fs: float = 800.0,
     frame_range: Optional[Tuple[int, int]] = None,
     min_segment_ms: float = 10.0,
-    line_color: str = '#111111',
+    male_color: str = '#d62728',
+    target_color: str = '#1f77b4',
     zero_line_color: str = '#bdbdbd',
     line_kwargs: Optional[Dict] = None,
+    legend_kwargs: Optional[Dict] = None,
     title: str = '',
 ) -> None:
-    """Plot the male-body-to-target pitch alignment (degrees) over time.
+    """Plot male thorax pitch (red) and target pitch to the female (blue).
 
-    ``alignment_deg`` is ``body_pitch − target_pitch``: zero means the male
-    body axis is aimed at the female COM. Song segments (pulse/sine) are
-    shaded behind the trace via the same `_shade_segments` helper as Panel
-    B; ``min_segment_ms`` suppresses ultra-short false detections.
+    ``male_pitch_deg`` is the thorax body-axis elevation (positive = nose up)
+    and ``target_pitch_deg`` is the elevation of the male-scutellum → female-COM
+    vector. Both are degrees; where the two traces overlap, the male is aimed
+    at the female. Song segments are shaded behind the traces via the same
+    `_shade_segments` helper as Panel B; ``min_segment_ms`` filters ultra-short
+    detections.
     """
     lk = {'lw': 0.8, **(line_kwargs or {})}
+    lg = {'loc': 'upper left', 'ncols': 2,
+          'columnspacing': 0.6, **(legend_kwargs or {})}
 
     if segments is not None:
         segs = list(segments)
@@ -1260,14 +1479,17 @@ def panel_male_pitch(
         _shade_segments(ax, segs, fs, frame_range=frame_range)
 
     ax.axhline(0.0, color=zero_line_color, lw=0.6, zorder=1)
-    ax.plot(t_ms, alignment_deg, color=line_color, linestyle='-',
-            zorder=2, **lk)
+    ax.plot(t_ms, male_pitch_deg, color=male_color, linestyle='-',
+            label='Male', zorder=3, **lk)
+    ax.plot(t_ms, target_pitch_deg, color=target_color, linestyle='-',
+            label='Female', zorder=2, **lk)
     ax.set_xlabel('Time (ms)')
-    ax.set_ylabel('Pitch align (°)')
+    ax.set_ylabel('Pitch (°)')
     if len(t_ms):
         ax.set_xlim(0.0, float(t_ms[-1]))
     if title:
         ax.set_title(title, pad=2)
+    _colored_text_legend(ax, **lg)
 
 
 def panel_pitch_alignment_violin(
@@ -1448,7 +1670,7 @@ def panel_sine_wing_inphase(
     """
     cc = {**WING_PHASE_COLORS, **(colors or {})}
     lk = {'lw': 0.8, **(line_kwargs or {})}
-    lg = {'loc': 'upper right', **(legend_kwargs or {})}
+    lg = {'loc': 'upper center', **(legend_kwargs or {})}
 
     ax.plot(t_ms, wing_extended_z, color=cc['extended'],
             label='Extending', **lk)
@@ -1565,6 +1787,7 @@ def panel_wing_phase_polar(
     color: Optional[str] = None,
     density: bool = True,
     mean_vector: bool = True,
+    center_stat: str = 'mean',
     title: str = 'L–R wing phase (sine)',
     bar_kwargs: Optional[Dict] = None,
     mean_kwargs: Optional[Dict] = None,
@@ -1578,8 +1801,10 @@ def panel_wing_phase_polar(
     bins : number of equal-width angular bins over [-pi, pi].
     density : if True, normalise so the histogram integrates to 1 over 2*pi
         (probability density per radian).
-    mean_vector : if True, draw a line from origin to the mean resultant
-        vector R = mean(exp(i*phase)); arrow direction = arg(R), length |R|.
+    mean_vector : if True, draw a marker on the rim at the center direction.
+    center_stat : ``'mean'`` (default) uses the circular mean arg(mean(e^{iθ}));
+        ``'median'`` uses the circular median (angle minimising the sum of
+        circular distances Σ π − |π − |θᵢ − α||).
     """
     if not getattr(ax, 'name', '') == 'polar':
         raise ValueError('panel_wing_phase_polar requires a polar axes')
@@ -1616,9 +1841,17 @@ def panel_wing_phase_polar(
     ax.set_ylim(0.0, rmax * 1.08)
 
     if mean_vector and x.size > 1:
-        R = np.mean(np.exp(1j * x))
-        r_len = float(np.abs(R))
-        r_ang = float(np.angle(R))
+        stat = str(center_stat).lower()
+        if stat == 'median':
+            # Circular median: angle α minimising Σ (π − |π − |xᵢ − α||).
+            diffs = np.abs(x[:, None] - x[None, :])
+            dist = np.pi - np.abs(np.pi - diffs)
+            r_ang = float(x[int(np.argmin(dist.sum(axis=1)))])
+        elif stat == 'mean':
+            r_ang = float(np.angle(np.mean(np.exp(1j * x))))
+        else:
+            raise ValueError(
+                f"center_stat must be 'mean' or 'median', got {center_stat!r}")
         ax.plot([r_ang], [rmax * 1.04],
                 marker='o', markersize=4.5,
                 markerfacecolor=mk.get('color', '#222222'),
