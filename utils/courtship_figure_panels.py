@@ -115,18 +115,18 @@ def assemble_figure(
     """Build the 4-row consolidated layout. Returns (fig, axes_dict).
 
     Layout (top to bottom):
-        Row 1 [labeled top-down frame] | [wing V13 z + scutellum z stacked]
-        Row 2  6 video frames with all keypoints overlayed
-        Row 3 [sine in-phase] | [joint angle density] | [Pslow/Pfast wave]
+        Row 1  video frames with KP overlay | sine in-phase trace
+        Row 2  wing V13 z + scutellum z stacked (full width)
+        Row 3 [polar L-R phase] | [joint angle density] | [Pslow/Pfast]
               | [scutellum z courtship vs free walking]
         Row 4  [N MuJoCo render frames] | [pitch align] | [per-bout violin]
 
     axes_dict keys:
-        'kp_label'     : axes (Row 1 left)
-        'wing'         : axes (Row 1 right top)
-        'scut'         : axes (Row 1 right bottom, sharex with wing)
-        'video'        : list of N axes (Row 2)
-        'sine_phase'   : axes (Row 3 col 0)
+        'video'        : list of N axes (Row 1 left)
+        'sine_phase'   : axes (Row 1 right)
+        'wing'         : axes (Row 2 top)
+        'scut'         : axes (Row 2 bottom, sharex with wing)
+        'wing_phase_polar' : polar axes (Row 3 col 0)
         'angle_2d'     : axes (Row 3 col 1)
         'pulse_class'  : axes (Row 3 col 2)
         'zheight'      : axes (Row 3 col 3)
@@ -137,51 +137,44 @@ def assemble_figure(
     apply_paper_style()
     fig = plt.figure(figsize=(fig_width_mm / 25.4, fig_height_mm / 25.4))
 
-    sub_row1, sub_video, sub_row3, sub_render = fig.subfigures(
-        4, 1, height_ratios=[1.15, 1.0, 1.6, 1.0], hspace=0.10,
+    sub_video, sub_traces, sub_row3, sub_render = fig.subfigures(
+        4, 1, height_ratios=[1.0, 1.15, 1.6, 1.0], hspace=0.10,
     )
 
-    # Row 1: labeled keypoint frame (left) + wing/scut traces (right)
-    sf1_left, sf1_right = sub_row1.subfigures(
-        1, 2, width_ratios=[1, 5], wspace=0.12,
-    )
-    ax_kp_label = sf1_left.subplots(1, 1)
-    ax_kp_label.set_xticks([]); ax_kp_label.set_yticks([])
-    for spine in ax_kp_label.spines.values():
-        spine.set_visible(False)
-    sf1_left.subplots_adjust(left=0.05, right=0.96, top=0.86, bottom=0.06)
-
-    ax_wing, ax_scut = sf1_right.subplots(
-        2, 1, sharex=True, height_ratios=[1.4, 1.0],
-    )
-    sf1_right.subplots_adjust(
-        left=0.07, right=0.97, top=0.86, bottom=0.20, hspace=0.16,
-    )
-
-    # Row 2: video frames (left) + exemplar sine in-phase trace (right). When
+    # Row 1: video frames (left) + exemplar sine in-phase trace (right). When
     # ``n_video_frames`` is set, the sine panel expands into the reclaimed
     # width so per-frame width stays roughly constant.
     orig_n_video = max(1, int(n_frames_strip) - 1)
     n_video = max(1, int(n_video_frames if n_video_frames is not None
                          else orig_n_video))
-    sf2_left_ratio = 5.0 * (n_video / orig_n_video)
-    sf2_right_ratio = 1.4 + (5.0 - sf2_left_ratio)
-    sf2_left, sf2_right = sub_video.subfigures(
-        1, 2, width_ratios=[sf2_left_ratio, sf2_right_ratio], wspace=0.06,
+    sf1_left_ratio = 5.0 * (n_video / orig_n_video)
+    sf1_right_ratio = 1.4 + (5.0 - sf1_left_ratio)
+    sf1_left, sf1_right = sub_video.subfigures(
+        1, 2, width_ratios=[sf1_left_ratio, sf1_right_ratio], wspace=0.02,
     )
-    ax_video = list(sf2_left.subplots(1, n_video))
+    ax_video = list(sf1_left.subplots(1, n_video))
     if n_video == 1:
         ax_video = [ax_video[0]] if not isinstance(ax_video, list) else ax_video
     for ax in ax_video:
         ax.set_xticks([]); ax.set_yticks([])
         for spine in ax.spines.values():
             spine.set_visible(False)
-    sf2_left.subplots_adjust(
-        wspace=0.06, left=0.05, right=0.97, top=0.90, bottom=0.06,
+    sf1_left.subplots_adjust(
+        wspace=0.06, left=0.05, right=0.99, top=0.80, bottom=0.06,
     )
-    ax_sine_phase = sf2_right.subplots(1, 1)
-    sf2_right.subplots_adjust(
-        left=0.18, right=0.96, top=0.90, bottom=0.24,
+    ax_sine_phase = sf1_right.subplots(1, 1)
+    sf1_right.subplots_adjust(
+        left=0.12, right=0.98, top=0.80, bottom=0.24,
+    )
+
+    # Row 2: wing V13 z + scutellum z stacked across the full figure width.
+    ax_wing, ax_scut = sub_traces.subplots(
+        2, 1, sharex=True, height_ratios=[1.4, 1.0],
+    )
+    ax_wing.tick_params(bottom=False, labelbottom=False)
+    ax_wing.spines['bottom'].set_visible(False)
+    sub_traces.subplots_adjust(
+        left=0.07, right=0.97, top=0.88, bottom=0.28, hspace=0.16,
     )
 
     # Row 3: 4 mechanism panels (col 0 = polar, cols 1-3 = cartesian)
@@ -223,11 +216,10 @@ def assemble_figure(
     )
 
     return fig, {
-        'kp_label':         ax_kp_label,
-        'wing':             ax_wing,
-        'scut':             ax_scut,
         'video':            ax_video,
         'sine_phase':       ax_sine_phase,
+        'wing':             ax_wing,
+        'scut':             ax_scut,
         'wing_phase_polar': ax_wing_phase_polar,
         'angle_2d':         ax_angle_2d,
         'pulse_class':      ax_pulse,
@@ -239,10 +231,10 @@ def assemble_figure(
 
 
 DEFAULT_PANEL_LETTERS: Sequence[Tuple[str, str]] = (
-    ('kp_label',         'A'),
-    # 'wing' / 'scut' share Panel A with 'kp_label' (single top-row panel)
-    ('video',            'B'),
-    ('sine_phase',       'C'),
+    ('video',            'A'),
+    ('sine_phase',       'B'),
+    ('wing',             'C'),
+    # 'scut' shares Panel C with 'wing' (stacked row-2 traces)
     ('wing_phase_polar', 'D'),
     ('angle_2d',         'E'),
     ('pulse_class',      'F'),
@@ -257,9 +249,9 @@ DEFAULT_PANEL_POSITIONS: Dict[str, Tuple[float, float]] = {
     # Per-key (x, y) in axes fractions for the panel-letter anchor.
     # Panels with y-tick labels use more negative x so the letter clears them
     # and sits at the panel's upper-left (everything else to the right).
-    'kp_label':         (-0.02, 1.04),
     'video':            (-0.02, 1.08),
     'sine_phase':       (-0.28, 1.04),
+    'wing':             (-0.02, 1.08),
     'wing_phase_polar': (-0.22, 1.20),
     'angle_2d':         (-0.40, 1.06),
     'pulse_class':      (-0.40, 1.06),
@@ -270,12 +262,12 @@ DEFAULT_PANEL_POSITIONS: Dict[str, Tuple[float, float]] = {
 }
 
 
-# Letters for row-leading panels (A, B, D, H) all land at the same figure-x
+# Letters for row-leading panels (A, C, D, H) all land at the same figure-x
 # so they line up vertically down the left edge of the figure. y still comes
 # from DEFAULT_PANEL_POSITIONS (axes fraction).
 DEFAULT_PANEL_FIG_X: Dict[str, float] = {
-    'kp_label':         0.010,
     'video':            0.010,
+    'wing':             0.010,
     'wing_phase_polar': 0.010,
     'render':           0.010,
 }
@@ -874,6 +866,89 @@ def floor_align_qpos_pair(
     return qpos_pair
 
 
+def estimate_rig_pose_from_qpos(
+    data,
+    bout_keys: Optional[Iterable[str]] = None,
+    fly_nq: int = 93,
+    two_flies_per_bout: bool = True,
+    exclude_keys: Sequence[str] = ('info',),
+) -> Dict[str, object]:
+    """Estimate the rig's xy center and yaw from all fly root-xy samples.
+
+    Fly root xy (qpos indices 0,1 per fly) lives in the camera-calibration
+    world frame, but the rig mesh is anchored at the MuJoCo world origin.
+    Aggregating every fly's xy across all bouts in ``data`` gives both the
+    rig's xy center (sample centroid) and its long-axis orientation
+    (principal axis of the centered covariance).
+
+    ``data`` maps bout_key → dict with a ``'qpos'`` array of shape
+    ``(T, nq)``. When ``two_flies_per_bout`` is True and ``nq >= 2*fly_nq``,
+    fly1's xy is taken from columns ``fly_nq:fly_nq+2`` as well.
+
+    Returns a dict with:
+      ``center_xy`` — (cx, cy) of the rig center in the calibration frame
+      ``yaw_rad``   — dominant-eigenvector angle, sign-fixed so ``v_x >= 0``
+      ``major_len`` — full extent (max-min) along the major axis
+      ``minor_len`` — full extent along the minor axis
+      ``n_points`` — total number of finite xy samples used
+
+    The rig center is the midpoint of the PCA-aligned bounding box of the
+    fly xy samples, not the raw centroid: flies typically spend unequal time
+    on different sides of a narrow chamber, so the mean drifts off-center.
+    The midpoint is unbiased as long as their range is symmetric about the
+    true rig center — a much weaker assumption.
+    """
+    keys = (list(bout_keys) if bout_keys is not None
+            else [k for k in data.keys() if k not in exclude_keys])
+    xy_chunks: List[np.ndarray] = []
+    for k in keys:
+        entry = data.get(k)
+        if entry is None or 'qpos' not in entry:
+            continue
+        qpos = np.asarray(entry['qpos'], dtype=float)
+        if qpos.ndim != 2 or qpos.shape[1] < 2:
+            continue
+        xy_chunks.append(qpos[:, 0:2])
+        if two_flies_per_bout and qpos.shape[1] >= 2 * fly_nq:
+            xy_chunks.append(qpos[:, fly_nq:fly_nq + 2])
+    if not xy_chunks:
+        raise ValueError('no xy samples collected from data')
+    xy = np.concatenate(xy_chunks, axis=0)
+    xy = xy[np.all(np.isfinite(xy), axis=1)]
+    if xy.shape[0] < 2:
+        raise ValueError(f'not enough finite xy samples: {xy.shape[0]}')
+    # PCA on mean-centered data → principal axis direction.
+    mean_xy = xy.mean(axis=0)
+    cov = np.cov(xy - mean_xy, rowvar=False)
+    evals, evecs = np.linalg.eigh(cov)
+    order = np.argsort(evals)[::-1]
+    evecs = evecs[:, order]
+    v = evecs[:, 0]
+    if v[0] < 0:
+        v = -v
+    yaw = float(np.arctan2(v[1], v[0]))
+    # Rotate samples into the PCA-aligned frame and take the midpoint of the
+    # axis-aligned bounding box. This recovers the rig center robustly even
+    # when flies spend unequal time on each side of the chamber.
+    c, s = np.cos(-yaw), np.sin(-yaw)
+    R_inv = np.array([[c, -s], [s, c]])
+    xy_local = (xy - mean_xy) @ R_inv.T
+    lo = xy_local.min(axis=0)
+    hi = xy_local.max(axis=0)
+    mid_local = 0.5 * (lo + hi)
+    # Map midpoint back into the calibration frame.
+    c2, s2 = np.cos(yaw), np.sin(yaw)
+    R = np.array([[c2, -s2], [s2, c2]])
+    center = mean_xy + R @ mid_local
+    return {
+        'center_xy': (float(center[0]), float(center[1])),
+        'yaw_rad': yaw,
+        'major_len': float(hi[0] - lo[0]),
+        'minor_len': float(hi[1] - lo[1]),
+        'n_points': int(xy.shape[0]),
+    }
+
+
 def panel_render_strip(
     axes: Sequence[plt.Axes],
     qpos_array: np.ndarray,
@@ -1045,6 +1120,110 @@ def _remap_settings_keys(settings: dict, suffix: str) -> dict:
     return out
 
 
+def _find_worldbody_geom(floor_spec, rig_geom_name: str):
+    for g in floor_spec.worldbody.geoms:
+        if g.name == rig_geom_name:
+            return g
+    names = [g.name for g in floor_spec.worldbody.geoms]
+    raise ValueError(
+        f'rig geom {rig_geom_name!r} not found in floor spec worldbody; '
+        f'available geoms: {names}'
+    )
+
+
+def _apply_rig_pose_override(
+    floor_spec,
+    floor_xml: str,
+    rig_geom_name: str,
+    rig_pos: Optional[Sequence[float]],
+    rig_quat: Optional[Sequence[float]],
+) -> None:
+    """Mutate the spec so the rig mesh RENDERS at the requested world pose.
+
+    MuJoCo's mesh compiler re-centers mesh vertices to the mesh COM and aligns
+    principal inertial axes to the body frame, so the compiled ``geom_pos`` /
+    ``geom_quat`` differ from the spec values. This helper probes that
+    mesh-induced shift by compiling a fresh copy of ``floor_xml``, then solves
+    for the spec-level ``pos``/``quat`` that produce the desired compiled pose.
+
+    ``rig_pos`` may be length-2 (preserving the XML default's rendered z) or
+    length-3. ``rig_quat`` is MuJoCo's scalar-first ``(w, x, y, z)``.
+    """
+    import mujoco
+
+    target = _find_worldbody_geom(floor_spec, rig_geom_name)
+
+    probe_spec = mujoco.MjSpec.from_file(floor_xml)
+    probe_model = probe_spec.compile()
+    pgid = mujoco.mj_name2id(
+        probe_model, mujoco.mjtObj.mjOBJ_GEOM, rig_geom_name,
+    )
+    probe_target = _find_worldbody_geom(probe_spec, rig_geom_name)
+    spec_pos0 = np.asarray(probe_target.pos, dtype=float)
+    spec_quat0 = np.asarray(probe_target.quat, dtype=float)
+    comp_pos0 = np.asarray(probe_model.geom_pos[pgid], dtype=float)
+    comp_quat0 = np.asarray(probe_model.geom_quat[pgid], dtype=float)
+    if not np.allclose(spec_quat0, [1.0, 0.0, 0.0, 0.0], atol=1e-8):
+        # Math below assumes the xml-declared geom quat is identity; this is
+        # the case for floor.xml. Generalizing would require unrotating the
+        # auto-center offset by spec_quat0 first.
+        raise NotImplementedError(
+            f'rig geom {rig_geom_name!r} has non-identity xml quat '
+            f'{spec_quat0.tolist()}; mesh auto-center compensation not '
+            f'implemented for that case'
+        )
+    mesh_auto_pos = comp_pos0 - spec_pos0      # in body frame (= world here)
+    mesh_auto_quat = comp_quat0                 # identity ⊗ auto_quat
+
+    desired_compiled_pos = comp_pos0.copy()
+    desired_compiled_quat = comp_quat0.copy()
+    if rig_pos is not None:
+        p = [float(x) for x in rig_pos]
+        if len(p) == 2:
+            desired_compiled_pos[0] = p[0]
+            desired_compiled_pos[1] = p[1]
+        elif len(p) == 3:
+            desired_compiled_pos = np.asarray(p, dtype=float)
+        else:
+            raise ValueError(f'rig_pos must have length 2 or 3; got {len(p)}')
+    if rig_quat is not None:
+        q = [float(x) for x in rig_quat]
+        if len(q) != 4:
+            raise ValueError(
+                f'rig_quat must have length 4 (w, x, y, z); got {len(q)}'
+            )
+        desired_compiled_quat = np.asarray(q, dtype=float)
+        desired_compiled_quat /= np.linalg.norm(desired_compiled_quat)
+
+    spec_quat = _quat_mul(desired_compiled_quat, _quat_conj(mesh_auto_quat))
+    spec_pos = desired_compiled_pos - _quat_rotate(spec_quat, mesh_auto_pos)
+
+    target.pos = spec_pos.tolist()
+    target.quat = spec_quat.tolist()
+
+
+def _quat_mul(q1: np.ndarray, q2: np.ndarray) -> np.ndarray:
+    """Hamilton product of two scalar-first quaternions."""
+    w1, x1, y1, z1 = q1
+    w2, x2, y2, z2 = q2
+    return np.array([
+        w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2,
+        w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2,
+        w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2,
+        w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2,
+    ], dtype=float)
+
+
+def _quat_conj(q: np.ndarray) -> np.ndarray:
+    return np.array([q[0], -q[1], -q[2], -q[3]], dtype=float)
+
+
+def _quat_rotate(q: np.ndarray, v: np.ndarray) -> np.ndarray:
+    """Apply scalar-first quaternion ``q`` to 3-vector ``v``."""
+    qv = np.array([0.0, v[0], v[1], v[2]], dtype=float)
+    return _quat_mul(_quat_mul(q, qv), _quat_conj(q))[1:]
+
+
 def build_courtship_pair_visualizer(
     flybody_xml: str,
     floor_xml: str,
@@ -1052,6 +1231,9 @@ def build_courtship_pair_visualizer(
     settings_fly1: Optional[str] = None,
     root_body: str = 'thorax',
     spawn_pos=(0.0, 0.0, -0.005),
+    rig_geom_name: str = 'Happy_house',
+    rig_pos: Optional[Sequence[float]] = None,
+    rig_quat: Optional[Sequence[float]] = None,
 ):
     """Compose a floor + two fly bodies (``_fly0`` male, ``_fly1`` female).
 
@@ -1073,6 +1255,16 @@ def build_courtship_pair_visualizer(
         Body to attach from the fly spec (default ``'thorax'``).
     spawn_pos : (x, y, z)
         Spawn offset for both flies (applied via the floor frame).
+    rig_geom_name : str
+        Name of the rig/arena geom in ``floor_xml`` whose pose may be
+        overridden (e.g. ``'Happy_house'``). Only consulted when
+        ``rig_pos`` or ``rig_quat`` is given.
+    rig_pos : sequence of float or None
+        Optional override for the rig geom's world xyz. Length-2 keeps the
+        XML's original z; length-3 sets xyz fully.
+    rig_quat : sequence of float or None
+        Optional override for the rig geom's quaternion in MuJoCo's
+        scalar-first ``(w, x, y, z)`` order.
     """
     import json
     import mujoco
@@ -1082,6 +1274,10 @@ def build_courtship_pair_visualizer(
     fly_spec_0 = mujoco.MjSpec.from_file(flybody_xml)
     fly_spec_1 = mujoco.MjSpec.from_file(flybody_xml)
     floor_spec = mujoco.MjSpec.from_file(floor_xml)
+    if rig_pos is not None or rig_quat is not None:
+        _apply_rig_pose_override(
+            floor_spec, floor_xml, rig_geom_name, rig_pos, rig_quat,
+        )
     spawn_frame = floor_spec.worldbody.add_frame(
         pos=list(spawn_pos), quat=[1, 0, 0, 0],
     )
@@ -1253,6 +1449,7 @@ def _shade_segments(
     pulse_subtype_labels: Optional[np.ndarray] = None,
     pulse_type_colors: Optional[Dict[str, str]] = None,
     fill_alpha: float = 0.20,
+    time_unit: str = 'ms',
 ) -> None:
     """Paint axvspans for each non-quiet song segment.
 
@@ -1266,6 +1463,7 @@ def _shade_segments(
     _fills = {**_SEG_FILL, **(fills or {})}
     _edges = {**_SEG_EDGE, **(edges or {})}
     _pt = {**PULSE_TYPE_COLORS, **(pulse_type_colors or {})}
+    _ms_scale = 1e-3 if time_unit == 's' else 1.0
 
     for seg in segments:
         stype = seg['type']
@@ -1277,8 +1475,8 @@ def _shade_segments(
             if e <= lo or s >= hi:
                 continue
             s, e = max(s, lo), min(e, hi)
-        s_ms = s / fs * 1000.0
-        e_ms = e / fs * 1000.0
+        s_ms = s / fs * 1000.0 * _ms_scale
+        e_ms = e / fs * 1000.0 * _ms_scale
 
         key = stype
         fill = _fills.get(stype, '#cccccc33')
@@ -1311,6 +1509,7 @@ def panel_wing_z_traces(
     legend_kwargs: Optional[Dict] = None,
     pulse_vline_kwargs: Optional[Dict] = None,
     min_segment_ms: float = 0.0,
+    time_unit: str = 'ms',
 ) -> None:
     """Plot left/right wing-V13 z-position with song shading + per-pulse markers.
 
@@ -1336,13 +1535,16 @@ def panel_wing_z_traces(
     lg = {'loc': 'lower left', 'bbox_to_anchor': (0.38, 0.02),
           'ncols': 1, 'columnspacing': 0.6, **(legend_kwargs or {})}
 
+    _ms_scale = 1e-3 if time_unit == 's' else 1.0
+
     seen: set = set()
     merged = _merge_segments_by_type([segments_L, segments_R])
     if min_segment_ms > 0:
         min_frames = max(1, int(round(float(min_segment_ms) * fs / 1000.0)))
         merged = [s for s in merged
                   if (int(s['end']) - int(s['start'])) >= min_frames]
-    _shade_segments(ax, merged, fs, frame_range=frame_range, seen_labels=seen)
+    _shade_segments(ax, merged, fs, frame_range=frame_range, seen_labels=seen,
+                    time_unit=time_unit)
 
     peaks_all: List[np.ndarray] = []
     labs_all: List[np.ndarray] = []
@@ -1367,17 +1569,18 @@ def panel_wing_z_traces(
             m = (pf_all >= lo) & (pf_all < hi)
             pf_all, lb_all = pf_all[m], lb_all[m]
         for f, lab in zip(pf_all, lb_all):
-            tm = float(f) / fs * 1000.0
+            tm = float(f) / fs * 1000.0 * _ms_scale
             color = pt.get(lab, 'k')
             label = lab if lab not in seen else None
             seen.add(lab)
             ax.axvline(tm, color=color, label=label, **vk)
 
-    ax.plot(t_ms, wingL_z, color=wc['WingL_V13'], label='Wing L V13', **lk)
-    ax.plot(t_ms, wingR_z, color=wc['WingR_V13'], label='Wing R V13', **lk)
+    t_plot = np.asarray(t_ms, dtype=float) * _ms_scale
+    ax.plot(t_plot, wingL_z, color=wc['WingL_V13'], label='Wing L V13', **lk)
+    ax.plot(t_plot, wingR_z, color=wc['WingR_V13'], label='Wing R V13', **lk)
     ax.set_ylabel('Wing V13\nz (mm)')
-    if len(t_ms):
-        ax.set_xlim(0.0, float(t_ms[-1]))
+    if t_plot.size:
+        ax.set_xlim(0.0, float(t_plot[-1]))
 
     # Keep only song-type (Sine/Pulse) and wing-trace labels; Pslow/Pfast
     # per-pulse markers are visible as vertical lines but not in the legend.
@@ -1407,6 +1610,7 @@ def panel_scutellum_z_trace(
     pulse_type_colors: Optional[Dict[str, str]] = None,
     line_color: str = 'k',
     line_kwargs: Optional[Dict] = None,
+    time_unit: str = 'ms',
 ) -> None:
     """Plot scutellum (body) z-position over the same time interval.
 
@@ -1414,13 +1618,16 @@ def panel_scutellum_z_trace(
     segments are shaded by dominant Pslow/Pfast type.
     """
     lk = {'lw': 0.7, **(line_kwargs or {})}
+    _ms_scale = 1e-3 if time_unit == 's' else 1.0
     if segments is not None:
         _shade_segments(ax, segments, fs, frame_range=frame_range,
                         pulse_peak_frames=pulse_peak_frames,
                         pulse_subtype_labels=pulse_subtype_labels,
-                        pulse_type_colors=pulse_type_colors)
-    ax.plot(t_ms, scutellum_z, color=line_color, **lk)
-    ax.set_xlabel('Time (ms)')
+                        pulse_type_colors=pulse_type_colors,
+                        time_unit=time_unit)
+    t_plot = np.asarray(t_ms, dtype=float) * _ms_scale
+    ax.plot(t_plot, scutellum_z, color=line_color, **lk)
+    ax.set_xlabel('Time (s)' if time_unit == 's' else 'Time (ms)')
     ax.set_ylabel('Scutellum\nz (mm)')
 
 
@@ -1456,6 +1663,7 @@ def panel_male_pitch(
     line_kwargs: Optional[Dict] = None,
     legend_kwargs: Optional[Dict] = None,
     title: str = '',
+    time_unit: str = 'ms',
 ) -> None:
     """Plot male thorax pitch (red) and target pitch to the female (blue).
 
@@ -1469,6 +1677,7 @@ def panel_male_pitch(
     lk = {'lw': 0.8, **(line_kwargs or {})}
     lg = {'loc': 'upper left', 'ncols': 2,
           'columnspacing': 0.6, **(legend_kwargs or {})}
+    _ms_scale = 1e-3 if time_unit == 's' else 1.0
 
     if segments is not None:
         segs = list(segments)
@@ -1476,17 +1685,19 @@ def panel_male_pitch(
             min_frames = max(1, int(round(float(min_segment_ms) * fs / 1000.0)))
             segs = [s for s in segs
                     if (int(s['end']) - int(s['start'])) >= min_frames]
-        _shade_segments(ax, segs, fs, frame_range=frame_range)
+        _shade_segments(ax, segs, fs, frame_range=frame_range,
+                        time_unit=time_unit)
 
+    t_plot = np.asarray(t_ms, dtype=float) * _ms_scale
     ax.axhline(0.0, color=zero_line_color, lw=0.6, zorder=1)
-    ax.plot(t_ms, male_pitch_deg, color=male_color, linestyle='-',
+    ax.plot(t_plot, male_pitch_deg, color=male_color, linestyle='-',
             label='Male', zorder=3, **lk)
-    ax.plot(t_ms, target_pitch_deg, color=target_color, linestyle='-',
+    ax.plot(t_plot, target_pitch_deg, color=target_color, linestyle='-',
             label='Female', zorder=2, **lk)
-    ax.set_xlabel('Time (ms)')
+    ax.set_xlabel('Time (s)' if time_unit == 's' else 'Time (ms)')
     ax.set_ylabel('Pitch (°)')
-    if len(t_ms):
-        ax.set_xlim(0.0, float(t_ms[-1]))
+    if t_plot.size:
+        ax.set_xlim(0.0, float(t_plot[-1]))
     if title:
         ax.set_title(title, pad=2)
     _colored_text_legend(ax, **lg)

@@ -158,3 +158,70 @@ def compute_per_bout_pitch_alignment(
         'bout_boundaries':    bb,
         'median_abs_alignment_deg': np.asarray(summaries, dtype=float),
     }
+
+
+def compute_pitch_alignment_all_sessions(
+    sessions: Sequence[Tuple[str | Path, str | Path]],
+    kp_scale: float = 0.1,
+    male_csv: str = MALE_CSV_NAME_DEFAULT,
+    head_name: str = 'Antenna_Base',
+    scut_name: str = 'Scutellum',
+) -> Dict[str, object]:
+    """Pool ``compute_per_bout_pitch_alignment`` across multiple sessions.
+
+    ``sessions`` is a list of ``(sam3_aligned_h5, bouts_root)`` pairs —
+    typically the ``Predictions_3D_*/sam3_aligned.h5`` file and its
+    parent directory holding ``bout_*/`` folders.
+
+    Returns a flat concatenated ``median_abs_alignment_deg`` across all
+    bouts of all sessions, plus parallel ``session_of_bout`` /
+    ``bout_names_global`` / ``session_paths`` so callers can map a
+    global bout index back to its session. Sessions that fail to load
+    (missing files, bout-count mismatch) are skipped with a warning and
+    their path reported in ``skipped``.
+    """
+    per_values: List[float] = []
+    session_of_bout: List[int] = []
+    bout_names_global: List[str] = []
+    session_paths: List[str] = []
+    skipped: List[Tuple[str, str]] = []
+    for i, (h5_path, bouts_root) in enumerate(sessions):
+        h5_path = Path(h5_path)
+        bouts_root = Path(bouts_root)
+        try:
+            r = compute_per_bout_pitch_alignment(
+                h5_path, bouts_root,
+                kp_scale=kp_scale, male_csv=male_csv,
+                head_name=head_name, scut_name=scut_name,
+            )
+        except (FileNotFoundError, KeyError, OSError, ValueError) as e:
+            skipped.append((str(h5_path), f'{type(e).__name__}: {e}'))
+            continue
+        vals = r['median_abs_alignment_deg']
+        per_values.extend(vals.tolist())
+        bout_names_global.extend(r['bout_names'])
+        session_of_bout.extend([i] * len(r['bout_names']))
+        session_paths.append(str(bouts_root))
+    return {
+        'median_abs_alignment_deg': np.asarray(per_values, dtype=float),
+        'session_of_bout':          np.asarray(session_of_bout, dtype=int),
+        'bout_names_global':        bout_names_global,
+        'session_paths':            session_paths,
+        'skipped':                  skipped,
+    }
+
+
+def find_courtship_sessions(
+    courtship_root: str | Path,
+) -> List[Tuple[Path, Path]]:
+    """Discover ``(sam3_aligned.h5, bouts_root)`` pairs under a root.
+
+    Globs ``**/sam3_aligned.h5`` and returns a sorted list of
+    ``(h5_path, parent_dir)`` tuples — the parent directory is the
+    conventional ``Predictions_3D_*`` folder that holds the per-bout
+    ``bout_*/`` subfolders consumed by
+    ``compute_per_bout_pitch_alignment``.
+    """
+    root = Path(courtship_root)
+    pairs = [(p, p.parent) for p in sorted(root.glob('**/sam3_aligned.h5'))]
+    return pairs
