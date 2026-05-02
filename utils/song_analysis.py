@@ -29,8 +29,11 @@ with a derivative-peak pulse detector. Per fly per bout:
 
 A secondary pipeline (Butterworth bandpass + Hilbert envelope for
 pulse, Thomson multitaper F-test for sine — closer to the paper text)
-runs in parallel and is exposed under ``*_new`` / ``frame_labels_new``
-keys for comparison. It is not the default output because on hand-
+is also available. ``SongAnalysisConfig.pipeline`` selects which
+runs: ``"legacy"`` (default), ``"new"``, or ``"both"`` (run both and
+expose them under ``*_legacy`` / ``*_new`` aliases; the legacy
+detector keeps the primary slot in this mode for backward
+compatibility). The new pipeline is not the default because on hand-
 validated courtship bouts it under-detects sustained sine and leaks
 on harmonic-rich bouts; the FFT + peak detector is more robust in
 practice.
@@ -92,6 +95,19 @@ class SongAnalysisConfig:
 
     # Frame rate -------------------------------------------------------------
     fs: float = 800.0  # Hz — Johnson-lab courtship camera rate
+
+    # Pipeline selection -----------------------------------------------------
+    # Which detector(s) to run inside ``analyze_fly_song``:
+    #   "legacy" — only the FFT-spectrogram + bilateral derivative-peak
+    #              detector. ``frame_labels`` / ``summary`` come from it and
+    #              are mirrored under ``*_legacy``; no ``*_new`` keys.
+    #   "new"    — only the Butterworth+Hilbert pulse + multitaper F-test
+    #              sine detector. ``frame_labels`` / ``summary`` come from
+    #              it and are mirrored under ``*_new``; no ``*_legacy`` keys.
+    #   "both"   — run both in parallel. Primary keys still come from the
+    #              legacy detector (backward compatible); ``*_new`` is the
+    #              experimental detector.
+    pipeline: str = "legacy"
 
     # ------------------------------------------------------------------ #
     # New pulse detector (Butterworth bandpass + Hilbert envelope, per paper)
@@ -1277,52 +1293,65 @@ def compute_pulse_wing_angle(
 def classify_song_both_sides(
     wing_data: Dict[str, Dict[str, np.ndarray]],
     cfg: SongAnalysisConfig,
-) -> Dict[str, Dict[str, Tuple[np.ndarray, Dict[str, np.ndarray]]]]:
-    """Run both detector pipelines on L/R wings and return both label
-    streams. ``legacy`` is the primary (FFT + derivative-peak) detector;
-    ``new`` is the experimental (Butterworth + multitaper) detector kept
-    for side-by-side comparison.
+) -> Dict[str, Dict[str, Optional[Tuple[np.ndarray, Dict[str, np.ndarray]]]]]:
+    """Run the requested detector pipeline(s) on L/R wings.
+
+    Honours ``cfg.pipeline``:
+        "legacy" — only the FFT + derivative-peak detector
+        "new"    — only the Butterworth + multitaper detector
+        "both"   — both pipelines
+
+    Skipped pipelines return ``None`` in their slot.
 
     Returned shape:
-        {"L": {"legacy": (labels, features),
-               "new":    (labels, features)},
-         "R": {"legacy": (labels, features),
-               "new":    (labels, features)}}
+        {"L": {"legacy": (labels, features) or None,
+               "new":    (labels, features) or None},
+         "R": {...}}
     """
+    if cfg.pipeline not in ("legacy", "new", "both"):
+        raise ValueError(
+            f"cfg.pipeline must be 'legacy', 'new', or 'both'; "
+            f"got {cfg.pipeline!r}"
+        )
+
     z_L = _interp_nan(np.asarray(wing_data[cfg.left_tip]["z"]))
     z_R = _interp_nan(np.asarray(wing_data[cfg.right_tip]["z"]))
 
-    # ---- NEW pipeline: Butterworth + Hilbert pulse, multitaper sine ----
-    mask_new, peaks_new = _bilateral_pulse_mask_butterworth(z_L, z_R, cfg)
-    labels_L_new, feats_L_new = _classify_sine_multitaper(z_L, mask_new, cfg)
-    labels_R_new, feats_R_new = _classify_sine_multitaper(z_R, mask_new, cfg)
-    feats_L_new["pulse_event_frames"] = peaks_new
-    feats_R_new["pulse_event_frames"] = peaks_new
-
-    # ---- LEGACY pipeline: FFT classifier + bilateral peak pulse mask ----
-    labels_L_leg, feats_L_leg = _classify_one_side_fft_legacy(z_L, cfg)
-    labels_R_leg, feats_R_leg = _classify_one_side_fft_legacy(z_R, cfg)
-    if cfg.use_peak_pulse and len(z_L) > 1:
-        mask_leg, peaks_leg = _bilateral_pulse_mask_legacy(z_L, z_R, cfg)
-        labels_L_leg = labels_L_leg.copy()
-        labels_R_leg = labels_R_leg.copy()
-        labels_L_leg[labels_L_leg == "pulse"] = "sine"
-        labels_R_leg[labels_R_leg == "pulse"] = "sine"
-        labels_L_leg[mask_leg] = "pulse"
-        labels_R_leg[mask_leg] = "pulse"
-        feats_L_leg["pulse_event_frames"] = peaks_leg
-        feats_R_leg["pulse_event_frames"] = peaks_leg
-
-    return {
-        "L": {
-            "new": (labels_L_new, feats_L_new),
-            "legacy": (labels_L_leg, feats_L_leg),
-        },
-        "R": {
-            "new": (labels_R_new, feats_R_new),
-            "legacy": (labels_R_leg, feats_R_leg),
-        },
+    out: Dict[
+        str, Dict[str, Optional[Tuple[np.ndarray, Dict[str, np.ndarray]]]]
+    ] = {
+        "L": {"legacy": None, "new": None},
+        "R": {"legacy": None, "new": None},
     }
+
+    if cfg.pipeline in ("new", "both"):
+        # NEW pipeline: Butterworth + Hilbert pulse, multitaper sine.
+        mask_new, peaks_new = _bilateral_pulse_mask_butterworth(z_L, z_R, cfg)
+        labels_L_new, feats_L_new = _classify_sine_multitaper(z_L, mask_new, cfg)
+        labels_R_new, feats_R_new = _classify_sine_multitaper(z_R, mask_new, cfg)
+        feats_L_new["pulse_event_frames"] = peaks_new
+        feats_R_new["pulse_event_frames"] = peaks_new
+        out["L"]["new"] = (labels_L_new, feats_L_new)
+        out["R"]["new"] = (labels_R_new, feats_R_new)
+
+    if cfg.pipeline in ("legacy", "both"):
+        # LEGACY pipeline: FFT classifier + bilateral peak pulse mask.
+        labels_L_leg, feats_L_leg = _classify_one_side_fft_legacy(z_L, cfg)
+        labels_R_leg, feats_R_leg = _classify_one_side_fft_legacy(z_R, cfg)
+        if cfg.use_peak_pulse and len(z_L) > 1:
+            mask_leg, peaks_leg = _bilateral_pulse_mask_legacy(z_L, z_R, cfg)
+            labels_L_leg = labels_L_leg.copy()
+            labels_R_leg = labels_R_leg.copy()
+            labels_L_leg[labels_L_leg == "pulse"] = "sine"
+            labels_R_leg[labels_R_leg == "pulse"] = "sine"
+            labels_L_leg[mask_leg] = "pulse"
+            labels_R_leg[mask_leg] = "pulse"
+            feats_L_leg["pulse_event_frames"] = peaks_leg
+            feats_R_leg["pulse_event_frames"] = peaks_leg
+        out["L"]["legacy"] = (labels_L_leg, feats_L_leg)
+        out["R"]["legacy"] = (labels_R_leg, feats_R_leg)
+
+    return out
 
 
 # -----------------------------------------------------------------------------
@@ -1429,14 +1458,16 @@ def analyze_fly_song(
     Returns a dict with:
         ``wing_data``          — per-tip xyz traces
         ``sides``              — {'L': {frame_labels, segments, summary,
-                                          window_features,
-                                          pulse_features,
-                                          frame_labels_new, segments_new,
-                                          summary_new, window_features_new},
-                                  'R': {...}}. Primary keys come from the
-                                  FFT + derivative-peak detector; ``*_new``
-                                  keys come from the experimental
-                                  Butterworth + multitaper detector.
+                                          window_features, pulse_features,
+                                          [*_legacy aliases], [*_new aliases]},
+                                  'R': {...}}.
+                                  ``cfg.pipeline`` controls which detector
+                                  fills the primary (unsuffixed) keys:
+                                  "legacy" → FFT + derivative-peak, no
+                                  ``*_new`` keys; "new" → Butterworth +
+                                  multitaper, no ``*_legacy`` keys; "both"
+                                  → primary stays legacy and ``*_new`` is
+                                  populated alongside.
         ``dominant_wing``      — 'L' or 'R'
         ``is_singing``         — (T,) bool gate
         ``activities``         — per-tip windowed |dZ/dt|
@@ -1444,9 +1475,10 @@ def analyze_fly_song(
                                   xpos_ego was provided
         ``joints``             — dict of wing DOFs if qpos was provided
         ``summary``            — dominant-wing song_fraction + bout
-                                  metadata (bout length, fs) from the
-                                  primary detector
-        ``summary_new``        — same shape, from the experimental detector
+                                  metadata, from whichever pipeline
+                                  ``cfg.pipeline`` selects as primary
+        ``summary_legacy``     — present only if the legacy detector ran
+        ``summary_new``        — present only if the new detector ran
     """
     if cfg is None:
         cfg = SongAnalysisConfig()
@@ -1460,36 +1492,49 @@ def analyze_fly_song(
     wing_data = compute_wing_tip_signal(kp_world, kp_idx)
     is_singing, activities, dominant_wing = detect_singing_frames(wing_data, cfg)
 
-    # FFT + peak classification -------------------------------------------
-    # classify_song_both_sides returns both the primary (FFT + derivative-peak)
-    # and the experimental (Butterworth+Hilbert + multitaper) outputs. The
-    # FFT + peak detector feeds the primary keys; the experimental detector
-    # populates the ``*_new`` keys for side-by-side comparison. We also mirror
-    # the primary keys under ``*_legacy`` for backward compatibility with
-    # notebook code that expects the old naming.
+    # Run the detector pipeline(s) selected by ``cfg.pipeline`` and route
+    # the chosen one to the unsuffixed primary keys. ``*_legacy`` /
+    # ``*_new`` aliases are populated only for pipelines that actually ran.
+    # When ``cfg.pipeline == "both"`` the legacy detector keeps the primary
+    # slot (backward compatible).
     side_results = classify_song_both_sides(wing_data, cfg)
+    primary_key = "new" if cfg.pipeline == "new" else "legacy"
     sides: Dict[str, Dict] = {}
     for sname, streams in side_results.items():
-        leg_labels, leg_features = streams["legacy"]
-        new_labels, new_features = streams["new"]
-        leg_segments = segments_from_labels(leg_labels, cfg.fs)
-        leg_summary = _side_summary(leg_labels, cfg.fs, valid_mask)
-        sides[sname] = {
-            "frame_labels": leg_labels,
-            "window_features": leg_features,
-            "segments": leg_segments,
-            "summary": leg_summary,
-            # Alias of the primary keys (legacy naming retained).
-            "frame_labels_legacy": leg_labels,
-            "window_features_legacy": leg_features,
-            "segments_legacy": leg_segments,
-            "summary_legacy": leg_summary,
-            # Experimental Butterworth + multitaper detector.
-            "frame_labels_new": new_labels,
-            "window_features_new": new_features,
-            "segments_new": segments_from_labels(new_labels, cfg.fs),
-            "summary_new": _side_summary(new_labels, cfg.fs, valid_mask),
+        labels_p, feats_p = streams[primary_key]
+        segs_p = segments_from_labels(labels_p, cfg.fs)
+        summ_p = _side_summary(labels_p, cfg.fs, valid_mask)
+        side_d: Dict = {
+            "frame_labels": labels_p,
+            "window_features": feats_p,
+            "segments": segs_p,
+            "summary": summ_p,
         }
+        if streams["legacy"] is not None:
+            if primary_key == "legacy":
+                side_d["frame_labels_legacy"] = labels_p
+                side_d["window_features_legacy"] = feats_p
+                side_d["segments_legacy"] = segs_p
+                side_d["summary_legacy"] = summ_p
+            else:
+                l_labels, l_feats = streams["legacy"]
+                side_d["frame_labels_legacy"] = l_labels
+                side_d["window_features_legacy"] = l_feats
+                side_d["segments_legacy"] = segments_from_labels(l_labels, cfg.fs)
+                side_d["summary_legacy"] = _side_summary(l_labels, cfg.fs, valid_mask)
+        if streams["new"] is not None:
+            if primary_key == "new":
+                side_d["frame_labels_new"] = labels_p
+                side_d["window_features_new"] = feats_p
+                side_d["segments_new"] = segs_p
+                side_d["summary_new"] = summ_p
+            else:
+                n_labels, n_feats = streams["new"]
+                side_d["frame_labels_new"] = n_labels
+                side_d["window_features_new"] = n_feats
+                side_d["segments_new"] = segments_from_labels(n_labels, cfg.fs)
+                side_d["summary_new"] = _side_summary(n_labels, cfg.fs, valid_mask)
+        sides[sname] = side_d
 
     # Wing extension angles (geometric feature, for plotting) -------------
     angle_L = angle_R = None
@@ -1540,7 +1585,6 @@ def analyze_fly_song(
             joints = extract_wing_joint_angles(qp, cfg)
 
     dom_summary = sides[dominant_wing]["summary"]
-    dom_summary_new = sides[dominant_wing]["summary_new"]
     primary_summary = {
         "n_frames": T,
         "duration_s": T / cfg.fs,
@@ -1552,7 +1596,19 @@ def analyze_fly_song(
         "valid_n_frames": dom_summary["n_frames"],
     }
 
-    return {
+    def _bout_summary(side_summary: Dict[str, float]) -> Dict[str, float]:
+        return {
+            "n_frames": T,
+            "duration_s": T / cfg.fs,
+            "dominant_wing": dominant_wing,
+            "song_fraction": side_summary["song_fraction"],
+            "frac_pulse": side_summary["frac_pulse"],
+            "frac_sine": side_summary["frac_sine"],
+            "frac_quiet": side_summary["frac_quiet"],
+            "valid_n_frames": side_summary["n_frames"],
+        }
+
+    out: Dict = {
         "wing_data": wing_data,
         "sides": sides,
         "dominant_wing": dominant_wing,
@@ -1564,17 +1620,15 @@ def analyze_fly_song(
         "horiz_angle_R": horiz_angle_R,
         "joints": joints,
         "summary": primary_summary,
-        # Alias of ``summary`` for backward compatibility with notebooks
-        # that expected the old naming (when the new detector was primary).
-        "summary_legacy": primary_summary,
-        "summary_new": {
-            "n_frames": T,
-            "duration_s": T / cfg.fs,
-            "dominant_wing": dominant_wing,
-            "song_fraction": dom_summary_new["song_fraction"],
-            "frac_pulse": dom_summary_new["frac_pulse"],
-            "frac_sine": dom_summary_new["frac_sine"],
-            "frac_quiet": dom_summary_new["frac_quiet"],
-            "valid_n_frames": dom_summary_new["n_frames"],
-        },
     }
+    if "summary_legacy" in sides[dominant_wing]:
+        out["summary_legacy"] = (
+            primary_summary if primary_key == "legacy"
+            else _bout_summary(sides[dominant_wing]["summary_legacy"])
+        )
+    if "summary_new" in sides[dominant_wing]:
+        out["summary_new"] = (
+            primary_summary if primary_key == "new"
+            else _bout_summary(sides[dominant_wing]["summary_new"])
+        )
+    return out

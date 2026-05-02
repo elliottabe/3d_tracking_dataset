@@ -21,7 +21,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
-from utils.io_dict_to_hdf5 import load as h5_load
+from utils.io_dict_to_hdf5 import load as h5_load, save as h5_save
 from utils.keypoint_filter import (
     despike_isolated_spikes, medfilt_despike, repair_wing_tip_identity_swaps,
 )
@@ -175,6 +175,10 @@ _PER_BOUT_INFO_KEYS = (
 )
 _GLOBAL_INFO_KEYS = (
     'kp_names', 'names_qpos', 'names_xpos', 'offsets', 'site_names_egocentric',
+)
+_PER_BOUT_FIELDS = (
+    'kp_data', 'marker_sites', 'xpos_egocentric', 'qpos', 'qvel',
+    'xpos', 'xquat', 'site_xpos',
 )
 
 
@@ -594,3 +598,181 @@ def analyze_all_pairs(
             print(f'cached {len(results)} pair results -> {cache_path}')
 
     return results
+
+
+def export_raw_courtship_h5(
+    h5_paths: Sequence[str | Path],
+    out_path: str | Path,
+    *,
+    preproc_search_paths: Optional[Sequence[str | Path]] = None,
+    glob_pattern: str = 'Predictions_3D_*/preprocessing/preprocessed_bout_v1_*_merged.h5',
+    analysis_cache: Optional[str | Path] = None,
+    min_song_bout_frames: int = 100,
+    min_bilateral_dz_p95: float = 12.0,
+    overwrite: bool = False,
+    verbose: bool = True,
+) -> dict:
+    """Merge multiple combined courtship h5s and export the analyse-ready subset.
+
+    Output contains only fly0/fly1 paired bouts that survive the same filters
+    as :func:`analyze_all_pairs` (``min_song_bout_frames`` and
+    ``min_bilateral_dz_p95``). For courtship with the production thresholds
+    this yields 110 bouts (55 pairs x 2 flies).
+
+    Per-bout payload preserved (all of these copied verbatim when present):
+    ``kp_data, xpos_egocentric, qpos, qvel, xpos, xquat, site_xpos,
+    geometric_angles``. When ``preproc_search_paths`` is provided, the
+    un-rescaled ``orig_keypoints`` from the matching preprocessing h5 is
+    attached too (best-effort; silently skipped when absent).
+
+    No song-analysis results are written. The on-disk schema is identical to
+    the inputs so :func:`load_courtship_h5` round-trips cleanly.
+
+    Parameters
+    ----------
+    h5_paths : sequence of paths
+        Combined courtship h5 files to merge (e.g. Session0 + Session1).
+    out_path : path
+        Destination path for the exported h5.
+    preproc_search_paths : sequence of paths, optional
+        Roots to search for ``Predictions_3D_*/preprocessing/...`` h5s when
+        attaching ``orig_keypoints``. ``None`` disables the attach step.
+    glob_pattern : str
+        Glob relative to each ``preproc_search_paths`` entry.
+    analysis_cache : path, optional
+        Pickle cache for :func:`analyze_all_pairs`. Strongly recommended:
+        first run pays the song-analysis cost, subsequent exports are nearly
+        free.
+    min_song_bout_frames, min_bilateral_dz_p95 : float
+        Filter thresholds passed straight through to :func:`analyze_all_pairs`.
+    overwrite : bool
+        If False (default), raise ``FileExistsError`` when ``out_path``
+        already exists.
+    verbose : bool
+        Print progress + a one-line summary of dropped/missing fields.
+
+    Returns
+    -------
+    dict
+        ``{'n_input_bouts', 'n_pairs', 'n_kept_bouts', 'out_path',
+        'missing_fields'}``.
+    """
+    out_path = Path(out_path)
+    if out_path.exists() and not overwrite:
+        raise FileExistsError(
+            f"{out_path} already exists; pass overwrite=True to replace."
+        )
+
+    data, info, kp_names, bout_keys = load_and_merge_courtship_h5(h5_paths)
+    n_input_bouts = len(bout_keys)
+    if verbose:
+        print(f'merged {n_input_bouts} bouts from {len(h5_paths)} file(s)')
+
+    pairs = pair_bouts(bout_keys, info)
+    if not pairs:
+        raise ValueError('no fly0/fly1 pairs found in input h5(s)')
+    if verbose:
+        print(f'paired into {len(pairs)} fly0/fly1 pair(s)')
+
+    results = analyze_all_pairs(
+        data, pairs, kp_names,
+        cache_path=analysis_cache,
+        min_song_bout_frames=min_song_bout_frames,
+        min_bilateral_dz_p95=min_bilateral_dz_p95,
+        verbose=verbose,
+    )
+    if not results:
+        raise RuntimeError(
+            f'0 bouts survive filter '
+            f'(min_song_bout_frames={min_song_bout_frames}, '
+            f'min_bilateral_dz_p95={min_bilateral_dz_p95}) -- refusing to '
+            f'write empty h5'
+        )
+
+    # tracker_key0 / tracker_key1 are the merged-namespace bout keys before
+    # any male-first reorder, so they index straight into `data` and `info`.
+    keep_old_keys: List[str] = []
+    for r in results:
+        keep_old_keys.append(str(r['tracker_key0']))
+        keep_old_keys.append(str(r['tracker_key1']))
+    n_kept = len(keep_old_keys)
+
+    # Build orig-kp index once if requested.
+    orig_index: Dict[Tuple[str, int], np.ndarray] = {}
+    if preproc_search_paths:
+        if verbose:
+            print(f'building orig-keypoints index from '
+                  f'{len(list(preproc_search_paths))} search path(s)...')
+        orig_index = load_orig_keypoints_index(
+            preproc_search_paths, glob_pattern=glob_pattern,
+        )
+        if verbose:
+            print(f'  indexed {len(orig_index)} preprocessing-bout entries')
+
+    # Per-bout payload.
+    pad = max(3, len(str(max(n_kept - 1, 0))))
+    out_data: dict = {}
+    missing_field_counts: Dict[str, int] = {f: 0 for f in _PER_BOUT_FIELDS}
+    n_orig_attached = 0
+    for new_idx, old_key in enumerate(keep_old_keys):
+        bout = data[old_key]
+        new_key = f'bout_{new_idx:0{pad}d}'
+        new_bout: dict = {}
+        for field in _PER_BOUT_FIELDS:
+            if field in bout:
+                v = bout[field]
+                # Some fields are dicts (e.g. geometric_angles); pass through
+                # untouched so the recursive saver writes a sub-group.
+                new_bout[field] = v if isinstance(v, dict) else np.asarray(v)
+            else:
+                missing_field_counts[field] += 1
+        if preproc_search_paths:
+            okp = get_orig_keypoints_for_combined_bout(
+                orig_index, info, bout_keys, old_key,
+            )
+            if okp is not None:
+                new_bout['orig_keypoints'] = np.asarray(okp)
+                n_orig_attached += 1
+        out_data[new_key] = new_bout
+
+    # Subset per-bout info arrays by the original index of each kept old key.
+    old_key_to_idx = {k: i for i, k in enumerate(bout_keys)}
+    keep_idx = [old_key_to_idx[k] for k in keep_old_keys]
+
+    out_info: dict = {}
+    for k in _GLOBAL_INFO_KEYS:
+        if k in info:
+            out_info[k] = info[k]
+    per_bout_keys_to_subset = list(_PER_BOUT_INFO_KEYS) + ['source_path', 'orig_bout_key']
+    for k in per_bout_keys_to_subset:
+        seq = _info_to_list(info.get(k))
+        if not seq:
+            continue
+        if len(seq) != n_input_bouts:
+            raise RuntimeError(
+                f"info['{k}'] length {len(seq)} != n_input_bouts {n_input_bouts}"
+            )
+        out_info[k] = [seq[i] for i in keep_idx]
+
+    if verbose:
+        missing_summary = {f: c for f, c in missing_field_counts.items() if c}
+        if missing_summary:
+            print(f'missing per-bout fields (skipped): {missing_summary}')
+        if preproc_search_paths:
+            print(f'orig_keypoints attached to {n_orig_attached}/{n_kept} bouts')
+        print(f'writing {n_kept} bouts to {out_path} ...')
+
+    h5_save(str(out_path), {**out_data, 'info': out_info})
+
+    if verbose:
+        print(f'done: {n_input_bouts} input -> {len(pairs)} pairs -> '
+              f'{n_kept} bouts -> {out_path}')
+
+    return {
+        'n_input_bouts': n_input_bouts,
+        'n_pairs': len(pairs),
+        'n_kept_bouts': n_kept,
+        'out_path': str(out_path),
+        'missing_fields': {f: c for f, c in missing_field_counts.items() if c},
+        'n_orig_attached': n_orig_attached,
+    }
