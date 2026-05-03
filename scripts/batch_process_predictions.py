@@ -26,11 +26,12 @@ Usage:
     python scripts/batch_process_predictions.py --dataset courtship
 """
 
-import sys
-import subprocess
-from pathlib import Path
-from datetime import datetime
 import argparse
+import os
+import subprocess
+import sys
+from datetime import datetime
+from pathlib import Path
 
 # Add project root to path for utility imports
 project_root = Path(__file__).parent.parent
@@ -49,7 +50,10 @@ def find_prediction_folders(base_dir: Path) -> list:
         List of Path objects for prediction folders, sorted by name
     """
     pattern = "Predictions_3D_*"
-    folders = sorted(base_dir.glob(pattern))
+    # Allow base_dir to itself be a single Predictions_3D_* folder (per-folder slurm jobs)
+    if base_dir.is_dir() and base_dir.match(pattern):
+        return [base_dir]
+    folders = sorted(base_dir.rglob(pattern))
 
     # Filter to only directories
     folders = [f for f in folders if f.is_dir()]
@@ -108,7 +112,7 @@ def run_preprocessing(folder: Path, anatomy: str, dataset: str, paths: str,
     Args:
         folder: Path to prediction folder
         anatomy: Anatomy version (e.g., 'v1')
-        dataset: Dataset name (e.g., 'free_walking', 'courtship')
+        dataset: Dataset name (e.g., 'free_running', 'courtship')
         paths: Paths config to use (e.g., 'workstation', 'hyak')
         fly_info: Dict from detect_flies() with fly-specific file info
         dry_run: If True, don't actually run, just show command
@@ -194,15 +198,16 @@ def main():
     parser.add_argument(
         '--dataset',
         type=str,
-        default='free_walking',
-        choices=['free_walking', 'courtship'],
-        help='Dataset type (default: free_walking)'
+        default='free_running',
+        choices=['free_running', 'courtship'],
+        help='Dataset type (default: free_running)'
     )
     parser.add_argument(
         '--base-dir',
         type=str,
         default=None,
-        help='Base directory containing Predictions_3D folders (default: /data2/users/eabe/datasets/Johnson_lab/<dataset>)'
+        help='Base directory containing Predictions_3D folders '
+             '(default: $FLY3D_DATA_ROOT/<dataset>)'
     )
     parser.add_argument(
         '--anatomy',
@@ -236,7 +241,12 @@ def main():
     args = parser.parse_args()
 
     if args.base_dir is None:
-        args.base_dir = f'/data2/users/eabe/datasets/Johnson_lab/{args.dataset}'
+        data_root = os.environ.get("FLY3D_DATA_ROOT")
+        if not data_root:
+            parser.error(
+                "--base-dir not given and FLY3D_DATA_ROOT is unset. Pass one of them."
+            )
+        args.base_dir = f"{data_root}/{args.dataset}"
 
     # Setup logging
     if args.log_file:

@@ -27,13 +27,15 @@ Usage:
 
 import argparse
 import logging
+import os
 import subprocess
 import sys
 from pathlib import Path
 import time
 
-# Default data root — all datasets live under this directory
-DATA_ROOT = Path('/data2/users/eabe/datasets/Johnson_lab')
+# Default data root — all datasets live under this directory.
+# Set FLY3D_DATA_ROOT in the environment (or pass --base-dir) to override.
+DATA_ROOT = Path(os.environ.get("FLY3D_DATA_ROOT", "")) if os.environ.get("FLY3D_DATA_ROOT") else None
 
 
 class PipelineRunner:
@@ -42,18 +44,29 @@ class PipelineRunner:
     def __init__(
         self,
         anatomy: str,
-        dataset: str = "free_walking",
+        dataset: str = "free_running",
         base_dir: Path | None = None,
         paths_config: str = "workstation",
         force: bool = False,
         skip_completed: bool = False,
         dry_run: bool = False,
         stac_overrides: str = "",
-        gpu_mem_fraction: float = 0.9
+        gpu_mem_fraction: float = 0.9,
+        yes: bool = False,
     ):
+        self.yes = yes
         self.anatomy = anatomy
         self.dataset = dataset
-        self.base_dir = base_dir if base_dir is not None else DATA_ROOT / dataset
+        if base_dir is not None:
+            self.base_dir = base_dir
+        elif DATA_ROOT is not None:
+            self.base_dir = DATA_ROOT / dataset
+        else:
+            raise ValueError(
+                "No data root configured. Pass --base-dir or set the "
+                "FLY3D_DATA_ROOT environment variable to the directory "
+                "containing your dataset folders (e.g. /path/to/Johnson_lab)."
+            )
         self.paths_config = paths_config
         self.force = force
         self.skip_completed = skip_completed
@@ -193,6 +206,37 @@ class PipelineRunner:
 
         return success
 
+    def step_split_valid(self) -> bool:
+        """Optional step: split per-fly preprocessed bouts into validity buckets.
+
+        Reads the existing fly0/fly1 preprocessed h5s and writes per-bucket
+        STAC inputs (_fly0_only / _fly1_only / _both). No-op for single-fly
+        datasets — the wrapper script skips folders without fly0/fly1 pairs,
+        and folders that yield zero valid bouts are reported but do not fail
+        the pipeline.
+        """
+        self.print_step_header(1, 5, "SPLIT VALID BOUTS")
+
+        cmd = [
+            sys.executable,
+            str(self.scripts_dir / "batch_split_valid_bouts.py"),
+            f"--dataset={self.dataset}",
+            f"--anatomy={self.anatomy}",
+            f"--base-dir={self.base_dir}",
+        ]
+        if self.force:
+            cmd.append("--force")
+        if self.dry_run:
+            cmd.append("--dry-run")
+
+        success, message = self.run_command(cmd, "split_valid", timeout=1800)
+        self.step_results["split_valid"] = (success, message)
+        if success:
+            self.log(f"Split complete: {message}")
+        else:
+            self.log(f"Split failed: {message}")
+        return success
+
     def step_2_stac(self) -> bool:
         """Step 2: STAC IK solver."""
         self.print_step_header(2, 4, "STAC IK SOLVER")
@@ -202,6 +246,7 @@ class PipelineRunner:
             str(self.scripts_dir / "batch_run_stac.py"),
             f"--dataset={self.dataset}",
             f"--anatomy={self.anatomy}",
+            f"--paths={self.paths_config}",
             f"--base-dir={self.base_dir}",
             f"--gpu-mem-fraction={self.gpu_mem_fraction}",
         ]
@@ -261,6 +306,7 @@ class PipelineRunner:
             f"paths={self.paths_config}",
             f"dataset={self.dataset}",
             f"anatomy={self.anatomy}",
+            f"+base_dir={self.base_dir}",
         ]
 
         if self.dry_run:
@@ -291,10 +337,10 @@ class PipelineRunner:
             True if all steps succeeded
         """
         if steps is None:
-            steps = ['preprocess', 'stac', 'postprocess', 'combine']
+            steps = ['convert', 'preprocess', 'split_valid', 'stac', 'postprocess', 'combine']
 
         # Validate steps
-        valid_steps = {'preprocess', 'stac', 'postprocess', 'combine'}
+        valid_steps = {'convert', 'preprocess', 'split_valid', 'stac', 'postprocess', 'combine'}
         invalid = set(steps) - valid_steps
         if invalid:
             self.log(f"Invalid steps: {invalid}")
@@ -318,7 +364,7 @@ class PipelineRunner:
         self.log("")
 
         # Confirm if not dry run
-        if not self.dry_run:
+        if not self.dry_run and not self.yes:
             response = input("Continue with pipeline execution? [y/N]: ")
             if response.lower() != 'y':
                 self.log("Pipeline cancelled by user")
@@ -329,6 +375,7 @@ class PipelineRunner:
         # Run steps in order
         step_map = {
             'preprocess': self.step_1_preprocess,
+            'split_valid': self.step_split_valid,
             'stac': self.step_2_stac,
             'postprocess': self.step_3_postprocess,
             'combine': self.step_4_combine,
@@ -379,7 +426,7 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Run complete pipeline for free_walking with anatomy v1
+  # Run complete pipeline for free_running with anatomy v1
   python scripts/run_full_pipeline.py --anatomy v1
 
   # Run for courtship dataset with v2_muscles anatomy
@@ -419,8 +466,8 @@ Pipeline Steps:
     parser.add_argument(
         '--dataset',
         type=str,
-        default='free_walking',
-        help='Dataset name (free_walking, courtship, etc.)'
+        default='free_running',
+        help='Dataset name (free_running, courtship, etc.)'
     )
     parser.add_argument(
         '--base-dir',
@@ -437,8 +484,9 @@ Pipeline Steps:
     parser.add_argument(
         '--steps',
         type=str,
-        default='preprocess,stac,postprocess,combine',
-        help='Comma-separated list of steps to run (preprocess,stac,postprocess,combine)'
+        default='preprocess,split_valid,stac,postprocess,combine',
+        help='Comma-separated list of steps to run '
+             '(preprocess,split_valid,stac,postprocess,combine).'
     )
     parser.add_argument(
         '--force',
@@ -462,12 +510,16 @@ Pipeline Steps:
         help='GPU memory fraction for STAC (0.0-1.0, default 0.9)'
     )
     parser.add_argument(
+        '-y', '--yes',
+        action='store_true',
+        help='Skip interactive confirmation prompt (for unattended runs)'
+    )
+    parser.add_argument(
         '--stac-overrides',
         type=str,
         default='',
         help='Additional Hydra config overrides for STAC'
     )
-    
     args = parser.parse_args()
     
     # Parse steps
@@ -483,7 +535,8 @@ Pipeline Steps:
         skip_completed=args.skip_completed,
         dry_run=args.dry_run,
         stac_overrides=args.stac_overrides,
-        gpu_mem_fraction=args.gpu_mem_fraction
+        gpu_mem_fraction=args.gpu_mem_fraction,
+        yes=args.yes,
     )
     
     # Run pipeline

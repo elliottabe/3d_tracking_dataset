@@ -10,7 +10,7 @@ This script:
 5. Saves preprocessed data to HDF5 format
 
 Usage:
-    python preprocess_keypoints_for_ik.py paths=workstation dataset=free_walking
+    python preprocess_keypoints_for_ik.py paths=workstation dataset=free_running
     python preprocess_keypoints_for_ik.py paths=hyak dataset=courtship preprocessing.apply_alignment=false
     python preprocess_keypoints_for_ik.py paths=workstation preprocessing.frame_start=100 preprocessing.frame_end=300
 """
@@ -56,7 +56,17 @@ try:
         match_csv_to_skeleton,
         reorder_keypoints_array,
         reorder_skeleton_edges)
-    from utils.keypoint_filter import filter_keypoints, load_confidence_from_csv, load_confidence_concatenated
+    from utils.fly_detection import build_compact_frame_map
+    from utils.keypoint_filter import (
+        filter_keypoints, load_confidence_from_csv, load_confidence_concatenated,
+        _nearest_fill_nan,
+    )
+    from utils.pair_validity import (
+        compute_pair_validity,
+        compute_single_fly_validity,
+        pair_validity_config_from_dict,
+        PairValidityConfig,
+    )
 except ModuleNotFoundError as e:
     print(f"Error: Could not import utilities. Make sure you're running from the project root.")
     print(f"Current directory: {Path.cwd()}")
@@ -404,8 +414,12 @@ def apply_procrustes_alignment(kp_array: np.ndarray,
             preserve_translation=True  # Let Procrustes handle centering internally
         )
         
-        # Apply only the scale to original keypoints (Procrustes already computed correct scale)
-        aligned_kp = kp_jax * procrustes_info['scales'][:, None, None]  # Scale only
+        # Apply per-fly Procrustes scale uniformly (body shape + position).
+        # This converts from raw tracking units to model units.
+        # Note: per-fly scale differences will slightly distort inter-fly
+        # distances — a shared-scale correction can be applied downstream
+        # in batch_split_valid_bouts.py where both flies are available.
+        aligned_kp = kp_jax * procrustes_info['scales'][:, None, None]
     else: 
         aligned_kp, procrustes_info = jit_vectorized_procrustes_with_scaling(
             kp_jax,
@@ -430,13 +444,13 @@ def apply_procrustes_alignment(kp_array: np.ndarray,
     
     print(f"Scale factor applied: {alignment_info['scales']:.4f}")
     
-    # Check scaling quality
-    orig_center = np.mean(kp_array, axis=(0, 1))
-    scaled_center = np.mean(aligned_kp, axis=(0, 1))
-    data_span = np.max(aligned_kp[0], axis=0) - np.min(aligned_kp[0], axis=0)
+    # Check scaling quality (nan-aware: kp_array/aligned_kp contain nans from untracked keypoints)
+    orig_center = np.nanmean(kp_array, axis=1).mean(axis=0)   # mean centroid
+    scaled_center = np.nanmean(aligned_kp, axis=1).mean(axis=0)
+    data_span = np.nanmax(aligned_kp[0], axis=0) - np.nanmin(aligned_kp[0], axis=0)
     scale_ratio = data_span / ref_span
-    print(f"Original data center: {orig_center}")
-    print(f"Scaled data center: {scaled_center} (should match original)")
+    print(f"Original centroid: {orig_center}")
+    print(f"Scaled centroid: {scaled_center} (should match original — centroid-relative scaling)")
     print(f"Data/Model span ratio: {scale_ratio} (should be ~1.0)")
     
     # Return the scaled keypoints (original position/orientation preserved)
@@ -474,6 +488,8 @@ def load_bouts_from_csv(bouts_csv_path: Path,
             f"The 'fly_id' column is required for tracking bout sources."
         )
     
+    has_source_fly = 'source_fly' in df.columns
+
     # Convert to list of dicts
     bouts = []
     for _, row in df.iterrows():
@@ -484,10 +500,11 @@ def load_bouts_from_csv(bouts_csv_path: Path,
         if fly_label is not None and not fid.endswith(('_fly0', '_fly1')):
             fid = f"{fid}_{fly_label}"
         bout_info = {
-            'bout_idx': int(row['bout_idx']-1),
+            'bout_idx': int(row['bout_idx'])-1,
             'start_frame': int(row['start_frame']),
             'end_frame': int(row['end_frame']),
             'fly_id': fid,
+            'source_fly': str(row['source_fly']) if has_source_fly else '',
         }
         bouts.append(bout_info)
     
@@ -529,31 +546,52 @@ def load_concatenated_bouts(csv_path: Path,
     # Get CSV size for validation
     n_frames_available = len(kp_data)
     print(f"CSV contains {n_frames_available} frames")
-    
+
+    # Detect compact (bouts-mode) CSV and build frame remapping if needed
+    tracking_info_path = csv_path.parent / "tracking_info.json"
+    compact_map = build_compact_frame_map(tracking_info_path, n_frames_available)
+    if compact_map is not None:
+        print(f"  Detected compact (bouts-mode) CSV — remapping {len(compact_map)} frames")
+
     # Create reordered column list (from reorder_csv_to_skeleton)
     reordered_cols = [''] * len(filtered_node_names) * 3
     for csv_name, new_idx in csv_to_filtered_idx.items():
         reordered_cols[new_idx * 3] = f"{csv_name}_x"
         reordered_cols[new_idx * 3 + 1] = f"{csv_name}_y"
         reordered_cols[new_idx * 3 + 2] = f"{csv_name}_z"
-    
+
     # Extract and concatenate bout data
     bout_arrays = []
     clip_info = []
     current_idx = 0
     skipped_bouts = []
-    
+
     for bout in bouts:
-        # Validate frame indices are within CSV bounds
-        if bout['start_frame'] >= n_frames_available or bout['end_frame'] > n_frames_available:
-            warning_msg = (f"⚠️ Skipping bout {bout['bout_idx']}: "
-                          f"frames {bout['start_frame']}-{bout['end_frame']} "
-                          f"out of bounds (CSV has {n_frames_available} frames)")
-            print(warning_msg)
-            skipped_bouts.append((bout['bout_idx'], warning_msg))
-            continue
-        
-        frame_indices = np.arange(bout['start_frame'], bout['end_frame'])
+        if compact_map is not None:
+            # Map original video frames -> compact CSV rows
+            rows = []
+            for f in range(bout['start_frame'], bout['end_frame'] + 1):
+                r = compact_map.get(f)
+                if r is not None:
+                    rows.append(r)
+            if not rows:
+                warning_msg = (f"Skipping bout {bout['bout_idx']}: "
+                              f"frames {bout['start_frame']}-{bout['end_frame']} "
+                              f"not found in compact CSV frame map")
+                print(warning_msg)
+                skipped_bouts.append((bout['bout_idx'], warning_msg))
+                continue
+            frame_indices = np.array(rows)
+        else:
+            # Validate frame indices are within CSV bounds (end_frame is inclusive)
+            if bout['start_frame'] >= n_frames_available or bout['end_frame'] >= n_frames_available:
+                warning_msg = (f"Skipping bout {bout['bout_idx']}: "
+                              f"frames {bout['start_frame']}-{bout['end_frame']} "
+                              f"out of bounds (CSV has {n_frames_available} frames)")
+                print(warning_msg)
+                skipped_bouts.append((bout['bout_idx'], warning_msg))
+                continue
+            frame_indices = np.arange(bout['start_frame'], bout['end_frame'] + 1)
         bout_data = kp_data.iloc[frame_indices][reordered_cols]
         bout_array = np.array(bout_data.values).reshape(-1, len(filtered_node_names), 3)
         
@@ -563,7 +601,10 @@ def load_concatenated_bouts(csv_path: Path,
             'bout_idx': bout['bout_idx'],
             'start_idx': current_idx,
             'end_idx': current_idx + len(bout_array),
-            'fly_id': bout['fly_id']
+            'fly_id': bout['fly_id'],
+            'source_fly': bout.get('source_fly', ''),
+            'start_frame': int(bout['start_frame']),
+            'end_frame': int(bout['end_frame']),
         })
         current_idx += len(bout_array)
     
@@ -615,11 +656,26 @@ def load_sibling_concatenated(sibling_csv_path: Path,
         return None
 
     n_frames_available = len(df)
+
+    # Detect compact (bouts-mode) CSV
+    tracking_info_path = sibling_csv_path.parent / "tracking_info.json"
+    compact_map = build_compact_frame_map(tracking_info_path, n_frames_available)
+
     arrays = []
     for bout in bouts:
-        if bout['start_frame'] >= n_frames_available or bout['end_frame'] > n_frames_available:
-            continue
-        frame_indices = np.arange(bout['start_frame'], bout['end_frame'])
+        if compact_map is not None:
+            rows = []
+            for f in range(bout['start_frame'], bout['end_frame'] + 1):
+                r = compact_map.get(f)
+                if r is not None:
+                    rows.append(r)
+            if not rows:
+                continue
+            frame_indices = np.array(rows)
+        else:
+            if bout['start_frame'] >= n_frames_available or bout['end_frame'] >= n_frames_available:
+                continue
+            frame_indices = np.arange(bout['start_frame'], bout['end_frame'] + 1)
         sub = df.iloc[frame_indices][reordered_cols]
         arr = np.array(sub.values).reshape(-1, len(filtered_node_names), 3)
         arrays.append(arr)
@@ -701,18 +757,22 @@ def apply_keypoint_filtering(
     confidence: Optional[np.ndarray] = None,
     fig_dir=None,
     bout_name: str = "bout",
-) -> Tuple[np.ndarray, Dict]:
+) -> Tuple[np.ndarray, Dict, np.ndarray]:
     """Apply keypoint filtering pipeline if enabled in config.
 
     Returns:
-        filtered_kp: (T, N, 3) cleaned array
-        report: per-step summary dict (empty if filtering disabled)
+        filtered_kp:   (T, N, 3) cleaned array
+        report:        per-step summary dict (empty if filtering disabled)
+        edge_nan_mask: (T, N) bool — True on frame-keypoints that were in a
+            leading/trailing NaN run in the raw input (phantom after any
+            bounded extrapolation). All-False if filtering is disabled.
     """
+    T, N = kp_array.shape[:2]
     if not filter_cfg.get('enabled', False):
         print("Keypoint filtering: DISABLED")
-        return kp_array, {}
+        return kp_array, {}, np.zeros((T, N), dtype=bool)
 
-    filtered_kp, report = filter_keypoints(
+    filtered_kp, report, edge_nan_mask = filter_keypoints(
         kp_array=kp_array,
         confidence=confidence,
         skeleton_edges=xml_edges,
@@ -721,7 +781,7 @@ def apply_keypoint_filtering(
         bout_name=bout_name,
         kp_names=xml_node_names,
     )
-    return filtered_kp, report
+    return filtered_kp, report, edge_nan_mask
 
 
 def process_single_bout(csv_path: Path,
@@ -802,7 +862,7 @@ def process_single_bout(csv_path: Path,
                 confidence, filtered_node_names, xml_node_names
             )
             fig_dir = output_dir / "filter_figures" if output_dir and filter_cfg.get('save_figures', False) else None
-            kp_array_xml, filter_report = apply_keypoint_filtering(
+            kp_array_xml, filter_report, _ = apply_keypoint_filtering(
                 kp_array_xml, xml_edges, xml_node_names, filter_cfg,
                 confidence=confidence, fig_dir=fig_dir, bout_name="single_bout",
             )
@@ -868,7 +928,9 @@ def process_bouts_batch(csv_path: Path,
                        exclude_wings: bool = False,
                        exclude_wing_veins: bool = False,
                        filter_cfg: Optional[DictConfig] = None,
-                       output_dir: Optional[Path] = None) -> Optional[Dict]:
+                       output_dir: Optional[Path] = None,
+                       pair_validity_cfg: Optional[DictConfig] = None,
+                       sex_cleaning_cfg: Optional[DictConfig] = None) -> Optional[Dict]:
     """
     Efficiently process multiple bouts by loading skeleton/model once and
     processing all data as a concatenated array.
@@ -923,13 +985,37 @@ def process_bouts_batch(csv_path: Path,
         
         # Extract fly_ids from clip_info for later storage
         fly_ids = [clip['fly_id'] for clip in clip_info]
+        source_flies = [clip.get('source_fly', '') for clip in clip_info]
+        start_frames = [int(clip['start_frame']) for clip in clip_info]
+        end_frames = [int(clip['end_frame']) for clip in clip_info]
 
         # 4b. Identity relink (multi-fly) — runs on raw concatenated 3D before
         # any Procrustes alignment so the sibling fly is in the same world frame.
+        #
+        # NOTE: By default this is now DEFERRED to batch_split_valid_bouts.py,
+        # where both fly0 and fly1 per-fly h5s are simultaneously available and
+        # we can run a single joint, bout-aware relink. The legacy per-fly path
+        # discarded the sibling output and ran twice (once per CSV), causing
+        # fly0 and fly1 to disagree on which frames were swapped — see
+        # plans/concurrent-leaping-liskov.md root cause #1. Set
+        # filter_cfg.identity_relink.defer_to_batch_split = false to fall back
+        # to the old behavior.
         relink_log_summary = None
+        global_swap_state = None  # (T_total,) bool from identity_relink, if it ran
+        _ir_cfg = (filter_cfg.get('identity_relink', {})
+                   if filter_cfg is not None else {})
+        _ir_enabled = bool(_ir_cfg.get('enabled', False))
+        _ir_defer = bool(_ir_cfg.get('defer_to_batch_split', True))
         if (filter_cfg is not None
                 and filter_cfg.get('enabled', False)
-                and filter_cfg.get('identity_relink', {}).get('enabled', False)):
+                and _ir_enabled
+                and _ir_defer):
+            print("\n[identity-relink] deferred to batch_split_valid_bouts.py "
+                  "(joint two-fly relink runs after both per-fly h5s exist)")
+        if (filter_cfg is not None
+                and filter_cfg.get('enabled', False)
+                and _ir_enabled
+                and not _ir_defer):
             from utils.identity_relink import relink_pair, RelinkConfig
             sibling_csv = derive_sibling_csv_path(csv_path)
             if sibling_csv is None:
@@ -962,6 +1048,7 @@ def process_bouts_batch(csv_path: Path,
                     print(f"  [identity-relink] {n_segs} swap segments, "
                           f"{frac*100:.2f}% of frames in swapped state")
                     concatenated_kp = relinked_self
+                    global_swap_state = np.asarray(log['swap_state'], dtype=bool)
                     relink_log_summary = dict(
                         n_swap_segments=n_segs,
                         fraction_swapped=float(frac),
@@ -1018,6 +1105,18 @@ def process_bouts_batch(csv_path: Path,
         print("PROCESSING INDIVIDUAL BOUTS WITH PER-BOUT FILTERING & ALIGNMENT")
         print("="*80)
 
+        # Parse pair_validity config once (used per-bout below)
+        pv_enabled = False
+        pv_obj: Optional[PairValidityConfig] = None
+        if pair_validity_cfg is not None:
+            pv_obj = pair_validity_config_from_dict(pair_validity_cfg)
+            pv_enabled = bool(pv_obj.enabled)
+        if pv_enabled:
+            print(f"\n[pair_validity] enabled: critical={list(pv_obj.critical_kp_patterns)}, "
+                  f"ground_eps={pv_obj.ground_epsilon_mm}mm, "
+                  f"floor_pct={pv_obj.floor_percentile}, "
+                  f"swap_guard={pv_obj.swap_guard_frames}")
+
         all_bouts_dict = {}
         for clip in clip_info:
             bout_idx = clip['bout_idx']
@@ -1028,16 +1127,29 @@ def process_bouts_batch(csv_path: Path,
             bout_kp = kp_array_xml[start_idx:end_idx]
             bout_orig = orig_xml[start_idx:end_idx]
 
-            # 8b. Optional: Keypoint filtering PER BOUT (before Procrustes)
+            # 8b. Optional: Keypoint filtering PER BOUT (before Procrustes).
+            # `bout_edge_nan` is a (T, N) bool mask marking frame-keypoints
+            # that were in a leading/trailing NaN run in the raw input. Short
+            # edge gaps are filled by bounded linear extrapolation (see
+            # `filter_cfg.interpolation.max_edge_extrap_frames`), longer runs
+            # stay NaN. Either way we pass the mask into pair_validity so
+            # those frames are marked untrusted downstream.
+            bout_edge_nan = np.zeros(bout_kp.shape[:2], dtype=bool)
             if filter_cfg is not None and filter_cfg.get('enabled', False):
                 bout_confidence = concat_confidence[start_idx:end_idx] if concat_confidence is not None else None
-                bout_kp, _ = apply_keypoint_filtering(
+                bout_kp, _, bout_edge_nan = apply_keypoint_filtering(
                     bout_kp, xml_edges, xml_node_names, filter_cfg,
                     confidence=bout_confidence, fig_dir=fig_dir,
                     bout_name=f"bout_{bout_idx:03d}",
                 )
 
             # Apply Procrustes alignment PER BOUT (like the notebook does)
+            # IMPORTANT: Procrustes uses nanmean to build the clip-average
+            # target pose. Any pre-alignment gap-fill (e.g. nearest-valid
+            # LOCF/BOCF) plants "ghost" keypoints across long occlusion runs
+            # and biases that average, which throws off the per-fly scale.
+            # So we run Procrustes on the filter output *with NaN still in
+            # place*, then do the NaN fill below.
             alignment_info = None
             if apply_alignment:
                 print(f"\n  Processing bout_{bout_idx:03d} ({bout_kp.shape[0]} frames)...")
@@ -1047,30 +1159,87 @@ def process_bouts_batch(csv_path: Path,
                 )
             else:
                 aligned_bout_kp = bout_kp
-            
+
+            # Post-alignment NaN backstop. STAC-mjx's trajectory LM rejects
+            # any step whose residual contains NaN, so long edge-NaN runs on
+            # occluded limbs freeze the entire clip at its initial guess.
+            # Running this *after* Procrustes keeps the scale clean while
+            # still handing STAC a finite target.
+            if (filter_cfg is not None
+                    and filter_cfg.get('nearest_fill', {}).get('enabled', False)):
+                nf_cfg = filter_cfg.get('nearest_fill', {})
+                min_valid = float(nf_cfg.get('min_valid_frac', 0.05))
+                aligned_bout_kp_np = np.asarray(aligned_bout_kp)
+                aligned_bout_kp_np, _ = _nearest_fill_nan(
+                    aligned_bout_kp_np, min_valid_frac=min_valid)
+                aligned_bout_kp = aligned_bout_kp_np
+
             bout_data = {
                 'keypoints': aligned_bout_kp,
                 'orig_keypoints': bout_orig,
                 'kp_names': xml_node_names,
                 'skeleton_edges': xml_edges,
+                'edge_nan': bout_edge_nan,
             }
-            
+
             if alignment_info is not None:
                 bout_data['alignment_info'] = alignment_info
-            
+
+            # Per-frame validity for this physical fly (bucketing + cross-fly
+            # checks happen later in batch_split_valid_bouts.py once both
+            # per-fly h5s exist). At this stage we only know one fly's kp, so
+            # we honestly compute single-fly validity (filter_ok & ground_ok)
+            # and skip the cross-fly identity check entirely. The bogus
+            # compute_pair_validity(self, self, ...) call that used to live
+            # here produced valid_both ≡ valid_fly0 and a fake identity_valid
+            # mask — see plans/concurrent-leaping-liskov.md root cause #4.
+            if pv_enabled:
+                bout_swap = (global_swap_state[start_idx:end_idx]
+                             if global_swap_state is not None else None)
+                pv_out = compute_single_fly_validity(
+                    aligned_bout_kp, xml_node_names, cfg=pv_obj,
+                    edge_nan_mask=bout_edge_nan,
+                )
+                bout_data['valid_fly'] = pv_out['valid_fly']
+                bout_data['filter_ok'] = pv_out['filter_ok']
+                bout_data['ground_ok'] = pv_out['ground_ok']
+                bout_data['floor_z'] = float(pv_out['floor_z'])
+                if bout_swap is not None:
+                    bout_data['swap_state'] = bout_swap
+
             all_bouts_dict[f'bout_{bout_idx:03d}'] = bout_data
             
             scale_str = f", scale={alignment_info['scales']:.6f}" if alignment_info else ""
-            fly_id_str = f", fly_id={fly_ids[bout_idx]}"
+            fly_id_str = f", fly_id={clip['fly_id']}"
             print(f"  ✓ bout_{bout_idx:03d}: {bout_data['keypoints'].shape[0]} frames{scale_str}{fly_id_str}")
         
         # Add info dictionary with fly_ids and clip_lengths
         all_bouts_dict['info'] = {
             'fly_ids': fly_ids,
+            'source_flies': source_flies,
+            'start_frames': start_frames,
+            'end_frames': end_frames,
             'clip_lengths': [clip['end_idx'] - clip['start_idx'] for clip in clip_info]
         }
         if relink_log_summary is not None:
             all_bouts_dict['info']['identity_relink'] = relink_log_summary
+        if pv_enabled:
+            all_bouts_dict['info']['pair_validity'] = {
+                'enabled': True,
+                'critical_kp_patterns': list(pv_obj.critical_kp_patterns),
+                'ground_kp_patterns': list(pv_obj.ground_kp_patterns),
+                'ground_epsilon_mm': float(pv_obj.ground_epsilon_mm),
+                'floor_percentile': float(pv_obj.floor_percentile),
+                'swap_guard_frames': int(pv_obj.swap_guard_frames),
+                'min_paired_frames': int(pv_obj.min_paired_frames),
+                'min_solo_frames': int(pv_obj.min_solo_frames),
+            }
+
+        # Echo sex_cleaning config so batch_split_valid_bouts.py can pick it up
+        if sex_cleaning_cfg is not None and sex_cleaning_cfg.get('enabled', False):
+            sc_dict = OmegaConf.to_container(sex_cleaning_cfg, resolve=True) \
+                if isinstance(sex_cleaning_cfg, DictConfig) else dict(sex_cleaning_cfg)
+            all_bouts_dict['info']['sex_cleaning'] = sc_dict
         
         print(f"\n✓ Successfully split into {len([k for k in all_bouts_dict.keys() if k != 'info'])} bouts")
         print(f"✓ Stored fly_ids in 'info': {fly_ids}")
@@ -1090,7 +1259,7 @@ def main(cfg: DictConfig):
     Main preprocessing function using Hydra configuration.
     
     Usage:
-        python preprocess_keypoints_for_ik.py paths=workstation dataset=free_walking
+        python preprocess_keypoints_for_ik.py paths=workstation dataset=free_running
         python preprocess_keypoints_for_ik.py paths=hyak preprocessing.apply_alignment=false
     """
     # Print configuration
@@ -1168,6 +1337,8 @@ def main(cfg: DictConfig):
             exclude_wing_veins=cfg.preprocessing.get('exclude_wing_veins', False),
             filter_cfg=cfg.preprocessing.get('filtering', None),
             output_dir=output_dir,
+            pair_validity_cfg=cfg.preprocessing.get('pair_validity', None),
+            sex_cleaning_cfg=cfg.preprocessing.get('sex_cleaning', None),
         )
 
         if all_bouts_dict is not None:

@@ -1,0 +1,140 @@
+[project]
+name = "fly-3d-tracking-dataset"
+version = "0.1.0"
+description = "3D fruit fly behavioral tracking dataset and analysis pipeline (Johnson lab)"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+license = { text = "BSD-3-Clause" }
+authors = [{ name = "Elliott Abe", email = "eabe@uw.edu" }]
+
+dependencies = [
+    # Core scientific stack
+    "numpy>=2.0,<3",
+    "matplotlib",
+    "pandas",
+    "scikit-learn",
+    "scikit-image",
+    "natsort",
+    "tqdm",
+    "psutil",
+    "loguru",
+    "typer",
+    "tyro",
+    "submitit",
+    # Hydra configs
+    "hydra-core",
+    "omegaconf",
+    "ml_collections",
+    # IO / data
+    "h5py",
+    "tifffile",
+    "pynwb",
+    "hdmf",
+    "ndx-pose",
+    # JAX ecosystem
+    "jax",
+    "brax",
+    "flax",
+    "chex",
+    "optax",
+    "orbax-checkpoint",
+    "jaxopt",
+    "jaxlie",
+    "jaxls",
+    "jax-dataclasses",
+    "jax-tqdm",
+    "jaxtyping",
+    # MuJoCo / simulation
+    "mujoco",
+    "mujoco-mjx",
+    "mujoco-warp",
+    "warp-lang",
+    "robot-descriptions",
+    "yourdfpy",
+    "trimesh",
+    "manifold3d",
+    "pycollada",
+    "glfw",
+    # PyTorch + vision (used by SAM3 / segmentation utilities)
+    "torch",
+    "torchvision",
+    "torchmetrics",
+    "timm",
+    "safetensors",
+    "huggingface-hub",
+    "einops",
+    "fvcore",
+    "iopath",
+    "pycocotools",
+    # Image / video
+    "opencv-python",
+    "decord",
+    "mediapy",
+    "imageio[ffmpeg]",
+    "imageio-ffmpeg",
+    # Notebook & widget infrastructure (needed at runtime by some plotting utils)
+    "ipywidgets",
+    # GPU helpers
+    "nvidia-ml-py3",
+    # Distributed
+    "ray",
+    # Editable local submodule (configured via [tool.uv.sources] below)
+    "stac-mjx",
+]
+
+[project.optional-dependencies]
+cuda12 = ["jax[cuda12]"]
+dev = [
+    "pytest",
+    "pytest-cov",
+    "coverage",
+    "black",
+    "ruff",
+    "pre-commit",
+    "ipykernel",
+    "ipympl",
+    "jupyterlab",
+    "nbstripout",
+]
+viz = [
+    "viser",
+    "pyside6",
+    "tensorboard",
+    "tensorboardx",
+]
+# JARVIS-HybridNet — multi-view 3D pose estimation (upstream tool that produces
+# the data3D.csv inputs and the runtime dep for scripts/render_bout_clips.py).
+# Installed editable from third_party/JARVIS-HybridNet (see [tool.uv.sources]).
+jarvis = ["jarvis-local"]
+# SAM3 (Meta Segment Anything 3) — used to regenerate sam3_masks.npz /
+# sam3_aligned.h5 for the courtship analyses. Pinned to a specific commit on
+# the user's fork that includes the streaming-mode update used by this
+# pipeline; replace with facebookresearch/sam3 upstream if preferred.
+sam3 = [
+    "sam3 @ git+https://github.com/elliottabe/sam3@f55aa0312fa83f91c3a1fc92174f51a3ae151e50",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+# This repo is an analysis pipeline, not a Python package to publish on PyPI.
+# Setting package = false tells uv to manage dependencies in a .venv without
+# trying to build or install this project itself.
+[tool.uv]
+package = false
+
+[tool.uv.sources]
+# stac-mjx is vendored as a git submodule and installed editable from there.
+stac-mjx = { path = "./stac-mjx", editable = true }
+# JARVIS-HybridNet is vendored as a git submodule under third_party/.
+jarvis-local = { path = "./third_party/JARVIS-HybridNet", editable = true }
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.black]
+line-length = 100
+target-version = ["py312"]
+

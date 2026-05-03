@@ -16,13 +16,13 @@ All operations work on numpy arrays of shape (T, N, 3).
 Usage::
 
     from utils.keypoint_filter import filter_keypoints, load_confidence_from_csv
-    filtered, report = filter_keypoints(kp_array, confidence, skeleton_edges, cfg.preprocessing.filtering)
+    filtered, report, edge_nan_mask = filter_keypoints(kp_array, confidence, skeleton_edges, cfg.preprocessing.filtering)
 """
 
 import numpy as np
 from scipy import signal
-from scipy.interpolate import splrep, splev
-from typing import Optional, Tuple, Dict, List
+from scipy.interpolate import PchipInterpolator
+from typing import Optional, Sequence, Tuple, Dict, List
 from omegaconf import DictConfig
 import traceback as _traceback
 from utils.centroid_jump_check import mask_centroid_jumps
@@ -38,46 +38,118 @@ import matplotlib.gridspec as gridspec
 
 # ─── Internal helpers ──────────────────────────────────────────────────────────
 
-def _nan_interp_1d(vals: np.ndarray, use_spline: bool = True) -> np.ndarray:
+def _nan_interp_1d(
+    vals: np.ndarray,
+    use_spline: bool = True,
+    max_edge_extrap: int = 0,
+    edge_fit_window: int = 5,
+) -> Tuple[np.ndarray, np.ndarray]:
     """Interpolate NaN gaps in a 1-D signal. Skips if >50% of values are NaN.
 
-    Only interpolates *between* valid data points. Leading/trailing NaN edges
-    are filled with the nearest valid value (no extrapolation) to avoid cubic
-    spline divergence at recording boundaries.
+    Interior gaps are filled with a monotone PCHIP cubic interpolant (C¹-smooth,
+    no overshoot between anchors). Leading/trailing NaN runs are handled with
+    bounded *linear extrapolation*: a degree-1 fit on the `edge_fit_window`
+    nearest valid points is evaluated at up to `max_edge_extrap` frames into the
+    edge run. Anything beyond that cap stays NaN and is dropped downstream by
+    `pair_validity`. This replaces the old constant-hold edge fill, which
+    produced flat tails whenever a bout had poorly-tracked trailing frames.
+
+    Args:
+        vals: (T,) 1-D signal with possible NaNs.
+        use_spline: use PCHIP cubic interpolation for interior gaps (True) or
+            plain linear interpolation (False).
+        max_edge_extrap: maximum number of leading/trailing frames to fill by
+            linear extrapolation. 0 = never extrapolate edges (leave NaN).
+        edge_fit_window: number of valid frames (nearest the edge) used to fit
+            the linear extrapolation model.
+
+    Returns:
+        out: (T,) filled signal. May still contain NaN where edge runs exceeded
+            the cap, or where the input was too sparse to interpolate safely.
+        phantom_mask: (T,) bool — True for any frame that was originally in a
+            leading/trailing NaN run, regardless of whether it was filled by
+            extrapolation. Interior NaNs that were filled by PCHIP are NOT
+            marked phantom. Used by `pair_validity.compute_single_fly_validity`
+            to mark these frames as not-trusted even when they were filled.
     """
+    T = len(vals)
+    phantom_mask = np.zeros(T, dtype=bool)
     nans = np.isnan(vals)
     if not np.any(nans):
-        return vals
-    if np.mean(~nans) < 0.5 or np.sum(~nans) < 4:
-        return vals  # too sparse — leave as NaN rather than extrapolate wildly
+        return vals, phantom_mask
 
-    x_good = np.where(~nans)[0]
+    finite_idx = np.where(~nans)[0]
+    if finite_idx.size == 0:
+        # Fully NaN column: every frame is "phantom" by construction.
+        phantom_mask[:] = True
+        return vals, phantom_mask
+
+    # Always record original edge-NaN positions as phantom, even if we later
+    # fill them by extrapolation.
+    x_min, x_max = finite_idx[0], finite_idx[-1]
+    if x_min > 0:
+        phantom_mask[:x_min] = True
+    if x_max < T - 1:
+        phantom_mask[x_max + 1:] = True
+
+    if np.mean(~nans) < 0.5 or np.sum(~nans) < 4:
+        # Too sparse — leave as NaN rather than interpolate wildly.
+        return vals, phantom_mask
+
+    x_good = finite_idx
     v_good = vals[~nans]
     x_bad = np.where(nans)[0]
     out = vals.copy()
 
     # Split NaN positions into interior (between first/last valid) and edges
-    x_min, x_max = x_good[0], x_good[-1]
     interior_mask = (x_bad >= x_min) & (x_bad <= x_max)
     x_interior = x_bad[interior_mask]
-    x_edges = x_bad[~interior_mask]
 
-    # Interpolate interior gaps (spline or linear)
+    # Interior gaps: PCHIP (or linear fallback). Always filled — these are
+    # interpolation, not extrapolation.
     if len(x_interior) > 0:
         if use_spline:
             try:
-                spl = splrep(x_good, v_good, k=3, s=0)
-                out[x_interior] = splev(x_interior, spl)
+                pchip = PchipInterpolator(x_good, v_good, extrapolate=False)
+                out[x_interior] = pchip(x_interior)
             except Exception:
                 out[x_interior] = np.interp(x_interior, x_good, v_good)
         else:
             out[x_interior] = np.interp(x_interior, x_good, v_good)
 
-    # Fill leading/trailing edges with nearest valid value (no extrapolation)
-    if len(x_edges) > 0:
-        out[x_edges] = np.interp(x_edges, x_good, v_good)
+    # Edge gaps: bounded linear extrapolation. No more constant-hold.
+    if max_edge_extrap > 0:
+        n_good = len(x_good)
+        fit_n = min(edge_fit_window, n_good)
 
-    return out
+        # Leading edge: indices [0, x_min) — fill the `max_edge_extrap` frames
+        # closest to x_min (i.e. [x_min - n_fill, x_min)).
+        if x_min > 0:
+            n_fill = int(min(x_min, max_edge_extrap))
+            fill_idx = np.arange(x_min - n_fill, x_min)
+            if fit_n >= 2:
+                slope, intercept = np.polyfit(
+                    x_good[:fit_n].astype(float), v_good[:fit_n], 1
+                )
+                out[fill_idx] = slope * fill_idx.astype(float) + intercept
+            elif fit_n == 1:
+                out[fill_idx] = v_good[0]
+
+        # Trailing edge: indices (x_max, T) — fill the `max_edge_extrap` frames
+        # closest to x_max (i.e. [x_max + 1, x_max + 1 + n_fill)).
+        if x_max < T - 1:
+            n_trail = T - 1 - x_max
+            n_fill = int(min(n_trail, max_edge_extrap))
+            fill_idx = np.arange(x_max + 1, x_max + 1 + n_fill)
+            if fit_n >= 2:
+                slope, intercept = np.polyfit(
+                    x_good[-fit_n:].astype(float), v_good[-fit_n:], 1
+                )
+                out[fill_idx] = slope * fill_idx.astype(float) + intercept
+            elif fit_n == 1:
+                out[fill_idx] = v_good[-1]
+
+    return out, phantom_mask
 
 
 def _nan_medfilt1d(vals: np.ndarray, kernel_size: int) -> np.ndarray:
@@ -91,6 +163,70 @@ def _nan_medfilt1d(vals: np.ndarray, kernel_size: int) -> np.ndarray:
         if len(valid) > 0:
             out[t] = np.median(valid)
     return out
+
+
+def _nearest_fill_nan(kp_array: np.ndarray,
+                      min_valid_frac: float = 0.05,
+                      verbose: bool = True) -> Tuple[np.ndarray, Dict]:
+    """Per-coordinate temporal nearest-valid fill (LOCF + BOCF).
+
+    For each (keypoint, coord) column, NaN samples are replaced with the
+    temporally nearest finite value (forward-fill first, then backward-fill
+    for any leading NaN run). Columns with fewer than ``min_valid_frac`` of
+    finite samples are left untouched — filling a near-empty column would
+    plant a constant phantom trajectory that misleads STAC.
+
+    Purpose: downstream solvers (e.g. stac-mjx jaxls LM trajectory solve)
+    reject steps with NaN in the residual, so any NaN anywhere in a clip
+    freezes the entire clip at its initial guess. This is the last-resort
+    gap-fill used after spline interpolation has handled interior gaps.
+
+    Returns (kp_filled, report).
+    """
+    T, N, D = kp_array.shape
+    out = kp_array.astype(float).copy()
+    flat = out.reshape(T, -1)
+    report = {
+        'columns_filled': 0,
+        'values_filled': 0,
+        'columns_skipped_sparse': 0,
+        'columns_fully_nan': 0,
+    }
+    for c in range(flat.shape[1]):
+        col = flat[:, c]
+        finite = np.isfinite(col)
+        n_valid = int(finite.sum())
+        if n_valid == 0:
+            report['columns_fully_nan'] += 1
+            continue
+        if n_valid / T < min_valid_frac:
+            report['columns_skipped_sparse'] += 1
+            continue
+        if finite.all():
+            continue
+        idx = np.arange(T)
+        valid_idx = idx[finite]
+        # np.searchsorted to find nearest prior valid index per frame
+        right = np.searchsorted(valid_idx, idx, side='right') - 1
+        left = np.clip(right + 1, 0, valid_idx.size - 1)
+        right = np.clip(right, 0, valid_idx.size - 1)
+        prev_idx = valid_idx[right]
+        next_idx = valid_idx[left]
+        # nearest of (prev, next) by distance
+        dist_prev = np.abs(idx - prev_idx)
+        dist_next = np.abs(idx - next_idx)
+        use_next = dist_next < dist_prev
+        nearest = np.where(use_next, next_idx, prev_idx)
+        n_before = int(np.sum(~finite))
+        flat[:, c] = col[nearest]
+        report['columns_filled'] += 1
+        report['values_filled'] += n_before
+    if verbose:
+        print(f"  [nearest_fill] filled {report['values_filled']} NaN "
+              f"samples across {report['columns_filled']} columns; "
+              f"skipped {report['columns_skipped_sparse']} too-sparse, "
+              f"{report['columns_fully_nan']} fully-NaN")
+    return out, report
 
 
 def _mask_low_confidence(
@@ -254,8 +390,11 @@ def _medfilt_interpolate(
             finite_mask = np.isfinite(vals)
 
             if np.sum(finite_mask) < medfilt_kernel:
-                # Not enough data for median filter — just interpolate gaps
-                kp_out[:, n, d] = _nan_interp_1d(vals, use_spline=use_spline)
+                # Not enough data for median filter — just interpolate interior
+                # gaps. Edges (if any) are left NaN here and handled later by
+                # `_interpolate_nan_gaps` with the real config knobs.
+                filled, _ = _nan_interp_1d(vals, use_spline=use_spline)
+                kp_out[:, n, d] = filled
                 continue
 
             # NaN-aware median filter reference
@@ -274,18 +413,11 @@ def _medfilt_interpolate(
                     vals[spike_mask] = np.nan
                     total_spikes += n_spikes
 
-            kp_out[:, n, d] = _nan_interp_1d(vals, use_spline=use_spline)
-
-    # Fill any remaining NaN gaps: linear interp for internal gaps,
-    # nearest-neighbour for leading/trailing edges.
-    for n in range(N):
-        for d in range(3):
-            vals = kp_out[:, n, d]
-            nans = np.isnan(vals)
-            if np.any(nans) and np.any(~nans):
-                valid_idx = np.where(~nans)[0]
-                vals[nans] = np.interp(np.where(nans)[0], valid_idx, vals[valid_idx])
-                kp_out[:, n, d] = vals
+            # Interior-only fill; the subsequent `_interpolate_nan_gaps` pass in
+            # `filter_keypoints` applies bounded edge extrapolation using the
+            # real config-driven limits.
+            filled, _ = _nan_interp_1d(vals, use_spline=use_spline)
+            kp_out[:, n, d] = filled
 
     if total_spikes:
         print(f"  [medfilt+interp] detected {total_spikes} coordinate-spikes "
@@ -297,52 +429,396 @@ def _medfilt_interpolate(
     return kp_out
 
 
+def despike_isolated_spikes(
+    arr: np.ndarray,
+    threshold_factor: float = 10.0,
+    max_iterations: int = 1,
+    verbose: bool = False,
+) -> Tuple[np.ndarray, int]:
+    """Remove tracking glitches via velocity-reversal detection.
+
+    Each pass finds frames where the jump in is large, the jump out is
+    large, and the two jumps have opposite signs (immediate reversal).
+    Flagged frames are replaced with the average of their neighbours.
+
+    With ``max_iterations=1`` (default), only true single-frame spikes are
+    fixed — safe for signals with fast oscillations like male wing song.
+
+    With ``max_iterations>1``, multi-frame glitches are peeled from the
+    outside in: a 3-frame spike becomes a 2-frame spike after pass 1,
+    then a 1-frame spike after pass 2, fully fixed by pass 3.  Use higher
+    values only for signals where multi-frame tracking errors are expected
+    and real fast oscillations are absent (e.g. non-singing flies).
+
+    Works on arrays of any shape whose first axis is time:
+    ``(T,)``, ``(T, D)``, ``(T, N, 3)``, etc.
+
+    Parameters
+    ----------
+    arr : ndarray
+        Input array.  First axis is time.
+    threshold_factor : float
+        A frame is flagged when its inward *and* outward velocity both
+        exceed ``threshold_factor × median(|diff|)`` for that signal.
+    max_iterations : int
+        Number of passes.  1 = single-frame only (conservative, safe for
+        song).  Higher values peel multi-frame glitches layer by layer.
+    verbose : bool
+        Print a summary line to stdout.
+
+    Returns
+    -------
+    (cleaned, n_fixed) : tuple[ndarray, int]
+        *cleaned* has the same shape/dtype as *arr*.  *n_fixed* is the total
+        number of spike frames replaced across all signals.
+    """
+    if arr.ndim == 0 or arr.shape[0] < 3:
+        return arr.copy(), 0
+
+    T = arr.shape[0]
+    orig_shape = arr.shape
+    # Flatten to (T, C) so we can iterate columns
+    flat = arr.reshape(T, -1).astype(np.float64, copy=True)
+    C = flat.shape[1]
+    total_fixed = 0
+
+    for c in range(C):
+        x = flat[:, c]
+
+        # Compute threshold once from the original signal's velocity scale
+        v0 = np.diff(x)
+        abs_v0 = np.abs(v0)
+        finite = np.isfinite(abs_v0)
+        if finite.sum() < 3:
+            continue
+        med_v = float(np.median(abs_v0[finite]))
+        if med_v < 1e-12:
+            continue
+        thresh = threshold_factor * med_v
+
+        for _iteration in range(max_iterations):
+            v = np.diff(x)
+            abs_v = np.abs(v)
+
+            big = abs_v > thresh
+            big_in  = big[:-1]
+            big_out = big[1:]
+            reversal = (v[:-1] * v[1:]) < 0
+            spike = big_in & big_out & reversal
+
+            idx = np.nonzero(spike)[0] + 1
+            if idx.size == 0:
+                break
+
+            n_this = 0
+            for t in idx:
+                left, right = x[t - 1], x[t + 1]
+                if np.isfinite(left) and np.isfinite(right):
+                    x[t] = (left + right) / 2.0
+                    n_this += 1
+            total_fixed += n_this
+            if n_this == 0:
+                break
+
+    out = flat.reshape(orig_shape)
+    if verbose and total_fixed:
+        tag = "single-frame" if max_iterations == 1 else f"up to {max_iterations} passes"
+        print(f"  [isolated-spike] fixed {total_fixed} spike frames ({tag}, "
+              f">{threshold_factor}\u00d7 median velocity, with reversal)")
+    return out, total_fixed
+
+
+def repair_wing_tip_identity_swaps(
+    kp0: np.ndarray,
+    kp1: np.ndarray,
+    kp_names: Sequence[str],
+    wing_kps: Tuple[str, str] = ('WingL_V13', 'WingR_V13'),
+    threshold_mm: float = 0.10,
+    max_flicker_frames: int = 30,
+    max_iterations: int = 3,
+    verbose: bool = False,
+) -> Tuple[np.ndarray, np.ndarray, int]:
+    """Fix short-run wing-tip identity swaps between two tracked flies.
+
+    During close-contact courtship the JARVIS multi-animal tracker occasionally
+    assigns fly0's wing-tip to fly1 (or vice versa) for a short contiguous run
+    of frames ("flicker").  Per-fly despike can't remove this because each
+    fly's trajectory contains a real wing-tip position — just the wrong one.
+
+    Each wing is handled independently.  For every transition ``i`` (between
+    frames ``i`` and ``i+1``) we compare two hypotheses for this single wing:
+
+    * ``keep``  — the two tracks continue as-is
+    * ``swap``  — fly0's and fly1's wing identities switch at frame ``i+1``
+
+    Transitions where ``cost(keep) − cost(swap) > threshold_mm`` are marked
+    as flip events.  The per-transition cost is label-symmetric under a
+    global swap, so absolute parity can't be recovered from cost alone.
+    To avoid any global-parity ambiguity, we only act on **short** runs
+    between consecutive flip events: when two flip events at ``t_a < t_b``
+    are separated by ``t_b − t_a <= max_flicker_frames`` frames, the region
+    ``[t_a+1, t_b]`` is treated as a flicker and its wing identities are
+    exchanged.  Long regions are left untouched — if the tracker held a
+    state for hundreds of frames, we trust that state.
+
+    Only the two wing-tip keypoints are modified; all other keypoints pass
+    through unchanged.  ``max_iterations`` is retained for symmetry with
+    :func:`despike_isolated_spikes`; iterations exit early once no further
+    flips qualify.
+
+    Parameters
+    ----------
+    kp0, kp1 : ndarray, shape (T, N, 3)
+        Per-fly keypoints, aligned in time.
+    kp_names : sequence of str
+        Keypoint names; must contain both entries of ``wing_kps``.
+    wing_kps : (str, str)
+        Names of the left and right wing-tip keypoints to repair.
+    threshold_mm : float
+        Minimum cost reduction (in position units, typically mm) required
+        for a transition to count as a flip event.
+    max_flicker_frames : int
+        Maximum length (in frames) of a swapped run to repair.  Runs longer
+        than this are assumed to be persistent states and left alone.
+    max_iterations : int
+        Maximum repair passes.  Exits early once a pass produces no flips.
+    verbose : bool
+        Print a summary line.
+
+    Returns
+    -------
+    (kp0_out, kp1_out, n_frames_swapped) : tuple[ndarray, ndarray, int]
+        Repaired keypoint arrays and total number of frame-level wing
+        identity swaps applied across both wings and all iterations.
+    """
+    if kp0.shape != kp1.shape:
+        raise ValueError(
+            f"kp0/kp1 shape mismatch: {kp0.shape} vs {kp1.shape}")
+    if kp0.ndim != 3 or kp0.shape[-1] != 3:
+        raise ValueError(
+            f"expected (T, N, 3) arrays, got kp0.shape={kp0.shape}")
+    T = kp0.shape[0]
+    if T < 3:
+        return kp0.copy(), kp1.copy(), 0
+
+    try:
+        i_tips = [kp_names.index(n) for n in wing_kps]
+    except ValueError as e:
+        raise ValueError(
+            f"wing keypoints {wing_kps} not in kp_names") from e
+
+    out0 = kp0.astype(np.float64, copy=True)
+    out1 = kp1.astype(np.float64, copy=True)
+    total_swaps = 0
+
+    def _dist(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+        d = np.linalg.norm(a - b, axis=-1)
+        return np.where(np.isfinite(d), d, np.inf)
+
+    def _short_run_assignment(parity: np.ndarray) -> np.ndarray:
+        """True in every contiguous ``parity==True`` run of length
+        ``<= max_flicker_frames``; False elsewhere."""
+        assign = np.zeros(T, dtype=bool)
+        in_run = False
+        run_start = 0
+        for t in range(T):
+            if parity[t] and not in_run:
+                in_run = True
+                run_start = t
+            elif not parity[t] and in_run:
+                if t - run_start <= max_flicker_frames:
+                    assign[run_start:t] = True
+                in_run = False
+        if in_run and (T - run_start) <= max_flicker_frames:
+            assign[run_start:T] = True
+        return assign
+
+    def _assignment_for_wing(tip_idx: int) -> Tuple[np.ndarray, int]:
+        """Return (per-frame assignment bool, n_frames_swapped) for one wing."""
+        tip0 = out0[:, tip_idx]
+        tip1 = out1[:, tip_idx]
+        keep = _dist(tip0[1:], tip0[:-1]) + _dist(tip1[1:], tip1[:-1])
+        swap = _dist(tip1[1:], tip0[:-1]) + _dist(tip0[1:], tip1[:-1])
+        flip = (keep - swap) > threshold_mm
+        if not flip.any():
+            return np.zeros(T, dtype=bool), 0
+        # Absolute parity is unrecoverable from cost alone, so we evaluate
+        # both interpretations and take whichever places more short runs —
+        # i.e., covers more plausible flicker frames.  The short-run length
+        # cap ensures neither parity ever proposes flipping a long region.
+        parity0 = np.concatenate(([False], np.cumsum(flip) % 2 == 1))
+        assign0 = _short_run_assignment(parity0)
+        assign1 = _short_run_assignment(~parity0)
+        chosen = assign0 if assign0.sum() >= assign1.sum() else assign1
+        return chosen, int(chosen.sum())
+
+    for _it in range(max_iterations):
+        n_this = 0
+        for tip_idx in i_tips:
+            assign, n = _assignment_for_wing(tip_idx)
+            if n == 0:
+                continue
+            tmp = out0[assign, tip_idx].copy()
+            out0[assign, tip_idx] = out1[assign, tip_idx]
+            out1[assign, tip_idx] = tmp
+            n_this += n
+        if n_this == 0:
+            break
+        total_swaps += n_this
+
+    if verbose and total_swaps:
+        print(f"  [wing-tip swap repair] swapped {total_swaps} frame-wing "
+              f"identities (>{threshold_mm:.3f} mm per-transition gain, "
+              f"runs \u2264 {max_flicker_frames} frames, "
+              f"{'/'.join(wing_kps)})")
+    return out0.astype(kp0.dtype, copy=False), out1.astype(kp1.dtype, copy=False), total_swaps
+
+
+def medfilt_despike(
+    arr: np.ndarray,
+    kernel: int = 7,
+    threshold_factor: float = 10.0,
+    max_replace_frac: float = 0.10,
+    verbose: bool = False,
+) -> Tuple[np.ndarray, int]:
+    """Replace frames that deviate from a local median by more than a
+    velocity-based threshold.
+
+    Designed for non-singing flies where multi-frame tracking excursions
+    are common (keypoint drifts to wrong feature for several frames).
+    NOT safe for fast oscillatory signals like male wing song — the median
+    filter will flatten real wing beats.
+
+    Parameters
+    ----------
+    arr : ndarray
+        Input array, shape ``(T,)``, ``(T, D)``, or ``(T, N, 3)``.
+    kernel : int
+        Median filter kernel size (must be odd).
+    threshold_factor : float
+        A frame is replaced when ``|signal - medfilt| > threshold_factor
+        × median(|diff(signal)|)``.  Uses the same velocity scale as
+        :func:`despike_isolated_spikes`.
+    max_replace_frac : float
+        Safety cap: skip a signal column if more than this fraction of
+        frames would be replaced (avoids destroying good data).
+    verbose : bool
+        Print summary.
+
+    Returns
+    -------
+    (cleaned, n_fixed) : tuple[ndarray, int]
+    """
+    from scipy.signal import medfilt as _medfilt
+
+    if arr.ndim == 0 or arr.shape[0] < kernel:
+        return arr.copy(), 0
+
+    T = arr.shape[0]
+    orig_shape = arr.shape
+    flat = arr.reshape(T, -1).astype(np.float64, copy=True)
+    C = flat.shape[1]
+    total_fixed = 0
+
+    for c in range(C):
+        sig = flat[:, c]
+        med = _medfilt(sig, kernel_size=kernel)
+        dev = np.abs(sig - med)
+
+        v = np.abs(np.diff(sig))
+        vf = v[np.isfinite(v)]
+        if len(vf) < 5:
+            continue
+        med_v = float(np.median(vf))
+        if med_v < 1e-12:
+            continue
+        thresh = threshold_factor * med_v
+
+        bad = dev > thresh
+        n_bad = int(bad.sum())
+        if n_bad > 0 and n_bad < T * max_replace_frac:
+            sig[bad] = med[bad]
+            total_fixed += n_bad
+
+    out = flat.reshape(orig_shape)
+    if verbose and total_fixed:
+        print(f"  [medfilt-despike] replaced {total_fixed} frames "
+              f"(kernel={kernel}, >{threshold_factor}\u00d7 median velocity)")
+    return out, total_fixed
+
+
 def _interpolate_nan_gaps(
     kp_array: np.ndarray,
     use_spline: bool = True,
-) -> np.ndarray:
+    max_edge_extrap_frames: int = 0,
+    edge_fit_window: int = 5,
+) -> Tuple[np.ndarray, np.ndarray]:
     """
     Interpolate all NaN gaps in a (T, N, 3) keypoint array.
 
-    Per keypoint, per coordinate: spline-interpolate internal NaN gaps,
-    then linear-fill any remaining leading/trailing edge NaNs.
+    Per coordinate: PCHIP interpolate interior NaN gaps. Leading/trailing NaN
+    runs are filled by *bounded linear extrapolation* (up to
+    ``max_edge_extrap_frames`` frames of linear fit on the nearest
+    ``edge_fit_window`` valid points); any edge frames beyond that cap remain
+    NaN and are dropped downstream by pair_validity.
 
     Args:
-        kp_array:   (T, N, 3) — may contain NaN
-        use_spline: use cubic spline (True) or linear interpolation (False)
+        kp_array: (T, N, 3) — may contain NaN.
+        use_spline: cubic PCHIP (True) or linear (False) for interior gaps.
+        max_edge_extrap_frames: max frames of leading/trailing linear
+            extrapolation. 0 disables edge extrapolation entirely.
+        edge_fit_window: number of valid frames used to fit the edge linear
+            model.
+
+    Returns:
+        kp_out: (T, N, 3) filled array. May still contain NaN on frame-keypoints
+            whose edge NaN run exceeded ``max_edge_extrap_frames``.
+        edge_nan_mask: (T, N) bool — True for any (frame, keypoint) that was
+            originally in a leading/trailing NaN run on *any* of its three
+            coordinates, regardless of whether the frame was filled by
+            extrapolation. Used by
+            ``pair_validity.compute_single_fly_validity`` to mark phantom
+            frames as untrusted.
     """
     T, N, _ = kp_array.shape
-    # Reshape to (T, N*3) so we can iterate over columns without nested loops
+    # Reshape to (T, N*3) so we can iterate over columns without nested loops.
     kp_flat = kp_array.reshape(T, -1).copy()
+    phantom_flat = np.zeros(kp_flat.shape, dtype=bool)
     nan_counts = np.isnan(kp_flat).sum(axis=0)  # per-column NaN count
     total_filled = 0
 
-    # Only process columns that have NaNs
     cols_with_nans = np.where(nan_counts > 0)[0]
     for c in cols_with_nans:
         vals = kp_flat[:, c]
         n_nan_before = int(nan_counts[c])
 
-        # Primary interpolation (spline or linear)
-        kp_flat[:, c] = _nan_interp_1d(vals, use_spline=use_spline)
+        filled, phantom = _nan_interp_1d(
+            vals,
+            use_spline=use_spline,
+            max_edge_extrap=max_edge_extrap_frames,
+            edge_fit_window=edge_fit_window,
+        )
+        kp_flat[:, c] = filled
+        phantom_flat[:, c] = phantom
 
-        # Edge fill: nearest-neighbour for leading/trailing NaNs
-        vals = kp_flat[:, c]
-        nans = np.isnan(vals)
-        if np.any(nans) and np.any(~nans):
-            valid_idx = np.where(~nans)[0]
-            vals[nans] = np.interp(np.where(nans)[0], valid_idx, vals[valid_idx])
-            kp_flat[:, c] = vals
-
-        total_filled += n_nan_before - int(np.sum(np.isnan(kp_flat[:, c])))
+        total_filled += n_nan_before - int(np.sum(np.isnan(filled)))
 
     kp_out = kp_flat.reshape(T, N, 3)
+    # OR across x/y/z coords for each (T, N) — a frame-keypoint is "edge
+    # phantom" if any of its coordinates sat in an edge NaN run.
+    edge_nan_mask = np.any(phantom_flat.reshape(T, N, 3), axis=2)
+
+    n_edge_frames = int(np.any(edge_nan_mask, axis=1).sum())
     if total_filled > 0:
-        print(f"  [interpolation] filled {total_filled} NaN coordinate-values "
-              f"({'spline' if use_spline else 'linear'})")
+        msg = (f"  [interpolation] filled {total_filled} NaN coordinate-values "
+               f"({'spline' if use_spline else 'linear'}, "
+               f"edge_extrap≤{max_edge_extrap_frames})")
+        if n_edge_frames:
+            msg += f"; {n_edge_frames} frames flagged edge-phantom"
+        print(msg)
     else:
         print(f"  [interpolation] no NaN gaps to fill")
-    return kp_out
+    return kp_out, edge_nan_mask
 
 
 def _confidence_weighted_smooth(
@@ -640,17 +1116,30 @@ def filter_keypoints(
     fig_dir=None,
     bout_name: str = "bout",
     kp_names: Optional[List[str]] = None,
-) -> Tuple[np.ndarray, Dict]:
+) -> Tuple[np.ndarray, Dict, np.ndarray]:
     """
     Apply the full filtering pipeline to a (T, N, 3) keypoint array.
 
     Steps (each enabled/disabled via filter_cfg sub-keys):
       1. confidence masking           (filter_cfg.confidence.enabled)
       2. bone-length outliers         (filter_cfg.bone_length.enabled, default OFF)
+     2b. centroid-jump masking        (filter_cfg.centroid_jump.enabled, default OFF)
+     2c. isolated-spike removal       (filter_cfg.isolated_spike.enabled, default ON)
       3. medfilt spike detection      (filter_cfg.medfilt.enabled, default OFF)
       4. interpolate NaN gaps         (filter_cfg.interpolation.enabled)
       5. confidence-weighted smooth   (filter_cfg.confidence_smooth.enabled)
       6. savgol smoothing             (filter_cfg.savgol.enabled, default OFF)
+
+    The interpolation stage replaces the legacy constant-hold edge fill with
+    bounded linear extrapolation (controlled by
+    ``filter_cfg.interpolation.max_edge_extrap_frames`` and ``.edge_fit_window``)
+    and returns a ``(T, N)`` ``edge_nan_mask`` identifying frame-keypoints that
+    were originally in a leading/trailing NaN run. Downstream,
+    ``pair_validity.compute_single_fly_validity`` uses this mask to mark those
+    phantom frames as untrusted (``valid_fly = False``) even when they were
+    filled by extrapolation. Subsequent stages (``confidence_smooth``,
+    ``savgol``) already skip columns containing NaN, so any edge frames left
+    un-extrapolated propagate as NaN safely.
 
     Args:
         kp_array:       (T, N, 3)  raw keypoint positions (mm)
@@ -662,12 +1151,17 @@ def filter_keypoints(
         kp_names:       List of N keypoint names for plot axis labels.
 
     Returns:
-        kp_filtered: (T, N, 3) cleaned array
-        report:      per-step summary dict
+        kp_filtered:   (T, N, 3) cleaned array
+        report:        per-step summary dict
+        edge_nan_mask: (T, N) bool — True where a frame-keypoint was in a
+            leading/trailing NaN run in the input (phantom after any bounded
+            extrapolation). Passed to pair_validity for honest validity masks.
     """
     report: Dict = {}
     kp_raw = kp_array.astype(float)
     kp = kp_raw.copy()
+    T_raw, N_raw = kp_raw.shape[:2]
+    edge_nan_mask = np.zeros((T_raw, N_raw), dtype=bool)
     print("\n--- Keypoint Filtering ---")
 
     # Step 1: confidence masking — NaN out low-confidence frames
@@ -716,6 +1210,29 @@ def filter_keypoints(
         print(f"  [centroid jump] Flagged {cj_report['n_frames_flagged']} frames "
               f"(masked {n_masked} with window={win}) [computed on raw input]")
 
+    # Step 2c: isolated spike removal (velocity-reversal detector).
+    # With max_iterations=1 (default): single-frame only, safe for all signals.
+    # With max_iterations>1: peels multi-frame glitches from outside in.
+    if filter_cfg.get('isolated_spike', {}).get('enabled', True):
+        _iso_cfg = filter_cfg.get('isolated_spike', {})
+        _iso_thresh = _iso_cfg.get('threshold_factor', 10.0)
+        _iso_iters = _iso_cfg.get('max_iterations', 1)
+        kp, _n_iso = despike_isolated_spikes(
+            kp, threshold_factor=_iso_thresh, max_iterations=_iso_iters, verbose=True)
+        report['isolated_spikes'] = _n_iso
+
+    # Step 2d: median-filter despike (optional, default OFF).
+    # Catches multi-frame tracking excursions that lack a velocity reversal.
+    # NOT safe for fast oscillations (male wing song) — enable only for
+    # non-singing flies or when song analysis is not needed.
+    if filter_cfg.get('medfilt_despike', {}).get('enabled', False):
+        _mfd_cfg = filter_cfg.get('medfilt_despike', {})
+        _mfd_kernel = _mfd_cfg.get('kernel', 7)
+        _mfd_thresh = _mfd_cfg.get('threshold_factor', 10.0)
+        kp, _n_mfd = medfilt_despike(
+            kp, kernel=_mfd_kernel, threshold_factor=_mfd_thresh, verbose=True)
+        report['medfilt_despike'] = _n_mfd
+
     # Step 3: medfilt spike detection + spline interpolation (optional, default OFF)
     if filter_cfg.get('medfilt', {}).get('enabled', False):
         kernel = filter_cfg.medfilt.get('kernel', 5)
@@ -726,8 +1243,17 @@ def filter_keypoints(
 
     # Step 4: interpolate NaN gaps (from confidence masking and/or outlier steps)
     if filter_cfg.get('interpolation', {}).get('enabled', True):
-        use_spline = filter_cfg.interpolation.get('use_spline', True)
-        kp = _interpolate_nan_gaps(kp, use_spline=use_spline)
+        interp_cfg = filter_cfg.interpolation
+        use_spline = interp_cfg.get('use_spline', True)
+        max_edge_extrap = int(interp_cfg.get('max_edge_extrap_frames', 0))
+        edge_fit_window = int(interp_cfg.get('edge_fit_window', 5))
+        kp, edge_nan_mask = _interpolate_nan_gaps(
+            kp,
+            use_spline=use_spline,
+            max_edge_extrap_frames=max_edge_extrap,
+            edge_fit_window=edge_fit_window,
+        )
+        report['edge_nan_frames'] = int(np.any(edge_nan_mask, axis=1).sum())
 
     # Step 5: confidence-weighted smoothing — blend raw + smoothed by confidence
     if filter_cfg.get('confidence_smooth', {}).get('enabled', False) and confidence is not None:
@@ -754,7 +1280,7 @@ def filter_keypoints(
             print(f"  [filter viz] Warning: figure generation failed — {exc}")
             _traceback.print_exc()
 
-    return kp, report
+    return kp, report, edge_nan_mask
 
 
 def load_confidence_from_csv(
@@ -832,6 +1358,8 @@ def load_confidence_concatenated(
         columns found.
     """
     import pandas as pd
+    from pathlib import Path
+    from utils.fly_detection import build_compact_frame_map
 
     df = pd.read_csv(csv_path, header=[0, 1])
     df.columns = ['_'.join(col).strip() if isinstance(col, tuple) else col
@@ -847,11 +1375,21 @@ def load_confidence_concatenated(
     N = len(filtered_node_names)
     conf_bouts = []
 
+    tracking_info_path = Path(csv_path).parent / "tracking_info.json"
+    compact_map = build_compact_frame_map(tracking_info_path, n_frames_available)
+
     for bout in bouts:
-        # Mirror the same bounds check as load_concatenated_bouts
-        if bout['start_frame'] >= n_frames_available or bout['end_frame'] > n_frames_available:
-            continue
-        frame_idx = np.arange(bout['start_frame'], bout['end_frame'])
+        if compact_map is not None:
+            rows = [compact_map[f]
+                    for f in range(bout['start_frame'], bout['end_frame'] + 1)
+                    if f in compact_map]
+            if not rows:
+                continue
+            frame_idx = np.array(rows)
+        else:
+            if bout['start_frame'] >= n_frames_available or bout['end_frame'] >= n_frames_available:
+                continue
+            frame_idx = np.arange(bout['start_frame'], bout['end_frame'] + 1)
         bout_conf_raw = conf_data.iloc[frame_idx].values.astype(float)
         T_bout = len(frame_idx)
         bout_conf = np.ones((T_bout, N), dtype=float)

@@ -1,0 +1,15 @@
+# @package _global_.dataset
+
+defaults:
+  - preprocessing
+  - postprocessing
+
+name: free_running
+env_name: free_running
+version: Data_analysis
+train: True
+
+concat:
+  input_pattern: 'postprocessing/ik_output_${anatomy.name}_${dataset.name}.h5'
+  output_file: 'ik_output_combined_${anatomy.name}_${dataset.name}.h5'
+  enable_jax: True

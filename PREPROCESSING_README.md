@@ -22,7 +22,7 @@ This script preprocesses 3D keypoint data from CSV format into the correct forma
 python preprocess_keypoints_for_ik.py \
     --csv_path /path/to/data3D.csv \
     --skeleton_path data/fly50.json \
-    --xml_path assets/fruitfly_v1/fruitfly_v1_free.xml \
+    --xml_path models/fruitfly_v1/fruitfly_v1_free.xml \
     --output_dir /path/to/output \
     --bout_name my_bout \
     --frame_start 1000 \
@@ -34,7 +34,7 @@ python preprocess_keypoints_for_ik.py \
 python preprocess_keypoints_for_ik.py \
     --csv_path /path/to/data3D.csv \
     --skeleton_path data/fly50.json \
-    --xml_path assets/fruitfly_v1/fruitfly_v1_free.xml \
+    --xml_path models/fruitfly_v1/fruitfly_v1_free.xml \
     --output_dir /path/to/output \
     --bout_name my_bout_aligned \
     --frame_start 1000 \
@@ -50,7 +50,7 @@ python preprocess_keypoints_for_ik.py \
 ### Required
 - `--csv_path`: Path to CSV file with keypoint data (multi-level header)
 - `--skeleton_path`: Path to skeleton JSON (e.g., `data/fly50.json`)
-- `--xml_path`: Path to MuJoCo XML model (e.g., `assets/fruitfly_v1/fruitfly_v1_free.xml`)
+- `--xml_path`: Path to MuJoCo XML model (e.g., `models/fruitfly_v1/fruitfly_v1_free.xml`)
 - `--output_dir`: Directory to save preprocessed HDF5 files
 
 ### Optional
@@ -146,7 +146,7 @@ for start in 1000 2000 3000; do
     python preprocess_keypoints_for_ik.py \
         --csv_path data/data3D.csv \
         --skeleton_path data/fly50.json \
-        --xml_path assets/fruitfly_v1/fruitfly_v1_free.xml \
+        --xml_path models/fruitfly_v1/fruitfly_v1_free.xml \
         --output_dir output/bouts \
         --bout_name bout_${start} \
         --frame_start $start \
@@ -177,7 +177,5 @@ print(f'First 5 names: {data[\"kp_names\"][:5]}')
 
 ## Related Files
 
-- `utils/kp_viz.py`: Keypoint matching and reordering functions
 - `utils/optimized_floor_alignment.py`: Procrustes alignment (JAX/JIT)
 - `utils/io_dict_to_hdf5.py`: HDF5 I/O with nested dictionaries
-- `fix_stac_config.py`: Script to fix STAC config offsets (if needed)

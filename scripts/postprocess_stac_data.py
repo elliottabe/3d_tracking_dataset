@@ -7,7 +7,7 @@ Postprocess STAC output data:
 5. Save processed output
 
 Usage:
-    python postprocess_stac_data.py paths=workstation dataset=free_walking
+    python postprocess_stac_data.py paths=workstation dataset=free_running
     python postprocess_stac_data.py paths=hyak dataset=courtship
 """
 
@@ -90,12 +90,32 @@ def load_clip_lengths(data_path: Path, filename: str) -> tuple:
         fly_ids = list(data_dict['info']['fly_ids'])
         print(f"✓ Found fly_ids: {fly_ids}")
 
+    # Extract source_flies (which fly originally detected each bout)
+    source_flies = None
+    if 'info' in data_dict and 'source_flies' in data_dict['info']:
+        source_flies = list(data_dict['info']['source_flies'])
+        print(f"✓ Found source_flies: {source_flies}")
+
+    # Extract bucket (validity bucket per bout: fly0_only/fly1_only/both)
+    buckets = None
+    if 'info' in data_dict and 'bucket' in data_dict['info']:
+        buckets = list(data_dict['info']['bucket'])
+        print(f"✓ Found bucket tags: {buckets}")
+
+    # Extract original raw-video frame ranges per bout
+    start_frames = None
+    end_frames = None
+    if 'info' in data_dict and 'start_frames' in data_dict['info']:
+        start_frames = [int(x) for x in data_dict['info']['start_frames']]
+    if 'info' in data_dict and 'end_frames' in data_dict['info']:
+        end_frames = [int(x) for x in data_dict['info']['end_frames']]
+
     print(f"✓ Found {len(clip_lengths)} bouts")
     print(f"  Clip lengths: {clip_lengths}")
     print(f"  Total frames: {sum(clip_lengths)}")
     print()
 
-    return clip_lengths, fly_ids
+    return clip_lengths, fly_ids, source_flies, buckets, start_frames, end_frames
 
 
 def load_stac_output(stac_path: Path):
@@ -644,7 +664,7 @@ def main(cfg: DictConfig):
     print()
     
     # Step 1: Load clip lengths and fly_ids
-    clip_lengths, fly_ids = load_clip_lengths(data_path, cfg.postprocessing.preprocessed_file)
+    clip_lengths, fly_ids, source_flies, buckets, start_frames, end_frames = load_clip_lengths(data_path, cfg.postprocessing.preprocessed_file)
     
     # Step 2: Load STAC output
     cfg_d, d, stac_data = load_stac_output(stac_path)
@@ -662,6 +682,14 @@ def main(cfg: DictConfig):
     # Inject fly_ids from preprocessing (STAC solver doesn't preserve them)
     if fly_ids is not None:
         bout_dict['info']['fly_ids'] = fly_ids
+    if source_flies is not None:
+        bout_dict['info']['source_flies'] = source_flies
+    if buckets is not None:
+        bout_dict['info']['bucket'] = buckets
+    if start_frames is not None:
+        bout_dict['info']['start_frames'] = start_frames
+    if end_frames is not None:
+        bout_dict['info']['end_frames'] = end_frames
 
     # if cfg.postprocessing.verbose:
     #     print()

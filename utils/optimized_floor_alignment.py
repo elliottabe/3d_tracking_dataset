@@ -207,8 +207,17 @@ def vectorized_procrustes_alignment(kp_clip, ref_pose, allow_scaling=True, use_c
         align_func = lambda pts: jit_procrustes_no_scaling(pts, ref_pose, exclude_indices, preserve_translation)
 
     if use_clip_average:
-        # Compute average pose across all frames
-        avg_pose = jnp.mean(kp_clip, axis=0)  # (N, 3)
+        # Compute average pose across all frames using NaN-aware mean so that a
+        # handful of untracked frames (common when one fly briefly leaves the
+        # arena) don't poison the whole clip's alignment. If a keypoint is
+        # untracked across the *entire* clip (nanmean still NaN), substitute
+        # the reference pose for that keypoint so Procrustes has a finite
+        # input — alignment is only computed from the surviving keypoints
+        # anyway. Without this substitution, a single NaN entry propagates
+        # through points_scale and triggers the silent `scale=1.0` fallback
+        # on line 54, leaving the bout unscaled in raw-world coordinates.
+        avg_pose = jnp.nanmean(kp_clip, axis=0)  # (N, 3)
+        avg_pose = jnp.where(jnp.isnan(avg_pose), ref_pose, avg_pose)
 
         # Perform Procrustes alignment on the average pose
         _, R, scale, translation = align_func(avg_pose)
@@ -503,7 +512,7 @@ def batch_process_with_ground_contact(bout_dict, ref_pose,
     Optimized batch processing with ground contact alignment.
 
     Args:
-        bout_dict: Dictionary of walking bout data
+        bout_dict: Dictionary of running bout data
         ref_pose: Reference pose for Procrustes alignment
         end_eff_indices: End effector indices
         percentile: Percentile for ground point selection
@@ -527,7 +536,7 @@ def batch_process_with_ground_contact(bout_dict, ref_pose,
     if max_clips is not None:
         bout_keys = bout_keys[:max_clips]
 
-    print(f"Processing {len(bout_keys)} walking bouts with ground contact alignment...")
+    print(f"Processing {len(bout_keys)} running bouts with ground contact alignment...")
     print("✅ Starting batch processing with optimized ground contact alignment...")
 
     # Process clips

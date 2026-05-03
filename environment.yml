@@ -1,40 +1,32 @@
-name: 3d_tracking
+# Minimal conda environment for the 3D tracking pipeline.
+#
+# This file provides ONLY:
+#   - Python 3.12
+#   - uv (so it's available immediately after `conda activate`)
+#   - System libraries that are easier to install via conda than apt/pip:
+#       ffmpeg (video IO), GLEW + Mesa + GLFW (headless OpenGL for MuJoCo)
+#
+# All Python dependencies are managed by uv via pyproject.toml + uv.lock.
+#
+# Recommended install:
+#   conda env create -f environment.yml
+#   conda activate fly-3d-tracking
+#   uv sync --active --extra cuda12 --extra dev
+#
+# `--active` tells uv to install into the conda env rather than create a
+# separate .venv/. The `cuda12` extra pulls JAX with CUDA 12 wheels;
+# `dev` adds pytest, ruff, jupyterlab, nbstripout.
+name: fly-3d-tracking
 channels:
-  - rapidsai
   - conda-forge
-  - menpo
 dependencies:
   - python=3.12
-  - numpy=2.2.6
-  - matplotlib
-  - pandas
-  - pip
-  - black
+  - uv
+  - ffmpeg
   - glew
   - mesalib
   - mesa-libgl-cos6-x86_64
   - glfw3
-  - ipykernel
-  - ffmpeg
-  - rapids=25.12
-  - cuda-version>=12.2,<=12.9
-  - scikit-learn
-  - jax
-  - pip
-  - pip:
-      - hydra-core
-      - h5py
-      - natsort
-      - nvidia-ml-py3
-      - tqdm
-      - psutil
-      - mediapy
-      - imageio[ffmpeg]
-      - ray[core]
-      - mujoco
-      - mujoco-mjx
-      - ipywidgets
-      - uv
-variables:             # Set MuJoCo environment variables
+variables:
   MUJOCO_GL: egl
   PYOPENGL_PLATFORM: egl

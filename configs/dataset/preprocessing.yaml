@@ -1,7 +1,7 @@
 # @package _global_.preprocessing
 
 # Preprocessing configuration for keypoint data
-# Usage: python preprocess_keypoints_for_ik.py paths=workstation dataset=free_walking anatomy=v1
+# Usage: python preprocess_keypoints_for_ik.py paths=workstation dataset=free_running anatomy=v1
 
 # Input/output paths (relative to dataset path or absolute)
 csv_path: 'data3D.csv'
@@ -54,6 +54,17 @@ filtering:
     swap_ratio: 0.7             # Swap if cost_swapped < cost_current * swap_ratio
     require_min_displacement: 0.0  # Only run swap test if max obs jump >= this
 
+  isolated_spike:
+    enabled: true               # safe for all keypoints including fast wing motion
+    threshold_factor: 10.0      # × median |frame-to-frame velocity|; only catches
+                                # single-frame glitches that immediately reverse
+    max_iterations: 1           # 1 = single-frame only; >1 peels multi-frame glitches
+
+  medfilt_despike:
+    enabled: false              # OFF by default — NOT safe for fast wing oscillations
+    kernel: 7                   # median filter kernel (must be odd)
+    threshold_factor: 10.0      # replace frames where |signal - median| > N × median velocity
+
   medfilt:
     enabled: false              # OFF by default — can flag real fast motion
     kernel: 5
@@ -63,6 +74,15 @@ filtering:
   interpolation:
     enabled: true
     use_spline: true
+    # Bounded edge extrapolation to avoid the old constant-hold flat tails.
+    # When a bout has leading/trailing NaN runs (e.g. poorly-tracked frames at
+    # the ends), we fit a line to the nearest `edge_fit_window` valid points
+    # and extrapolate up to `max_edge_extrap_frames` into the edge run. Any
+    # frames beyond the cap stay NaN and are dropped by pair_validity. Set
+    # max_edge_extrap_frames=0 to disable extrapolation entirely (edges stay
+    # NaN and are invalidated).
+    max_edge_extrap_frames: 5
+    edge_fit_window: 5
 
   confidence_smooth:
     enabled: false              # OFF by default — attenuates real high-freq features (e.g. sine song)
@@ -77,3 +97,48 @@ filtering:
     polyorder: 3
 
   save_figures: true  # Save diagnostic plots to output_dir/filter_figures/
+
+# Per-frame validity for paired dual-fly bouts (courtship).
+# When enabled, process_bouts_batch adds `valid_fly0`, `valid_fly1`,
+# `valid_both`, and `pair_state` arrays to each bout so downstream code can
+# separate frames where only one fly is tracked well from frames where both
+# are tracked. Requires filtering.identity_relink to run for the swap mask.
+pair_validity:
+  enabled: false              # Enable in dataset overrides (e.g. courtship)
+  # fly50 skeleton uses names like T1L_TaT1/T1L_TaT3/T1L_TaTip (tarsal
+  # segments + tip) and Scutellum for the thorax. The old '*Tarsus*'/'*Claw*'
+  # patterns matched nothing on this skeleton, so every frame passed the
+  # ground fallback and failed the critical filter on any Scutellum NaN.
+  critical_kp_patterns: ['*_TaT1', '*_TaT3', '*_TaTip', 'Scutellum']
+  ground_kp_patterns:   ['*_TaTip', '*_TaT3']
+  ground_epsilon_mm: 0.05
+  floor_percentile: 5.0
+  swap_guard_frames: 5
+  min_paired_frames: 30
+  min_solo_frames: 30
+  # Identity-collapse detector. When > 0, frames where the two flies'
+  # `colocation_centroid_kp` positions are closer than this threshold are
+  # marked invalid for BOTH flies (neither track can be trusted when they
+  # snap onto the same physical animal). 0 disables the check. For
+  # Drosophila courtship, ~1.0 mm (half a body length) is a reasonable
+  # floor — override in the dataset config.
+  min_pair_separation_mm: 0.0
+  colocation_centroid_kp: Scutellum
+
+# Per-sex aggressive cleaning (runs in batch_split_valid_bouts.py after
+# identity relink, before pair_validity and bucket splitting).
+# Requires both per-fly h5s — only applies to shared (paired) bouts.
+sex_cleaning:
+  enabled: false              # Enable in dataset overrides (e.g. courtship)
+  # Female fly gets aggressive denoising (safe since she's not singing)
+  female:
+    despike_iterations: 6     # Multi-pass velocity-reversal peeling
+    medfilt_despike:
+      enabled: true
+      kernel: 7
+      threshold_factor: 10.0
+  # Male fly keeps conservative settings (preserves song oscillations)
+  male:
+    despike_iterations: 1     # Single-frame only (already ran in preprocessing)
+    medfilt_despike:
+      enabled: false

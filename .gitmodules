@@ -2,3 +2,7 @@
 	path = stac-mjx
 	url = git@github.com:elliottabe/stac-mjx.git
 	branch = elliottabe/analysis_test
+[submodule "third_party/JARVIS-HybridNet"]
+	path = third_party/JARVIS-HybridNet
+	url = https://github.com/elliottabe/JARVIS-HybridNet.git
+	branch = elliottabe/multianimal-publication

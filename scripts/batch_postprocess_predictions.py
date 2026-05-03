@@ -23,11 +23,12 @@ Usage:
     python scripts/batch_postprocess_predictions.py --dataset courtship
 """
 
-import sys
-import subprocess
-from pathlib import Path
-from datetime import datetime
 import argparse
+import os
+import subprocess
+import sys
+from datetime import datetime
+from pathlib import Path
 
 
 def find_prediction_folders(base_dir: Path) -> list:
@@ -41,7 +42,9 @@ def find_prediction_folders(base_dir: Path) -> list:
         List of Path objects for prediction folders, sorted by name
     """
     pattern = "Predictions_3D_*"
-    folders = sorted(base_dir.glob(pattern))
+    if base_dir.is_dir() and base_dir.match(pattern):
+        return [base_dir]
+    folders = sorted(base_dir.rglob(pattern))
     folders = [f for f in folders if f.is_dir()]
     return folders
 
@@ -61,7 +64,17 @@ def find_stac_outputs(folder: Path, anatomy: str, dataset: str) -> list[dict]:
     stac_dir = folder / "stac"
     items = []
 
-    # Check for fly-suffixed STAC outputs first
+    # Check for merged-flies STAC output first (single file containing all flies)
+    merged_file = stac_dir / f"Fruitfly_ik_{anatomy}_{dataset}_merged.h5"
+    if merged_file.exists():
+        items.append({
+            'fly_suffix': '_merged',
+            'fly_label': 'merged',
+            'stac_path': merged_file,
+        })
+        return items
+
+    # Check for fly-suffixed STAC outputs (legacy per-fly STAC runs)
     fly_files = sorted(stac_dir.glob(f"Fruitfly_ik_{anatomy}_{dataset}_fly*.h5"))
     if fly_files:
         for fp in fly_files:
@@ -201,9 +214,9 @@ def main():
     parser.add_argument(
         '--dataset',
         type=str,
-        default='free_walking',
-        choices=['free_walking', 'courtship'],
-        help='Dataset type (default: free_walking)'
+        default='free_running',
+        choices=['free_running', 'courtship'],
+        help='Dataset type (default: free_running)'
     )
     parser.add_argument(
         '--base-dir',
@@ -243,7 +256,12 @@ def main():
     args = parser.parse_args()
 
     if args.base_dir is None:
-        args.base_dir = f'/data2/users/eabe/datasets/Johnson_lab/{args.dataset}'
+        data_root = os.environ.get("FLY3D_DATA_ROOT")
+        if not data_root:
+            parser.error(
+                "--base-dir not given and FLY3D_DATA_ROOT is unset. Pass one of them."
+            )
+        args.base_dir = f"{data_root}/{args.dataset}"
 
     # Setup logging
     if args.log_file:

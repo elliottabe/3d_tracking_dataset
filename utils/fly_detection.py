@@ -5,10 +5,49 @@ Detects whether a Predictions_3D folder contains single-fly or dual-fly data
 based on the presence of fly-suffixed CSV files.
 """
 
+import json
 from pathlib import Path
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
 
+import h5py
+import numpy as np
 import pandas as pd
+
+
+_POPCOUNT = np.array([bin(i).count('1') for i in range(256)], dtype=np.uint32)
+
+# Keypoints used to derive body heading from per-bout 3D CSVs.
+_HEADING_ANTERIOR_KP = 'Antenna_Base'
+_HEADING_POSTERIOR_KP = 'Scutellum'
+
+
+def build_compact_frame_map(tracking_info_path: Path,
+                            n_csv_rows: int) -> Optional[Dict[int, int]]:
+    """If the CSV is compact (bouts-mode JARVIS output), build a mapping from
+    original video frame number -> compact CSV row index.
+
+    Returns None if the CSV is sparse (legacy full-video output).
+    Detection: if tracking_info.json exists, has a 'bouts' array, and the sum
+    of bout lengths matches n_csv_rows, the CSV is compact.
+    """
+    if not tracking_info_path.exists():
+        return None
+    import json
+    with open(tracking_info_path) as f:
+        info = json.load(f)
+    bouts = info.get('bouts')
+    if not bouts:
+        return None
+    compact_total = sum(b['end'] - b['start'] + 1 for b in bouts)
+    if compact_total != n_csv_rows:
+        return None
+    frame_map: Dict[int, int] = {}
+    row = 0
+    for b in bouts:
+        for frame in range(b['start'], b['end'] + 1):
+            frame_map[frame] = row
+            row += 1
+    return frame_map
 
 
 def build_unified_bouts_csv(folder: Path, dataset: str,
@@ -44,6 +83,8 @@ def build_unified_bouts_csv(folder: Path, dataset: str,
 
     df0 = pd.read_csv(fly0_csv)
     df1 = pd.read_csv(fly1_csv)
+    df0["source_fly"] = "fly0"
+    df1["source_fly"] = "fly1"
     df = pd.concat([df0, df1], ignore_index=True)
 
     # Strip _fly0 / _fly1 suffix from fly_id (session-level only)
@@ -51,12 +92,587 @@ def build_unified_bouts_csv(folder: Path, dataset: str,
         df["fly_id"] = df["fly_id"].astype(str).str.replace(r"_fly\d+$", "",
                                                               regex=True)
 
-    df = df.drop_duplicates(subset=["fly_id", "start_frame", "end_frame"])
-    df = df.sort_values(["fly_id", "start_frame"]).reset_index(drop=True)
+    df = df.drop_duplicates(
+        subset=["fly_id", "source_fly", "start_frame", "end_frame"]
+    )
+    df = df.sort_values(["fly_id", "source_fly", "start_frame"]).reset_index(drop=True)
     df["bout_idx"] = range(1, len(df) + 1)
 
     df.to_csv(out_csv, index=False)
     return out_csv
+
+
+def _decide_sex_swap(npz_path: Path,
+                     min_ratio: float = 1.05) -> Tuple[bool, float, float]:
+    """
+    Decide whether to swap fly0<->fly1 so fly0 becomes the male (smaller).
+
+    Reads ``sam3_masks.npz`` (keys ``packed`` shape [A, C, F, H, W_pack]
+    uint8, bit-packed masks) and computes per-fly mask-pixel area on an
+    every-10th-frame subsample via a popcount lookup. Female D. melanogaster
+    are ~15-20% larger; swap if fly0 is larger by at least ``min_ratio``.
+
+    Returns (swap, area0, area1). If the NPZ is missing or both areas are
+    within ``min_ratio`` of each other, returns (False, …).
+    """
+    if not npz_path.exists():
+        return False, 0.0, 0.0
+    with np.load(npz_path) as d:
+        if 'packed' not in d:
+            return False, 0.0, 0.0
+        packed = d['packed']  # (A, C, F, H, W_pack)
+    if packed.shape[0] < 2:
+        return False, 0.0, 0.0
+    F = packed.shape[2]
+    step = max(1, F // 50)
+    subset = packed[:, :, ::step]  # (A, C, F_sub, H, W_pack)
+    # popcount per byte then sum
+    pop = _POPCOUNT[subset]
+    area0 = float(pop[0].sum())
+    area1 = float(pop[1].sum())
+    denom = min(area0, area1)
+    if denom <= 0:
+        return False, area0, area1
+    ratio = max(area0, area1) / denom
+    swap = (area0 > area1) and (ratio >= min_ratio)
+    return swap, area0, area1
+
+
+def _find_unified_bouts_csv(folder: Path, dataset: str) -> Optional[Path]:
+    """Walk up parent dirs to find <dataset>_bouts_unified_summary.csv."""
+    target = f"{dataset}_bouts_unified_summary.csv"
+    for candidate in [folder, *folder.parents]:
+        p = candidate / target
+        if p.exists():
+            return p
+    return None
+
+
+def _load_projection_matrices(folder: Path) -> Optional[np.ndarray]:
+    """Walk up from folder looking for a calibration/ dir with Cam*.yaml,
+    read each file's ``projectionMatrix`` (3x4) via cv2 FileStorage, and
+    return a stacked (C, 3, 4) array ordered by camera-name sort.
+
+    Returns None if no usable calibration dir is found.
+    """
+    import cv2  # lazy — only needed when per-bout layout is materialized
+    for candidate in [folder, *folder.parents]:
+        calib_dir = candidate / 'calibration'
+        if not calib_dir.is_dir():
+            continue
+        yaml_files = sorted(calib_dir.glob('Cam*.yaml'))
+        if len(yaml_files) < 2:
+            continue
+        mats = []
+        for p in yaml_files:
+            fs = cv2.FileStorage(str(p), cv2.FILE_STORAGE_READ)
+            node = fs.getNode('projectionMatrix')
+            if node.empty():
+                fs.release()
+                return None
+            mats.append(np.asarray(node.mat(), dtype=np.float64))
+            fs.release()
+        return np.stack(mats, axis=0)
+    return None
+
+
+def _triangulate_dlt(pts_xy: np.ndarray,
+                     P: np.ndarray) -> np.ndarray:
+    """DLT triangulate one 3D point from N 2D observations.
+
+    ``pts_xy`` is (N, 2); ``P`` is (N, 3, 4) projection matrices for the same
+    N cameras. Returns (3,) in the calibration's world frame (mm for this
+    setup). Assumes N >= 2. Uses SVD on the 2N x 4 constraint stack.
+    """
+    u = pts_xy[:, 0]
+    v = pts_xy[:, 1]
+    A = np.empty((2 * len(pts_xy), 4), dtype=np.float64)
+    A[0::2] = u[:, None] * P[:, 2, :] - P[:, 0, :]
+    A[1::2] = v[:, None] * P[:, 2, :] - P[:, 1, :]
+    _, _, vh = np.linalg.svd(A)
+    X = vh[-1]
+    return (X[:3] / X[3]).astype(np.float32)
+
+
+def _triangulate_sam_com_per_bout(bout_dir: Path,
+                                   P_all: np.ndarray) -> Optional[np.ndarray]:
+    """Triangulate per-frame, per-fly 3D body CoM from the bout's SAM masks.
+
+    ``P_all`` is a (C, 3, 4) projection-matrix stack matching the NPZ's
+    camera axis order. Returns (A, F, 3) float mm-array, NaN where <2
+    cameras have a valid mask centroid at that frame. Returns None if the
+    NPZ is missing or its camera axis length disagrees with the calibration.
+    """
+    npz = bout_dir / 'sam3_masks.npz'
+    if not npz.exists():
+        return None
+    with np.load(str(npz)) as d:
+        if 'centroids' not in d or 'valid' not in d:
+            return None
+        centroids = np.asarray(d['centroids'], dtype=np.float64)
+        valid = np.asarray(d['valid'], dtype=bool)
+    A, C, F = valid.shape[:3]
+    if C != P_all.shape[0]:
+        return None
+
+    coms = np.full((A, F, 3), np.nan, dtype=np.float32)
+    for a in range(A):
+        for f in range(F):
+            ok_cams = np.where(valid[a, :, f])[0]
+            if ok_cams.size < 2:
+                continue
+            coms[a, f] = _triangulate_dlt(centroids[a, ok_cams, f],
+                                           P_all[ok_cams])
+    return coms
+
+
+def _inject_scutellum_from_sam_com(df: pd.DataFrame,
+                                    coms_fly: np.ndarray,
+                                    *,
+                                    conf_low: float = 0.3,
+                                    conf_high: float = 0.8,
+                                    min_anchor_frames: int = 30,
+                                    ) -> Tuple[int, int]:
+    """Replace Scutellum xyz with SAM-CoM + rigid offset on low-conf frames.
+
+    The rigid offset is the per-bout median of ``Scutellum_KP - SAM_CoM`` over
+    frames where Scutellum confidence >= conf_high and both are finite. On fill
+    frames, Scutellum xyz <- SAM_CoM + offset and Scutellum confidence <- 1.0.
+
+    If fewer than min_anchor_frames anchor frames exist, the injection is
+    skipped for this fly.
+
+    Mutates df. Returns (n_anchor_frames, n_filled_frames).
+    """
+    cols = {
+        'x': ('Scutellum', 'x'),
+        'y': ('Scutellum', 'y'),
+        'z': ('Scutellum', 'z'),
+        'c': ('Scutellum', 'confidence'),
+    }
+    for v in cols.values():
+        if v not in df.columns:
+            return (0, 0)
+    F = len(df)
+    if coms_fly.shape[0] != F or coms_fly.shape[1] != 3:
+        return (0, 0)
+
+    sx = df[cols['x']].to_numpy(np.float32)
+    sy = df[cols['y']].to_numpy(np.float32)
+    sz = df[cols['z']].to_numpy(np.float32)
+    sc = df[cols['c']].to_numpy(np.float32)
+
+    com_finite = np.isfinite(coms_fly).all(-1)
+    anchor = (
+        (sc >= conf_high) & com_finite
+        & np.isfinite(sx) & np.isfinite(sy) & np.isfinite(sz)
+    )
+    n_anchor = int(anchor.sum())
+    if n_anchor < min_anchor_frames:
+        return (n_anchor, 0)
+
+    offset = np.array([
+        float(np.median(sx[anchor] - coms_fly[anchor, 0])),
+        float(np.median(sy[anchor] - coms_fly[anchor, 1])),
+        float(np.median(sz[anchor] - coms_fly[anchor, 2])),
+    ], dtype=np.float32)
+
+    fill = (sc < conf_low) & com_finite
+    n_fill = int(fill.sum())
+    if n_fill == 0:
+        return (n_anchor, 0)
+
+    sx[fill] = coms_fly[fill, 0] + offset[0]
+    sy[fill] = coms_fly[fill, 1] + offset[1]
+    sz[fill] = coms_fly[fill, 2] + offset[2]
+    sc[fill] = 1.0
+
+    df[cols['x']] = sx
+    df[cols['y']] = sy
+    df[cols['z']] = sz
+    df[cols['c']] = sc
+    return (n_anchor, n_fill)
+
+
+def _synthesize_unified_from_bouts(folder: Path,
+                                   bout_dirs: List[Path]) -> pd.DataFrame:
+    """Build a unified bouts DataFrame from the per-bout CSV frame columns.
+
+    Used for new-format folders that have bout_*/fly{0,1}.csv but no
+    pre-existing <dataset>_bouts_unified_summary.csv. The fly_id is derived
+    from folder path components (``<SessionX>/<timestamp>``), matching the
+    convention used by build_unified_bouts_csv. source_fly is always 'both'
+    since every bout dir carries both fly0 and fly1 CSVs.
+    """
+    fly_id = f"{folder.parent.parent.name}/{folder.parent.name}"
+    rows = []
+    for i, bout_dir in enumerate(bout_dirs, start=1):
+        probe = pd.read_csv(bout_dir / "fly0.csv", header=[0, 1])
+        frame_col = [c for c in probe.columns if c[0] == 'frame']
+        if not frame_col:
+            raise ValueError(
+                f"No 'frame' column found in {bout_dir}/fly0.csv — cannot "
+                f"synthesize bouts summary for new-format folder {folder}."
+            )
+        frames = probe[frame_col[0]].values
+        rows.append({
+            'fly_id': fly_id,
+            'bout_idx': i,
+            'start_frame': int(frames.min()),
+            'end_frame': int(frames.max()),
+            'source_fly': 'both',
+        })
+    return pd.DataFrame(rows,
+                        columns=['fly_id', 'bout_idx', 'start_frame',
+                                 'end_frame', 'source_fly'])
+
+
+def _concat_per_bout_csvs(bout_csvs: List[Path]) -> pd.DataFrame:
+    """
+    Read bout_*/flyX.csv (per-bout compact CSVs with 2-row MultiIndex header)
+    and concatenate in bout order.
+
+    - Drops the `frame` column (pipeline uses tracking_info.json for bout
+      windows, keyed on start/end in the per-fly summary).
+    - Renames the row-1 label `conf` -> `confidence` so
+      `load_confidence_from_csv` picks up `<kp>_confidence` after MultiIndex
+      flatten.
+    """
+    frames = []
+    for p in bout_csvs:
+        df = pd.read_csv(p, header=[0, 1])
+        # Drop frame column (level-0 label is 'frame', level-1 also 'frame')
+        drop_cols = [c for c in df.columns if c[0] == 'frame']
+        df = df.drop(columns=drop_cols)
+        # Rename level-1 'conf' -> 'confidence'
+        df.columns = pd.MultiIndex.from_tuples(
+            [(lvl0, 'confidence' if lvl1 == 'conf' else lvl1)
+             for lvl0, lvl1 in df.columns]
+        )
+        frames.append(df)
+    return pd.concat(frames, ignore_index=True)
+
+
+def _extract_xyz_from_df(df: pd.DataFrame, kp: str) -> np.ndarray:
+    """Return [F, 3] float32 xyz for one keypoint from a 2-row MultiIndex CSV DataFrame."""
+    return np.stack([
+        df[(kp, 'x')].values.astype(np.float32),
+        df[(kp, 'y')].values.astype(np.float32),
+        df[(kp, 'z')].values.astype(np.float32),
+    ], axis=-1)
+
+
+def _compute_heading(df: pd.DataFrame,
+                     anterior: str = _HEADING_ANTERIOR_KP,
+                     posterior: str = _HEADING_POSTERIOR_KP,
+                     ) -> Tuple[np.ndarray, np.ndarray]:
+    """Compute per-frame xy-plane heading and centroid for one fly.
+
+    heading [F, 3]: unit vector (anterior - posterior) with z zeroed.
+                     Zero vector where the xy-norm is numerically zero.
+    centroid [F, 3]: 3D position of the posterior keypoint (thorax anchor).
+    """
+    ant = _extract_xyz_from_df(df, anterior)
+    post = _extract_xyz_from_df(df, posterior)
+    vec = ant - post
+    vec[..., 2] = 0.0
+    norms = np.linalg.norm(vec, axis=-1, keepdims=True)
+    safe = np.where(norms > 1e-6, norms, 1.0)
+    heading = np.where(norms > 1e-6, vec / safe, 0.0).astype(np.float32)
+    return heading, post
+
+
+def _signed_xy_angle(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """Signed angle (rad) in the xy-plane from `a` to `b`, both [F, 3] unit vectors."""
+    dot = (a * b).sum(axis=-1)
+    cross_z = a[..., 0] * b[..., 1] - a[..., 1] * b[..., 0]
+    return np.arctan2(cross_z, dot).astype(np.float32)
+
+
+def _write_sam3_aligned_h5(
+    out_path: Path,
+    bout_dirs: List[Path],
+    sex_swaps: List[bool],
+    bouts_info: List[Dict],
+    male_headings: List[np.ndarray],
+    female_headings: List[np.ndarray],
+    male_centroids: List[np.ndarray],
+    female_centroids: List[np.ndarray],
+) -> None:
+    """Stream-write a per-folder sam3_aligned.h5 containing masks + derived arrays.
+
+    After applying the per-bout sex swap, ``[A=0] = male`` and ``[A=1] = female``.
+    Masks / centroids / valid flags are concatenated along the frame axis in
+    bout order; per-bout row boundaries are stored in ``/bout_boundaries`` so
+    downstream code can recover bout ranges without re-reading the NPZs.
+
+    Derived arrays under ``/derived/`` are aligned frame-for-frame with the
+    concatenated masks.
+    """
+    all_male_h = np.concatenate(male_headings, axis=0)
+    all_female_h = np.concatenate(female_headings, axis=0)
+    all_male_c = np.concatenate(male_centroids, axis=0)
+    all_female_c = np.concatenate(female_centroids, axis=0)
+
+    centroid_vec = (all_female_c - all_male_c).astype(np.float32)
+    cv_xy = centroid_vec.copy()
+    cv_xy[..., 2] = 0.0
+    cv_norm = np.linalg.norm(cv_xy, axis=-1, keepdims=True)
+    cv_safe = np.where(cv_norm > 1e-6, cv_norm, 1.0)
+    cv_unit = np.where(cv_norm > 1e-6, cv_xy / cv_safe, 0.0).astype(np.float32)
+    relative_angle = _signed_xy_angle(all_male_h, cv_unit)
+
+    row_offset = 0
+    row_starts: List[int] = []
+    row_ends: List[int] = []
+
+    with h5py.File(out_path, 'w') as f:
+        mask_ds = cent_ds = valid_ds = None
+
+        for bout_dir, swap in zip(bout_dirs, sex_swaps):
+            with np.load(bout_dir / "sam3_masks.npz") as d:
+                packed = np.asarray(d['packed'])
+                centroids = np.asarray(d['centroids'])
+                valid = np.asarray(d['valid'])
+                shape_arr = np.asarray(d['shape']) if 'shape' in d else None
+
+            if swap:
+                packed = np.ascontiguousarray(packed[::-1])
+                centroids = np.ascontiguousarray(centroids[::-1])
+                valid = np.ascontiguousarray(valid[::-1])
+
+            A, C, F, H, W_pack = packed.shape
+
+            if mask_ds is None:
+                mask_ds = f.create_dataset(
+                    'mask_packed', shape=(A, C, 0, H, W_pack),
+                    maxshape=(A, C, None, H, W_pack),
+                    dtype='uint8', compression='gzip', compression_opts=4,
+                    chunks=(A, C, max(1, min(64, F)), H, W_pack),
+                )
+                cent_ds = f.create_dataset(
+                    'centroids', shape=(A, C, 0, 2),
+                    maxshape=(A, C, None, 2), dtype='float32',
+                )
+                valid_ds = f.create_dataset(
+                    'valid', shape=(A, C, 0),
+                    maxshape=(A, C, None), dtype='bool',
+                )
+                if shape_arr is not None and shape_arr.size >= 2:
+                    f.attrs['H'] = int(shape_arr[0])
+                    f.attrs['W'] = int(shape_arr[1])
+                else:
+                    f.attrs['H'] = int(H)
+                    f.attrs['W'] = int(W_pack) * 8
+                f.attrs['W_packed'] = int(W_pack)
+                f.attrs['fps'] = 800
+                f.attrs['layout'] = (
+                    'packed bits along last axis; [A=0]=male, [A=1]=female '
+                    'after per-bout sex swap'
+                )
+
+            new_size = row_offset + F
+            mask_ds.resize((A, C, new_size, H, W_pack))
+            mask_ds[:, :, row_offset:new_size, :, :] = packed
+            cent_ds.resize((A, C, new_size, 2))
+            cent_ds[:, :, row_offset:new_size, :] = centroids
+            valid_ds.resize((A, C, new_size))
+            valid_ds[:, :, row_offset:new_size] = valid
+
+            row_starts.append(row_offset)
+            row_ends.append(new_size - 1)
+            row_offset = new_size
+
+        f.create_dataset(
+            'bout_boundaries',
+            data=np.stack([np.asarray(row_starts, dtype=np.int64),
+                           np.asarray(row_ends, dtype=np.int64)], axis=1),
+        )
+        f.create_dataset(
+            'bout_frames',
+            data=np.asarray([[b['start'], b['end']] for b in bouts_info],
+                            dtype=np.int64),
+        )
+        f.create_dataset('sex_swaps',
+                         data=np.asarray(sex_swaps, dtype=bool))
+
+        g = f.create_group('derived')
+        g.create_dataset('male_heading', data=all_male_h, compression='gzip')
+        g.create_dataset('female_heading', data=all_female_h, compression='gzip')
+        g.create_dataset('male_centroid', data=all_male_c, compression='gzip')
+        g.create_dataset('female_centroid', data=all_female_c, compression='gzip')
+        g.create_dataset('centroid_vec', data=centroid_vec, compression='gzip')
+        g.create_dataset('relative_angle', data=relative_angle, compression='gzip')
+        g.attrs['heading_anterior_kp'] = _HEADING_ANTERIOR_KP
+        g.attrs['heading_posterior_kp'] = _HEADING_POSTERIOR_KP
+        g.attrs['relative_angle_convention'] = (
+            'atan2(cross_z, dot) in xy-plane; 0 rad = male heading parallel '
+            'to the male->female centroid vector'
+        )
+
+
+def aggregate_per_bout_predictions(folder: Path,
+                                    dataset: str,
+                                    force: bool = False) -> bool:
+    """
+    Materialize old-style aggregate predictions from a per-bout layout.
+
+    Turns::
+
+        folder/bout_<N>/fly{0,1}.csv  +  sam3_masks.npz
+
+    into the pipeline-expected flat layout::
+
+        folder/data3D_fly{0,1}.csv
+        folder/tracking_info.json
+        folder/<dataset>_bouts_fly{0,1}_summary.csv
+        folder/<dataset>_bouts_unified_summary.csv
+
+    Also applies a mask-area sex-swap per bout so fly0 is the male (smaller
+    mask). Per-bout decisions are recorded under ``sex_swaps`` in
+    tracking_info.json for traceability.
+
+    Idempotent: returns False without writing if all outputs exist and are
+    newer than every per-bout CSV (unless ``force=True``).
+    """
+    bout_dirs = sorted(
+        d for d in folder.iterdir()
+        if d.is_dir() and d.name.startswith('bout_')
+        and (d / 'fly0.csv').exists() and (d / 'fly1.csv').exists()
+    )
+    if not bout_dirs:
+        return False
+
+    data3d_paths = [folder / f"data3D_fly{n}.csv" for n in (0, 1)]
+    summary_paths = [folder / f"{dataset}_bouts_fly{n}_summary.csv"
+                     for n in (0, 1)]
+    unified_out = folder / f"{dataset}_bouts_unified_summary.csv"
+    tracking_info = folder / "tracking_info.json"
+    sam3_aligned_out = folder / "sam3_aligned.h5"
+    outputs = [*data3d_paths, *summary_paths, unified_out, tracking_info,
+               sam3_aligned_out]
+
+    if not force and all(p.exists() for p in outputs):
+        newest_input = max(
+            (d / f"fly{n}.csv").stat().st_mtime
+            for d in bout_dirs for n in (0, 1)
+        )
+        oldest_output = min(p.stat().st_mtime for p in outputs)
+        if oldest_output >= newest_input:
+            return False
+
+    unified_src = _find_unified_bouts_csv(folder, dataset)
+    if unified_src is None:
+        unified_df = _synthesize_unified_from_bouts(folder, bout_dirs)
+    else:
+        unified_df = pd.read_csv(unified_src)
+
+    bouts_info: List[Dict[str, int]] = []
+    sex_swaps: List[bool] = []
+    # Concatenated DataFrames per OUTPUT fly index after sex-swap applied.
+    fly_frames: List[List[pd.DataFrame]] = [[], []]
+    # Per-bout heading / centroid arrays aligned to mask concat order.
+    male_headings: List[np.ndarray] = []
+    female_headings: List[np.ndarray] = []
+    male_centroids: List[np.ndarray] = []
+    female_centroids: List[np.ndarray] = []
+    
+    P_all = _load_projection_matrices(folder)
+    if P_all is None:
+        print("  [aggregate] no calibration/ found — skipping SAM-CoM "
+              "Scutellum injection")
+
+    for bout_dir in bout_dirs:
+        swap, a0, a1 = _decide_sex_swap(bout_dir / "sam3_masks.npz")
+        sex_swaps.append(swap)
+        # Peek at the fly0 CSV's `frame` column for bout range
+        probe = pd.read_csv(bout_dir / "fly0.csv", header=[0, 1])
+        frame_col = [c for c in probe.columns if c[0] == 'frame']
+        frames = probe[frame_col[0]].values if frame_col else None
+        start = int(frames.min()) if frames is not None else -1
+        end = int(frames.max()) if frames is not None else -1
+        bouts_info.append({'start': start, 'end': end,
+                           'area0': a0, 'area1': a1, 'swap': swap})
+
+        out_fly0_src = bout_dir / ("fly1.csv" if swap else "fly0.csv")
+        out_fly1_src = bout_dir / ("fly0.csv" if swap else "fly1.csv")
+        df0 = _concat_per_bout_csvs([out_fly0_src])
+        df1 = _concat_per_bout_csvs([out_fly1_src])
+
+        inj_msg = "scut-inject=skipped"
+        if P_all is not None:
+            coms = _triangulate_sam_com_per_bout(bout_dir, P_all)
+            if coms is not None and coms.shape[0] >= 2:
+                # Output fly0 corresponds to input fly_idx=1 if swap, else 0.
+                com0 = coms[1 if swap else 0]
+                com1 = coms[0 if swap else 1]
+                n_a0, n_f0 = _inject_scutellum_from_sam_com(df0, com0)
+                n_a1, n_f1 = _inject_scutellum_from_sam_com(df1, com1)
+                inj_msg = (f"scut-inject fly0:({n_a0}anch,{n_f0}fill) "
+                           f"fly1:({n_a1}anch,{n_f1}fill)")
+
+        fly_frames[0].append(df0)
+        fly_frames[1].append(df1)
+
+        m_head, m_cent = _compute_heading(df0)
+        f_head, f_cent = _compute_heading(df1)
+        male_headings.append(m_head)
+        female_headings.append(f_head)
+        male_centroids.append(m_cent)
+        female_centroids.append(f_cent)
+
+        print(f"  [aggregate] {bout_dir.name}: frames=[{start},{end}] "
+              f"area0={a0:.0f} area1={a1:.0f} swap={swap} {inj_msg}")
+
+    for n in (0, 1):
+        combined = pd.concat(fly_frames[n], ignore_index=True)
+        combined.to_csv(data3d_paths[n], index=False)
+
+    _write_sam3_aligned_h5(
+        sam3_aligned_out,
+        bout_dirs=bout_dirs,
+        sex_swaps=sex_swaps,
+        bouts_info=bouts_info,
+        male_headings=male_headings,
+        female_headings=female_headings,
+        male_centroids=male_centroids,
+        female_centroids=female_centroids,
+    )
+    print(f"  [aggregate] wrote {sam3_aligned_out.name} "
+          f"({sam3_aligned_out.stat().st_size / 1024 / 1024:.1f} MB)")
+
+    # tracking_info.json — compact-frame-map schema
+    tracking_info.write_text(json.dumps({
+        'bouts': [{'start': b['start'], 'end': b['end']} for b in bouts_info],
+        'sex_swaps': [b['swap'] for b in bouts_info],
+        'areas': [{'a0': b['area0'], 'a1': b['area1']} for b in bouts_info],
+    }, indent=2))
+
+    # Filter unified summary to materialized bouts; renumber bout_idx.
+    materialized_ranges = {(b['start'], b['end']) for b in bouts_info}
+    unified_filtered = unified_df[
+        unified_df.apply(
+            lambda r: (int(r['start_frame']), int(r['end_frame']))
+            in materialized_ranges,
+            axis=1,
+        )
+    ].copy()
+    unified_filtered = unified_filtered.sort_values(
+        ['fly_id', 'source_fly', 'start_frame']).reset_index(drop=True)
+    unified_filtered['bout_idx'] = range(1, len(unified_filtered) + 1)
+    unified_filtered.to_csv(unified_out, index=False)
+
+    # Per-fly bouts summaries — filter by source_fly, renumber bout_idx.
+    for n in (0, 1):
+        src_tags = {'both', f'fly{n}'}
+        per_fly = unified_filtered[
+            unified_filtered['source_fly'].isin(src_tags)].copy()
+        per_fly = per_fly.drop(columns=['source_fly'])
+        per_fly = per_fly.sort_values(['fly_id', 'start_frame']).reset_index(drop=True)
+        per_fly['bout_idx'] = range(1, len(per_fly) + 1)
+        per_fly.to_csv(summary_paths[n], index=False)
+
+    return True
 
 
 def detect_flies(folder: Path, dataset: str) -> List[Dict]:
@@ -69,7 +685,7 @@ def detect_flies(folder: Path, dataset: str) -> List[Dict]:
 
     Args:
         folder: Path to a Predictions_3D_* folder.
-        dataset: Dataset name (e.g., 'courtship', 'free_walking').
+        dataset: Dataset name (e.g., 'courtship', 'free_running').
 
     Returns:
         List of dicts, each with keys:
@@ -79,6 +695,12 @@ def detect_flies(folder: Path, dataset: str) -> List[Dict]:
             - bouts_csv: Bouts summary CSV filename for this fly
     """
     flies = []
+
+    # Per-bout layout (bout_*/fly{0,1}.csv)? Materialize aggregates in place
+    # and fall through to the standard dual-fly branch below.
+    if (not sorted(folder.glob("data3D_fly*.csv"))
+            and sorted(folder.glob("bout_*/fly*.csv"))):
+        aggregate_per_bout_predictions(folder, dataset)
 
     # Check for dual-fly layout: data3D_fly0.csv, data3D_fly1.csv
     fly_csvs = sorted(folder.glob("data3D_fly*.csv"))

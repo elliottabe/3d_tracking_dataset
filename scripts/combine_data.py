@@ -7,7 +7,7 @@ Postprocess STAC output data:
 5. Save processed output
 
 Usage:
-    python postprocess_stac_data.py paths=workstation dataset=free_walking
+    python postprocess_stac_data.py paths=workstation dataset=free_running
     python postprocess_stac_data.py paths=hyak dataset=courtship
 """
 
@@ -45,7 +45,7 @@ sys.path.insert(0, str(project_root))
 
 from utils import io_dict_to_hdf5 as ioh5
 from utils.stac_data_utils import (
-    reorganize_stac_by_bouts, 
+    reorganize_stac_by_bouts,
     print_bout_dict_structure,
     interpolate_trajectory,
     adjust_root_z_for_floor
@@ -54,6 +54,7 @@ from utils.path_utils import load_config_with_path_template, convert_dict_to_pat
 from utils.io import load_stac_data
 from utils.mjx_preprocess import process_clip, ReferenceClip
 from utils.stac_data_utils import concatenate_bout_dicts
+from utils.mask_combine import concatenate_per_folder_masks
 
 
 
@@ -64,14 +65,23 @@ def main(cfg: DictConfig):
     # Convert path strings to Path objects
     cfg.paths = convert_dict_to_path(cfg.paths)
 
-    # Create anatomy-specific output directory
-    anatomy_save_dir = cfg.paths.save_dir / cfg.anatomy.name
+    # Resolve paths — prefer a CLI-supplied base_dir so the combine step only
+    # aggregates predictions from the current run's base dir and writes its
+    # outputs back into that same folder (per-folder bouts workflow). Falls
+    # back to the dataset-level save_dir when no override is given.
+    override = cfg.get('base_dir', None)
+    if override:
+        base_dir = Path(override)
+        anatomy_save_dir = base_dir / cfg.anatomy.name
+        print(f"Using base_dir override: {base_dir}")
+    else:
+        base_dir = cfg.paths.data_dir.parent
+        anatomy_save_dir = cfg.paths.save_dir / cfg.anatomy.name
+        print(f"Using default base_dir from config: {base_dir}")
+
     anatomy_save_dir.mkdir(parents=True, exist_ok=True)
     anatomy_log_dir = anatomy_save_dir / "logs"
     anatomy_log_dir.mkdir(parents=True, exist_ok=True)
-
-    # Resolve paths
-    base_dir = cfg.paths.data_dir.parent
 
     # Get concatenation config (with defaults)
     input_pattern = cfg.dataset.get('concat', {}).get('input_pattern', 'ik_output_*')
@@ -87,7 +97,7 @@ def main(cfg: DictConfig):
 
     # Find all matching files
     file_paths = [fp for fp in sorted(base_dir.rglob(f"{input_pattern}")) if 'combined' not in fp.name]
-    # file_paths = [Path('/data2/users/eabe/datasets/Johnson_lab/free_walking/Predictions_3D_20260202-171900/ik_output_v2_muscles_stationary_free.h5')]
+    # file_paths = [Path('/data2/users/eabe/datasets/Johnson_lab/free_running/Predictions_3D_20260202-171900/ik_output_v2_muscles_stationary_free.h5')]
 
 
     print(f"Found {len(file_paths)} files:")
@@ -96,122 +106,183 @@ def main(cfg: DictConfig):
     print()
 
     # Concatenate
-    combined_dict = concatenate_bout_dicts(
+    full_dict = concatenate_bout_dicts(
         file_paths=[str(fp) for fp in file_paths],
         enable_jax=enable_jax,
         verbose=True
     )
 
-    # Print structure
-    # print_bout_dict_structure(combined_dict, show_values=False, max_depth=2)
+    # Partition by validity bucket if present (multianimal pipeline emits a
+    # parallel `info['bucket']` list of fly0_only / fly1_only / both tags).
+    # For single-animal datasets there is no bucket info, so we keep a single
+    # combined output named `ik_output_combined.h5` (legacy behaviour).
+    bucket_list = []
+    info_buckets = full_dict.get('info', {}).get('bucket', None)
+    if info_buckets is not None:
+        bucket_list = list(np.asarray(info_buckets).tolist()) \
+            if not isinstance(info_buckets, list) else list(info_buckets)
 
-    # Create non-interpolated version by renaming _stac keys to clean keys
-    print("\n" + "=" * 80)
-    print("CREATING NON-INTERPOLATED VERSION")
-    print("=" * 80)
+    def _filter_dict_by_bucket(src: dict, keep_indices: list[int]) -> dict:
+        """Build a sub combined_dict containing only bouts at the given indices,
+        renumbered sequentially. Concatenated info fields are sliced to match."""
+        all_keys = sorted([k for k in src.keys() if k != 'info'])
+        out = {}
+        for new_idx, old_idx in enumerate(keep_indices):
+            new_key = f'bout_{new_idx:03d}'
+            out[new_key] = src[all_keys[old_idx]]
+        out['info'] = {}
+        concat_fields = {'clip_lengths', 'clip_lengths_original',
+                         'clip_lengths_interp_unpadded', 'fly_ids',
+                         'source_flies', 'start_frames', 'end_frames',
+                         'bucket'}
+        for k, v in src.get('info', {}).items():
+            if k in concat_fields:
+                try:
+                    arr = np.asarray(v).tolist() if not isinstance(v, list) else v
+                    out['info'][k] = [arr[i] for i in keep_indices]
+                except Exception:
+                    out['info'][k] = v
+            else:
+                out['info'][k] = v
+        return out
+
+    if bucket_list:
+        present = sorted(set(bucket_list), key=lambda x: ['fly0_only', 'both', 'fly1_only'].index(x)
+                         if x in ('fly0_only', 'both', 'fly1_only') else 99)
+        partitions = []
+        for bucket in present:
+            keep = [i for i, b in enumerate(bucket_list) if b == bucket]
+            if not keep:
+                continue
+            sub = _filter_dict_by_bucket(full_dict, keep)
+            partitions.append((bucket, sub))
+        if not partitions:
+            print("⚠ No bouts in any bucket — nothing to write")
+            return
+        print(f"\nPartitioned into {len(partitions)} validity bucket(s): "
+              f"{[b for b, _ in partitions]}")
+    else:
+        partitions = [(None, full_dict)]
+
+    def _save_one(combined_dict: dict, out_base: Path, out_interp: Path):
+        # Create non-interpolated version by renaming _stac keys to clean keys
+        print("\n" + "=" * 80)
+        print(f"CREATING NON-INTERPOLATED VERSION → {out_base.name}")
+        print("=" * 80)
     
-    # Get clip_lengths_original for unpadding
-    clip_lengths_original = combined_dict.get('info', {}).get('clip_lengths_original', [])
-    bout_keys = sorted([k for k in combined_dict.keys() if k != 'info'])
-    
-    if clip_lengths_original is not None and len(clip_lengths_original) > 0:
-        print(f"Unpadding {len(bout_keys)} bouts to original lengths...")
-    
-    non_interp_dict = {}
-    for bout_idx, bout_key in enumerate(bout_keys):
-        bout_data = combined_dict[bout_key]
-        non_interp_dict[bout_key] = {}
-        
-        # Get original length for this bout (for unpadding)
-        orig_length = clip_lengths_original[bout_idx] if bout_idx < len(clip_lengths_original) else None
-        
-        for key, value in bout_data.items():
-            if key.endswith('_stac'):
-                # Rename _stac keys to clean keys (already at original length)
-                clean_key = key[:-5]  # Remove '_stac' suffix
-                non_interp_dict[bout_key][clean_key] = value
-            elif not any(f"{key}_stac" in bout_data for k in [key]):
-                # For keys without _stac counterpart, check if they need unpadding
-                if not any(f"{k}_stac" == key for k in bout_data.keys()):
-                    # If this is a trajectory array and we have original length, unpad it
+        # Get clip_lengths_original for unpadding
+        clip_lengths_original = combined_dict.get('info', {}).get('clip_lengths_original', [])
+        bout_keys = sorted([k for k in combined_dict.keys() if k != 'info'])
+
+        if clip_lengths_original is not None and len(clip_lengths_original) > 0:
+            print(f"Unpadding {len(bout_keys)} bouts to original lengths...")
+
+        non_interp_dict = {}
+        for bout_idx, bout_key in enumerate(bout_keys):
+            bout_data = combined_dict[bout_key]
+            non_interp_dict[bout_key] = {}
+
+            orig_length = clip_lengths_original[bout_idx] if bout_idx < len(clip_lengths_original) else None
+
+            for key, value in bout_data.items():
+                if key.endswith('_stac'):
+                    clean_key = key[:-5]
+                    non_interp_dict[bout_key][clean_key] = value
+                elif not any(f"{k}_stac" == key for k in bout_data.keys()):
                     if orig_length is not None and isinstance(value, (np.ndarray, jnp.ndarray)) and len(value.shape) > 0 and value.shape[0] > orig_length:
-                        # Unpad by taking only the first orig_length frames
                         if enable_jax and isinstance(value, jnp.ndarray):
                             non_interp_dict[bout_key][key] = np.array(value[:orig_length])
                         else:
                             non_interp_dict[bout_key][key] = value[:orig_length]
                     else:
                         non_interp_dict[bout_key][key] = value
-    
-    # Handle info specially - only include clip_lengths_original as clip_lengths
-    # Important: preserve fly_ids
-    non_interp_dict['info'] = {}
-    for key, value in combined_dict['info'].items():
-        if key == 'clip_lengths_original':
-            non_interp_dict['info']['clip_lengths'] = value
-        elif key not in ['clip_lengths', 'clip_lengths_interp_unpadded']:
-            non_interp_dict['info'][key] = value
-    
-    # Save non-interpolated version (base file)
-    print(f"Saving non-interpolated data to: {output_file}")
-    if 'info' in non_interp_dict and 'clip_lengths' in non_interp_dict['info']:
-        print(f"  Clip lengths (original, unpadded): {non_interp_dict['info']['clip_lengths']}")
-    ioh5.save(output_file, non_interp_dict)
-    print(f"✓ Saved successfully")
-    print(f"  File size: {Path(output_file).stat().st_size / 1024 / 1024:.2f} MB")
-    print()
 
-    # Save interpolated version (clean keys contain interpolated data)
-    print("=" * 80)
-    print("SAVING COMBINED OUTPUT - INTERPOLATED")
-    print("=" * 80)
-    
-    # Clean up interpolated dict to remove clip_lengths_original
-    # and optionally unpad to clip_lengths_interp_unpadded
-    clip_lengths_interp_unpadded = combined_dict.get('info', {}).get('clip_lengths_interp_unpadded', [])
-    
-    if clip_lengths_interp_unpadded is not None and len(clip_lengths_interp_unpadded) > 0:
-        print(f"Unpadding {len(bout_keys)} bouts to interpolated unpadded lengths...")
-    
-    interp_dict = {}
-    for bout_idx, bout_key in enumerate(bout_keys):
-        bout_data = combined_dict[bout_key]
-        interp_dict[bout_key] = {}
-        
-        # Get unpadded length for this bout (if available)
-        unpadded_length = clip_lengths_interp_unpadded[bout_idx] if bout_idx < len(clip_lengths_interp_unpadded) else None
-        
-        for key, value in bout_data.items():
-            # Skip _stac keys in interpolated version
-            if key.endswith('_stac'):
-                continue
-                
-            # Unpad trajectory arrays to their unpadded interpolated length
-            if unpadded_length is not None and isinstance(value, (np.ndarray, jnp.ndarray)) and len(value.shape) > 0 and value.shape[0] > unpadded_length:
-                if enable_jax and isinstance(value, jnp.ndarray):
-                    interp_dict[bout_key][key] = np.array(value[:unpadded_length])
+        non_interp_dict['info'] = {}
+        for key, value in combined_dict['info'].items():
+            if key == 'clip_lengths_original':
+                non_interp_dict['info']['clip_lengths'] = value
+            elif key not in ['clip_lengths', 'clip_lengths_interp_unpadded']:
+                non_interp_dict['info'][key] = value
+
+        print(f"Saving non-interpolated data to: {out_base}")
+        if 'info' in non_interp_dict and 'clip_lengths' in non_interp_dict['info']:
+            print(f"  Clip lengths (original, unpadded): {non_interp_dict['info']['clip_lengths']}")
+        ioh5.save(out_base, non_interp_dict)
+        print(f"✓ Saved successfully")
+        print(f"  File size: {Path(out_base).stat().st_size / 1024 / 1024:.2f} MB")
+        print()
+
+        print("=" * 80)
+        print(f"SAVING COMBINED OUTPUT - INTERPOLATED → {out_interp.name}")
+        print("=" * 80)
+
+        clip_lengths_interp_unpadded = combined_dict.get('info', {}).get('clip_lengths_interp_unpadded', [])
+
+        if clip_lengths_interp_unpadded is not None and len(clip_lengths_interp_unpadded) > 0:
+            print(f"Unpadding {len(bout_keys)} bouts to interpolated unpadded lengths...")
+
+        interp_dict = {}
+        for bout_idx, bout_key in enumerate(bout_keys):
+            bout_data = combined_dict[bout_key]
+            interp_dict[bout_key] = {}
+
+            unpadded_length = clip_lengths_interp_unpadded[bout_idx] if bout_idx < len(clip_lengths_interp_unpadded) else None
+
+            for key, value in bout_data.items():
+                if key.endswith('_stac'):
+                    continue
+
+                if unpadded_length is not None and isinstance(value, (np.ndarray, jnp.ndarray)) and len(value.shape) > 0 and value.shape[0] > unpadded_length:
+                    if enable_jax and isinstance(value, jnp.ndarray):
+                        interp_dict[bout_key][key] = np.array(value[:unpadded_length])
+                    else:
+                        interp_dict[bout_key][key] = value[:unpadded_length]
                 else:
-                    interp_dict[bout_key][key] = value[:unpadded_length]
-            else:
-                interp_dict[bout_key][key] = value
-    
-    # Handle info specially - keep clip_lengths_interp_unpadded as clip_lengths, remove original
-    # Important: preserve fly_ids
-    interp_dict['info'] = {}
-    for key, value in combined_dict['info'].items():
-        if key == 'clip_lengths_interp_unpadded':
-            interp_dict['info']['clip_lengths'] = value
-        elif key not in ['clip_lengths_original', 'clip_lengths']:
-            interp_dict['info'][key] = value
-    
-    print(f"Saving interpolated data to: {output_file_interp}")
-    if 'info' in interp_dict:
-        if 'clip_lengths' in interp_dict['info']:
+                    interp_dict[bout_key][key] = value
+
+        interp_dict['info'] = {}
+        for key, value in combined_dict['info'].items():
+            if key == 'clip_lengths_interp_unpadded':
+                interp_dict['info']['clip_lengths'] = value
+            elif key not in ['clip_lengths_original', 'clip_lengths']:
+                interp_dict['info'][key] = value
+
+        print(f"Saving interpolated data to: {out_interp}")
+        if 'info' in interp_dict and 'clip_lengths' in interp_dict['info']:
             print(f"  Clip lengths (interpolated, unpadded): {interp_dict['info']['clip_lengths']}")
-    ioh5.save(output_file_interp, interp_dict)
-    print(f"✓ Saved successfully")
-    print(f"  File size: {Path(output_file_interp).stat().st_size / 1024 / 1024:.2f} MB")
-    print()
+        ioh5.save(out_interp, interp_dict)
+        print(f"✓ Saved successfully")
+        print(f"  File size: {Path(out_interp).stat().st_size / 1024 / 1024:.2f} MB")
+        print()
+
+    # Run save for each partition (one path for single-animal, three for multianimal)
+    for bucket, sub in partitions:
+        if bucket is None:
+            base_out = output_file
+            interp_out = output_file_interp
+        else:
+            stem = output_file.name[:-3] if output_file.name.endswith('.h5') else output_file.name
+            base_out = output_file.with_name(f"{stem}_{bucket}.h5")
+            interp_out = output_file.with_name(f"{stem}_{bucket}_interpolated.h5")
+        _save_one(sub, base_out, interp_out)
+
+    # Cross-folder SAM3 mask concatenation. Per-folder sam3_aligned.h5 files are
+    # written by the `convert` step when bout_*/sam3_masks.npz data is present.
+    # The combined file is a sibling of ik_output_combined*.h5 so postprocess
+    # readers that glob for ik_output_*.h5 don't pick it up.
+    mask_files = sorted(base_dir.rglob("sam3_aligned.h5"))
+    if mask_files:
+        stem = output_file.name[:-3] if output_file.name.endswith('.h5') \
+            else output_file.name
+        mask_out = output_file.with_name(f"{stem}_masks.h5")
+        print("\n" + "=" * 80)
+        print(f"CONCATENATING {len(mask_files)} sam3_aligned.h5 → {mask_out.name}")
+        print("=" * 80)
+        concatenate_per_folder_masks(mask_files, mask_out)
+        print(f"✓ Wrote {mask_out} "
+              f"({mask_out.stat().st_size / 1024 / 1024:.1f} MB)")
+    else:
+        print("\n(no sam3_aligned.h5 files under base_dir — skipping mask combine)")
 
     cfg_temp = cfg.copy()
     cfg_temp.paths = convert_dict_to_string(cfg_temp.paths)

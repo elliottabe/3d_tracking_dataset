@@ -1,6 +1,6 @@
-# Batch Processing Pipeline for Free Walking Predictions
+# Batch Processing Pipeline for Free Running Predictions
 
-This guide explains how to process all Predictions_3D folders in the free_walking dataset using the batch processing scripts.
+This guide explains how to process all Predictions_3D folders in the free_running dataset using the batch processing scripts.
 
 ## Quick Start - Full Pipeline
 
@@ -46,10 +46,10 @@ You can run each step individually (detailed below) or use the full pipeline scr
 ## Directory Structure
 
 ```
-/data2/users/eabe/datasets/Johnson_lab/free_walking/
+/data2/users/eabe/datasets/Johnson_lab/free_running/
 ├── Predictions_3D_20260202-171900/
 │   ├── data3D.csv                    # Raw 3D keypoint data
-│   ├── walking_bouts_summary.csv     # Bout info with fly_id
+│   ├── free_running_bouts_summary.csv     # Bout info with fly_id ({dataset}_bouts_summary.csv)
 │   ├── preprocessed_bout_v1.h5       # Output from step 1
 │   ├── Fruitfly_ik_v1_free.h5        # Output from step 2 (STAC)
 │   └── ik_output_v1.h5               # Output from step 3
@@ -94,7 +94,7 @@ python scripts/batch_process_predictions.py --log-file my_preprocess.log
 ### What It Does
 
 For each `Predictions_3D_*` folder:
-- Checks for required input files (`data3D.csv`, `walking_bouts_summary.csv`)
+- Checks for required input files (`data3D.csv`, `{dataset}_bouts_summary.csv`)
 - Skips if output already exists (unless `--force`)
 - Runs `preprocess_keypoints_for_ik.py` with appropriate paths
 - Logs all results to timestamped log file
@@ -174,7 +174,7 @@ For each `Predictions_3D_*` folder with preprocessed data:
   - Applies MOCAP_SCALE_FACTOR to keypoint data
   - Uses Hydra config overrides:
     - `paths=workstation`
-    - `dataset=free_walking`
+    - `dataset=free_running`
     - `anatomy={anatomy}`
     - `version={folder_name}` - Dynamically set for each folder
 - Creates two output files per folder:
@@ -203,13 +203,13 @@ Example configuration flow:
 defaults:
   - anatomy: v1
   - paths: workstation
-  - dataset: free_walking
+  - dataset: free_running
 
 # Batch script overrides version for each folder
 version: Predictions_3D_20260202-171900  # Set dynamically
 
 # This makes paths.data_dir resolve to:
-# /data2/users/eabe/datasets/Johnson_lab/free_walking/Predictions_3D_20260202-171900
+# /data2/users/eabe/datasets/Johnson_lab/free_running/Predictions_3D_20260202-171900
 
 # Which makes dataset.stac.data_path resolve to:
 # {data_dir}/preprocessed_bout_v1.h5
@@ -228,7 +228,7 @@ If you need to process individual folders manually:
 
 ```bash
 cd stac-mjx
-python run_stac_fly_model.py paths=workstation dataset=free_walking anatomy=v1 \
+python run_stac_fly_model.py paths=workstation dataset=free_running anatomy=v1 \
     version=Predictions_3D_20260202-171900
 ```
 
@@ -289,7 +289,7 @@ Merge all postprocessed outputs into a single file.
 
 ```bash
 # Combine all ik_output files
-python scripts/combine_data.py paths=workstation dataset=free_walking anatomy=v1
+python scripts/combine_data.py paths=workstation dataset=free_running anatomy=v1
 ```
 
 This will:
@@ -302,7 +302,7 @@ This will:
 
 ### Output
 
-In the base directory (`/data2/users/eabe/datasets/Johnson_lab/free_walking/Data_analysis/Testing/`):
+In the base directory (`/data2/users/eabe/datasets/Johnson_lab/free_running/Data_analysis/Testing/`):
 - `ik_output_combined_{anatomy}.h5`
 - `ik_output_combined_interp_{anatomy}.h5`
 
@@ -353,7 +353,7 @@ python scripts/batch_run_stac.py --anatomy v1
 python scripts/batch_postprocess_predictions.py --anatomy v1 --paths workstation
 
 # 4. Combine everything
-python scripts/combine_data.py paths=workstation dataset=free_walking anatomy=v1
+python scripts/combine_data.py paths=workstation dataset=free_running anatomy=v1
 ```
 
 ## Monitoring Progress
@@ -369,13 +369,13 @@ Batch scripts create timestamped log files:
 
 ```bash
 # List preprocessing outputs
-ls -lh /data2/users/eabe/datasets/Johnson_lab/free_walking/Predictions_*/preprocessed_bout_*.h5
+ls -lh /data2/users/eabe/datasets/Johnson_lab/free_running/Predictions_*/preprocessed_bout_*.h5
 
 # List STAC outputs
-ls -lh /data2/users/eabe/datasets/Johnson_lab/free_walking/Predictions_*/Fruitfly_ik_*.h5
+ls -lh /data2/users/eabe/datasets/Johnson_lab/free_running/Predictions_*/Fruitfly_ik_*.h5
 
 # List postprocessing outputs
-ls -lh /data2/users/eabe/datasets/Johnson_lab/free_walking/Predictions_*/ik_output_*.h5
+ls -lh /data2/users/eabe/datasets/Johnson_lab/free_running/Predictions_*/ik_output_*.h5
 ```
 
 ## Troubleshooting
@@ -389,7 +389,7 @@ Available columns: ['bout_idx', 'start_frame', 'end_frame', ...]
 The 'fly_id' column is required for tracking bout sources.
 ```
 
-**Solution:** Ensure your `walking_bouts_summary.csv` has a `fly_id` column. It should look like:
+**Solution:** Ensure your `{dataset}_bouts_summary.csv` (e.g. `free_running_bouts_summary.csv`) has a `fly_id` column. It should look like:
 ```csv
 fly_id,bout_idx,start_frame,end_frame,n_frames,...
 Session6/2025_10_12_15_06_46,1,13258,13491,234,...
@@ -420,8 +420,8 @@ To process only specific folders:
 Or process individual folders manually:
 ```bash
 python scripts/preprocess_keypoints_for_ik.py \
-    paths=workstation dataset=free_walking anatomy=v1 \
-    paths.data_dir=/data2/users/eabe/datasets/Johnson_lab/free_walking/Predictions_3D_20260202-171900
+    paths=workstation dataset=free_running anatomy=v1 \
+    paths.data_dir=/data2/users/eabe/datasets/Johnson_lab/free_running/Predictions_3D_20260202-171900
 ```
 
 ## Anatomy Versions
@@ -522,7 +522,7 @@ python scripts/run_full_pipeline.py --anatomy v1 --gpu-mem-fraction 0.8
 
 # Different dataset and paths config
 python scripts/run_full_pipeline.py --anatomy v1 \
-    --dataset free_walking \
+    --dataset free_running \
     --paths workstation \
     --base-dir /path/to/data
 
@@ -541,8 +541,8 @@ $ python scripts/run_full_pipeline.py --anatomy v1 --dry-run
 
 Configuration:
   Anatomy: v1
-  Dataset: free_walking
-  Base directory: /data2/users/eabe/datasets/Johnson_lab/free_walking
+  Dataset: free_running
+  Base directory: /data2/users/eabe/datasets/Johnson_lab/free_running
   Paths config: workstation
   Steps to run: preprocess, stac, postprocess, combine
   Force reprocessing: False
