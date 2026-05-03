@@ -12,8 +12,8 @@ headless rendering, and then let `uv` install all the Python dependencies
 on top of it.
 
 ```bash
-# Clone with submodules
-git clone --recurse-submodules <repository-url>
+# Clone with submodules (use --shallow-submodules to avoid pulling JARVIS history)
+git clone --recurse-submodules --shallow-submodules <repository-url>
 cd 3d_tracking_dataset
 
 # (If already cloned without --recurse-submodules)
@@ -28,8 +28,17 @@ uv sync --active --extra cuda12 --extra dev
 
 # 3. Smoke test
 python test_configs.py
-pytest tests/
 ```
+
+To pull in the optional upstream tools (rendering bout clips with JARVIS,
+regenerating SAM3 masks), add their extras:
+
+```bash
+uv sync --active --extra cuda12 --extra dev --extra jarvis --extra sam3
+```
+
+See [External tools](#external-tools) below for details on what each does
+and when you actually need it.
 
 The `--active` flag tells `uv` to install into the activated conda env
 instead of creating a separate `.venv/`. `uv.lock` pins exact versions for
@@ -53,6 +62,59 @@ uv run pytest tests/
 A `nbstripout` filter is declared in [.gitattributes](.gitattributes); contributors
 should run `nbstripout --install` after cloning so notebook outputs are
 automatically removed from commits.
+
+## External tools
+
+Two upstream tools are integrated as opt-in extras. They are not required
+for the core analysis pipeline; pre-computed outputs from each ship with
+the dataset.
+
+### JARVIS-HybridNet
+
+Multi-view markerless 3D pose estimation (Hüser et al.). Pinned as a git
+submodule under [third_party/JARVIS-HybridNet/](third_party/JARVIS-HybridNet/)
+on the publication branch `elliottabe/multianimal-publication`.
+
+You need JARVIS only if you want to:
+
+- **Reproduce the upstream tracking step** — running JARVIS on raw
+  multi-view video produces the per-fly `data3D.csv` files this repo
+  consumes. See JARVIS's own
+  [Getting Started Guide](https://jarvis-mocap.github.io/jarvis-docs/) for
+  the full workflow.
+- **Render bout clips** — [scripts/render_bout_clips.py](scripts/render_bout_clips.py)
+  uses `jarvis.visualization.create_multi_animal_videos3D` to overlay
+  3D poses on multi-camera video for QC.
+
+Install:
+
+```bash
+uv sync --active --extra jarvis
+```
+
+The extra adds the editable JARVIS submodule plus its transitive deps
+(streamlit, imgaug, etc.). It works with Python 3.12 because the
+publication branch on the fork relaxes JARVIS's old version pins.
+
+### SAM3 (Meta Segment Anything 3)
+
+Used to (re)generate per-bout segmentation masks (`sam3_masks.npz`,
+`sam3_aligned.h5`) consumed by the courtship analyses in
+[utils/sam3_female_com.py](utils/sam3_female_com.py) and
+[utils/sam3_aligned_bouts.py](utils/sam3_aligned_bouts.py).
+
+You need SAM3 only if you want to **regenerate the segmentation masks
+from raw video**. The repo's analysis code only reads pre-computed
+masks; those mask files ship as data with the dataset.
+
+Install (pulls SAM3 from a fork pinned for numpy 2 compatibility):
+
+```bash
+uv sync --active --extra sam3
+```
+
+SAM3 weights are auto-fetched from Hugging Face on first use; some
+models are gated behind a HF account.
 
 ## Configuring data paths
 
@@ -87,7 +149,8 @@ uv run python scripts/run_full_pipeline.py --anatomy v1 --dataset free_running
 ├── scripts/                  pipeline scripts (preprocess, IK, postprocess, combine)
 ├── utils/                    shared library code (IO, alignment, song analysis, ...)
 ├── stac-mjx/                 git submodule: STAC inverse-kinematics solver
-├── tests/                    pytest suite
+├── third_party/
+│   └── JARVIS-HybridNet/     git submodule: multi-view 3D pose estimation (optional)
 ├── pyproject.toml            uv-managed dependency spec
 ├── uv.lock                   resolved lockfile
 └── environment.yml           optional conda env for system-level libs
@@ -136,7 +199,10 @@ for the canonical list.
 
 ## Submodules
 
-- [stac-mjx/](stac-mjx/) — STAC inverse kinematics solver, installed editable.
+- [stac-mjx/](stac-mjx/) — STAC inverse kinematics solver, installed editable
+  (always required).
+- [third_party/JARVIS-HybridNet/](third_party/JARVIS-HybridNet/) — multi-view
+  pose estimation, installed editable when `--extra jarvis` is used.
 
 See [SUBMODULES.md](SUBMODULES.md) for submodule workflow.
 

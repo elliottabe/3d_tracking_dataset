@@ -4,9 +4,14 @@ This repository uses git submodules to manage dependencies.
 
 ## Current Submodules
 
-- **stac-mjx** (`stac-mjx/`) - STAC inverse kinematics solver
+- **stac-mjx** (`stac-mjx/`) — STAC inverse kinematics solver. Always required.
   - Repository: `git@github.com:elliottabe/stac-mjx.git`
   - Branch: main
+- **JARVIS-HybridNet** (`third_party/JARVIS-HybridNet/`) — multi-view 3D pose
+  estimation. Optional; required only for `scripts/render_bout_clips.py` and
+  for re-running the upstream tracking pipeline.
+  - Repository: `https://github.com/elliottabe/JARVIS-HybridNet.git`
+  - Branch: `elliottabe/multianimal-publication` (publication-pinned)
 
 ## Initial Setup
 
@@ -17,15 +22,20 @@ When cloning this repository for the first time, initialize the submodules:
 git clone git@github.com:YOUR_USERNAME/3d_tracking_dataset.git
 cd 3d_tracking_dataset
 
-# Initialize and clone all submodules
-git submodule update --init --recursive
+# Initialize and clone all submodules (with shallow JARVIS history)
+git submodule update --init --recursive --depth 1
 ```
 
 Or clone with submodules in one step:
 
 ```bash
-git clone --recurse-submodules git@github.com:YOUR_USERNAME/3d_tracking_dataset.git
+git clone --recurse-submodules --shallow-submodules \
+    git@github.com:YOUR_USERNAME/3d_tracking_dataset.git
 ```
+
+`--shallow-submodules` keeps JARVIS's git history out of the clone (~2 GB
+saved). The submodule still works the same; `git log` inside it will only
+show the pinned commit.
 
 ## Working with Submodules
 

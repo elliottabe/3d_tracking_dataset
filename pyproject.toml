@@ -102,6 +102,17 @@ viz = [
     "tensorboard",
     "tensorboardx",
 ]
+# JARVIS-HybridNet — multi-view 3D pose estimation (upstream tool that produces
+# the data3D.csv inputs and the runtime dep for scripts/render_bout_clips.py).
+# Installed editable from third_party/JARVIS-HybridNet (see [tool.uv.sources]).
+jarvis = ["jarvis-local"]
+# SAM3 (Meta Segment Anything 3) — used to regenerate sam3_masks.npz /
+# sam3_aligned.h5 for the courtship analyses. Pinned to a specific commit on
+# the user's fork that includes the streaming-mode update used by this
+# pipeline; replace with facebookresearch/sam3 upstream if preferred.
+sam3 = [
+    "sam3 @ git+https://github.com/elliottabe/sam3@f55aa0312fa83f91c3a1fc92174f51a3ae151e50",
+]
 
 [build-system]
 requires = ["setuptools>=68"]
@@ -116,6 +127,8 @@ package = false
 [tool.uv.sources]
 # stac-mjx is vendored as a git submodule and installed editable from there.
 stac-mjx = { path = "./stac-mjx", editable = true }
+# JARVIS-HybridNet is vendored as a git submodule under third_party/.
+jarvis-local = { path = "./third_party/JARVIS-HybridNet", editable = true }
 
 [tool.ruff]
 line-length = 100
