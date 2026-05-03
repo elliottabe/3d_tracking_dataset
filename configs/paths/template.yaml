@@ -7,7 +7,7 @@
 #
 # Variables that interpolate other config sections:
 #   ${paths.user}   - your username (set below)
-#   ${dataset.name} - selected dataset (free_walking, courtship, ...)
+#   ${dataset.name} - selected dataset (free_running, courtship, ...)
 #   ${version}      - dataset version label
 #   ${run_id}       - run identifier for outputs
 

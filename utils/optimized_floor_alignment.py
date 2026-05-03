@@ -512,7 +512,7 @@ def batch_process_with_ground_contact(bout_dict, ref_pose,
     Optimized batch processing with ground contact alignment.
 
     Args:
-        bout_dict: Dictionary of walking bout data
+        bout_dict: Dictionary of running bout data
         ref_pose: Reference pose for Procrustes alignment
         end_eff_indices: End effector indices
         percentile: Percentile for ground point selection
@@ -536,7 +536,7 @@ def batch_process_with_ground_contact(bout_dict, ref_pose,
     if max_clips is not None:
         bout_keys = bout_keys[:max_clips]
 
-    print(f"Processing {len(bout_keys)} walking bouts with ground contact alignment...")
+    print(f"Processing {len(bout_keys)} running bouts with ground contact alignment...")
     print("✅ Starting batch processing with optimized ground contact alignment...")
 
     # Process clips

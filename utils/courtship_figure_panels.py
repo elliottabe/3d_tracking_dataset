@@ -10,7 +10,7 @@ Layout (183 mm x 130 mm, 4 rows):
 
     Row 1: 6 cropped video frames
     Row 2: 6 MuJoCo render frames
-    Row 3: [wing-z trace stacked over scutellum-z trace] | [singing vs walking
+    Row 3: [wing-z trace stacked over scutellum-z trace] | [singing vs running
            z-height boxplot]   widths 2:1
     Row 4: [pulse-bout classification] | [pulse vs sine totals]
            | [L/R wing dominance]      widths 1:1:1
@@ -118,7 +118,7 @@ def assemble_figure(
         Row 1  video frames with KP overlay | sine in-phase trace
         Row 2  wing V13 z + scutellum z stacked (full width)
         Row 3 [polar L-R phase] | [joint angle density] | [Pslow/Pfast]
-              | [scutellum z courtship vs free walking]
+              | [scutellum z courtship vs free running]
         Row 4  [N MuJoCo render frames] | [pitch align] | [per-bout violin]
 
     axes_dict keys:
@@ -274,7 +274,7 @@ DEFAULT_PANEL_FIG_X: Dict[str, float] = {
 
 
 def _root_figure(ax) -> plt.Figure:
-    """Return the top-level Figure for an axes, walking up nested SubFigures."""
+    """Return the top-level Figure for an axes, running up nested SubFigures."""
     f = ax.figure
     while getattr(f, 'figure', None) is not None and f.figure is not f:
         f = f.figure
@@ -1768,14 +1768,14 @@ def panel_pitch_alignment_violin(
 
 
 # -----------------------------------------------------------------------------
-# Row 3 right: singing vs free-walking z-height
+# Row 3 right: singing vs free-running z-height
 # -----------------------------------------------------------------------------
 
-def panel_z_height_singing_vs_walking(
+def panel_z_height_singing_vs_running(
     ax: plt.Axes,
     pulse_z: np.ndarray,
     sine_z: np.ndarray,
-    walking_z: np.ndarray,
+    running_z: np.ndarray,
     kind: str = 'box',
     colors: Optional[Sequence[str]] = None,
     alpha: float = 0.55,
@@ -1787,15 +1787,15 @@ def panel_z_height_singing_vs_walking(
     rng_seed: int = 0,
     title: str = 'z height by state',
 ) -> None:
-    """Compare scutellum z-height during pulse, sine, and free walking.
+    """Compare scutellum z-height during pulse, sine, and free running.
 
-    ``colors`` overrides the default (pulse/sine/walking) triplet. When
+    ``colors`` overrides the default (pulse/sine/running) triplet. When
     ``show_points`` is True (default), raw samples are jittered and scattered
     on top of each box/violin.
     """
     p = np.asarray(pulse_z,   dtype=float); p = p[np.isfinite(p)]
     s = np.asarray(sine_z,    dtype=float); s = s[np.isfinite(s)]
-    w = np.asarray(walking_z, dtype=float); w = w[np.isfinite(w)]
+    w = np.asarray(running_z, dtype=float); w = w[np.isfinite(w)]
     data = [p, s, w]
     labels = [
         f'pulse\n(n={p.size})',

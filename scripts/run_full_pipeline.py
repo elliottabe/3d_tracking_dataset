@@ -44,7 +44,7 @@ class PipelineRunner:
     def __init__(
         self,
         anatomy: str,
-        dataset: str = "free_walking",
+        dataset: str = "free_running",
         base_dir: Path | None = None,
         paths_config: str = "workstation",
         force: bool = False,
@@ -426,7 +426,7 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Run complete pipeline for free_walking with anatomy v1
+  # Run complete pipeline for free_running with anatomy v1
   python scripts/run_full_pipeline.py --anatomy v1
 
   # Run for courtship dataset with v2_muscles anatomy
@@ -466,8 +466,8 @@ Pipeline Steps:
     parser.add_argument(
         '--dataset',
         type=str,
-        default='free_walking',
-        help='Dataset name (free_walking, courtship, etc.)'
+        default='free_running',
+        help='Dataset name (free_running, courtship, etc.)'
     )
     parser.add_argument(
         '--base-dir',

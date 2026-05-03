@@ -1,6 +1,6 @@
 """Pslow / Pfast classification method-diagram figure.
 
-Renders a single multi-panel figure walking through the classification
+Renders a single multi-panel figure running through the classification
 pipeline implemented in :mod:`utils.song_analysis` (per-pulse features)
 and :mod:`utils.pulse_types` (PCA + GMM clustering):
 

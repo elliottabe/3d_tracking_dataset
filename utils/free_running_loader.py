@@ -1,9 +1,9 @@
-"""Loader for non-courtship free-walking scutellum z-position.
+"""Loader for non-courtship free-running scutellum z-position.
 
 Mirrors the relevant slice of :mod:`utils.courtship_loader` but only extracts
 the named keypoint's z-coordinate; no song / sex / locomotion analysis. Used
 by the consolidated courtship figure to compare singing male body height
-against a population of freely walking flies.
+against a population of freely running flies.
 """
 from __future__ import annotations
 
@@ -27,7 +27,7 @@ def _resolve_kp_idx(info: dict, kp_name: str) -> int:
     return names.index(kp_name)
 
 
-def load_free_walking_scutellum_z(
+def load_free_running_scutellum_z(
     h5_path: str | Path,
     kp_name: str = 'Scutellum',
     bout_keys: Optional[Sequence[str]] = None,
@@ -35,11 +35,11 @@ def load_free_walking_scutellum_z(
     per_bout: bool = False,
     min_frames: int = 1,
 ) -> np.ndarray:
-    """Return scutellum z (mm) for a free-walking combined h5.
+    """Return scutellum z (mm) for a free-running combined h5.
 
     Parameters
     ----------
-    h5_path : path to a free-walking combined h5 with per-bout
+    h5_path : path to a free-running combined h5 with per-bout
         ``kp_data`` arrays of shape (T, N, 3) (or flat (T, N*3)).
     kp_name : keypoint to extract; default 'Scutellum'.
     bout_keys : optional subset of bout keys to load; default = all bouts
@@ -187,7 +187,7 @@ def _match_by_n_frames(
     return None
 
 
-def export_raw_free_walking_h5(
+def export_raw_free_running_h5(
     combined_h5_path: str | Path,
     out_path: str | Path,
     *,
@@ -196,10 +196,10 @@ def export_raw_free_walking_h5(
     overwrite: bool = False,
     verbose: bool = True,
 ) -> dict:
-    """Export a "raw-data only" free-walking h5 from an existing combined h5.
+    """Export a "raw-data only" free-running h5 from an existing combined h5.
 
-    The input is the already-merged ``ik_output_combined_v1_free_walking.h5``.
-    All bouts are kept (no song or pair filter — free walking has no notion of
+    The input is the already-merged ``ik_output_combined_v1_free_running.h5``.
+    All bouts are kept (no song or pair filter — free running has no notion of
     pairs). For each bout, copies the standard raw arrays
     (``kp_data, marker_sites, xpos_egocentric, qpos, qvel, xpos, xquat,
     site_xpos``) but drops ``geometric_angles``.
@@ -215,13 +215,13 @@ def export_raw_free_walking_h5(
     Parameters
     ----------
     combined_h5_path : path
-        Source merged free-walking h5.
+        Source merged free-running h5.
     out_path : path
         Destination path for the exported h5.
     bout_summary_csvs : sequence of paths, optional
-        ``free_walking_bouts_summary.csv`` files (one per Predictions_3D dir).
+        ``free_running_bouts_summary.csv`` files (one per Predictions_3D dir).
     preproc_h5_paths : sequence of paths, optional
-        ``preprocessed_bout_*_free_walking.h5`` files for ``orig_keypoints``.
+        ``preprocessed_bout_*_free_running.h5`` files for ``orig_keypoints``.
     overwrite : bool
         If False (default), raise ``FileExistsError`` when ``out_path`` exists.
     verbose : bool

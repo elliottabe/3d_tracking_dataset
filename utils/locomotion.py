@@ -1,8 +1,8 @@
-"""Walking, turning and COM-height features for one fly in one bout.
+"""Running, turning and COM-height features for one fly in one bout.
 
 Designed to feed the paper-figure notebook: computes per-frame forward /
 lateral speed and turn rate from a centroid keypoint, per-frame COM
-height above the estimated floor plane, and a stopped / walking state
+height above the estimated floor plane, and a stopped / running state
 gate. All numeric features are returned in data-native units unless the
 caller supplies ``body_length`` for normalisation.
 
@@ -41,8 +41,8 @@ class LocomotionConfig:
     ground_epsilon: float = 0.05
     floor_percentile: float = 5.0
 
-    # Stopped / walking classifier thresholds, in body-length / s.
-    walking_speed_bl: float = 0.5
+    # Stopped / running classifier thresholds, in body-length / s.
+    running_speed_bl: float = 0.5
     stopped_speed_bl: float = 0.3  # hysteresis floor
     min_run_ms: float = 40.0        # minimum state duration before flipping
 
@@ -172,14 +172,14 @@ def compute_com_height(
 
 
 # -----------------------------------------------------------------------------
-# Walking state (stopped / walking) with hysteresis
+# Running state (stopped / running) with hysteresis
 # -----------------------------------------------------------------------------
 
 
-def classify_walking_state(
+def classify_running_state(
     speed_bl: np.ndarray, cfg: Optional[LocomotionConfig] = None
 ) -> np.ndarray:
-    """Per-frame state ∈ {'walking', 'stopped'} from a body-length speed
+    """Per-frame state ∈ {'running', 'stopped'} from a body-length speed
     signal. Uses a hysteresis gate plus a minimum-run-length filter so
     the labels aren't dominated by single-frame jitter.
     """
@@ -190,16 +190,16 @@ def classify_walking_state(
     if T == 0:
         return state
 
-    walking = False
+    running = False
     for t in range(T):
         s = speed_bl[t]
-        if walking:
+        if running:
             if s < cfg.stopped_speed_bl:
-                walking = False
+                running = False
         else:
-            if s > cfg.walking_speed_bl:
-                walking = True
-        state[t] = "walking" if walking else "stopped"
+            if s > cfg.running_speed_bl:
+                running = True
+        state[t] = "running" if running else "stopped"
 
     # Minimum-run-length filter: collapse runs shorter than min_run_ms.
     min_run = max(1, int(round(cfg.min_run_ms * 1e-3 * cfg.fs)))
@@ -278,9 +278,9 @@ def summarize_by_song(
     return out
 
 
-def walking_fraction(state: np.ndarray) -> float:
-    """Fraction of frames labelled 'walking' (NaN-safe)."""
+def running_fraction(state: np.ndarray) -> float:
+    """Fraction of frames labelled 'running' (NaN-safe)."""
     T = len(state)
     if T == 0:
         return 0.0
-    return float(np.sum(np.asarray(state) == "walking") / T)
+    return float(np.sum(np.asarray(state) == "running") / T)

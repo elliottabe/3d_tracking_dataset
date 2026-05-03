@@ -128,8 +128,8 @@ The batch processing scripts can now reference the submodule:
 ```bash
 # Run STAC IK using the submodule
 cd stac-mjx
-python run_stac.py paths=workstation dataset=free_walking anatomy=v1 \
-    paths.data_dir=/data2/users/eabe/datasets/Johnson_lab/free_walking/Predictions_3D_20260202-171900
+python run_stac.py paths=workstation dataset=free_running anatomy=v1 \
+    paths.data_dir=/data2/users/eabe/datasets/Johnson_lab/free_running/Predictions_3D_20260202-171900
 ```
 
 ## Removing a Submodule

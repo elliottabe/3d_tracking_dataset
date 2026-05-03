@@ -112,7 +112,7 @@ def run_preprocessing(folder: Path, anatomy: str, dataset: str, paths: str,
     Args:
         folder: Path to prediction folder
         anatomy: Anatomy version (e.g., 'v1')
-        dataset: Dataset name (e.g., 'free_walking', 'courtship')
+        dataset: Dataset name (e.g., 'free_running', 'courtship')
         paths: Paths config to use (e.g., 'workstation', 'hyak')
         fly_info: Dict from detect_flies() with fly-specific file info
         dry_run: If True, don't actually run, just show command
@@ -198,9 +198,9 @@ def main():
     parser.add_argument(
         '--dataset',
         type=str,
-        default='free_walking',
-        choices=['free_walking', 'courtship'],
-        help='Dataset type (default: free_walking)'
+        default='free_running',
+        choices=['free_running', 'courtship'],
+        help='Dataset type (default: free_running)'
     )
     parser.add_argument(
         '--base-dir',

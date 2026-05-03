@@ -32,7 +32,7 @@ from utils.locomotion import (
     LocomotionConfig,
     compute_centroid_velocity,
     compute_com_height,
-    classify_walking_state,
+    classify_running_state,
     summarize_by_song,
 )
 
@@ -383,7 +383,7 @@ def analyze_pair(
     dict with keys: key0, key1, T, valid_fly0, valid_fly1, colocated,
         song0, song1, sex, tracker_key0, tracker_key1, tracker_male_id,
         tracker_song_fraction_fly0, tracker_song_fraction_fly1,
-        male_labels, male_valid, kin, com_z, floor_z, walking_state, by_song.
+        male_labels, male_valid, kin, com_z, floor_z, running_state, by_song.
     """
     if song_cfg is None:
         song_cfg = SongAnalysisConfig()
@@ -448,7 +448,7 @@ def analyze_pair(
     kin = compute_centroid_velocity(kp0, kp_names, loc_cfg, body_length=bl)
     com_z, floor_z = compute_com_height(kp0, kp_names, loc_cfg)
     speed_bl = kin.get('speed_bl', kin['speed'])
-    wstate = classify_walking_state(np.asarray(speed_bl), loc_cfg)
+    wstate = classify_running_state(np.asarray(speed_bl), loc_cfg)
 
     # Dominant-wing frame labels
     dw = str(song0.get('dominant_wing', 'L')).upper()
@@ -479,7 +479,7 @@ def analyze_pair(
         'male_valid':  v0,
         'kin': kin,
         'com_z': com_z, 'floor_z': floor_z,
-        'walking_state': wstate,
+        'running_state': wstate,
         'by_song': by_song,
     }
 

@@ -7,7 +7,7 @@ Postprocess STAC output data:
 5. Save processed output
 
 Usage:
-    python postprocess_stac_data.py paths=workstation dataset=free_walking
+    python postprocess_stac_data.py paths=workstation dataset=free_running
     python postprocess_stac_data.py paths=hyak dataset=courtship
 """
 

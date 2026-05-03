@@ -1,7 +1,7 @@
 # @package _global_.preprocessing
 
 # Preprocessing configuration for keypoint data
-# Usage: python preprocess_keypoints_for_ik.py paths=workstation dataset=free_walking anatomy=v1
+# Usage: python preprocess_keypoints_for_ik.py paths=workstation dataset=free_running anatomy=v1
 
 # Input/output paths (relative to dataset path or absolute)
 csv_path: 'data3D.csv'

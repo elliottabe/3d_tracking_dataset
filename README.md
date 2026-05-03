@@ -2,7 +2,7 @@
 
 Pipeline for processing 3D keypoint tracking of fruit fly (*Drosophila*) behavior:
 Procrustes alignment, inverse kinematics via STAC-MJX, and analysis utilities for
-free-walking and courtship datasets.
+free-running and courtship datasets.
 
 ## Quick Start
 
@@ -70,7 +70,7 @@ fallback for the dataset root, e.g.:
 
 ```bash
 export FLY3D_DATA_ROOT=/path/to/Johnson_lab
-uv run python scripts/run_full_pipeline.py --anatomy v1 --dataset free_walking
+uv run python scripts/run_full_pipeline.py --anatomy v1 --dataset free_running
 ```
 
 ## Repository structure
@@ -79,7 +79,7 @@ uv run python scripts/run_full_pipeline.py --anatomy v1 --dataset free_walking
 3d_tracking_dataset/
 ├── configs/                  Hydra configuration (anatomy, dataset, paths)
 │   ├── anatomy/              v1, v2, v2_muscles model definitions
-│   ├── dataset/              free_walking, courtship, etc.
+│   ├── dataset/              free_running, courtship, etc.
 │   └── paths/                per-machine path templates (incl. template.yaml)
 ├── models/
 │   └── fruitfly_v1/          vendored MuJoCo model used by anatomy=v1
@@ -99,14 +99,14 @@ The full pipeline runs in four steps; each can also be invoked individually.
 
 ```bash
 # All-in-one (after FLY3D_DATA_ROOT or --base-dir is set)
-uv run python scripts/run_full_pipeline.py --anatomy v1 --dataset free_walking
+uv run python scripts/run_full_pipeline.py --anatomy v1 --dataset free_running
 
 # Or step by step
 uv run python scripts/batch_process_predictions.py     --anatomy v1   # 1. preprocess
 uv run python scripts/batch_split_valid_bouts.py       --dataset courtship  # courtship only
 uv run python scripts/batch_run_stac.py                --anatomy v1   # 2. STAC IK
 uv run python scripts/batch_postprocess_predictions.py --anatomy v1   # 3. postprocess
-uv run python scripts/combine_data.py paths=mymachine dataset=free_walking anatomy=v1  # 4. combine
+uv run python scripts/combine_data.py paths=mymachine dataset=free_running anatomy=v1  # 4. combine
 ```
 
 See [BATCH_PROCESSING.md](BATCH_PROCESSING.md) for full pipeline documentation.
@@ -115,7 +115,7 @@ See [BATCH_PROCESSING.md](BATCH_PROCESSING.md) for full pipeline documentation.
 
 - [notebooks/Verify_Data.ipynb](notebooks/Verify_Data.ipynb) — load and validate processed data
 - [notebooks/Courtship_Song_Figures2.ipynb](notebooks/Courtship_Song_Figures2.ipynb) — courtship song & rendered-bout figures
-- [notebooks/Joint_Kinematics_Analysis.ipynb](notebooks/Joint_Kinematics_Analysis.ipynb) — PCA/UMAP analysis of joint kinematics during free walking
+- [notebooks/Joint_Kinematics_Analysis.ipynb](notebooks/Joint_Kinematics_Analysis.ipynb) — PCA/UMAP analysis of joint kinematics during free running
 - [notebooks/Sandbox_Strict.ipynb](notebooks/Sandbox_Strict.ipynb) — 2D keypoint trajectory overlays
 - [notebooks/Scutellum_Height_Running.ipynb](notebooks/Scutellum_Height_Running.ipynb) — inverted-pendulum vs. spring-mass locomotion analysis
 

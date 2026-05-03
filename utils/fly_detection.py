@@ -685,7 +685,7 @@ def detect_flies(folder: Path, dataset: str) -> List[Dict]:
 
     Args:
         folder: Path to a Predictions_3D_* folder.
-        dataset: Dataset name (e.g., 'courtship', 'free_walking').
+        dataset: Dataset name (e.g., 'courtship', 'free_running').
 
     Returns:
         List of dicts, each with keys:

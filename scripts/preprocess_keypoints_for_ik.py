@@ -10,7 +10,7 @@ This script:
 5. Saves preprocessed data to HDF5 format
 
 Usage:
-    python preprocess_keypoints_for_ik.py paths=workstation dataset=free_walking
+    python preprocess_keypoints_for_ik.py paths=workstation dataset=free_running
     python preprocess_keypoints_for_ik.py paths=hyak dataset=courtship preprocessing.apply_alignment=false
     python preprocess_keypoints_for_ik.py paths=workstation preprocessing.frame_start=100 preprocessing.frame_end=300
 """
@@ -1259,7 +1259,7 @@ def main(cfg: DictConfig):
     Main preprocessing function using Hydra configuration.
     
     Usage:
-        python preprocess_keypoints_for_ik.py paths=workstation dataset=free_walking
+        python preprocess_keypoints_for_ik.py paths=workstation dataset=free_running
         python preprocess_keypoints_for_ik.py paths=hyak preprocessing.apply_alignment=false
     """
     # Print configuration

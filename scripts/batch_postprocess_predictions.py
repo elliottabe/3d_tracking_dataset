@@ -214,9 +214,9 @@ def main():
     parser.add_argument(
         '--dataset',
         type=str,
-        default='free_walking',
-        choices=['free_walking', 'courtship'],
-        help='Dataset type (default: free_walking)'
+        default='free_running',
+        choices=['free_running', 'courtship'],
+        help='Dataset type (default: free_running)'
     )
     parser.add_argument(
         '--base-dir',

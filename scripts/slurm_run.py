@@ -10,8 +10,8 @@ preprocess -> stac -> postprocess steps on a single folder. An optional final
 `combine` job is submitted with an `afterok` dependency on all per-folder jobs.
 
 Usage:
-    python scripts/slurm_run.py --dataset free_walking --anatomy v1
-    python scripts/slurm_run.py --dataset free_walking --anatomy v1 --dry-run
+    python scripts/slurm_run.py --dataset free_running --anatomy v1
+    python scripts/slurm_run.py --dataset free_running --anatomy v1 --dry-run
     python scripts/slurm_run.py --dataset courtship --anatomy v1 --no-combine
 """
 
@@ -174,7 +174,7 @@ python -u scripts/run_full_pipeline.py \\
 def main():
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument('--dataset', default='free_walking',
+    p.add_argument('--dataset', default='free_running',
                    help='Dataset name; expects <dataset>_bouts_summary.csv per folder')
     p.add_argument('--anatomy', default='v1', help='Anatomy version (v1, v2_muscles, ...)')
     p.add_argument('--paths', default='hyak', help='Paths config (hyak, workstation, ...)')
@@ -300,7 +300,7 @@ if __name__ == "__main__":
 
 squeue -u $USER -h -o "%i %j" | awk '/pipe_courtship|combine_courtship/ {print $1}' | xargs -r scancel
 
-python ./scripts/slurm_run.py --dataset free_walking --anatomy v1 --paths hyak --base-dir /gscratch/portia/eabe/data/Johnson_lab/free_walking/session11
+python ./scripts/slurm_run.py --dataset free_running --anatomy v1 --paths hyak --base-dir /gscratch/portia/eabe/data/Johnson_lab/free_running/session11
 python ./scripts/slurm_run.py --dataset courtship --anatomy v1 --paths hyak --base-dir /gscratch/portia/eabe/data/Johnson_lab/courtship/04092026_bouts --extra=--force --partition ckpt-g2 --dry-run
 python ./scripts/slurm_run.py --dataset courtship --anatomy v1 --paths hyak --base-dir /gscratch/portia/eabe/data/Johnson_lab/courtship/Session1_bouts_04172026 --extra=--force --dry-run
 

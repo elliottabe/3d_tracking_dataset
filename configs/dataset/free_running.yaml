@@ -4,8 +4,8 @@ defaults:
   - preprocessing
   - postprocessing
 
-name: free_walking
-env_name: free_walking
+name: free_running
+env_name: free_running
 version: Data_analysis
 train: True
 

@@ -1,7 +1,7 @@
 # @package _global_.postprocessing
 
 # Postprocessing configuration for STAC output
-# Usage: python postprocess_stac_data.py paths=workstation dataset=free_walking
+# Usage: python postprocess_stac_data.py paths=workstation dataset=free_running
 
 # Input files (relative to data_dir or absolute)
 stac_output_file: 'stac/Fruitfly_ik_${anatomy.name}_${dataset.name}.h5'
