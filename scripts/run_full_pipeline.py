@@ -168,34 +168,6 @@ class PipelineRunner:
             self.step_times[step_name] = elapsed
             return False, f"Exception: {str(e)}"
     
-    def step_0_convert(self) -> bool:
-        """Step 0: Materialise legacy data3D_fly*.csv + bouts summaries for
-        Predictions_3D_* folders that only contain the newer bout_*/ layout.
-
-        Idempotent: folders already in legacy form are skipped (unless --force).
-        For old-format datasets this is a no-op across the board.
-        """
-        self.print_step_header(0, 5, "CONVERT BOUTS -> LEGACY")
-
-        cmd = [
-            sys.executable,
-            str(self.scripts_dir / "convert_bouts_to_legacy.py"),
-            f"--dataset={self.dataset}",
-            f"--base-dir={self.base_dir}",
-        ]
-        if self.force:
-            cmd.append("--force")
-        if self.dry_run:
-            cmd.append("--dry-run")
-
-        success, message = self.run_command(cmd, "convert", timeout=600)
-        self.step_results["convert"] = (success, message)
-        if success:
-            self.log(f"Convert complete: {message}")
-        else:
-            self.log(f"Convert failed: {message}")
-        return success
-
     def step_1_preprocess(self) -> bool:
         """Step 1: Preprocessing."""
         self.print_step_header(1, 4, "PREPROCESSING")
@@ -392,7 +364,6 @@ class PipelineRunner:
 
         # Run steps in order
         step_map = {
-            'convert': self.step_0_convert,
             'preprocess': self.step_1_preprocess,
             'split_valid': self.step_split_valid,
             'stac': self.step_2_stac,
@@ -503,11 +474,9 @@ Pipeline Steps:
     parser.add_argument(
         '--steps',
         type=str,
-        default='convert,preprocess,split_valid,stac,postprocess,combine',
+        default='preprocess,split_valid,stac,postprocess,combine',
         help='Comma-separated list of steps to run '
-             '(convert,preprocess,split_valid,stac,postprocess,combine). '
-             'The "convert" step materialises legacy data3D_fly*.csv + bouts '
-             'summaries for new-format folders; it is a no-op for old-format folders.'
+             '(preprocess,split_valid,stac,postprocess,combine).'
     )
     parser.add_argument(
         '--force',
