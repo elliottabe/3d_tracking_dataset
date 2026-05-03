@@ -1578,7 +1578,7 @@ def panel_wing_z_traces(
     t_plot = np.asarray(t_ms, dtype=float) * _ms_scale
     ax.plot(t_plot, wingL_z, color=wc['WingL_V13'], label='Wing L V13', **lk)
     ax.plot(t_plot, wingR_z, color=wc['WingR_V13'], label='Wing R V13', **lk)
-    ax.set_ylabel('Wing V13\nz (mm)')
+    ax.set_ylabel('Wing tip\nz (mm)')
     if t_plot.size:
         ax.set_xlim(0.0, float(t_plot[-1]))
 
@@ -1796,26 +1796,41 @@ def panel_z_height_singing_vs_running(
     p = np.asarray(pulse_z,   dtype=float); p = p[np.isfinite(p)]
     s = np.asarray(sine_z,    dtype=float); s = s[np.isfinite(s)]
     w = np.asarray(running_z, dtype=float); w = w[np.isfinite(w)]
-    data = [p, s, w]
-    labels = [
+    all_data = [p, s, w]
+    all_labels = [
         f'pulse\n(n={p.size})',
         f'sine\n(n={s.size})',
-        f'free walk\n(n={w.size})',
+        f'free running\n(n={w.size})',
     ]
-    cols = list(colors) if colors else [
+    all_cols = list(colors) if colors else [
         SONG_COLORS['pulse'], SONG_COLORS['sine'], '#888888',
     ]
-    positions = [0, 1, 2]
+    all_positions = [0, 1, 2]
+
+    # matplotlib's violinplot/boxplot raise on zero-size arrays. Drop empty
+    # groups so the panel still renders if one source returns no samples.
+    keep = [vals.size > 0 for vals in all_data]
+    data      = [v for v, k in zip(all_data,      keep) if k]
+    labels    = [l for l, k in zip(all_labels,    keep) if k]
+    cols      = [c for c, k in zip(all_cols,      keep) if k]
+    positions = [p_ for p_, k in zip(all_positions, keep) if k]
 
     if show_points:
         pk = {'s': 6, 'linewidths': 0.3, 'edgecolors': 'k',
               'alpha': 0.7, 'zorder': 1, **(point_kwargs or {})}
         rng = np.random.default_rng(rng_seed)
         for pos, vals, c in zip(positions, data, cols):
-            if vals.size == 0:
-                continue
             jitter = rng.uniform(-jitter_width, jitter_width, size=vals.size)
             ax.scatter(pos + jitter, vals, c=c, **pk)
+
+    if not data:
+        ax.text(0.5, 0.5, 'no data', transform=ax.transAxes,
+                ha='center', va='center', fontsize=8, color='gray')
+        ax.set_xticks(all_positions)
+        ax.set_xticklabels(all_labels)
+        ax.set_ylabel('Scutellum z (mm)')
+        ax.set_title(title, pad=2)
+        return
 
     if kind == 'violin':
         vk = {'widths': 0.7, 'showmeans': True, 'showextrema': False,
@@ -1844,8 +1859,10 @@ def panel_z_height_singing_vs_running(
             for line in bp.get(key, []):
                 line.set_zorder(3)
 
-    ax.set_xticks(positions)
-    ax.set_xticklabels(labels)
+    # Always show all three x positions for layout stability, even if one
+    # group is empty (its label still reflects n=0).
+    ax.set_xticks(all_positions)
+    ax.set_xticklabels(all_labels)
     ax.set_ylabel('Scutellum z (mm)')
     ax.set_title(title, pad=2)
 
@@ -1888,7 +1905,7 @@ def panel_sine_wing_inphase(
     ax.plot(t_ms, wing_folded_z, color=cc['folded'],
             label='Folding', **lk)
     ax.set_xlabel('Time (ms)')
-    ax.set_ylabel('Wing V13 z (mm)')
+    ax.set_ylabel('Wing tip z (mm)')
     ax.set_title(title, pad=2)
     _colored_text_legend(ax, **lg)
 
