@@ -6,6 +6,11 @@ free-walking and courtship datasets.
 
 ## Quick Start
 
+The recommended workflow is to create a minimal conda environment that
+provides Python 3.12, `uv`, and the system-level libraries needed for
+headless rendering, and then let `uv` install all the Python dependencies
+on top of it.
+
 ```bash
 # Clone with submodules
 git clone --recurse-submodules <repository-url>
@@ -14,28 +19,33 @@ cd 3d_tracking_dataset
 # (If already cloned without --recurse-submodules)
 git submodule update --init --recursive
 
-# Recommended: install via uv (Python deps in pyproject.toml + uv.lock)
-uv sync --extra cuda12 --extra dev
-
-# Run a smoke test
-uv run python test_configs.py
-uv run pytest tests/
-```
-
-`uv sync` creates `.venv/` with all Python dependencies including the editable
-`stac-mjx` submodule. The `cuda12` extra pulls JAX with CUDA 12 wheels; drop it
-on CPU-only systems. The `dev` extra adds pytest, ruff, jupyterlab, and
-nbstripout.
-
-### Optional: conda for system libraries
-
-If your system lacks headless OpenGL or ffmpeg, [environment.yml](environment.yml)
-provides a minimal conda env with those system libraries:
-
-```bash
+# 1. Minimal conda env: Python 3.12 + uv + ffmpeg + headless OpenGL
 conda env create -f environment.yml
 conda activate fly-3d-tracking
+
+# 2. Install all Python deps into the active conda env via uv
+uv sync --active --extra cuda12 --extra dev
+
+# 3. Smoke test
+python test_configs.py
+pytest tests/
+```
+
+The `--active` flag tells `uv` to install into the activated conda env
+instead of creating a separate `.venv/`. `uv.lock` pins exact versions for
+reproducibility. The `cuda12` extra pulls JAX with CUDA 12 wheels (drop it
+on CPU-only systems); `dev` adds pytest, ruff, jupyterlab, and nbstripout.
+
+### Pure-uv install (no conda)
+
+If your system already has ffmpeg and headless OpenGL libraries available
+(e.g. via apt: `ffmpeg libegl1 libgl1 libglfw3`), you can skip conda
+entirely and let `uv` create its own venv:
+
+```bash
 uv sync --extra cuda12 --extra dev
+uv run python test_configs.py
+uv run pytest tests/
 ```
 
 ### Notebook outputs

@@ -1,15 +1,21 @@
-# Optional: minimal conda environment providing system-level libraries
-# (headless OpenGL, ffmpeg, glfw) that are easier to install via conda
-# than via pip on Linux clusters. Python packages themselves are managed
-# by uv via pyproject.toml.
+# Minimal conda environment for the 3D tracking pipeline.
 #
-# Recommended workflow (Linux with GPU):
+# This file provides ONLY:
+#   - Python 3.12
+#   - uv (so it's available immediately after `conda activate`)
+#   - System libraries that are easier to install via conda than apt/pip:
+#       ffmpeg (video IO), GLEW + Mesa + GLFW (headless OpenGL for MuJoCo)
+#
+# All Python dependencies are managed by uv via pyproject.toml + uv.lock.
+#
+# Recommended install:
 #   conda env create -f environment.yml
 #   conda activate fly-3d-tracking
-#   uv sync --extra cuda12         # installs all Python deps incl. JAX[cuda12]
+#   uv sync --active --extra cuda12 --extra dev
 #
-# If your system already provides headless GL + ffmpeg, you can skip conda
-# entirely and just run `uv sync` in any venv with Python 3.12.
+# `--active` tells uv to install into the conda env rather than create a
+# separate .venv/. The `cuda12` extra pulls JAX with CUDA 12 wheels;
+# `dev` adds pytest, ruff, jupyterlab, nbstripout.
 name: fly-3d-tracking
 channels:
   - conda-forge
