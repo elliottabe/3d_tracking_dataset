@@ -27,14 +27,15 @@ Usage:
 
 import argparse
 import logging
+import os
 import subprocess
 import sys
 from pathlib import Path
 import time
 
-# Default data root — all datasets live under this directory
-DATA_ROOT = Path('/gscratch/portia/eabe/data/Johnson_lab')
-# DATA_ROOT = Path('/data2/users/eabe/datasets/Johnson_lab')
+# Default data root — all datasets live under this directory.
+# Set FLY3D_DATA_ROOT in the environment (or pass --base-dir) to override.
+DATA_ROOT = Path(os.environ.get("FLY3D_DATA_ROOT", "")) if os.environ.get("FLY3D_DATA_ROOT") else None
 
 
 class PipelineRunner:
@@ -56,7 +57,16 @@ class PipelineRunner:
         self.yes = yes
         self.anatomy = anatomy
         self.dataset = dataset
-        self.base_dir = base_dir if base_dir is not None else DATA_ROOT / dataset
+        if base_dir is not None:
+            self.base_dir = base_dir
+        elif DATA_ROOT is not None:
+            self.base_dir = DATA_ROOT / dataset
+        else:
+            raise ValueError(
+                "No data root configured. Pass --base-dir or set the "
+                "FLY3D_DATA_ROOT environment variable to the directory "
+                "containing your dataset folders (e.g. /path/to/Johnson_lab)."
+            )
         self.paths_config = paths_config
         self.force = force
         self.skip_completed = skip_completed

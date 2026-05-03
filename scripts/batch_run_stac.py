@@ -481,7 +481,12 @@ Examples:
     args = parser.parse_args()
 
     if args.base_dir is None:
-        args.base_dir = Path(f'/data2/users/eabe/datasets/Johnson_lab/{args.dataset}')
+        data_root = os.environ.get("FLY3D_DATA_ROOT")
+        if not data_root:
+            parser.error(
+                "--base-dir not given and FLY3D_DATA_ROOT is unset. Pass one of them."
+            )
+        args.base_dir = Path(data_root) / args.dataset
 
     # Validate stac-mjx directory
     if not args.stac_dir.exists():

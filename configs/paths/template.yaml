@@ -1,0 +1,36 @@
+# Path template — copy this to a new file (e.g. paths/<machine>.yaml) and edit
+# the placeholders for your environment, then select it via Hydra:
+#
+#   python scripts/run_full_pipeline.py paths=<machine> ...
+#
+# Or load directly in a notebook with utils.path_utils.load_config_with_path_template().
+#
+# Variables that interpolate other config sections:
+#   ${paths.user}   - your username (set below)
+#   ${dataset.name} - selected dataset (free_walking, courtship, ...)
+#   ${version}      - dataset version label
+#   ${run_id}       - run identifier for outputs
+
+user: <YOUR_USERNAME>
+
+# Repo root checkout. Anatomy v1 resolves its vendored model paths through this:
+#   models/fruitfly_v1/fruitfly_v1_free.xml lives under cwd_dir/models/.
+cwd_dir:  /<PATH_TO>/3d_tracking_dataset
+
+# Where input datasets live (raw 3D predictions, video sources, calibration).
+base_dir: /<PATH_TO_DATASETS>/${dataset.name}/${version}
+data_dir: /<PATH_TO_DATASETS>/${dataset.name}/${version}
+
+# Where pipeline outputs are written (per run).
+save_dir: ${multirun_save_dir:${paths.base_dir},${run_id}}
+log_dir:  ${paths.save_dir}/logs/
+ckpt_dir: ${paths.save_dir}/ckpt/
+fig_dir:  ${paths.save_dir}/figures/
+
+# Optional: only set if you want to use external (non-vendored) anatomy variants
+# such as fruitfly_v2 or fruitfly_v2_muscles. Anatomy v1 uses the vendored copy
+# under cwd_dir/models/ and does not consume body_model_dir.
+# body_model_dir: /<PATH_TO>/fruitfly_body_models/
+
+# Optional: shared parent for related repos (used by some helper scripts).
+# project_dir: /<PATH_TO>/Research/MyRepos/

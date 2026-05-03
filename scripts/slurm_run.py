@@ -16,11 +16,13 @@ Usage:
 """
 
 import argparse
+import os
 import subprocess
 import sys
 from pathlib import Path
 
-DATA_ROOT = Path('/gscratch/portia/eabe/data/Johnson_lab')
+# Default data root — override with FLY3D_DATA_ROOT env var or --base-dir.
+DATA_ROOT = Path(os.environ["FLY3D_DATA_ROOT"]) if os.environ.get("FLY3D_DATA_ROOT") else None
 
 # Partition -> nodelist (from sinfo); auto-selected based on --partition.
 GPU_NODELISTS = {
@@ -206,7 +208,17 @@ def main():
         args.requeue = args.partition.startswith('ckpt')
     requeue_line = "#SBATCH --requeue" if args.requeue else ""
 
-    base_dir = args.base_dir if args.base_dir is not None else DATA_ROOT / args.dataset
+    if args.base_dir is not None:
+        base_dir = args.base_dir
+    elif DATA_ROOT is not None:
+        base_dir = DATA_ROOT / args.dataset
+    else:
+        print(
+            "Error: no data root configured. Pass --base-dir or set "
+            "FLY3D_DATA_ROOT in the environment.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
     if not base_dir.exists():
         print(f"Error: base directory not found: {base_dir}", file=sys.stderr)
         sys.exit(1)

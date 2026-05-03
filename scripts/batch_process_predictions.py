@@ -26,11 +26,12 @@ Usage:
     python scripts/batch_process_predictions.py --dataset courtship
 """
 
-import sys
-import subprocess
-from pathlib import Path
-from datetime import datetime
 import argparse
+import os
+import subprocess
+import sys
+from datetime import datetime
+from pathlib import Path
 
 # Add project root to path for utility imports
 project_root = Path(__file__).parent.parent
@@ -205,7 +206,8 @@ def main():
         '--base-dir',
         type=str,
         default=None,
-        help='Base directory containing Predictions_3D folders (default: /data2/users/eabe/datasets/Johnson_lab/<dataset>)'
+        help='Base directory containing Predictions_3D folders '
+             '(default: $FLY3D_DATA_ROOT/<dataset>)'
     )
     parser.add_argument(
         '--anatomy',
@@ -239,7 +241,12 @@ def main():
     args = parser.parse_args()
 
     if args.base_dir is None:
-        args.base_dir = f'/data2/users/eabe/datasets/Johnson_lab/{args.dataset}'
+        data_root = os.environ.get("FLY3D_DATA_ROOT")
+        if not data_root:
+            parser.error(
+                "--base-dir not given and FLY3D_DATA_ROOT is unset. Pass one of them."
+            )
+        args.base_dir = f"{data_root}/{args.dataset}"
 
     # Setup logging
     if args.log_file:
