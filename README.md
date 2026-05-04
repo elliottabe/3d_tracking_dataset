@@ -1,8 +1,8 @@
 # 3D Tracking Dataset
 
-Pipeline for processing 3D keypoint tracking of fruit fly (*Drosophila*) behavior:
-Procrustes alignment, inverse kinematics via STAC-MJX, and analysis utilities for
-free-running and courtship datasets.
+Pipeline for processing 3D keypoint tracking of fruit fly (*Drosophila*) behavior:  
+[Whole-body 3D kinematics of freely behaving Drosophila](https://doi.org/10.64898/2026.05.03.722293
+)
 
 ## Quick Start
 
@@ -56,12 +56,6 @@ uv sync --extra cuda12 --extra dev
 uv run python test_configs.py
 uv run pytest tests/
 ```
-
-### Notebook outputs
-
-A `nbstripout` filter is declared in [.gitattributes](.gitattributes); contributors
-should run `nbstripout --install` after cloning so notebook outputs are
-automatically removed from commits.
 
 ## External tools
 
@@ -202,4 +196,4 @@ See [SUBMODULES.md](SUBMODULES.md) for submodule workflow.
 ## Citation
 
 If you use this dataset or pipeline, please cite the accompanying manuscript
-(see preprint link / DOI here).
+(see preprint [link / DOI here](https://doi.org/10.64898/2026.05.03.722293 )).
