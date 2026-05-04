@@ -174,13 +174,6 @@ uv run python scripts/combine_data.py paths=mymachine dataset=free_running anato
 
 See [BATCH_PROCESSING.md](BATCH_PROCESSING.md) for full pipeline documentation.
 
-## Notebooks
-
-- [notebooks/Verify_Data.ipynb](notebooks/Verify_Data.ipynb) — load and validate processed data
-- [notebooks/Courtship_Song_Figures2.ipynb](notebooks/Courtship_Song_Figures2.ipynb) — courtship song & rendered-bout figures
-- [notebooks/Joint_Kinematics_Analysis.ipynb](notebooks/Joint_Kinematics_Analysis.ipynb) — PCA/UMAP analysis of joint kinematics during free running
-- [notebooks/Sandbox_Strict.ipynb](notebooks/Sandbox_Strict.ipynb) — 2D keypoint trajectory overlays
-- [notebooks/Scutellum_Height_Running.ipynb](notebooks/Scutellum_Height_Running.ipynb) — inverted-pendulum vs. spring-mass locomotion analysis
 
 ## Key features
 
