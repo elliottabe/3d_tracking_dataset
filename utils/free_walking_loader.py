@@ -304,7 +304,7 @@ def export_raw_free_walking_h5(
             j = _match_by_n_frames(
                 csv_index[fid], n_frames,
                 used_flags=csv_used[fid],
-                n_frames_getter=lambda r: r['n_frames'],
+                n_frames_getter=lambda r: r['n_frames'] - 1,  # CSV uses end-start+1; combined uses end-start
             )
             if j is not None:
                 csv_row = csv_index[fid][j]

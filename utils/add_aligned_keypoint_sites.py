@@ -388,6 +388,265 @@ def get_aligned_mocap_indices(mj_model: mujoco.MjModel,
     
     return mocap_indices
 
+
+def prune_spec_to_keypoints(spec: mujoco.MjSpec,
+                            present_kp_names: List[str],
+                            site_prefixes: tuple = ('tracking', 'aligned'),
+                            verbose: bool = True) -> List[str]:
+    """Remove body subtrees whose keypoint sites are all absent from the data.
+
+    For an amputation (or any recording with missing markers), the body model
+    XML still contains the full limb (e.g. the front-left T1L leg) with dangling
+    ``tracking[...]`` sites that have no corresponding keypoint. This walks the
+    spec and deletes the *top-most* body whose entire subtree of keypoint sites
+    (``tracking[KP]`` / ``aligned[KP]``) is absent from ``present_kp_names`` —
+    so a distal leg truncation drops the missing chain while keeping the most
+    proximal body that still carries a present keypoint (e.g. coxa for T1L_ThxCx).
+
+    Operates in place on ``spec`` BEFORE ``compile()`` / attaching. Because it
+    removes joints, the resulting model has fewer DOFs — use it for keypoint /
+    reference-pose visualization, not for replaying full-model STAC ``qpos``
+    (which still contains the unconstrained amputated-leg joints).
+
+    Args:
+        spec: A fly-model ``mujoco.MjSpec`` (raw, before suffix-attach).
+        present_kp_names: Keypoint names present in the data (e.g. ``kp_names``).
+        site_prefixes: Site-name prefixes that encode a keypoint as ``prefix[KP]``.
+        verbose: Print which bodies were removed.
+
+    Returns:
+        List of removed (top-most) body names.
+    """
+    import re
+
+    present = set(present_kp_names)
+    pattern = re.compile(r'(?:' + '|'.join(site_prefixes) + r')\[(.+)\]$')
+
+    def site_kp(name: str):
+        m = pattern.match(name or '')
+        return m.group(1) if m else None
+
+    # child-name -> parent-name map via a worldbody walk
+    parent_of: Dict[str, Optional[str]] = {}
+
+    def _walk(body, parent_name):
+        parent_of[body.name] = parent_name
+        child = body.first_body()
+        while child is not None:
+            _walk(child, body.name)
+            child = body.next_body(child)
+
+    _walk(spec.worldbody, None)
+
+    def subtree_kps(body) -> set:
+        kps = set()
+        for site in body.find_all(mujoco.mjtObj.mjOBJ_SITE):
+            kp = site_kp(site.name)
+            if kp is not None:
+                kps.add(kp)
+        return kps
+
+    # A body is "fully absent" if its subtree has >=1 keypoint site and none of
+    # those keypoints are present in the data.
+    fully_absent: Dict[str, object] = {}
+    for body in spec.bodies:
+        if not body.name:
+            continue
+        kps = subtree_kps(body)
+        if kps and kps.isdisjoint(present):
+            fully_absent[body.name] = body
+
+    # Delete only the top-most fully-absent bodies (parent not itself absent);
+    # deleting a body cascades to its subtree.
+    topmost = [b for name, b in fully_absent.items()
+               if parent_of.get(name) not in fully_absent]
+    removed = sorted(b.name for b in topmost)
+    for body in topmost:
+        spec.delete(body)
+
+    if verbose:
+        if removed:
+            print(f"✓ Pruned {len(removed)} body subtree(s) for missing keypoints: {removed}")
+        else:
+            print("✓ No body parts to prune — all model keypoints present in data")
+    return removed
+
+
+def render_keypoint_overlay(keypoints,
+                            kp_names: List[str],
+                            flybody_path,
+                            floor_path,
+                            out_path,
+                            n_frames: int = 3,
+                            cameras=('track1', 'track2'),
+                            height: int = 512,
+                            width: int = 512,
+                            floor_offset: float = 0.0,
+                            trunk_keypoints=('Scutellum', 'WingL_base', 'WingR_base',
+                                             'Abd_A4', 'Abd_tip'),
+                            anchor_keypoint: str = 'Scutellum',
+                            segment_scales=None) -> Optional[Path]:
+    """Per-bout QC render: body model + aligned keypoint markers overlaid.
+
+    The (already Procrustes-scaled) keypoint cloud is rigidly fit to the model's
+    rest pose using the trunk markers (Kabsch rotation+translation, NO scale) and
+    drawn as colored mocap markers over the model, so you can visually confirm
+    the body scale matches the model. The body model is pruned to the keypoints
+    present in the data (so an amputated limb is removed). Saves a PNG montage of
+    ``n_frames`` evenly-spaced frames x cameras.
+
+    Rendering needs an EGL/GPU context; on failure this returns None (and prints
+    a note) rather than raising, so it never breaks preprocessing.
+
+    Args:
+        keypoints: (T, N, 3) aligned keypoints for one bout (model units).
+        kp_names: keypoint names matching axis 1 of ``keypoints``.
+        flybody_path: fly model MJCF path.
+        floor_path: floor/arena MJCF path.
+        out_path: output PNG path (Path).
+        n_frames: number of evenly-spaced frames to render.
+        cameras: camera names (``_fly`` suffix added if missing).
+        height, width: render size per panel.
+        floor_offset: z offset for attaching the fly above the floor.
+        trunk_keypoints: rigid markers used for the Kabsch alignment.
+
+    Returns:
+        ``out_path`` on success, else ``None``.
+    """
+    import numpy as np
+    import mujoco
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    from pathlib import Path as _Path
+
+    out_path = _Path(out_path)
+    try:
+        kp = np.asarray(keypoints)
+        T = kp.shape[0]
+        names = list(kp_names)
+
+        # Build pruned model + floor + colored mocap markers.
+        spec = mujoco.MjSpec.from_file(str(flybody_path))
+        # Apply the subject-specific per-segment morph (if provided) so markers
+        # overlay the morphed mesh, matching what STAC solved on.
+        if segment_scales:
+            try:
+                import sys as _sys
+                from pathlib import Path as _P
+                _sys.path.insert(0, str(_P(__file__).resolve().parent.parent / "stac-mjx"))
+                from stac_mjx.rescale import rescale_per_segment
+                rescale_per_segment(spec, list(segment_scales))
+            except Exception as _e:
+                print(f"  [render] segment morph skipped: {_e}")
+        prune_spec_to_keypoints(spec, names, verbose=False)
+        floor_spec = mujoco.MjSpec.from_file(str(floor_path))
+        floor_spec.worldbody.add_frame(
+            pos=[0, 0, floor_offset], quat=[1, 0, 0, 0]
+        ).attach_body(spec.body('thorax'), '', suffix='_fly')
+        floor_spec = add_aligned_mocap_bodies(floor_spec, names, color_coded=True,
+                                              prefix='aligned_')
+        mj_model = floor_spec.compile()
+        mj_data = mujoco.MjData(mj_model)
+        mujoco.mj_forward(mj_model, mj_data)
+        mocap_idx = get_aligned_mocap_indices(mj_model, names, prefix='aligned_')
+
+        # Drop the floor to just below the fly's lowest point so the body sits on
+        # top of it (the rest-pose feet hang below the thorax; without this the
+        # fly renders half-buried in the floor).
+        floor_gid = mujoco.mj_name2id(mj_model, mujoco.mjtObj.mjOBJ_GEOM, 'floor')
+        if floor_gid >= 0:
+            zs = [mj_data.geom_xpos[g, 2] for g in range(mj_model.ngeom) if g != floor_gid]
+            if zs:
+                mj_model.geom_pos[floor_gid, 2] = float(min(zs)) - 0.02
+                mujoco.mj_forward(mj_model, mj_data)
+
+        # Model rest-pose tracking-site positions for present keypoints.
+        ref = {}
+        for n in names:
+            sid = mujoco.mj_name2id(mj_model, mujoco.mjtObj.mjOBJ_SITE, f'tracking[{n}]_fly')
+            if sid >= 0:
+                ref[n] = mj_data.site_xpos[sid].copy()
+        trunk = [n for n in trunk_keypoints if n in ref and n in names]
+
+        fidx = [T // 2] if n_frames <= 1 else \
+            sorted(set(int(round(x)) for x in np.linspace(0, T - 1, n_frames)))
+
+        cams = []
+        for c in cameras:
+            cn = str(c) if str(c).endswith('_fly') else f'{c}_fly'
+            if mujoco.mj_name2id(mj_model, mujoco.mjtObj.mjOBJ_CAMERA, cn) >= 0:
+                cams.append(cn)
+        if not cams:
+            cams = [mj_model.camera(0).name]
+
+        def kabsch(P, Q):
+            """Rigid R, t mapping P -> Q (no scaling)."""
+            Pc, Qc = P - P.mean(0), Q - Q.mean(0)
+            U, _, Vt = np.linalg.svd(Pc.T @ Qc)
+            D = np.sign(np.linalg.det(Vt.T @ U.T))
+            R = Vt.T @ np.diag([1.0, 1.0, D]) @ U.T
+            return R, Q.mean(0) - R @ P.mean(0)
+
+        so = mujoco.MjvOption()
+        so.sitegroup[:] = [1, 1, 1, 1, 1, 0]
+        so.flags[mujoco.mjtVisFlag.mjVIS_TRANSPARENT] = True
+
+        nrows, ncols = len(fidx), len(cams)
+        fig, axs = plt.subplots(nrows, ncols, figsize=(3 * ncols, 3 * nrows),
+                                squeeze=False)
+        with mujoco.Renderer(mj_model, height=height, width=width) as rnd:
+            for r, t in enumerate(fidx):
+                tk = [n for n in trunk
+                      if np.all(np.isfinite(kp[t, names.index(n)]))]
+                if len(tk) >= 3:
+                    P = np.array([kp[t, names.index(n)] for n in tk])
+                    Q = np.array([ref[n] for n in tk])
+                    R, t_centroid = kabsch(P, Q)
+                else:
+                    R, t_centroid = np.eye(3), np.zeros(3)
+                # Pin the thorax keypoint exactly onto the model's thorax site:
+                # keep the trunk-derived rotation R but choose the translation so
+                # anchor_keypoint maps onto its model site. Makes the thorax
+                # coincide and turns any residual splay into a direct read on the
+                # scale. Falls back to the Kabsch centroid translation if the
+                # anchor is missing/NaN this frame.
+                if (anchor_keypoint in names and anchor_keypoint in ref
+                        and np.all(np.isfinite(kp[t, names.index(anchor_keypoint)]))):
+                    a = kp[t, names.index(anchor_keypoint)]
+                    tt = ref[anchor_keypoint] - R @ a
+                else:
+                    tt = t_centroid
+                for i, mid in mocap_idx.items():
+                    p = kp[t, i]
+                    mj_data.mocap_pos[mid] = (R @ p + tt) if np.all(np.isfinite(p)) \
+                        else np.array([0.0, 0.0, -100.0])  # hide NaN markers off-scene
+                    mj_data.mocap_quat[mid] = [1, 0, 0, 0]
+                mujoco.mj_forward(mj_model, mj_data)
+                for c, cn in enumerate(cams):
+                    rnd.update_scene(mj_data, camera=cn, scene_option=so)
+                    rnd.scene.flags[mujoco.mjtRndFlag.mjRND_SHADOW] = False
+                    axs[r][c].imshow(rnd.render())
+                    axs[r][c].axis('off')
+                    if r == 0:
+                        axs[r][c].set_title(cn, fontsize=8)
+                axs[r][0].text(-0.04, 0.5, f'frame {t}', rotation=90, va='center',
+                               ha='right', transform=axs[r][0].transAxes, fontsize=8)
+        fig.suptitle(out_path.stem, fontsize=9)
+        fig.tight_layout()
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(out_path, dpi=120, bbox_inches='tight')
+        plt.close(fig)
+        return out_path
+    except Exception as e:
+        print(f"  [render] skipped {out_path.name}: {e}")
+        try:
+            plt.close('all')
+        except Exception:
+            pass
+        return None
+
+
 def remove_aligned_sites(xml_path: str,
                         output_path: Optional[str] = None,
                         backup: bool = True) -> Path:

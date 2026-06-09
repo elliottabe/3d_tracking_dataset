@@ -1,0 +1,21 @@
+# @package _global_.dataset
+
+defaults:
+  - /preprocessing: default
+  - /postprocessing: default
+  - /stac: default
+
+name: amputation
+env_name: amputation
+version: Data_analysis
+train: True
+
+concat:
+  input_pattern: 'postprocessing/ik_output_${anatomy.name}_${dataset.name}.h5'
+  output_file: 'ik_output_combined_${anatomy.name}_${dataset.name}.h5'
+  enable_jax: True
+
+# Note: no postprocessing overrides needed. Floor-alignment end effectors are
+# auto-filtered to the legs actually tracked in the data (see
+# postprocess_stac_data.py:filter_end_effectors_to_tracked), so an amputated
+# leg's untracked claw is dropped from ground-contact estimation automatically.

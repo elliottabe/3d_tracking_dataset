@@ -17,6 +17,12 @@ defaults:
   - paths: workstation
   # - train: imitation
 
+# Bridge: expose anatomy.model at the top level so STAC (scripts/run_stac.py ->
+# stac_mjx.run_stac) reads cfg.model.* from the anatomy config. cfg.stac comes
+# from the `stac` config group (selected per-dataset). Preprocess/postprocess
+# ignore cfg.model.
+model: ${anatomy.model}
+
 
 # set the directory where the output files get saved
 hydra:

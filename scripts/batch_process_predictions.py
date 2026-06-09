@@ -198,7 +198,7 @@ def main():
         '--dataset',
         type=str,
         default='free_walking',
-        choices=['free_walking', 'courtship'],
+        choices=['free_walking', 'courtship', 'amputation'],
         help='Dataset type (default: free_walking)'
     )
     parser.add_argument(

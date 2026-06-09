@@ -10,6 +10,8 @@ xml_path: '${anatomy.mjcf_path}'  # Get from anatomy config
 
 # Bout configuration
 bout_name: 'preprocessed_bout_${anatomy.name}_${dataset.name}'  # Output file for preprocessed bout data
+# Filename STAC reads (tracks bout_name; override per-fly for dual-fly STAC inputs).
+input_filename: '${preprocessing.bout_name}.h5'
 bouts_csv: '${dataset.name}_bouts_summary.csv'  # CSV with bout info (bout_idx, start_frame, end_frame)
 
 # Single bout mode (ignored if bouts_csv is used)
@@ -21,10 +23,45 @@ apply_alignment: true
 apply_scaling: true
 preserve_translation: true  # Preserve original position/orientation (only scale)
 
-# Keypoint exclusion from alignment
-exclude_antenna: false
-exclude_wings: false
-exclude_wing_veins: true  # Exclude only wing vein markers (V12/V13) from Procrustes scaling
+# Keypoints excluded from the Procrustes alignment fit are configured via the
+# layered `alignment_exclude` (anatomy default) + `dataset.alignment` (override)
+# schema — see configs/anatomy/*.yaml and select_excluded_indices().
+
+# Procrustes body-size scaling.
+# A fly's body size is constant, so estimating one shared scale (instead of a
+# fresh per-bout scale) removes per-bout noise. Using rigid trunk markers makes
+# the scale invariant to leg pose AND to which legs are tracked (amputation),
+# so amputated and intact flies are scaled comparably. The data spread is the
+# robust statistic over each frame's rotation-invariant trunk-marker spread,
+# which avoids the heading-smear of the old bout-averaged-pose estimate.
+scaling:
+  shared_across_bouts: true   # one robust per-fly scale applied to every bout
+  scale_keypoints: trunk      # 'trunk' (rigid body markers) | 'all' (legacy: all included keypoints)
+  trunk_keypoints: [Scutellum, WingL_base, WingR_base, Abd_A4, Abd_tip]
+  robust_stat: median         # 'median' | 'mean' over per-frame trunk spreads
+  # Set shared_across_bouts: false to restore the legacy independent per-bout scale.
+
+# Subject-specific per-segment model calibration. After the global scale fixes
+# overall size, this measures each bone length from the joint keypoints and emits
+# per-segment scale factors (stored in the h5 info) that morph the body model to
+# THIS fly's proportions at STAC/postprocess/viz build time — fixing leg/head/
+# abdomen mismatches a single global scale + marker offsets cannot. Set
+# enabled: false to disable (behaviour is then identical to before).
+calibration:
+  enabled: False
+  symmetry: False        # average L/R segment scales (fills an amputated/occluded side)
+  clamp: [0.7, 1.4]     # reject tracking blowups (scales outside are clamped)
+
+# Per-bout QC render: the body model with the aligned keypoint markers overlaid
+# (rigidly fit to the model rest pose via the trunk markers) so you can eyeball
+# the Procrustes scale. Saved next to the filter figures as bout_XXX_overlay.png.
+# Needs an EGL/GPU context; skipped gracefully if rendering is unavailable.
+alignment_render:
+  enabled: true
+  n_frames: 3                 # evenly-spaced frames per bout
+  cameras: [track1, track3]   # camera names (the '_fly' suffix is added automatically)
+  height: 512
+  width: 512
 
 # Keypoint filtering (applied after XML reordering, before Procrustes alignment)
 filtering:

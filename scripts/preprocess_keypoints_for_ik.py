@@ -33,6 +33,7 @@ except AttributeError:
 
 import json
 import sys
+import fnmatch
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
 
@@ -327,13 +328,109 @@ def reorder_to_xml_site_order(kp_array: np.ndarray,
     return kp_array_xml_order, xml_node_names_ordered, xml_edges
 
 
+DEFAULT_TRUNK_KEYPOINTS = ['Scutellum', 'WingL_base', 'WingR_base', 'Abd_A4', 'Abd_tip']
+
+
+def select_excluded_indices(xml_node_names: List[str],
+                            patterns: Optional[List[str]]) -> Optional[jnp.ndarray]:
+    """Return indices of keypoints whose name matches any glob pattern.
+
+    Used to exclude markers from the Procrustes alignment FIT (they are still
+    transformed by the computed rotation/scale, just not used to compute it).
+    Patterns are matched case-sensitively against keypoint names with
+    ``fnmatch`` glob syntax, e.g. ``'*_V12'`` (wing veins), ``'Antenna*'``,
+    ``'Eye*'``, ``'WingL*'``. This replaces the old fixed antenna/wing booleans
+    so the exclusion works for any skeleton or condition.
+
+    Args:
+        xml_node_names: keypoint names in XML/site order.
+        patterns: glob patterns; None/empty means exclude nothing.
+
+    Returns:
+        jnp array of excluded indices, or None if nothing matched.
+    """
+    if not patterns:
+        return None
+    pats = list(patterns)
+    idx = [i for i, name in enumerate(xml_node_names)
+           if any(fnmatch.fnmatchcase(name, p) for p in pats)]
+    return jnp.array(idx) if idx else None
+
+
+def compute_shared_scale(kp_array_xml: np.ndarray,
+                         xml_node_names: List[str],
+                         mj_model: object,
+                         skeleton_to_mujoco: Dict,
+                         scale_keypoints: Optional[List[str]] = None,
+                         robust_stat: str = 'median') -> Optional[float]:
+    """Compute ONE body-size scale for the whole fly from rigid trunk markers.
+
+    Body size is constant for a fly, so scaling each bout independently just
+    injects per-bout noise (and, with an amputation, makes the scale depend on
+    which legs are tracked). This estimates a single scale from a set of stable
+    body markers using each frame's rotation/translation-invariant Frobenius
+    spread (the centered point cloud's norm), then takes a robust statistic over
+    all frames. Per-frame spread avoids the heading-smear that biases the
+    bout-averaged-pose estimate, and using only trunk markers makes the scale
+    independent of leg pose and of which legs are present.
+
+    Args:
+        kp_array_xml: Concatenated keypoints over all bouts, XML order (T, N, 3).
+        xml_node_names: Keypoint names in XML order.
+        mj_model: Compiled MuJoCo model (reference pose from rest configuration).
+        skeleton_to_mujoco: Mapping from keypoint name to MuJoCo site index.
+        scale_keypoints: Body markers to use (default: DEFAULT_TRUNK_KEYPOINTS).
+            Only those also present in the data are used.
+        robust_stat: 'median' (default) or 'mean' over per-frame spreads.
+
+    Returns:
+        scale = ref_spread / data_spread, or None if it can't be computed
+        (caller should fall back to per-bout scaling).
+    """
+    names = list(scale_keypoints) if scale_keypoints else list(DEFAULT_TRUNK_KEYPOINTS)
+    name_to_idx = {n: i for i, n in enumerate(xml_node_names)}
+    present = [n for n in names if n in name_to_idx and n in skeleton_to_mujoco]
+    if len(present) < 3:
+        print(f"  [scaling] shared scale needs >=3 trunk markers, found {present}; "
+              f"falling back to per-bout scaling")
+        return None
+
+    # Reference (model rest pose) trunk spread.
+    mj_data = mujoco.MjData(mj_model)
+    mujoco.mj_forward(mj_model, mj_data)
+    ref = np.array([mj_data.site_xpos[skeleton_to_mujoco[n]] for n in present])
+    ref = ref - ref.mean(axis=0)
+    ref_spread = float(np.sqrt((ref ** 2).sum()))
+
+    # Data trunk spread: per-frame Frobenius spread over frames where all trunk
+    # markers are finite (rotation/translation invariant), then robust stat.
+    tidx = [name_to_idx[n] for n in present]
+    P = np.asarray(kp_array_xml)[:, tidx, :]
+    valid = np.all(np.isfinite(P), axis=(1, 2))
+    P = P[valid]
+    if P.shape[0] == 0:
+        print("  [scaling] no frames with all trunk markers valid; falling back to per-bout")
+        return None
+    Pc = P - P.mean(axis=1, keepdims=True)
+    spreads = np.sqrt((Pc ** 2).sum(axis=(1, 2)))
+    data_spread = float(np.median(spreads) if robust_stat == 'median' else np.mean(spreads))
+    if data_spread <= 1e-10:
+        return None
+
+    scale = ref_spread / data_spread
+    print(f"  [scaling] shared trunk scale from {present} "
+          f"({robust_stat} over {P.shape[0]} valid frames): {scale:.6f}")
+    return scale
+
+
 def apply_procrustes_alignment(kp_array: np.ndarray,
                                 mj_model: object,
                                 xml_node_names: List[str],
                                 skeleton_to_mujoco: Dict,
                                 exclude_indices: Optional[np.ndarray] = None,
                                 apply_scaling: bool = True,
-                                preserve_translation: bool = True) -> Tuple[np.ndarray, Dict]:
+                                preserve_translation: bool = True,
+                                override_scale: Optional[float] = None) -> Tuple[np.ndarray, Dict]:
     """
     Apply Procrustes scaling to match MuJoCo model's size.
     
@@ -396,6 +493,25 @@ def apply_procrustes_alignment(kp_array: np.ndarray,
     # Convert to JAX arrays
     kp_jax = jnp.array(kp_array)
     ref_pose_jax = jnp.array(ref_pose)
+
+    # Shared-scale path: apply a precomputed per-fly scale uniformly (only scale,
+    # position/orientation preserved — same effect as preserve_translation=True).
+    # Used when scaling.shared_across_bouts is enabled so every bout gets one
+    # consistent body-size scale instead of a noisy per-bout estimate.
+    if override_scale is not None:
+        scale = float(override_scale)
+        aligned_kp = np.array(kp_jax * scale)
+        alignment_info = {
+            'scales': scale if apply_scaling else 1.0,
+            'rotation': np.eye(3),
+            'translation': np.zeros(3),
+        }
+        if exclude_indices is not None:
+            alignment_info['exclude_indices'] = (
+                exclude_indices.tolist() if hasattr(exclude_indices, 'tolist')
+                else list(exclude_indices))
+        print(f"Scale factor applied (shared per-fly): {alignment_info['scales']:.6f}")
+        return aligned_kp, alignment_info
 
     # Apply alignment
     if exclude_indices is not None:
@@ -791,9 +907,7 @@ def process_single_bout(csv_path: Path,
                         frame_end: Optional[int] = None,
                         apply_alignment: bool = False,
                         apply_scaling: bool = False,
-                        exclude_antenna: bool = False,
-                        exclude_wings: bool = False,
-                        exclude_wing_veins: bool = False,
+                        align_exclude_patterns: Optional[List[str]] = None,
                         filter_cfg: Optional[DictConfig] = None,
                         output_dir: Optional[Path] = None) -> Optional[Dict]:
     """
@@ -807,9 +921,8 @@ def process_single_bout(csv_path: Path,
         frame_end: End frame index (None for all frames)
         apply_alignment: Whether to apply Procrustes alignment
         apply_scaling: Whether to apply scaling during alignment
-        exclude_antenna: Whether to exclude antenna from alignment
-        exclude_wings: Whether to exclude all wing keypoints from alignment
-        exclude_wing_veins: Whether to exclude only wing vein keypoints (V12/V13) from alignment
+        align_exclude_patterns: Glob patterns (fnmatch) of keypoint names to exclude
+            from the Procrustes alignment fit (e.g. ['*_V12', '*_V13', 'Antenna*'])
         filter_cfg: Optional filtering configuration (OmegaConf DictConfig)
         output_dir: Optional output directory for filter diagnostic figures
 
@@ -870,23 +983,8 @@ def process_single_bout(csv_path: Path,
         # 7. Optional: Apply Procrustes alignment
         alignment_info = None
         if apply_alignment:
-            # Determine which keypoints to exclude from alignment
-            exclude_indices = []
-            if exclude_antenna:
-                # Antenna is typically index 0 after reordering
-                antenna_idx = [i for i, name in enumerate(xml_node_names) if 'Antenna' in name]
-                exclude_indices.extend(antenna_idx)
-            
-            if exclude_wings:
-                # Wing keypoints
-                wing_idx = [i for i, name in enumerate(xml_node_names) if 'Wing' in name]
-                exclude_indices.extend(wing_idx)
-            elif exclude_wing_veins:
-                # Only wing vein keypoints (V12/V13), keep wing base
-                vein_idx = [i for i, name in enumerate(xml_node_names) if 'Wing' in name and ('V12' in name or 'V13' in name)]
-                exclude_indices.extend(vein_idx)
-
-            exclude_arr = jnp.array(exclude_indices) if exclude_indices else None
+            # Keypoints excluded from the alignment fit (pattern-based; see schema)
+            exclude_arr = select_excluded_indices(xml_node_names, align_exclude_patterns)
 
             kp_array_xml, alignment_info = apply_procrustes_alignment(
                 kp_array_xml, mj_model, xml_node_names, skeleton_to_mujoco,
@@ -924,13 +1022,16 @@ def process_bouts_batch(csv_path: Path,
                        bouts: List[Dict],
                        apply_alignment: bool = False,
                        apply_scaling: bool = False,
-                       exclude_antenna: bool = False,
-                       exclude_wings: bool = False,
-                       exclude_wing_veins: bool = False,
+                       align_exclude_patterns: Optional[List[str]] = None,
                        filter_cfg: Optional[DictConfig] = None,
                        output_dir: Optional[Path] = None,
                        pair_validity_cfg: Optional[DictConfig] = None,
-                       sex_cleaning_cfg: Optional[DictConfig] = None) -> Optional[Dict]:
+                       sex_cleaning_cfg: Optional[DictConfig] = None,
+                       scaling_cfg: Optional[DictConfig] = None,
+                       render_cfg: Optional[DictConfig] = None,
+                       arena_path: Optional[Path] = None,
+                       calibration_cfg: Optional[DictConfig] = None,
+                       keypoint_model_pairs: Optional[Dict] = None) -> Optional[Dict]:
     """
     Efficiently process multiple bouts by loading skeleton/model once and
     processing all data as a concatenated array.
@@ -947,9 +1048,8 @@ def process_bouts_batch(csv_path: Path,
         bouts: List of bout information dicts
         apply_alignment: Whether to apply Procrustes alignment
         apply_scaling: Whether to apply scaling during alignment
-        exclude_antenna: Whether to exclude antenna from alignment
-        exclude_wings: Whether to exclude all wing keypoints from alignment
-        exclude_wing_veins: Whether to exclude only wing vein keypoints (V12/V13) from alignment
+        align_exclude_patterns: Glob patterns (fnmatch) of keypoint names to exclude
+            from the Procrustes alignment fit (e.g. ['*_V12', '*_V13', 'Antenna*'])
         filter_cfg: Optional filtering configuration (OmegaConf DictConfig)
         output_dir: Optional output directory for filter diagnostic figures
 
@@ -1070,24 +1170,16 @@ def process_bouts_batch(csv_path: Path,
         # IMPORTANT: Copy AFTER reordering so orig_keypoints match keypoints order
         orig_xml = kp_array_xml.copy()
         
-        # 7. Determine which keypoints to exclude from alignment (do this once)
-        exclude_indices = []
+        # 7. Determine which keypoints to exclude from the alignment fit (once).
+        # Pattern-based (glob over keypoint names) so it works for any skeleton /
+        # condition; see select_excluded_indices and the layered config schema.
+        exclude_arr = None
         if apply_alignment:
-            if exclude_antenna:
-                antenna_idx = [i for i, name in enumerate(xml_node_names) if 'Antenna' in name]
-                exclude_indices.extend(antenna_idx)
-                print(f"Excluding antenna keypoints: {antenna_idx}")
-            
-            if exclude_wings:
-                wing_idx = [i for i, name in enumerate(xml_node_names) if 'Wing' in name]
-                exclude_indices.extend(wing_idx)
-                print(f"Excluding wing keypoints: {wing_idx}")
-            elif exclude_wing_veins:
-                vein_idx = [i for i, name in enumerate(xml_node_names) if 'Wing' in name and ('V12' in name or 'V13' in name)]
-                exclude_indices.extend(vein_idx)
-                print(f"Excluding wing vein keypoints: {vein_idx}")
-
-        exclude_arr = jnp.array(exclude_indices) if exclude_indices else None
+            exclude_arr = select_excluded_indices(xml_node_names, align_exclude_patterns)
+            if exclude_arr is not None:
+                print(f"Excluding {len(exclude_arr)} keypoints from alignment fit "
+                      f"(patterns {list(align_exclude_patterns)}): "
+                      f"{[xml_node_names[i] for i in exclude_arr.tolist()]}")
         
         # 7b. Load confidence once for all bouts (avoid re-reading CSV per bout)
         concat_confidence = None
@@ -1116,6 +1208,50 @@ def process_bouts_batch(csv_path: Path,
                   f"ground_eps={pv_obj.ground_epsilon_mm}mm, "
                   f"floor_pct={pv_obj.floor_percentile}, "
                   f"swap_guard={pv_obj.swap_guard_frames}")
+
+        # Optional: one shared per-fly body scale across all bouts (vs per-bout).
+        # Body size is constant for a fly, so a single robust trunk-based scale
+        # removes per-bout noise and is invariant to which legs are tracked
+        # (amputation). Computed once here from the concatenated data and applied
+        # to every bout via override_scale below.
+        shared_scale = None
+        if (apply_alignment and apply_scaling and scaling_cfg is not None
+                and scaling_cfg.get('shared_across_bouts', False)):
+            mode = scaling_cfg.get('scale_keypoints', 'trunk')
+            if mode == 'trunk':
+                scale_names = list(scaling_cfg.get('trunk_keypoints', DEFAULT_TRUNK_KEYPOINTS))
+            else:  # 'all' — every keypoint present in XML order (legacy marker set)
+                scale_names = list(xml_node_names)
+            shared_scale = compute_shared_scale(
+                kp_array_xml, xml_node_names, mj_model, skeleton_to_mujoco,
+                scale_keypoints=scale_names,
+                robust_stat=scaling_cfg.get('robust_stat', 'median'),
+            )
+
+        # Subject-specific per-segment calibration: measure each bone length from
+        # the globally-scaled keypoints and emit per-segment scale factors that
+        # morph the model to THIS fly's proportions (legs/head/abdomen). Stored in
+        # info; applied at STAC/postprocess/viz model build via rescale_per_segment.
+        segment_scales = None
+        if (calibration_cfg is not None and calibration_cfg.get('enabled', False)
+                and keypoint_model_pairs is not None):
+            from utils.segment_calibration import (
+                build_segment_map, model_reference_lengths, estimate_segment_scales)
+            seg_map = build_segment_map(dict(keypoint_model_pairs))
+            ref_lengths = model_reference_lengths(mj_model, seg_map)
+            kp_scaled = np.asarray(kp_array_xml) * (shared_scale if shared_scale else 1.0)
+            clamp = tuple(calibration_cfg.get('clamp', [0.7, 1.4]))
+            seg_scales = estimate_segment_scales(
+                kp_scaled, list(xml_node_names), seg_map, ref_lengths,
+                symmetry=calibration_cfg.get('symmetry', True), clamp=clamp)
+            # Store h5-friendly (dict keyed by segment name).
+            segment_scales = {s['name']: {'geom_body': s['geom_body'],
+                                          'length_body': s['length_body'],
+                                          'scale': float(s['scale'])}
+                              for s in seg_scales}
+            print(f"[calibration] {len(segment_scales)} segment scales "
+                  f"(range {min(s['scale'] for s in seg_scales):.2f}-"
+                  f"{max(s['scale'] for s in seg_scales):.2f})")
 
         all_bouts_dict = {}
         for clip in clip_info:
@@ -1155,7 +1291,8 @@ def process_bouts_batch(csv_path: Path,
                 print(f"\n  Processing bout_{bout_idx:03d} ({bout_kp.shape[0]} frames)...")
                 aligned_bout_kp, alignment_info = apply_procrustes_alignment(
                     bout_kp, mj_model, xml_node_names, skeleton_to_mujoco,
-                    exclude_indices=exclude_arr, apply_scaling=apply_scaling, preserve_translation=True
+                    exclude_indices=exclude_arr, apply_scaling=apply_scaling, preserve_translation=True,
+                    override_scale=shared_scale,
                 )
             else:
                 aligned_bout_kp = bout_kp
@@ -1208,7 +1345,24 @@ def process_bouts_batch(csv_path: Path,
                     bout_data['swap_state'] = bout_swap
 
             all_bouts_dict[f'bout_{bout_idx:03d}'] = bout_data
-            
+
+            # Optional per-bout QC render: body model + aligned keypoints overlaid.
+            if (render_cfg is not None and render_cfg.get('enabled', False)
+                    and output_dir is not None and arena_path is not None):
+                from utils.add_aligned_keypoint_sites import render_keypoint_overlay
+                render_dir = output_dir / "filter_figures"
+                render_keypoint_overlay(
+                    np.asarray(bout_data['keypoints']), list(xml_node_names),
+                    xml_path, arena_path,
+                    render_dir / f"bout_{bout_idx:03d}_overlay.png",
+                    n_frames=int(render_cfg.get('n_frames', 3)),
+                    cameras=list(render_cfg.get('cameras', ['track1', 'track2'])),
+                    height=int(render_cfg.get('height', 512)),
+                    width=int(render_cfg.get('width', 512)),
+                    segment_scales=(list(segment_scales.values())
+                                    if segment_scales else None),
+                )
+
             scale_str = f", scale={alignment_info['scales']:.6f}" if alignment_info else ""
             fly_id_str = f", fly_id={clip['fly_id']}"
             print(f"  ✓ bout_{bout_idx:03d}: {bout_data['keypoints'].shape[0]} frames{scale_str}{fly_id_str}")
@@ -1221,6 +1375,8 @@ def process_bouts_batch(csv_path: Path,
             'end_frames': end_frames,
             'clip_lengths': [clip['end_idx'] - clip['start_idx'] for clip in clip_info]
         }
+        if segment_scales is not None:
+            all_bouts_dict['info']['segment_scales'] = segment_scales
         if relink_log_summary is not None:
             all_bouts_dict['info']['identity_relink'] = relink_log_summary
         if pv_enabled:
@@ -1272,7 +1428,18 @@ def main(cfg: DictConfig):
     
     # Convert path strings to Path objects
     cfg.paths = convert_dict_to_path(cfg.paths)
-    
+
+    # Alignment exclusion patterns (layered schema): skeleton-structural defaults
+    # from the anatomy config, optionally overridden/extended per dataset/condition.
+    anatomy_exclude = list(cfg.anatomy.get('alignment_exclude', []) or [])
+    ds_align = cfg.dataset.get('alignment', {}) or {}
+    if ds_align.get('exclude', None) is not None:
+        align_exclude_patterns = list(ds_align['exclude'])          # replace default
+    else:
+        align_exclude_patterns = list(anatomy_exclude)
+    align_exclude_patterns += list(ds_align.get('exclude_extra', []) or [])  # append
+    print(f"Alignment exclusion patterns: {align_exclude_patterns}")
+
     # Resolve paths (handle both absolute and relative)
     data_dir = Path(cfg.paths.data_dir)
     csv_path = Path(cfg.preprocessing.csv_path)
@@ -1332,13 +1499,16 @@ def main(cfg: DictConfig):
             bouts=bouts,
             apply_alignment=cfg.preprocessing.apply_alignment,
             apply_scaling=cfg.preprocessing.apply_scaling,
-            exclude_antenna=cfg.preprocessing.exclude_antenna,
-            exclude_wings=cfg.preprocessing.exclude_wings,
-            exclude_wing_veins=cfg.preprocessing.get('exclude_wing_veins', False),
+            align_exclude_patterns=align_exclude_patterns,
             filter_cfg=cfg.preprocessing.get('filtering', None),
             output_dir=output_dir,
             pair_validity_cfg=cfg.preprocessing.get('pair_validity', None),
             sex_cleaning_cfg=cfg.preprocessing.get('sex_cleaning', None),
+            scaling_cfg=cfg.preprocessing.get('scaling', None),
+            render_cfg=cfg.preprocessing.get('alignment_render', None),
+            arena_path=Path(cfg.anatomy.arena_path),
+            calibration_cfg=cfg.preprocessing.get('calibration', None),
+            keypoint_model_pairs=cfg.model.get('KEYPOINT_MODEL_PAIRS', None),
         )
 
         if all_bouts_dict is not None:
@@ -1376,9 +1546,7 @@ def main(cfg: DictConfig):
             frame_end=cfg.preprocessing.frame_end,
             apply_alignment=cfg.preprocessing.apply_alignment,
             apply_scaling=cfg.preprocessing.apply_scaling,
-            exclude_antenna=cfg.preprocessing.exclude_antenna,
-            exclude_wings=cfg.preprocessing.exclude_wings,
-            exclude_wing_veins=cfg.preprocessing.get('exclude_wing_veins', False),
+            align_exclude_patterns=align_exclude_patterns,
             filter_cfg=cfg.preprocessing.get('filtering', None),
             output_dir=output_dir,
         )

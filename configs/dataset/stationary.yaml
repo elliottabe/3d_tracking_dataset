@@ -1,8 +1,9 @@
 # @package _global_.dataset
 
 defaults:
-  - preprocessing
-  - postprocessing
+  - /preprocessing: default
+  - /postprocessing: default
+  - /stac: stationary
 
 name: stationary
 env_name: stationary

@@ -29,6 +29,7 @@ except AttributeError:
     pass  # Skip if not available in this JAX version
 
 import sys
+import re
 from pathlib import Path
 import time
 import jax.numpy as jnp
@@ -54,6 +55,65 @@ from utils.path_utils import load_config_with_path_template, convert_dict_to_pat
 from utils.io import load_stac_data
 from utils.mjx_preprocess import process_clip, ReferenceClip
 from utils.geometric_angles import compute_geometric_angles_all_legs
+
+
+def filter_end_effectors_to_tracked(end_effector_names, kp_names, verbose=False):
+    """Filter floor-alignment end effectors to legs actually tracked in the data.
+
+    A claw is a valid ground-contact reference only if its leg was constrained
+    during IK. An untracked leg (e.g. an amputated leg with no distal keypoints)
+    sits at the model rest pose and would bias floor-height estimation.
+
+    A configured end effector is kept when its leg tag — parsed from names like
+    ``claw_T1_left`` -> ``T1L`` — has a tarsal keypoint (``T1L_Ta*``) in
+    ``kp_names``. End effectors whose name can't be parsed are kept (conservative),
+    and if ``kp_names`` is unavailable or filtering would drop everything, the
+    original list is returned unchanged.
+
+    Args:
+        end_effector_names: Configured end-effector (claw) body-name fragments.
+        kp_names: Keypoint names present in the data (from STAC ``info``).
+        verbose: Print which end effectors were dropped.
+
+    Returns:
+        Filtered list of end-effector names.
+    """
+    names = list(end_effector_names)
+    if not kp_names:
+        return names
+    kp_set = set(kp_names)
+
+    def leg_tag(eff):
+        m = re.search(r'T([123])_(left|right)', eff)
+        if not m:
+            return None
+        return f"T{m.group(1)}{'L' if m.group(2) == 'left' else 'R'}"
+
+    def is_tracked(tag):
+        # Leg is tracked distally if it has any tarsal keypoint (e.g. *_TaTip).
+        return any(k.startswith(f"{tag}_Ta") for k in kp_set)
+
+    kept, dropped = [], []
+    for eff in names:
+        tag = leg_tag(eff)
+        if tag is None or is_tracked(tag):
+            kept.append(eff)
+        else:
+            dropped.append(eff)
+    if dropped and verbose:
+        print(f"  Floor alignment: dropping untracked end effectors {dropped} "
+              f"(no tarsal keypoints in data)")
+    return kept if kept else names  # never return empty
+
+
+def load_segment_scales(preprocessed_path: Path):
+    """Read per-segment calibration scales from the preprocessed h5 (robust)."""
+    from utils.segment_calibration import read_segment_scales
+    try:
+        return read_segment_scales(preprocessed_path)
+    except Exception as exc:
+        print(f"  [calibration] could not read segment_scales: {exc}")
+        return None
 
 
 def load_clip_lengths(data_path: Path, filename: str) -> tuple:
@@ -513,16 +573,25 @@ def process_all_bouts(
         if verbose:
             print(f"  Batch shape: qpos={qpos_batch.shape}, xpos={xpos_batch.shape}")
         
-        # Find end effector indices
+        # Find end effector indices.
+        # Auto-filter the configured end effectors to legs actually tracked in
+        # the data: an untracked leg (e.g. amputated) has no tarsal keypoints and
+        # its claw rests at the model default pose, which would bias floor
+        # detection. This replaces any need for per-dataset end_effector overrides.
         names_xpos = bout_dict['info']['names_xpos']
+        end_effector_names = filter_end_effectors_to_tracked(
+            floor_cfg.end_effector_names,
+            bout_dict['info'].get('kp_names', []),
+            verbose=verbose,
+        )
         end_eff_indices = [
             i for i, name in enumerate(names_xpos)
-            if any(eff_name in name for eff_name in floor_cfg.end_effector_names)
+            if any(eff_name in name for eff_name in end_effector_names)
         ]
         
         if len(end_eff_indices) == 0:
             if floor_cfg.enabled:
-                print(f"  ⚠ ERROR: No end effectors found matching {floor_cfg.end_effector_names}")
+                print(f"  ⚠ ERROR: No end effectors found matching {end_effector_names}")
                 print(f"  Available body names: {names_xpos}")
                 print(f"  Floor alignment will be DISABLED due to missing end effectors!")
                 # Disable floor alignment if end effectors not found
@@ -722,7 +791,17 @@ def main(cfg: DictConfig):
             if stac_model_path.exists():
                 print(f"  Using STAC model: {stac_model_path}")
                 spec = mujoco.MjSpec().from_file(stac_model_path.as_posix())
-        
+
+        # Apply the SAME subject-specific per-segment morph STAC used, so FK on the
+        # solved qpos (xpos, floor alignment, velocities) is consistent with the
+        # model the poses were solved on. Scales read from the preprocessed h5.
+        seg_scales = load_segment_scales(preprocessed_path)
+        if seg_scales:
+            sys.path.insert(0, str(project_root / "stac-mjx"))
+            from stac_mjx.rescale import rescale_per_segment
+            rescale_per_segment(spec, seg_scales)
+            print(f"  [calibration] morphed {len(seg_scales)} body segments for FK consistency")
+
         spawn_frame = floor_spec.worldbody.add_frame(
             pos=[0, 0, -.125],
             quat=[1, 0, 0, 0],

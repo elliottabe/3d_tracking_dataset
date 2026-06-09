@@ -316,9 +316,11 @@ def run_stac(
     Returns:
         (success, message) tuple
     """
+    # Run the MAIN repo's STAC entry (library call against the unified config
+    # tree) instead of the submodule's run_stac_fly_model.py.
     cmd = [
         sys.executable,
-        "run_stac_fly_model.py",
+        str(_PROJECT_ROOT / "scripts" / "run_stac.py"),
         f"paths={paths_config}",
         f"dataset={dataset}",
         f"anatomy={anatomy_name}",
@@ -331,15 +333,17 @@ def run_stac(
         "run_id=stac",
     ]
 
-    # Add fly-specific overrides for input/output filenames
+    # Add fly-specific overrides for input/output filenames. With the unified
+    # config tree, preprocessing.input_filename is global and stac.* is a
+    # top-level group (no longer dataset.stac.*).
     if fly_suffix:
         input_filename = f"preprocessed_bout_{anatomy_name}_{dataset}{fly_suffix}.h5"
         fit_path = f"Fruitfly_fit_{anatomy_name}_{dataset}{fly_suffix}.h5"
         ik_path = f"Fruitfly_ik_{anatomy_name}_{dataset}{fly_suffix}.h5"
         cmd.extend([
-            f"dataset.preprocessing.input_filename={input_filename}",
-            f"dataset.stac.fit_offsets_path={fit_path}",
-            f"dataset.stac.ik_only_path={ik_path}",
+            f"preprocessing.input_filename={input_filename}",
+            f"stac.fit_offsets_path={fit_path}",
+            f"stac.ik_only_path={ik_path}",
         ])
 
     # Add any additional STAC overrides
@@ -350,7 +354,7 @@ def run_stac(
     fly_label = fly_suffix.lstrip('_') if fly_suffix else 'single'
 
     if dry_run:
-        print(f"  Would run: cd {stac_dir} && {' '.join(cmd)}")
+        print(f"  Would run: cd {_PROJECT_ROOT} && {' '.join(cmd)}")
         return True, "Dry run"
 
     # Set up environment
@@ -372,7 +376,7 @@ def run_stac(
 
             proc = subprocess.Popen(
                 cmd,
-                cwd=stac_dir,
+                cwd=_PROJECT_ROOT,
                 env=env,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
@@ -434,7 +438,7 @@ Examples:
         '--dataset',
         type=str,
         default='free_walking',
-        choices=['free_walking', 'courtship', 'stationary'],
+        choices=['free_walking', 'courtship', 'stationary', 'amputation'],
         help='Dataset type (default: free_walking)'
     )
     parser.add_argument(
@@ -490,9 +494,9 @@ Examples:
         print("   git submodule update --init --recursive")
         return 1
 
-    run_stac_script = args.stac_dir / "run_stac_fly_model.py"
+    run_stac_script = _PROJECT_ROOT / "scripts" / "run_stac.py"
     if not run_stac_script.exists():
-        print(f"Error: run_stac_fly_model.py not found in {args.stac_dir}")
+        print(f"Error: scripts/run_stac.py not found at {run_stac_script}")
         return 1
 
     # Find all preprocessed files

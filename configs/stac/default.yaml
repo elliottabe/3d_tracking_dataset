@@ -1,0 +1,30 @@
+# @package _global_.stac
+
+# Shared STAC IK parameters (ported from stac-mjx so the main configs are the
+# single source of truth). This is the `stac` config group's default; datasets
+# select it (or a variant like courtship/stationary) in their `defaults:` list.
+# Read at cfg.stac.* by scripts/run_stac.py (stac_mjx.run_stac).
+
+# Input preprocessed h5 (override preprocessing.input_filename per-fly for dual-fly).
+data_path: "${paths.data_dir}/preprocessing/${preprocessing.input_filename}"
+# STAC outputs are written under <data_dir>/stac/.
+save_path: "${paths.data_dir}/stac"
+xml_dir: "${paths.body_model_dir}/${anatomy.name}/"
+
+continuous: False
+enable_padding: True
+n_fit_frames: 601
+n_frames_per_clip: 601
+num_clips: 0            # computed dynamically
+skip_fit_offsets: False
+skip_ik_only: False
+infer_qvels: True
+
+fit_offsets_path: "Fruitfly_fit_${anatomy.name}_${dataset.name}.h5"
+ik_only_path: "Fruitfly_ik_${anatomy.name}_${dataset.name}.h5"
+
+mujoco:
+  solver: "cg"
+  iterations: 1
+  ls_iterations: 4
+  dt: 0.00125

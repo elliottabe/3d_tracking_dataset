@@ -76,7 +76,7 @@ from typing import Dict, List, Sequence, Tuple
 
 import numpy as np
 
-_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent  # scripts/diagnostics/ -> repo root
 sys.path.insert(0, str(_PROJECT_ROOT))
 
 from utils import io_dict_to_hdf5 as ioh5  # noqa: E402
