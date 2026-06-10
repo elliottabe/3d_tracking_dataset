@@ -30,15 +30,22 @@ _LEG_CHAIN = ['ThxCx', 'Tro', 'FeTi', 'TiTa', 'TaT1', 'TaT3', 'TaTip']
 _LEGS = ['T1L', 'T1R', 'T2L', 'T2R', 'T3L', 'T3R']
 
 
-def build_segment_map(keypoint_model_pairs: Dict[str, str]) -> List[Dict]:
+def build_segment_map(keypoint_model_pairs: Dict[str, str],
+                      include_wings: bool = True) -> List[Dict]:
     """Build the list of calibratable segments from KEYPOINT_MODEL_PAIRS.
 
     Args:
         keypoint_model_pairs: mapping keypoint name -> model body name.
+        include_wings: also calibrate wing length (hinge->tip). Safe for moving
+            wings (the hinge->tip distance is rotation-invariant), but set False
+            to skip if wing tracking is unreliable.
 
     Returns:
         List of segment dicts with keys: name, prox_kp, dist_kp(s), geom_body,
         length_body, mirror (side-independent key for L/R symmetry), self_segment.
+        Wing segments additionally carry ``scale_sites_on_body`` (the tip is a site
+        offset on the wing body, not a child body) and use an empty ``length_body``
+        (the hinge must not move).
     """
     kmp = dict(keypoint_model_pairs)
     segs: List[Dict] = []
@@ -75,11 +82,34 @@ def build_segment_map(keypoint_model_pairs: Dict[str, str]) -> List[Dict]:
             'geom_body': kmp[head_dists[0]], 'length_body': kmp[head_dists[0]],
             'mirror': None, 'self_segment': True,
         })
+
+    # Wings: a rigid blade rotating about a thorax hinge. The hinge->tip distance
+    # is rotation-invariant (CV ~1.5% even under full extension), so it is a stable
+    # length target whether the wing is folded (walking) or extended (courtship).
+    # The tip is a SITE offset on the wing body (not a child body), so we scale the
+    # wing body's geoms AND its tracking sites, but NOT its pos (the hinge is fixed
+    # on the thorax). length_body is empty to skip the body-pos move.
+    if include_wings:
+        for side in ('L', 'R'):
+            base, tip = f'Wing{side}_base', f'Wing{side}_V13'
+            body = kmp.get(tip)              # wing_left / wing_right
+            if base in kmp and tip in kmp and body:
+                segs.append({
+                    'name': body, 'prox_kp': base, 'dist_kp': tip,
+                    'geom_body': body, 'length_body': '',
+                    'scale_sites_on_body': body,
+                    'mirror': 'wing', 'self_segment': False,
+                })
     return segs
 
 
-def _median_dist(kp: np.ndarray, names: List[str], a: str, b) -> Optional[float]:
-    """Median (over frames) distance between keypoint a and b (b may be a list -> centroid)."""
+def _median_dist(kp: np.ndarray, names: List[str], a: str, b,
+                 min_valid: int = 1) -> Optional[float]:
+    """Median (over frames) distance between keypoint a and b (b may be a list -> centroid).
+
+    Returns None if fewer than ``min_valid`` frames have a finite distance (guards
+    against a poorly-tracked segment, e.g. an occluded wing in courtship).
+    """
     if a not in names:
         return None
     pa = kp[:, names.index(a), :]
@@ -94,7 +124,7 @@ def _median_dist(kp: np.ndarray, names: List[str], a: str, b) -> Optional[float]
         pb = kp[:, names.index(b), :]
     dd = np.linalg.norm(pa - pb, axis=-1)
     finite = dd[np.isfinite(dd)]
-    return float(np.median(finite)) if finite.size else None
+    return float(np.median(finite)) if finite.size >= max(1, min_valid) else None
 
 
 def estimate_segment_scales(keypoints: np.ndarray,
@@ -102,7 +132,8 @@ def estimate_segment_scales(keypoints: np.ndarray,
                             segment_map: List[Dict],
                             model_ref_lengths: Dict[str, float],
                             symmetry: bool = True,
-                            clamp: tuple = (0.7, 1.4)) -> List[Dict]:
+                            clamp: tuple = (0.7, 1.4),
+                            min_valid_frames: int = 30) -> List[Dict]:
     """Compute per-segment scale = data_length / model_length.
 
     Args:
@@ -121,7 +152,8 @@ def estimate_segment_scales(keypoints: np.ndarray,
     kp = np.asarray(keypoints)
     raw: Dict[str, Optional[float]] = {}
     for seg in segment_map:
-        dlen = _median_dist(kp, kp_names, seg['prox_kp'], seg['dist_kp'])
+        dlen = _median_dist(kp, kp_names, seg['prox_kp'], seg['dist_kp'],
+                            min_valid=min_valid_frames)
         mlen = model_ref_lengths.get(seg['name'])
         raw[seg['name']] = (dlen / mlen) if (dlen and mlen and mlen > 1e-9) else None
 
@@ -146,7 +178,8 @@ def estimate_segment_scales(keypoints: np.ndarray,
         s = float(np.clip(s, clamp[0], clamp[1]))
         out.append({'name': seg['name'], 'geom_body': seg['geom_body'],
                     'length_body': seg['length_body'],
-                    'self_segment': seg['self_segment'], 'scale': s})
+                    'self_segment': seg['self_segment'], 'scale': s,
+                    'scale_sites_on_body': seg.get('scale_sites_on_body', '')})
     return out
 
 
@@ -174,7 +207,10 @@ def read_segment_scales(h5_path) -> Optional[List[Dict]]:
 
         out = [{'geom_body': str(_v(g[k]['geom_body'])),
                 'length_body': str(_v(g[k]['length_body'])),
-                'scale': float(_v(g[k]['scale']))} for k in g.keys()]
+                'scale': float(_v(g[k]['scale'])),
+                'scale_sites_on_body': (str(_v(g[k]['scale_sites_on_body']))
+                                        if 'scale_sites_on_body' in g[k] else '')}
+               for k in g.keys()]
     return out or None
 
 

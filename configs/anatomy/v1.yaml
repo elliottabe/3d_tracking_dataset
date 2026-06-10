@@ -463,7 +463,6 @@ model:
     # occluded markers (wing veins, tarsal tips, ThxCx) and the trunk anchors
     # (Scutellum, Abd_tip) regularized.
     - Scutellum
-    - Scutellum
     - WingL_base
     - WingR_base
     - Abd_tip
@@ -493,6 +492,17 @@ model:
   # (extension, flexion, twist); all three must be regularized or the free DOFs compensate.
   # Keys are joint names from the MJCF; values are L2 regularization coefficients.
   # Unspecified joints default to 0.0 (no regularization).
+  #
+  # NOTE: this option is now wired up (Stac.__init__ builds q_reg_weights from it).
+  # Empty = no regularization (default).
+  #
+  # We tried regularizing wing_roll toward 0 to lay the wings flat, but it BACKFIRED:
+  # (1) a weight of 1.0 dominated the loss and degraded the whole fit (legs/abdomen),
+  # and (2) the wing roll is NOT actually unconstrained — the well-tracked WingL/R_V12
+  # vein consistently (std 0.06 rad) places the wing at ~0.9 rad (~52deg) roll; forcing
+  # roll=0 raised the V12 residual 6%->14%. So the data genuinely wants the rolled wing
+  # (likely a systematic model-V12-site vs tracker-V12-vein mismatch). Don't regularize
+  # roll to force flat wings — fix the V12 site placement instead. Leaving empty.
   JOINT_REG_WEIGHTS: {}
 
   # Fixed step size for the ProjectedGradient q optimizer.
@@ -507,7 +517,7 @@ model:
   # instead of per-frame ProjectedGradient.
   USE_JAXLS: True
   JAXLS_LAMBDA_INITIAL: 1.0
-  JAXLS_SMOOTH_WEIGHT: 0.01
+  JAXLS_SMOOTH_WEIGHT: 0.005
   JAXLS_LINEAR_SOLVER: "auto"
   JAXLS_USE_SE3_ROOT: true
   JAXLS_CHUNK_SIZE: 0  # JAXLS_CHUNK_SIZE > 0 solves in chunks of frames to reduce memory usage at the cost of speed.

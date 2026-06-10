@@ -38,7 +38,18 @@ scaling:
   shared_across_bouts: true   # one robust per-fly scale applied to every bout
   scale_keypoints: trunk      # 'trunk' (rigid body markers) | 'all' (legacy: all included keypoints)
   trunk_keypoints: [Scutellum, WingL_base, WingR_base, Abd_A4, Abd_tip]
-  robust_stat: median         # 'median' | 'mean' over per-frame trunk spreads
+  robust_stat: median         # 'median' | 'mean' over the per-frame scales
+  # Scale estimator. 'umeyama' is the least-squares similarity scale and is
+  # provably <= the legacy norm-ratio (it never over-scales when the trunk shape
+  # doesn't perfectly match the model), which counters keypoints landing larger
+  # than the body. 'norm_ratio' restores the previous ‖ref‖/‖data‖ spread match.
+  estimator: umeyama          # 'umeyama' | 'norm_ratio'
+  # 'huber' adds IRLS within-frame down-weighting of a mistracked marker. It is a
+  # no-op on clean data and barely helps with the default trunk markers (the
+  # robust median over frames already handles glitches, and trunk markers are
+  # never amputated), so it defaults off. It matters more with scale_keypoints:
+  # all, where mistracked legs enter the fit.
+  robust: none                # 'huber' | 'none'
   # Set shared_across_bouts: false to restore the legacy independent per-bout scale.
 
 # Subject-specific per-segment model calibration. After the global scale fixes
@@ -51,6 +62,16 @@ calibration:
   enabled: False
   symmetry: False        # average L/R segment scales (fills an amputated/occluded side)
   clamp: [0.7, 1.4]     # reject tracking blowups (scales outside are clamped)
+  # Calibrate wing length (hinge->tip). The hinge->tip distance is rotation-
+  # invariant (CV ~1.5% even under full extension), so it is robust for both
+  # walking (folded) and courtship (extended) wings; the wing tip is a site offset
+  # on the wing body, so the morph scales the wing body's geoms + tracking sites
+  # (not the hinge). Set False to skip wings.
+  wings: True
+  # Drop a segment (-> scale 1.0) if fewer than this many frames have both of its
+  # keypoints tracked. Guards a poorly-tracked segment (e.g. an occluded courtship
+  # wing) from a garbage length estimate.
+  min_valid_frames: 30
 
 # Per-bout QC render: the body model with the aligned keypoint markers overlaid
 # (rigidly fit to the model rest pose via the trunk markers) so you can eyeball

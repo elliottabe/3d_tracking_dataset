@@ -22,7 +22,10 @@ os.environ['PYOPENGL_PLATFORM'] = 'egl'
 os.environ["XLA_FLAGS"] = "--xla_gpu_triton_gemm_any=True"
 
 import jax
-jax.config.update("jax_compilation_cache_dir", "/tmp/jax_cache")
+# Persistent compilation cache dir; override with JAX_COMPILATION_CACHE_DIR
+# (e.g. point at scratch on clusters where /tmp is node-local/ephemeral).
+jax.config.update("jax_compilation_cache_dir",
+                  os.environ.get("JAX_COMPILATION_CACHE_DIR", "/tmp/jax_cache"))
 jax.config.update("jax_persistent_cache_min_entry_size_bytes", -1)
 jax.config.update("jax_persistent_cache_min_compile_time_secs", 0)
 # Note: jax_persistent_cache_enable_xla_caches may not be available in all JAX versions
@@ -357,12 +360,69 @@ def select_excluded_indices(xml_node_names: List[str],
     return jnp.array(idx) if idx else None
 
 
+def _umeyama_scale_per_frame(P: np.ndarray, ref_centered: np.ndarray,
+                             robust: str = 'huber', n_iter: int = 3) -> np.ndarray:
+    """Per-frame Umeyama least-squares similarity scale (data -> model rest).
+
+    For each frame, the optimal similarity scale mapping the trunk markers ``P``
+    onto the fixed model rest trunk ``ref_centered`` is
+    ``s = trace(D·S) / Σ‖p_centered‖²`` where ``U D Vᵀ = svd(refᵀ·data)`` and
+    ``S`` is the reflection-correction sign matrix (Umeyama 1991). This scale is
+    provably ≤ the norm-ratio ``‖ref‖/‖data‖`` (von Neumann trace inequality), so
+    it never over-scales when the shapes don't perfectly match.
+
+    Args:
+        P: (F, n, 3) trunk-marker positions, one set per valid frame.
+        ref_centered: (n, 3) model rest trunk positions, already centered.
+        robust: 'huber' runs IRLS down-weighting outlier markers; 'none' does a
+            single unweighted fit.
+        n_iter: IRLS iterations when robust='huber'.
+
+    Returns:
+        (F,) per-frame scale (data -> model).
+    """
+    P = np.asarray(P, dtype=np.float64)
+    Y = ref_centered[None].astype(np.float64)           # (1, n, 3)
+    F, n, _ = P.shape
+    w = np.ones((F, n), dtype=np.float64)
+    c = np.ones(F, dtype=np.float64)
+    iters = n_iter if robust == 'huber' else 1
+    for _ in range(iters):
+        wsum = w.sum(axis=1)[:, None, None]             # (F, 1, 1)
+        wn = w[..., None]                               # (F, n, 1)
+        Xbar = (wn * P).sum(axis=1, keepdims=True) / np.maximum(wsum, 1e-12)
+        Ybar = (wn * Y).sum(axis=1, keepdims=True) / np.maximum(wsum, 1e-12)
+        Xc = P - Xbar                                   # (F, n, 3)
+        Yc = Y - Ybar                                   # (F, n, 3)
+        H = np.einsum('fn,fni,fnj->fij', w, Yc, Xc)     # (F, 3, 3) = refᵀ·data
+        U, Dv, Vt = np.linalg.svd(H)
+        dsign = np.sign(np.linalg.det(H))
+        dsign[dsign == 0] = 1.0
+        trDS = Dv[:, 0] + Dv[:, 1] + dsign * Dv[:, 2]
+        denom = (w * (Xc ** 2).sum(-1)).sum(axis=1)     # (F,)
+        c = trDS / np.maximum(denom, 1e-12)
+        if robust != 'huber':
+            break
+        Smid = np.ones((F, 3)); Smid[:, 2] = dsign
+        R = np.einsum('fij,fj,fjk->fik', U, Smid, Vt)   # (F, 3, 3) data -> model
+        Yhat = c[:, None, None] * np.einsum('fij,fnj->fni', R, Xc)
+        resid = np.linalg.norm(Yhat - Yc, axis=-1)      # (F, n)
+        rr = resid.reshape(-1)
+        med = np.median(rr)
+        sigma = 1.4826 * np.median(np.abs(rr - med)) + 1e-12
+        delta = 1.345 * sigma                           # Huber threshold
+        w = np.where(resid <= delta, 1.0, delta / np.maximum(resid, 1e-12))
+    return c
+
+
 def compute_shared_scale(kp_array_xml: np.ndarray,
                          xml_node_names: List[str],
                          mj_model: object,
                          skeleton_to_mujoco: Dict,
                          scale_keypoints: Optional[List[str]] = None,
-                         robust_stat: str = 'median') -> Optional[float]:
+                         robust_stat: str = 'median',
+                         estimator: str = 'umeyama',
+                         robust: str = 'none') -> Optional[float]:
     """Compute ONE body-size scale for the whole fly from rigid trunk markers.
 
     Body size is constant for a fly, so scaling each bout independently just
@@ -381,11 +441,15 @@ def compute_shared_scale(kp_array_xml: np.ndarray,
         skeleton_to_mujoco: Mapping from keypoint name to MuJoCo site index.
         scale_keypoints: Body markers to use (default: DEFAULT_TRUNK_KEYPOINTS).
             Only those also present in the data are used.
-        robust_stat: 'median' (default) or 'mean' over per-frame spreads.
+        robust_stat: 'median' (default) or 'mean' over the per-frame scales.
+        estimator: 'umeyama' (default; least-squares similarity scale, provably
+            never over-scales) or 'norm_ratio' (legacy ‖ref‖/‖data‖ spread match).
+        robust: 'huber' (default; IRLS down-weights a mistracked trunk marker
+            within each frame) or 'none'. Only affects the 'umeyama' estimator.
 
     Returns:
-        scale = ref_spread / data_spread, or None if it can't be computed
-        (caller should fall back to per-bout scaling).
+        A single scale (multiply keypoints by it to match the model), or None if
+        it can't be computed (caller should fall back to per-bout scaling).
     """
     names = list(scale_keypoints) if scale_keypoints else list(DEFAULT_TRUNK_KEYPOINTS)
     name_to_idx = {n: i for i, n in enumerate(xml_node_names)}
@@ -395,31 +459,48 @@ def compute_shared_scale(kp_array_xml: np.ndarray,
               f"falling back to per-bout scaling")
         return None
 
-    # Reference (model rest pose) trunk spread.
+    # Reference (model rest pose) trunk positions, centered.
     mj_data = mujoco.MjData(mj_model)
     mujoco.mj_forward(mj_model, mj_data)
     ref = np.array([mj_data.site_xpos[skeleton_to_mujoco[n]] for n in present])
-    ref = ref - ref.mean(axis=0)
-    ref_spread = float(np.sqrt((ref ** 2).sum()))
+    ref_centered = ref - ref.mean(axis=0)
+    ref_spread = float(np.sqrt((ref_centered ** 2).sum()))
 
-    # Data trunk spread: per-frame Frobenius spread over frames where all trunk
-    # markers are finite (rotation/translation invariant), then robust stat.
+    # Data trunk points over frames where all trunk markers are finite
+    # (rotation/translation invariant once centered per frame).
     tidx = [name_to_idx[n] for n in present]
-    P = np.asarray(kp_array_xml)[:, tidx, :]
+    P = np.asarray(kp_array_xml, dtype=np.float64)[:, tidx, :]
     valid = np.all(np.isfinite(P), axis=(1, 2))
     P = P[valid]
     if P.shape[0] == 0:
         print("  [scaling] no frames with all trunk markers valid; falling back to per-bout")
         return None
-    Pc = P - P.mean(axis=1, keepdims=True)
-    spreads = np.sqrt((Pc ** 2).sum(axis=(1, 2)))
+
+    # Reference per-frame norm-ratio spread (also used as the legacy estimate and
+    # for the comparison print).
+    spreads = np.sqrt(((P - P.mean(axis=1, keepdims=True)) ** 2).sum(axis=(1, 2)))
     data_spread = float(np.median(spreads) if robust_stat == 'median' else np.mean(spreads))
     if data_spread <= 1e-10:
         return None
+    norm_ratio_scale = ref_spread / data_spread
 
-    scale = ref_spread / data_spread
-    print(f"  [scaling] shared trunk scale from {present} "
-          f"({robust_stat} over {P.shape[0]} valid frames): {scale:.6f}")
+    if estimator == 'norm_ratio':
+        print(f"  [scaling] shared trunk scale [norm_ratio] from {present} "
+              f"({robust_stat} over {P.shape[0]} frames): {norm_ratio_scale:.6f}")
+        return norm_ratio_scale
+
+    # Umeyama least-squares similarity scale per frame, optionally Huber-IRLS
+    # reweighted to resist a mistracked trunk marker. Never over-scales.
+    c = _umeyama_scale_per_frame(P, ref_centered, robust=robust)
+    c = c[np.isfinite(c) & (c > 0)]
+    if c.size == 0:
+        print("  [scaling] umeyama produced no valid per-frame scales; "
+              "falling back to norm_ratio")
+        return norm_ratio_scale
+    scale = float(np.median(c) if robust_stat == 'median' else np.mean(c))
+    print(f"  [scaling] shared trunk scale [umeyama/{robust}] from {present} "
+          f"({robust_stat} over {c.size} frames): {scale:.6f} "
+          f"(norm_ratio would be {norm_ratio_scale:.6f})")
     return scale
 
 
@@ -1226,6 +1307,8 @@ def process_bouts_batch(csv_path: Path,
                 kp_array_xml, xml_node_names, mj_model, skeleton_to_mujoco,
                 scale_keypoints=scale_names,
                 robust_stat=scaling_cfg.get('robust_stat', 'median'),
+                estimator=scaling_cfg.get('estimator', 'umeyama'),
+                robust=scaling_cfg.get('robust', 'none'),
             )
 
         # Subject-specific per-segment calibration: measure each bone length from
@@ -1237,17 +1320,21 @@ def process_bouts_batch(csv_path: Path,
                 and keypoint_model_pairs is not None):
             from utils.segment_calibration import (
                 build_segment_map, model_reference_lengths, estimate_segment_scales)
-            seg_map = build_segment_map(dict(keypoint_model_pairs))
+            seg_map = build_segment_map(
+                dict(keypoint_model_pairs),
+                include_wings=calibration_cfg.get('wings', True))
             ref_lengths = model_reference_lengths(mj_model, seg_map)
             kp_scaled = np.asarray(kp_array_xml) * (shared_scale if shared_scale else 1.0)
             clamp = tuple(calibration_cfg.get('clamp', [0.7, 1.4]))
             seg_scales = estimate_segment_scales(
                 kp_scaled, list(xml_node_names), seg_map, ref_lengths,
-                symmetry=calibration_cfg.get('symmetry', True), clamp=clamp)
+                symmetry=calibration_cfg.get('symmetry', True), clamp=clamp,
+                min_valid_frames=int(calibration_cfg.get('min_valid_frames', 30)))
             # Store h5-friendly (dict keyed by segment name).
             segment_scales = {s['name']: {'geom_body': s['geom_body'],
                                           'length_body': s['length_body'],
-                                          'scale': float(s['scale'])}
+                                          'scale': float(s['scale']),
+                                          'scale_sites_on_body': s.get('scale_sites_on_body', '')}
                               for s in seg_scales}
             print(f"[calibration] {len(segment_scales)} segment scales "
                   f"(range {min(s['scale'] for s in seg_scales):.2f}-"

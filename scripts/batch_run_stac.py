@@ -166,8 +166,9 @@ def get_stac_environment(gpu_mem_fraction: float = 0.9) -> dict:
     # GPU memory management
     env['XLA_PYTHON_CLIENT_MEM_FRACTION'] = str(gpu_mem_fraction)
 
-    # JAX compilation cache
-    env['JAX_COMPILATION_CACHE_DIR'] = '/tmp/jax_cache'
+    # JAX compilation cache (override with JAX_COMPILATION_CACHE_DIR; e.g. point
+    # at scratch on clusters where /tmp is node-local/ephemeral).
+    env['JAX_COMPILATION_CACHE_DIR'] = os.environ.get('JAX_COMPILATION_CACHE_DIR', '/tmp/jax_cache')
     env['JAX_PERSISTENT_CACHE_MIN_ENTRY_SIZE_BYTES'] = '-1'
     env['JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS'] = '0'
 

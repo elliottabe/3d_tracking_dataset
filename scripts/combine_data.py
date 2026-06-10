@@ -19,7 +19,10 @@ os.environ['PYOPENGL_PLATFORM'] = 'egl'
 os.environ["XLA_FLAGS"] = "--xla_gpu_triton_gemm_any=True"
 
 import jax
-jax.config.update("jax_compilation_cache_dir", "/tmp/jax_cache")
+# Persistent compilation cache dir; override with JAX_COMPILATION_CACHE_DIR
+# (e.g. point at scratch on clusters where /tmp is node-local/ephemeral).
+jax.config.update("jax_compilation_cache_dir",
+                  os.environ.get("JAX_COMPILATION_CACHE_DIR", "/tmp/jax_cache"))
 jax.config.update("jax_persistent_cache_min_entry_size_bytes", -1)
 jax.config.update("jax_persistent_cache_min_compile_time_secs", 0)
 # Note: jax_persistent_cache_enable_xla_caches may not be available in all JAX versions

@@ -13,6 +13,12 @@ xml_dir: "${paths.body_model_dir}/${anatomy.name}/"
 
 continuous: False
 enable_padding: True
+# Length-bucketed IK (multi-bout only): pad each bout to its length-bucket's max
+# instead of the global max, cutting wasted replicated-padding compute. Output is
+# re-padded to the global max so the saved h5 format is unchanged, and a kp_data
+# round-trip assertion guards bout ordering. Accuracy-identical on real frames.
+bucketed_ik: False
+bucket_edges: [1000, 2000, 3500]   # bouts grouped as <=1000 | <=2000 | <=3500 | >3500
 n_fit_frames: 601
 n_frames_per_clip: 601
 num_clips: 0            # computed dynamically
