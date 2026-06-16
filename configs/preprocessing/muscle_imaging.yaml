@@ -1,0 +1,47 @@
+# @package _global_.preprocessing
+# Underview muscle-imaging preprocessing variant. Inherits preprocessing/default.yaml.
+#
+# The default body-size scaling uses trunk markers
+# [Scutellum, WingL_base, WingR_base, Abd_A4, Abd_tip], but the underview rig
+# only tracks Scutellum (thorax-tether) and Abd_tip (abdomen-tip) of those — 2
+# markers, below the >=3 the shared trunk-scale path needs. It would then fall
+# back to a noisier per-bout Procrustes scale fit on all (moving) keypoints.
+# Re-point the trunk markers at the body landmarks that ARE present: the
+# thorax/head/abdomen body axis plus the two front-leg coxae for lateral spread.
+defaults:
+  - default
+
+scaling:
+  trunk_keypoints: [Scutellum, Antenna_Base, Abd_tip, T1L_ThxCx, T1R_ThxCx]
+  robust: huber     # coxae/head move slightly between frames; down-weight outliers
+
+# Rotate the keypoints into the model's canonical body frame before STAC. The
+# underview rig exports an arbitrary lab frame (body axis along world-z), so STAC
+# would otherwise solve a large near-constant root quaternion. Canonicalising
+# makes the root quaternion ~(1,0,0,0), so the body-frame muscle/joint analysis
+# is in a standard orientation. Markers span all 3 axes (body axis + the two
+# front coxae) so the roll is determined.
+canonical_orientation:
+  enabled: true
+  markers: [Scutellum, Antenna_Base, Abd_tip, T1L_ThxCx, T1R_ThxCx]
+
+# Subject-specific per-segment morph: DISABLED. Diagnosis (bone-length rigidity)
+# showed the proximal/mid leg bones (coxa/femur/tibia) are already rigid and
+# well-tracked (CV <1%), so they don't need morphing; the real residual is in the
+# tarsus (TiTa->TaTip CV 15-18% — an articulated, underview-occluded chain that a
+# single morph scale cannot represent, and which lacks the TaT1/TaT3 points the
+# morph needs anyway). Calibration moved the overall residual only 5.6%->5.3%, so
+# it is not the right lever here. Left enabled:false (= generic v2 proportions).
+calibration:
+  enabled: false
+
+filtering:
+  # Backstop the NaNs left after spline interpolation (occluded distal leg points
+  # masked by the confidence filter + leading/trailing edge gaps). STAC-mjx's
+  # trajectory LM rejects ANY step whose residual contains NaN, so even a handful
+  # of NaN keypoint-frames in the offset-fit window poison the offsets and turn
+  # every frame's error NaN. LOCF/BOCF fill (after Procrustes, so the scale stays
+  # clean) hands STAC a fully finite target. Same fix the courtship variant uses.
+  nearest_fill:
+    enabled: true
+    min_valid_frac: 0.05   # skip a keypoint with <5% finite frames (would plant a phantom)

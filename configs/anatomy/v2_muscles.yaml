@@ -450,7 +450,7 @@ model:
 
   # If you have reason to believe that the initial offsets are correct for particular keypoints,
   # you can regularize those sites using _SITES_TO_REGULARIZE.
-  M_REG_COEF: 1
+  M_REG_COEF: 0
 
   # Per-joint L2 regularization toward rest pose (q=0) applied during pose optimization.
   # Helps multi-axis joints (e.g. T1 coxa ball joints) avoid degenerate solutions.

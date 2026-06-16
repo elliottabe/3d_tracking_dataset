@@ -1,0 +1,21 @@
+# @package _global_.dataset
+
+defaults:
+  - /preprocessing: muscle_imaging
+  - /postprocessing: default
+  - /stac: default
+
+name: muscle_imaging
+env_name: muscle_imaging
+version: test_data        # paths.data_dir -> .../Johnson_lab/muscle_imaging/test_data
+train: True
+
+concat:
+  input_pattern: 'postprocessing/ik_output_${anatomy.name}_${dataset.name}.h5'
+  output_file: 'ik_output_combined_${anatomy.name}_${dataset.name}.h5'
+  enable_jax: True
+
+# Underview muscle-imaging condition: tethered fly, only right legs + left front
+# leg + a few body markers tracked (no wings/eyes/left-mid/left-hind legs).
+# Untracked model keypoints are auto-pruned at STAC time
+# (stac-mjx/keypoint_prune.py), same mechanism as the amputation dataset.

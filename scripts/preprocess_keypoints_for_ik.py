@@ -504,6 +504,67 @@ def compute_shared_scale(kp_array_xml: np.ndarray,
     return scale
 
 
+def compute_canonical_rotation(kp_array_xml: np.ndarray,
+                               xml_node_names: List[str],
+                               mj_model: object,
+                               skeleton_to_mujoco: Dict,
+                               marker_names: List[str]) -> Optional[np.ndarray]:
+    """One rotation mapping the data's body frame onto the model rest body frame.
+
+    Some rigs export keypoints in an arbitrary lab frame (e.g. the underview
+    muscle-imaging rig, whose body axis runs along world-z), so STAC solves a
+    large, near-constant root quaternion. Rotating the keypoints into the model's
+    canonical body frame *before* STAC makes the IK warm-start and solve to a root
+    quaternion of ~(1,0,0,0), which is what downstream body-frame analysis wants.
+
+    Uses a Kabsch fit (rotation only) of the data's *median* body-marker pose onto
+    the model rest pose of the same markers. For a tethered fly the body
+    orientation is ~constant, so one rotation canonicalises every frame while
+    preserving the fly's small frame-to-frame deviations. Markers should span all
+    three axes (e.g. head/thorax/abdomen + the two front-leg coxae) so the roll
+    about the body axis is determined.
+
+    Args:
+        kp_array_xml: (T, N, 3) keypoints in XML order (any scale; rotation is
+            scale-invariant).
+        xml_node_names: keypoint names matching axis 1.
+        mj_model: compiled model (rest pose = canonical target).
+        skeleton_to_mujoco: keypoint name -> model site index.
+        marker_names: body markers used for the fit (present subset is used).
+
+    Returns:
+        (3, 3) rotation R (apply as ``kp @ R.T``), or None if <3 markers usable.
+    """
+    name_to_idx = {n: i for i, n in enumerate(xml_node_names)}
+    present = [n for n in marker_names
+               if n in name_to_idx and n in skeleton_to_mujoco]
+    if len(present) < 3:
+        print(f"  [canonical] need >=3 body markers, found {present}; skipping")
+        return None
+
+    mj_data = mujoco.MjData(mj_model)
+    mujoco.mj_forward(mj_model, mj_data)
+    ref = np.array([mj_data.site_xpos[skeleton_to_mujoco[n]] for n in present])
+
+    tidx = [name_to_idx[n] for n in present]
+    P = np.asarray(kp_array_xml, dtype=np.float64)[:, tidx, :]
+    P = P[np.all(np.isfinite(P), axis=(1, 2))]
+    if P.shape[0] == 0:
+        print("  [canonical] no frames with all body markers valid; skipping")
+        return None
+    data_med = np.median(P, axis=0)
+
+    # Kabsch: rotation R with ref_c ~= data_c @ R.T (det>0, no reflection).
+    Dc = data_med - data_med.mean(0)
+    Rc = ref - ref.mean(0)
+    U, _, Vt = np.linalg.svd(Dc.T @ Rc)
+    d = np.sign(np.linalg.det(Vt.T @ U.T))
+    R = (Vt.T @ np.diag([1.0, 1.0, d]) @ U.T)
+    resid = np.sqrt(np.mean((Rc - Dc @ R.T) ** 2))
+    print(f"  [canonical] body rotation from {present} (Kabsch RMS resid {resid:.4f})")
+    return R
+
+
 def apply_procrustes_alignment(kp_array: np.ndarray,
                                 mj_model: object,
                                 xml_node_names: List[str],
@@ -1112,7 +1173,8 @@ def process_bouts_batch(csv_path: Path,
                        render_cfg: Optional[DictConfig] = None,
                        arena_path: Optional[Path] = None,
                        calibration_cfg: Optional[DictConfig] = None,
-                       keypoint_model_pairs: Optional[Dict] = None) -> Optional[Dict]:
+                       keypoint_model_pairs: Optional[Dict] = None,
+                       canonical_cfg: Optional[DictConfig] = None) -> Optional[Dict]:
     """
     Efficiently process multiple bouts by loading skeleton/model once and
     processing all data as a concatenated array.
@@ -1250,7 +1312,23 @@ def process_bouts_batch(csv_path: Path,
         )
         # IMPORTANT: Copy AFTER reordering so orig_keypoints match keypoints order
         orig_xml = kp_array_xml.copy()
-        
+
+        # 6c. Optional: rotate the whole cloud into the model's canonical body
+        # frame so STAC solves a root quaternion of ~(1,0,0,0). Applied before
+        # scale/filter/align; the per-frame scale (compute_shared_scale) is
+        # rotation-invariant, so ordering is unaffected. orig_xml stays raw.
+        if canonical_cfg is not None and canonical_cfg.get('enabled', False):
+            cano_markers = list(canonical_cfg.get(
+                'markers', DEFAULT_TRUNK_KEYPOINTS))
+            R_cano = compute_canonical_rotation(
+                kp_array_xml, xml_node_names, mj_model, skeleton_to_mujoco,
+                cano_markers)
+            if R_cano is not None:
+                c = np.nanmean(kp_array_xml.reshape(-1, 3), axis=0)
+                kp_array_xml = (kp_array_xml - c) @ R_cano.T + c
+                print(f"  [canonical] rotated {kp_array_xml.shape[0]} frames "
+                      "into the model canonical body frame")
+
         # 7. Determine which keypoints to exclude from the alignment fit (once).
         # Pattern-based (glob over keypoint names) so it works for any skeleton /
         # condition; see select_excluded_indices and the layered config schema.
@@ -1438,6 +1516,16 @@ def process_bouts_batch(csv_path: Path,
                     and output_dir is not None and arena_path is not None):
                 from utils.add_aligned_keypoint_sites import render_keypoint_overlay
                 render_dir = output_dir / "filter_figures"
+                # Use the dataset's configured trunk markers for the rigid Kabsch
+                # fit. The default 5 (Scutellum/WingL_base/WingR_base/Abd_A4/Abd_tip)
+                # collapse to <3 present on reduced marker sets (e.g. underview),
+                # which makes the 2-point fit degenerate and scatters the overlay.
+                overlay_trunk = (list(scaling_cfg.get('trunk_keypoints'))
+                                 if scaling_cfg is not None
+                                 and scaling_cfg.get('trunk_keypoints', None)
+                                 else None)
+                overlay_kwargs = ({'trunk_keypoints': overlay_trunk}
+                                  if overlay_trunk else {})
                 render_keypoint_overlay(
                     np.asarray(bout_data['keypoints']), list(xml_node_names),
                     xml_path, arena_path,
@@ -1448,6 +1536,7 @@ def process_bouts_batch(csv_path: Path,
                     width=int(render_cfg.get('width', 512)),
                     segment_scales=(list(segment_scales.values())
                                     if segment_scales else None),
+                    **overlay_kwargs,
                 )
 
             scale_str = f", scale={alignment_info['scales']:.6f}" if alignment_info else ""
@@ -1596,6 +1685,7 @@ def main(cfg: DictConfig):
             arena_path=Path(cfg.anatomy.arena_path),
             calibration_cfg=cfg.preprocessing.get('calibration', None),
             keypoint_model_pairs=cfg.model.get('KEYPOINT_MODEL_PAIRS', None),
+            canonical_cfg=cfg.preprocessing.get('canonical_orientation', None),
         )
 
         if all_bouts_dict is not None:

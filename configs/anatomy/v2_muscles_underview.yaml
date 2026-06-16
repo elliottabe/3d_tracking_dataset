@@ -1,0 +1,55 @@
+# @package _global_.anatomy
+
+# Underview muscle-imaging variant of v2_muscles. The underview rig tracks the
+# right legs (T1/T2/T3 R) + left front leg (T1L) + a few body markers, but no
+# wings or eyes. prune_model_to_available (scripts/run_stac.py) auto-subsets the
+# model keypoints to what the data actually has, so the only thing that must
+# change here is the IK orientation warm-start: the v2_muscles defaults anchor
+# on WingL_base/WingR_base, which are untracked, so re-anchor to markers that
+# ARE present (head front, abdomen rear, the two front-leg coxae for left/right).
+defaults:
+  - v2_muscles
+  - _self_
+
+name: v2_muscles_underview
+
+model:
+  JAXLS_ORIENTATION_KEYPOINTS:
+    front: Antenna_Base   # head-top
+    rear: Abd_tip         # abdomen-tip
+    left: T1L_ThxCx       # left front-leg coxa
+    right: T1R_ThxCx      # right front-leg coxa
+
+  # --- Coxa mapping fix ---------------------------------------------------
+  # The v2 tracking[ThxCx] site sits at the coxa MIDPOINT (0.020 from the
+  # thorax-coxa joint, ~half the 0.039 model coxa), so ThxCx->Tro spans only the
+  # lower half of the coxa. The underview "coxa joint" (A) is at the thorax-coxa
+  # joint (coxa top), so the data A->femur span is ~2x the model's. Move the ThxCx
+  # site to the coxa body origin (= thorax-coxa joint) so it lines up with A.
+  # (Dict merges with v2_muscles: only these two offsets change.)
+  KEYPOINT_INITIAL_OFFSETS:
+    T1L_ThxCx: 0. 0. 0.
+    T1R_ThxCx: 0. 0. 0.
+
+  # Drop the front coxae from offset regularization so STAC's offset fit can move
+  # the ThxCx markers onto the data's thorax-coxa-joint A point (otherwise they
+  # are pinned near the mid-coxa initial). List REPLACES the v2_muscles list.
+  SITES_TO_REGULARIZE:
+    - Scutellum
+    - Abd_A4
+    - Abd_tip
+    - WingL_base
+    - WingR_base
+    - T1L_TaTip
+    - T2L_TaTip
+    - T3L_TaTip
+    - T1R_TaTip
+    - T2R_TaTip
+    - T3R_TaTip
+
+  # The LEFT coxa is mislabeled upstream (L1A: coxa->femur span 2.4x the right and
+  # longer than its own femur — anatomically impossible). Down-weight it heavily so
+  # it cannot distort the left front-leg pose, while still serving as the (rigid,
+  # consistent) left orientation anchor. Unspecified keypoints stay weight 1.0.
+  KEYPOINT_WEIGHTS:
+    T1L_ThxCx: 0.1
