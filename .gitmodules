@@ -1,8 +1,8 @@
 [submodule "stac-mjx"]
 	path = stac-mjx
 	url = git@github.com:elliottabe/stac-mjx.git
-	branch = elliottabe/analysis_test
+	branch = elliottabe/paper_update_062026
 [submodule "third_party/JARVIS-HybridNet"]
 	path = third_party/JARVIS-HybridNet
 	url = git@github.com:elliottabe/JARVIS-HybridNet.git
-	branch = elliottabe/multianimal-publication
+	branch = elliottabe/paper_update_062026
