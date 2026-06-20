@@ -6,7 +6,7 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-SUBMODULES=("stac-mjx")
+SUBMODULES=("stac-mjx" "third_party/JARVIS-HybridNet")
 
 cd "$REPO_ROOT"
 

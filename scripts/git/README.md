@@ -1,6 +1,6 @@
 # Git Scripts for Multi-Repo Management
 
-These scripts help manage the 3d_tracking_dataset repository and its submodules (stac-mjx).
+These scripts help manage the 3d_tracking_dataset repository and its submodules (stac-mjx, third_party/JARVIS-HybridNet).
 
 ## Initial Setup
 
