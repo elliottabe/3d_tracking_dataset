@@ -31,9 +31,12 @@ from jarvis_jax.train.train import (
 DEFAULT_MAE_NPZ = "/gscratch/portia/eabe/data/Johnson_lab/mae_vitb.npz"
 
 
-def _cycle(make_iter):
+def _epochs(ds, batch_size, base_seed):
+    """Infinite stream of batches, reshuffled each epoch."""
+    epoch = 0
     while True:
-        yield from make_iter()
+        yield from batches(ds, batch_size, shuffle=True, seed=base_seed + epoch)
+        epoch += 1
 
 
 def run_training(root, *, out_dir, mae_npz=DEFAULT_MAE_NPZ, tcfg=None,
@@ -45,6 +48,12 @@ def run_training(root, *, out_dir, mae_npz=DEFAULT_MAE_NPZ, tcfg=None,
         # batch must be divisible by the number of devices for data-parallel sharding
         n_devices = len(jax.devices())
         tcfg.total_steps, tcfg.batch_size, eval_every, log_every = 4, n_devices, 4, 1
+
+    n_dev = len(jax.devices())
+    if tcfg.batch_size % n_dev != 0:
+        raise ValueError(
+            f"batch_size ({tcfg.batch_size}) must be divisible by the JAX device "
+            f"count ({n_dev}) for data-parallel sharding.")
 
     if mae_npz and os.path.exists(mae_npz):
         model = build(mae_npz, cfg)          # MAE-pretrained backbone
@@ -60,8 +69,7 @@ def run_training(root, *, out_dir, mae_npz=DEFAULT_MAE_NPZ, tcfg=None,
     train_ds = V3Dataset(root, "train")
     val_ds = V3Dataset(root, "val", recordings=[val_recording])
 
-    src = _cycle(lambda: batches(
-        train_ds, tcfg.batch_size, shuffle=True, seed=tcfg.seed))
+    src = _epochs(train_ds, tcfg.batch_size, tcfg.seed)
 
     final_loss = 0.0
     for i in range(tcfg.total_steps):
@@ -77,7 +85,7 @@ def run_training(root, *, out_dir, mae_npz=DEFAULT_MAE_NPZ, tcfg=None,
     print(f"final val MPJPE {val_mpjpe:.3f}px")
 
     ckptr = ocp.StandardCheckpointer()
-    ckptr.save(out_dir, nnx.split(model)[1])
+    ckptr.save(out_dir, nnx.split(model)[1], force=True)
     ckptr.wait_until_finished()
     return {"final_loss": final_loss, "val_mpjpe": val_mpjpe,
             "steps": tcfg.total_steps}
