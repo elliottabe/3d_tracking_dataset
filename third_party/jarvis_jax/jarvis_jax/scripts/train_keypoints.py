@@ -28,6 +28,7 @@ from jarvis_jax.sharding import data_parallel_mesh
 from jarvis_jax.train.train import (
     TrainConfig, make_optimizer, make_train_step, eval_mpjpe,
 )
+from jarvis_jax.train.checkpoint import make_manager, save_step, restore_latest
 
 DEFAULT_MAE_NPZ = "/gscratch/portia/eabe/data/Johnson_lab/mae_vitb.npz"
 
@@ -42,7 +43,8 @@ def _epochs(ds, batch_size, base_seed):
 
 def run_training(root, *, out_dir, mae_npz=DEFAULT_MAE_NPZ, tcfg=None,
                  val_recording="2026_05_27_11_56_05",
-                 log_every=50, eval_every=500, smoke=False):
+                 log_every=50, eval_every=500, smoke=False,
+                 ckpt_dir=None, save_every=500):
     cfg = ViTPoseConfig()
     tcfg = tcfg or TrainConfig()
     if smoke:
@@ -64,6 +66,14 @@ def run_training(root, *, out_dir, mae_npz=DEFAULT_MAE_NPZ, tcfg=None,
         model = ViTPose(cfg, rngs=nnx.Rngs(tcfg.seed))
 
     opt = make_optimizer(model, tcfg)
+
+    mngr = make_manager(ckpt_dir) if ckpt_dir else None
+    start = 0
+    if mngr is not None:
+        model, opt, start = restore_latest(mngr, model, opt)
+        if start:
+            print(f"resuming from checkpoint at step {start}")
+
     step = make_train_step(tcfg.mask_weight)
     mesh = data_parallel_mesh()
 
@@ -74,13 +84,19 @@ def run_training(root, *, out_dir, mae_npz=DEFAULT_MAE_NPZ, tcfg=None,
     dev_stream = prefetch(host_stream, mesh, depth=2)
 
     final_loss = 0.0
-    for i in range(tcfg.total_steps):
+    for i in range(start, tcfg.total_steps):
         img4_u8, kp_xy, vis = next(dev_stream)
         final_loss = float(step(model, opt, img4_u8, kp_xy, vis))
         if (i + 1) % log_every == 0:
             print(f"step {i+1}/{tcfg.total_steps} loss {final_loss:.5f}")
         if (i + 1) % eval_every == 0:
             print(f"  val MPJPE {eval_mpjpe(model, val_ds, tcfg.batch_size):.3f}px")
+        if mngr is not None and (i + 1) % save_every == 0:
+            save_step(mngr, i + 1, model, opt)
+
+    if mngr is not None:
+        save_step(mngr, tcfg.total_steps, model, opt)
+        mngr.wait_until_finished()
 
     val_mpjpe = eval_mpjpe(model, val_ds, tcfg.batch_size)
     print(f"final val MPJPE {val_mpjpe:.3f}px")
@@ -102,12 +118,15 @@ def main():
     ap.add_argument("--lr", type=float, default=3e-4)
     ap.add_argument("--backbone-lr-mult", type=float, default=0.1)
     ap.add_argument("--smoke", action="store_true")
+    ap.add_argument("--ckpt-dir", default=None)
+    ap.add_argument("--save-every", type=int, default=500)
     args = ap.parse_args()
 
     tcfg = TrainConfig(total_steps=args.steps, batch_size=args.batch, lr=args.lr,
                        backbone_lr_mult=args.backbone_lr_mult)
     run_training(args.root, out_dir=args.out, mae_npz=args.mae_npz,
-                 tcfg=tcfg, smoke=args.smoke)
+                 tcfg=tcfg, smoke=args.smoke,
+                 ckpt_dir=args.ckpt_dir, save_every=args.save_every)
 
 
 if __name__ == "__main__":
