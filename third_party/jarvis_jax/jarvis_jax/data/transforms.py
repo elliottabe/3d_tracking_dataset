@@ -45,7 +45,9 @@ def transform_keypoints(kps, x0, y0, crop=448, heatmap_size=224):
 
 
 def gaussian_heatmaps(hm_xy, vis, heatmap_size=224, sigma=2.0):
-    """Render (heatmap_size, heatmap_size, K) Gaussian heatmaps (peak 1.0)."""
+    """Render (heatmap_size, heatmap_size, K) Gaussian heatmaps (peak 1.0).
+
+    hm_xy: (K, 2) array with columns [x (col), y (row)]."""
     k = hm_xy.shape[0]
     hm = np.zeros((heatmap_size, heatmap_size, k), dtype=np.float32)
     grid = np.arange(heatmap_size, dtype=np.float32)
@@ -54,7 +56,7 @@ def gaussian_heatmaps(hm_xy, vis, heatmap_size=224, sigma=2.0):
     for j in range(k):
         if not vis[j]:
             continue
-        cx, cy = hm_xy[j]
+        cx, cy = hm_xy[j]  # hm_xy columns are [x (col), y (row)]
         g = np.exp(-(((xx - cx) ** 2) + ((yy - cy) ** 2)) / two_s2)
         hm[:, :, j] = g
     return hm
