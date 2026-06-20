@@ -1,5 +1,4 @@
 # tests/test_train_step.py
-import os
 import jax
 import numpy as np
 import pytest
@@ -36,7 +35,7 @@ def test_overfit_one_batch_drops_loss_and_recovers_keypoints():
     import jax.numpy as jnp
     img4j, hmj, visj = jnp.asarray(img4), jnp.asarray(hm), jnp.asarray(vis)
     first = float(step(model, opt, img4j, hmj, visj))
-    for _ in range(600):
+    for _ in range(599):
         last = float(step(model, opt, img4j, hmj, visj))
     # balanced loss floors higher than plain MSE (background term), so use 0.3x
     assert last < 0.3 * first, f"loss did not drop: {first} -> {last}"

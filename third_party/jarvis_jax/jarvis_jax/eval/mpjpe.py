@@ -1,4 +1,4 @@
-"""Keypoint decoding (normalized-mass centroid) and MPJPE."""
+"""Keypoint decoding (argmax + windowed-centroid) and MPJPE."""
 import jax
 import jax.numpy as jnp
 
