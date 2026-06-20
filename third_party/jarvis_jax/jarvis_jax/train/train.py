@@ -6,6 +6,7 @@ import jax.numpy as jnp
 import optax
 from flax import nnx
 
+from jarvis_jax.data.device import normalize_image, render_heatmaps
 from jarvis_jax.train.losses import heatmap_mse, mask_containment
 from jarvis_jax.eval.mpjpe import heatmaps_to_keypoints, mpjpe
 
@@ -53,14 +54,16 @@ def make_optimizer(model, cfg):
 
 
 def make_train_step(mask_weight):
-    """Return an nnx.jit train step with `mask_weight` baked in as a constant."""
+    """Return an nnx.jit train step (renders heatmaps + normalizes on device)."""
     mw = float(mask_weight)
 
-    def loss_fn(model, img4, hm, vis):
-        pred = model(img4, use_running_average=False)
+    def loss_fn(model, img4_u8, kp_xy, vis):
+        img = normalize_image(img4_u8)
+        hm = render_heatmaps(kp_xy, vis)
+        pred = model(img, use_running_average=False)
         loss = heatmap_mse(pred, hm, vis)
         if mw > 0.0:
-            mask = img4[..., 3]
+            mask = img[..., 3]
             mask224 = jax.image.resize(
                 mask, (mask.shape[0], pred.shape[1], pred.shape[2]),
                 method="nearest")
@@ -68,8 +71,8 @@ def make_train_step(mask_weight):
         return loss
 
     @nnx.jit
-    def step(model, optimizer, img4, hm, vis):
-        loss, grads = nnx.value_and_grad(loss_fn)(model, img4, hm, vis)
+    def step(model, optimizer, img4_u8, kp_xy, vis):
+        loss, grads = nnx.value_and_grad(loss_fn)(model, img4_u8, kp_xy, vis)
         optimizer.update(model, grads)
         return loss
 
@@ -77,14 +80,18 @@ def make_train_step(mask_weight):
 
 
 def eval_mpjpe(model, ds, batch_size, *, in_size=448):
-    """Average MPJPE over the dataset (single device)."""
+    """Average MPJPE over the dataset (single device). GT keypoints are the true
+    annotation coords (kp_xy scaled to in_size), not a decode of GT heatmaps."""
     from jarvis_jax.data.v3 import batches
     model.eval()
+    scale = in_size / float(ds.heatmap_size)
     total, count = 0.0, 0
-    for img4, hm, vis in batches(ds, batch_size, shuffle=False, drop_last=False):
-        pred = model(jnp.asarray(img4), use_running_average=True)
+    for img4_u8, kp_xy, vis in batches(ds, batch_size, shuffle=False,
+                                       drop_last=False):
+        img = normalize_image(jnp.asarray(img4_u8))
+        pred = model(img, use_running_average=True)
         pk = heatmaps_to_keypoints(pred, in_size=in_size)
-        gk = heatmaps_to_keypoints(jnp.asarray(hm), in_size=in_size)
+        gk = jnp.asarray(kp_xy) * scale
         n = int(vis.sum())
         if n == 0:
             continue

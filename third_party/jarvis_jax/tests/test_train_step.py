@@ -31,13 +31,11 @@ def test_train_step_reduces_loss_with_finite_grads():
     """
     cfg = ViTPoseConfig()
     rng = np.random.RandomState(0)
-    img4 = rng.rand(2, 448, 448, 4).astype("float32")
-    from jarvis_jax.data.transforms import gaussian_heatmaps
+    # synthetic batch: random uint8 image, one visible keypoint each (heatmap coords)
+    img4 = rng.randint(0, 256, (2, 448, 448, 4), dtype=np.uint8)
     vis = np.zeros((2, 50), dtype=bool); vis[:, 0] = True
-    hm = np.zeros((2, 224, 224, 50), dtype="float32")
-    for b, (cx, cy) in enumerate([(100.0, 50.0), (60.0, 150.0)]):
-        xy = np.zeros((50, 2), dtype="float32"); xy[0] = [cx, cy]
-        hm[b] = gaussian_heatmaps(xy, vis[b])
+    kp = np.zeros((2, 50, 2), dtype=np.float32)
+    kp[0, 0] = [100.0, 50.0]; kp[1, 0] = [60.0, 150.0]
 
     model = ViTPose(cfg, rngs=nnx.Rngs(0))
     tcfg = TrainConfig(total_steps=20, lr=1e-3, warmup_steps=2)
@@ -45,8 +43,8 @@ def test_train_step_reduces_loss_with_finite_grads():
     step = make_train_step(mask_weight=0.0)
 
     import jax.numpy as jnp
-    img4j, hmj, visj = jnp.asarray(img4), jnp.asarray(hm), jnp.asarray(vis)
-    losses = [float(step(model, opt, img4j, hmj, visj)) for _ in range(20)]
+    img4j, kpj, visj = jnp.asarray(img4), jnp.asarray(kp), jnp.asarray(vis)
+    losses = [float(step(model, opt, img4j, kpj, visj)) for _ in range(20)]
 
     assert np.isfinite(losses).all(), f"non-finite loss encountered: {losses}"
     # A clear, robust reduction (not a marginal epsilon) proves gradients flowed
