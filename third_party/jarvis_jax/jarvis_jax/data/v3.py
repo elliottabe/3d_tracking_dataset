@@ -12,7 +12,7 @@ from jarvis_jax.data.transforms import (
 
 
 class V3Dataset:
-    def __init__(self, root, split, *, crop=448, heatmap_size=224, sigma=2.0,
+    def __init__(self, root, split, *, crop=448, heatmap_size=224, sigma=7.0,
                  recordings=None):
         self.root = root
         self.split = split

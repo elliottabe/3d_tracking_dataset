@@ -3,15 +3,24 @@ import jax
 import jax.numpy as jnp
 
 
-def heatmap_mse(pred, gt, vis):
-    """Masked heatmap MSE. pred,gt: (B,H,W,K); vis: (B,K) bool.
+def heatmap_mse(pred, gt, vis, bg_weight=0.1, fg_thresh=0.01, eps=1e-6):
+    """Foreground-weighted heatmap MSE. pred,gt: (B,H,W,K); vis: (B,K) bool.
 
-    Mean over spatial dims per keypoint, then mean over visible keypoints.
+    Plain mean-MSE over all H*W pixels dilutes the sparse keypoint-foreground
+    gradient ~50000x, so the model collapses to predicting all-zeros and the
+    peak never forms. Instead average the squared error separately over
+    foreground (gt > fg_thresh) and background pixels per keypoint, then combine
+    as mse_fg + bg_weight * mse_bg. This gives the peak a full-strength gradient.
+    Averaged over visible keypoints only.
     """
-    per_kp = jnp.mean((pred - gt) ** 2, axis=(1, 2))     # (B,K)
-    w = vis.astype(pred.dtype)                            # (B,K)
-    denom = jnp.maximum(w.sum(), 1.0)
-    return (per_kp * w).sum() / denom
+    d = (pred - gt) ** 2
+    fg = (gt > fg_thresh).astype(pred.dtype)
+    nfg = fg.sum(axis=(1, 2)) + eps
+    nbg = (1.0 - fg).sum(axis=(1, 2)) + eps
+    per_kp = (d * fg).sum(axis=(1, 2)) / nfg + bg_weight * (
+        (d * (1.0 - fg)).sum(axis=(1, 2)) / nbg)          # (B,K)
+    w = vis.astype(pred.dtype)
+    return (per_kp * w).sum() / jnp.maximum(w.sum(), 1.0)
 
 
 def mask_containment(pred, mask224, eps=1e-6):

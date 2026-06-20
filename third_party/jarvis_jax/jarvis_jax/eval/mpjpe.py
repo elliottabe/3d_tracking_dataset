@@ -3,21 +3,33 @@ import jax
 import jax.numpy as jnp
 
 
-def heatmaps_to_keypoints(hm, *, in_size=448):
-    """(B,H,W,K) heatmaps -> (B,K,2) keypoints in `in_size` pixel coords."""
+def heatmaps_to_keypoints(hm, *, in_size=448, radius=7):
+    """(B,H,W,K) heatmaps -> (B,K,2) keypoints in `in_size` pixel coords.
+
+    Argmax locates each keypoint's peak, then a local mass-centroid within a
+    +/-radius window refines it to sub-pixel. This is robust to diffuse positive
+    background (a global centroid would be swamped by it and collapse to image
+    center).
+    """
     b, h, w, k = hm.shape
     if h != w:
-        raise ValueError(f"heatmaps_to_keypoints expects square heatmaps, got {h}x{w}")
+        raise ValueError(
+            f"heatmaps_to_keypoints expects square heatmaps, got {h}x{w}")
     p = jax.nn.relu(hm)
-    z = p.sum(axis=(1, 2), keepdims=True) + 1e-8          # (B,1,1,K)
-    p = p / z
-    ys = jnp.arange(h, dtype=hm.dtype)
-    xs = jnp.arange(w, dtype=hm.dtype)
-    gy, gx = jnp.meshgrid(ys, xs, indexing="ij")          # (H,W)
-    x = (p * gx[None, :, :, None]).sum(axis=(1, 2))        # (B,K)
-    y = (p * gy[None, :, :, None]).sum(axis=(1, 2))        # (B,K)
+    idx = jnp.argmax(p.reshape(b, h * w, k), axis=1)       # (B,K)
+    py = (idx // w)[:, None, None, :]                       # (B,1,1,K)
+    px = (idx % w)[:, None, None, :]
+    ys = jnp.arange(h)[None, :, None, None]
+    xs = jnp.arange(w)[None, None, :, None]
+    win = ((jnp.abs(ys - py) <= radius) & (jnp.abs(xs - px) <= radius)).astype(p.dtype)
+    pw = p * win
+    z = pw.sum(axis=(1, 2)) + 1e-8                          # (B,K)
+    gx = jnp.arange(w, dtype=hm.dtype)[None, None, :, None]
+    gy = jnp.arange(h, dtype=hm.dtype)[None, :, None, None]
+    x = (pw * gx).sum(axis=(1, 2)) / z
+    y = (pw * gy).sum(axis=(1, 2)) / z
     scale = in_size / float(h)
-    return jnp.stack([x * scale, y * scale], axis=-1)      # (B,K,2)
+    return jnp.stack([x * scale, y * scale], axis=-1)       # (B,K,2)
 
 
 def mpjpe(pred_kp, gt_kp, vis):

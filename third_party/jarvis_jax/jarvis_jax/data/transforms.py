@@ -44,7 +44,7 @@ def transform_keypoints(kps, x0, y0, crop=448, heatmap_size=224):
     return hm_xy, vis
 
 
-def gaussian_heatmaps(hm_xy, vis, heatmap_size=224, sigma=2.0):
+def gaussian_heatmaps(hm_xy, vis, heatmap_size=224, sigma=7.0):
     """Render (heatmap_size, heatmap_size, K) Gaussian heatmaps (peak 1.0).
 
     hm_xy: (K, 2) array with columns [x (col), y (row)]."""

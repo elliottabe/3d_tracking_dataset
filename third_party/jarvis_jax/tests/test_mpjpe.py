@@ -16,6 +16,16 @@ def test_centroid_recovers_peak_and_scales_to_448():
     assert np.allclose(kp[0, 0], [200.0, 100.0], atol=0.1)
 
 
+def test_decode_robust_to_diffuse_positive_background():
+    # sharp peak at (cx=100, cy=50) plus a uniform 0.1 positive background.
+    # A global centroid would collapse toward image center; windowed centroid
+    # must still report the peak.
+    hm = np.full((1, 224, 224, 1), 0.1, dtype=np.float32)
+    hm[0, :, :, 0] += _gauss(224, 224, cx=100.0, cy=50.0)
+    kp = np.asarray(heatmaps_to_keypoints(jnp.asarray(hm), in_size=448))
+    assert np.allclose(kp[0, 0], [200.0, 100.0], atol=3.0)
+
+
 def test_mpjpe_zero_when_equal_and_ignores_invisible():
     kp = jnp.asarray(np.random.RandomState(1).rand(2, 5, 2).astype("float32"))
     vis = jnp.ones((2, 5), dtype=bool)
