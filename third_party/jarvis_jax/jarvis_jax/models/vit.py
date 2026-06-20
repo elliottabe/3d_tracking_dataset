@@ -29,3 +29,24 @@ class Attention(nnx.Module):
         attn = jax.nn.softmax(attn, axis=-1)
         out = (attn @ v).transpose(0, 2, 1, 3).reshape(b, n, d)
         return self.proj(out)
+
+class MLP(nnx.Module):
+    def __init__(self, dim: int, mlp_ratio: int, *, rngs: nnx.Rngs):
+        hidden = dim * mlp_ratio
+        self.fc1 = nnx.Linear(dim, hidden, rngs=rngs)
+        self.fc2 = nnx.Linear(hidden, dim, rngs=rngs)
+
+    def __call__(self, x):
+        return self.fc2(jax.nn.gelu(self.fc1(x), approximate=False))
+
+class Block(nnx.Module):
+    def __init__(self, dim: int, num_heads: int, mlp_ratio: int, *, rngs: nnx.Rngs):
+        self.norm1 = nnx.LayerNorm(dim, rngs=rngs)
+        self.attn = Attention(dim, num_heads, rngs=rngs)
+        self.norm2 = nnx.LayerNorm(dim, rngs=rngs)
+        self.mlp = MLP(dim, mlp_ratio, rngs=rngs)
+
+    def __call__(self, x):
+        x = x + self.attn(self.norm1(x))
+        x = x + self.mlp(self.norm2(x))
+        return x
