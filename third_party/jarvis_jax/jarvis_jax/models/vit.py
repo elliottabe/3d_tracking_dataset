@@ -1,5 +1,6 @@
 import jax, jax.numpy as jnp
 from flax import nnx
+from jarvis_jax.config import ViTPoseConfig
 
 class PatchEmbed(nnx.Module):
     def __init__(self, in_ch: int, embed_dim: int, patch: int, *, rngs: nnx.Rngs):
@@ -50,3 +51,23 @@ class Block(nnx.Module):
         x = x + self.attn(self.norm1(x))
         x = x + self.mlp(self.norm2(x))
         return x
+
+class ViT(nnx.Module):
+    def __init__(self, cfg: ViTPoseConfig, *, rngs: nnx.Rngs):
+        self.cfg = cfg
+        self.patch_embed = PatchEmbed(cfg.in_ch, cfg.embed_dim, cfg.patch, rngs=rngs)
+        self.cls_token = nnx.Param(jnp.zeros((1, 1, cfg.embed_dim)))
+        self.pos_embed = nnx.Param(jnp.zeros((1, cfg.num_tokens + 1, cfg.embed_dim)))
+        self.blocks = nnx.List([Block(cfg.embed_dim, cfg.num_heads, cfg.mlp_ratio, rngs=rngs)
+                                for _ in range(cfg.depth)])
+        self.norm = nnx.LayerNorm(cfg.embed_dim, rngs=rngs)
+
+    def __call__(self, x):
+        x = self.patch_embed(x)                                  # (B,N,D)
+        b = x.shape[0]
+        cls = jnp.broadcast_to(self.cls_token.value, (b, 1, x.shape[-1]))
+        x = jnp.concatenate([cls, x], axis=1) + self.pos_embed.value
+        for blk in self.blocks:
+            x = blk(x)
+        x = self.norm(x)
+        return x[:, 1:]                                          # drop cls

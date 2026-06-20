@@ -1,6 +1,7 @@
 import jax, jax.numpy as jnp
 from flax import nnx
-from jarvis_jax.models.vit import PatchEmbed, Attention, MLP, Block
+from jarvis_jax.models.vit import PatchEmbed, Attention, MLP, Block, ViT
+from jarvis_jax.config import ViTPoseConfig
 
 def test_patch_embed_shapes():
     m = PatchEmbed(in_ch=4, embed_dim=768, patch=16, rngs=nnx.Rngs(0))
@@ -24,3 +25,11 @@ def test_mlp_and_block():
     blk = Block(dim=768, num_heads=12, mlp_ratio=4, rngs=nnx.Rngs(0))
     x = jnp.ones((2, 785, 768))
     assert blk(x).shape == (2, 785, 768)
+
+def test_vit_forward():
+    cfg = ViTPoseConfig()
+    m = ViT(cfg, rngs=nnx.Rngs(0))
+    assert m.pos_embed.value.shape == (1, 785, 768)
+    out = m(jnp.zeros((1, 448, 448, 4)))
+    assert out.shape == (1, 784, 768)   # cls dropped
+    assert jnp.isfinite(out).all()
