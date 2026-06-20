@@ -22,8 +22,9 @@ from flax import nnx
 from jarvis_jax.config import ViTPoseConfig
 from jarvis_jax.models.vitpose import ViTPose
 from jarvis_jax.convert.build_checkpoint import build
+from jarvis_jax.data.prefetch import prefetch
 from jarvis_jax.data.v3 import V3Dataset, batches
-from jarvis_jax.sharding import data_parallel_mesh, shard_batch
+from jarvis_jax.sharding import data_parallel_mesh
 from jarvis_jax.train.train import (
     TrainConfig, make_optimizer, make_train_step, eval_mpjpe,
 )
@@ -69,13 +70,13 @@ def run_training(root, *, out_dir, mae_npz=DEFAULT_MAE_NPZ, tcfg=None,
     train_ds = V3Dataset(root, "train")
     val_ds = V3Dataset(root, "val", recordings=[val_recording])
 
-    src = _epochs(train_ds, tcfg.batch_size, tcfg.seed)
+    host_stream = _epochs(train_ds, tcfg.batch_size, tcfg.seed)
+    dev_stream = prefetch(host_stream, mesh, depth=2)
 
     final_loss = 0.0
     for i in range(tcfg.total_steps):
-        img4, hm, vis = next(src)
-        b = [shard_batch(jnp.asarray(a), mesh) for a in (img4, hm, vis)]
-        final_loss = float(step(model, opt, *b))
+        img4_u8, kp_xy, vis = next(dev_stream)
+        final_loss = float(step(model, opt, img4_u8, kp_xy, vis))
         if (i + 1) % log_every == 0:
             print(f"step {i+1}/{tcfg.total_steps} loss {final_loss:.5f}")
         if (i + 1) % eval_every == 0:
