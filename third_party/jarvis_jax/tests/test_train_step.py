@@ -52,3 +52,33 @@ def test_train_step_reduces_loss_with_finite_grads():
     # A clear, robust reduction (not a marginal epsilon) proves gradients flowed
     # and the optimizer is updating; well-separated from a no-op/NaN failure.
     assert losses[-1] < 0.9 * losses[0], f"loss did not drop: {losses[0]} -> {losses[-1]}"
+
+
+def test_make_optimizer_backbone_lr_is_scaled():
+    # The 2-group optimizer trains the backbone at backbone_lr_mult x the head LR.
+    # AdamW's first-step magnitude ~ the LR, so the backbone param moves ~mult x
+    # as far as the head param. Both groups share the same schedule shape, so the
+    # ratio equals backbone_lr_mult at any step. Deterministic; runs on CPU.
+    import jax.numpy as jnp
+    cfg = ViTPoseConfig()
+    m = ViTPose(cfg, rngs=nnx.Rngs(0))
+    tcfg = TrainConfig(lr=1e-3, backbone_lr_mult=0.1, warmup_steps=0,
+                       total_steps=10, weight_decay=0.0)
+    opt = make_optimizer(m, tcfg)
+
+    def loss_fn(model):
+        return model(jnp.ones((1, 448, 448, 4))).sum()
+
+    _, grads = nnx.value_and_grad(loss_fn)(m)
+
+    def first(model, group):
+        s = nnx.state(model, nnx.Param)
+        v = (s["backbone"]["blocks"][0]["mlp"]["fc1"]["bias"] if group == "bb"
+             else s["decoder"]["head"]["bias"])
+        return float(jnp.ravel(v.value)[0])
+
+    bb0, hd0 = first(m, "bb"), first(m, "hd")
+    opt.update(m, grads)
+    bb_delta, hd_delta = abs(first(m, "bb") - bb0), abs(first(m, "hd") - hd0)
+    assert hd_delta > 0, "head did not move"
+    assert abs(bb_delta / hd_delta - 0.1) < 0.02, (bb_delta, hd_delta)
