@@ -1,5 +1,5 @@
 """NumPy V3 keypoint dataset: COCO annotations + matched SAM masks -> 4-channel
-448 crops and 224x224x50 Gaussian heatmaps."""
+448 uint8 crops and (50,2) heatmap-coord keypoints."""
 import json
 import os
 
@@ -7,7 +7,7 @@ import numpy as np
 from PIL import Image
 
 from jarvis_jax.data.transforms import (
-    crop_origin, normalize_rgb, transform_keypoints, gaussian_heatmaps,
+    crop_origin, transform_keypoints,
 )
 
 
@@ -70,18 +70,18 @@ class V3Dataset:
         img_w, img_h = self.img_wh[i]
 
         with Image.open(os.path.join(self.root, self.split, fn)) as pil:
-            img = np.asarray(pil.convert("RGB"), dtype=np.float32) / 255.0
-        mask = self._load_mask(fn, self.ann_ids[i], img_w, img_h)
+            img = np.asarray(pil.convert("RGB"), dtype=np.uint8)   # (H,W,3) 0-255
+        mask = self._load_mask(fn, self.ann_ids[i], img_w, img_h)  # float32 0/1
 
         x0, y0 = crop_origin(bbox, img_w, img_h, self.crop)
-        rgb_crop = normalize_rgb(img[y0:y0 + self.crop, x0:x0 + self.crop])
+        rgb_crop = img[y0:y0 + self.crop, x0:x0 + self.crop]                 # uint8
         mask_crop = mask[y0:y0 + self.crop, x0:x0 + self.crop][..., None]
-        img4 = np.concatenate([rgb_crop, mask_crop], axis=-1)
+        img4 = np.concatenate(
+            [rgb_crop, mask_crop.astype(np.uint8)], axis=-1)                 # (448,448,4) uint8
 
-        hm_xy, vis = transform_keypoints(
+        kp_xy, vis = transform_keypoints(
             self.keypoints[i], x0, y0, self.crop, self.heatmap_size)
-        hm = gaussian_heatmaps(hm_xy, vis, self.heatmap_size, self.sigma)
-        return img4, hm, vis
+        return img4, kp_xy.astype(np.float32), vis
 
 
 def batches(ds, batch_size, *, shuffle=True, seed=0, drop_last=True):
@@ -92,5 +92,5 @@ def batches(ds, batch_size, *, shuffle=True, seed=0, drop_last=True):
     stop = (n // batch_size) * batch_size if drop_last else n
     for s in range(0, stop, batch_size):
         sel = idx[s:s + batch_size]
-        imgs, hms, viss = zip(*(ds[int(j)] for j in sel))
-        yield (np.stack(imgs), np.stack(hms), np.stack(viss))
+        imgs, kps, viss = zip(*(ds[int(j)] for j in sel))
+        yield (np.stack(imgs), np.stack(kps), np.stack(viss))
