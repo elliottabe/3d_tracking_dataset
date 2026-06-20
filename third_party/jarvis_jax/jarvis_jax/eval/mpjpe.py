@@ -6,6 +6,8 @@ import jax.numpy as jnp
 def heatmaps_to_keypoints(hm, *, in_size=448):
     """(B,H,W,K) heatmaps -> (B,K,2) keypoints in `in_size` pixel coords."""
     b, h, w, k = hm.shape
+    if h != w:
+        raise ValueError(f"heatmaps_to_keypoints expects square heatmaps, got {h}x{w}")
     p = jax.nn.relu(hm)
     z = p.sum(axis=(1, 2), keepdims=True) + 1e-8          # (B,1,1,K)
     p = p / z

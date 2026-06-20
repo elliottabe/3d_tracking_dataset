@@ -13,7 +13,7 @@ def test_centroid_recovers_peak_and_scales_to_448():
     hm[0, :, :, 0] = _gauss(224, 224, cx=100.0, cy=50.0)
     kp = np.asarray(heatmaps_to_keypoints(jnp.asarray(hm), in_size=448))
     # heatmap (100,50) -> *2 -> (200,100) in 448 coords
-    assert np.allclose(kp[0, 0], [200.0, 100.0], atol=1.0)
+    assert np.allclose(kp[0, 0], [200.0, 100.0], atol=0.1)
 
 
 def test_mpjpe_zero_when_equal_and_ignores_invisible():
