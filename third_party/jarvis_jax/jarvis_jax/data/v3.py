@@ -52,34 +52,36 @@ class V3Dataset:
             os.path.splitext(file_name)[0] + ".npz")
         if not os.path.exists(npz_path):
             return np.zeros((img_h, img_w), dtype=np.float32)
-        z = np.load(npz_path, allow_pickle=True)
-        masks, ids, matched = z["masks"], z["ann_ids"], z["matched"]
-        if masks.shape[0] == 0:
+        try:
+            z = np.load(npz_path, allow_pickle=True)
+            masks, ids, matched = z["masks"], z["ann_ids"], z["matched"]
+            if masks.shape[0] == 0:
+                return np.zeros((img_h, img_w), dtype=np.float32)
+            sel = np.where((ids == ann_id) & matched)[0]
+            if sel.size == 0:
+                return np.zeros((img_h, img_w), dtype=np.float32)
+            return masks[sel[0]].astype(np.float32)
+        except Exception:
             return np.zeros((img_h, img_w), dtype=np.float32)
-        sel = np.where((ids == ann_id) & matched)[0]
-        if sel.size == 0:
-            return np.zeros((img_h, img_w), dtype=np.float32)
-        return masks[sel[0]].astype(np.float32)
 
     def __getitem__(self, i):
         fn = self.file_names[i]
         bbox = self.bboxes[i]
         img_w, img_h = self.img_wh[i]
 
-        img = np.asarray(
-            Image.open(os.path.join(self.root, self.split, fn)).convert("RGB"),
-            dtype=np.float32) / 255.0
+        with Image.open(os.path.join(self.root, self.split, fn)) as pil:
+            img = np.asarray(pil.convert("RGB"), dtype=np.float32) / 255.0
         mask = self._load_mask(fn, self.ann_ids[i], img_w, img_h)
 
         x0, y0 = crop_origin(bbox, img_w, img_h, self.crop)
         rgb_crop = normalize_rgb(img[y0:y0 + self.crop, x0:x0 + self.crop])
         mask_crop = mask[y0:y0 + self.crop, x0:x0 + self.crop][..., None]
-        img4 = np.concatenate([rgb_crop, mask_crop.astype(np.float32)], axis=-1)
+        img4 = np.concatenate([rgb_crop, mask_crop], axis=-1)
 
         hm_xy, vis = transform_keypoints(
             self.keypoints[i], x0, y0, self.crop, self.heatmap_size)
         hm = gaussian_heatmaps(hm_xy, vis, self.heatmap_size, self.sigma)
-        return img4.astype(np.float32), hm, vis
+        return img4, hm, vis
 
 
 def batches(ds, batch_size, *, shuffle=True, seed=0, drop_last=True):
