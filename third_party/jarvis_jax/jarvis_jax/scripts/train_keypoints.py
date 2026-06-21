@@ -24,7 +24,7 @@ from jarvis_jax.models.vitpose import ViTPose
 from jarvis_jax.convert.build_checkpoint import build
 from jarvis_jax.data.prefetch import prefetch
 from jarvis_jax.data.v3 import V3Dataset, batches
-from jarvis_jax.sharding import data_parallel_mesh
+from jarvis_jax.sharding import data_parallel_mesh, replicate
 from jarvis_jax.train.train import (
     TrainConfig, make_optimizer, make_train_step, eval_mpjpe,
 )
@@ -76,6 +76,16 @@ def run_training(root, *, out_dir, mae_npz=DEFAULT_MAE_NPZ, tcfg=None,
 
     step = make_train_step(tcfg.mask_weight)
     mesh = data_parallel_mesh()
+
+    # Replicate params + optimizer state across the mesh so the data-sharded
+    # jit step has consistent device placement. Critical on resume: Orbax
+    # restore commits restored arrays to device 0, which clashes with the
+    # sharded batch otherwise ("Received incompatible devices"). Harmless on a
+    # fresh run (uncommitted arrays would be auto-replicated anyway).
+    gdef_m, st_m = nnx.split(model)
+    model = nnx.merge(gdef_m, replicate(st_m, mesh))
+    gdef_o, st_o = nnx.split(opt)
+    opt = nnx.merge(gdef_o, replicate(st_o, mesh))
 
     train_ds = V3Dataset(root, "train")
     val_ds = V3Dataset(root, "val", recordings=[val_recording])
