@@ -237,10 +237,15 @@ def to_device_sharded(cache: dict, mesh) -> dict:
     def _put(arr, dtype=None):
         # Read the memmap slice into RAM first (avoids repeated memmap seeks),
         # then hand to device_put with the target sharding.
+        # IMPORTANT: pass the host NumPy array directly to device_put (do NOT
+        # wrap in jnp.asarray), so JAX shards the buffer across devices without
+        # materializing the full array on a single GPU first.
         np_arr = np.asarray(arr[:n_used])
         if dtype is not None:
             np_arr = np_arr.astype(dtype)
-        return jax.device_put(jnp.asarray(np_arr), sharding)
+        # Ensure contiguous array (handles memmap slices); this copy is on host RAM
+        np_arr = np.ascontiguousarray(np_arr)
+        return jax.device_put(np_arr, sharding)
 
     volumes = _put(cache["volumes"], dtype=np.float16)
     kp3d    = _put(cache["kp3d"])
