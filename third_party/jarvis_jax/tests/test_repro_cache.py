@@ -1,17 +1,28 @@
-"""Tests for data/repro_cache.py — writer + reader round-trip.
+"""Tests for data/repro_cache.py — writer + reader round-trip (Task 2) and
+GPU-resident mesh-sharded cache loader + batch iterator (Task 3).
 
-Tests:
+Task 2 tests:
     test_write_read_roundtrip — synthetic volumes streamed via write_cache,
         reload via load_cache; checks shapes, dtype (fp16), and meta round-trip.
     test_load_cache_readonly — load_cache returns a memmap in read-only mode.
+
+Task 3 tests:
+    test_to_device_sharded_shapes — to_device_sharded returns sharded JAX
+        arrays with correct shapes; n trimmed to device multiple.
+    test_to_device_sharded_trim — to_device_sharded trims n when not divisible.
+    test_cached_batches_shapes — cached_batches yields batches with correct shapes.
+    test_to_device_sharded_and_batch — combined smoke test from brief.
 """
 import json
 import os
 
+import jax
+import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from jarvis_jax.data.repro_cache import write_cache, load_cache
+from jarvis_jax.data.repro_cache import write_cache, load_cache, to_device_sharded, cached_batches
+from jarvis_jax.sharding import data_parallel_mesh
 
 
 def _make_volumes_iter(n, rng):
@@ -102,3 +113,95 @@ def test_load_cache_readonly(tmp_path):
     # In read-only mode, writes should raise
     with pytest.raises((ValueError, TypeError, OSError)):
         c["volumes"][0, 0, 0, 0, 0] = np.float16(999.0)
+
+
+# ---------------------------------------------------------------------------
+# Task 3: GPU-resident mesh-sharded cache helpers
+# ---------------------------------------------------------------------------
+
+def _fake_cache(n):
+    """Build a synthetic in-memory cache dict with n framesets."""
+    return {
+        "volumes": np.zeros((n, 50, 48, 48, 48), np.float16),
+        "kp3d": np.zeros((n, 50, 3), np.float32),
+        "center3D": np.zeros((n, 3), np.float32),
+        "vis": np.ones((n, 50), bool),
+        "meta": {"n": n},
+    }
+
+
+def test_to_device_sharded_shapes():
+    """to_device_sharded returns JAX arrays with correct shapes and sharding."""
+    mesh = data_parallel_mesh()
+    nd = jax.device_count()
+    n = 4 * nd
+    dev = to_device_sharded(_fake_cache(n), mesh)
+
+    # All four arrays must be present and have correct shapes
+    assert dev["volumes"].shape == (n, 50, 48, 48, 48), (
+        f"volumes shape mismatch: {dev['volumes'].shape}")
+    assert dev["kp3d"].shape == (n, 50, 3), f"kp3d shape mismatch: {dev['kp3d'].shape}"
+    assert dev["center3D"].shape == (n, 3), f"center3D shape mismatch: {dev['center3D'].shape}"
+    assert dev["vis"].shape == (n, 50), f"vis shape mismatch: {dev['vis'].shape}"
+
+    # All arrays must carry sharding metadata (JAX Arrays have .sharding)
+    for key in ("volumes", "kp3d", "center3D", "vis"):
+        assert hasattr(dev[key], "sharding"), f"{key} missing .sharding attribute"
+
+    # volumes must stay fp16 on device
+    assert dev["volumes"].dtype == jnp.float16, (
+        f"volumes dtype should be float16, got {dev['volumes'].dtype}")
+
+    # n_used returned
+    assert dev["n_used"] == n
+
+
+def test_to_device_sharded_trim():
+    """to_device_sharded trims n to the largest device-count multiple."""
+    mesh = data_parallel_mesh()
+    nd = jax.device_count()
+    # Give n that is NOT divisible by device count (add 1 extra)
+    n_raw = 4 * nd + 1
+    dev = to_device_sharded(_fake_cache(n_raw), mesh)
+    n_used = dev["n_used"]
+
+    assert n_used == 4 * nd, f"Expected n_used={4*nd}, got {n_used}"
+    assert dev["volumes"].shape[0] == n_used, (
+        f"volumes axis-0 ({dev['volumes'].shape[0]}) != n_used ({n_used})")
+    # Confirm it's divisible
+    assert n_used % nd == 0, f"n_used={n_used} is not divisible by nd={nd}"
+
+
+def test_cached_batches_shapes():
+    """cached_batches yields dicts with correct shapes (no host round-trip needed)."""
+    mesh = data_parallel_mesh()
+    nd = jax.device_count()
+    n = 4 * nd
+    dev = to_device_sharded(_fake_cache(n), mesh)
+
+    batch_size = 2 * nd
+    batches = list(cached_batches(dev, batch_size=batch_size, shuffle=False))
+
+    # With n=4*nd and batch_size=2*nd, expect exactly 2 batches
+    assert len(batches) == 2, f"Expected 2 batches, got {len(batches)}"
+
+    for b in batches:
+        assert b["volumes"].shape == (batch_size, 50, 48, 48, 48), (
+            f"volumes batch shape: {b['volumes'].shape}")
+        assert b["kp3d"].shape == (batch_size, 50, 3), (
+            f"kp3d batch shape: {b['kp3d'].shape}")
+        assert b["center3D"].shape == (batch_size, 3), (
+            f"center3D batch shape: {b['center3D'].shape}")
+        assert b["vis"].shape == (batch_size, 50), (
+            f"vis batch shape: {b['vis'].shape}")
+
+
+def test_to_device_sharded_and_batch():
+    """Combined smoke test from the task brief."""
+    mesh = data_parallel_mesh()
+    nd = jax.device_count()
+    dev = to_device_sharded(_fake_cache(4 * nd), mesh)
+    assert hasattr(dev["volumes"], "sharding")
+    b = next(cached_batches(dev, batch_size=2 * nd, shuffle=False))
+    assert b["volumes"].shape == (2 * nd, 50, 48, 48, 48)
+    assert b["kp3d"].shape == (2 * nd, 50, 3)

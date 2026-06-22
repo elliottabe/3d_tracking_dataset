@@ -24,15 +24,34 @@ load_cache(cache_dir, split) -> dict
         center3D  : np.ndarray (n,3)   float32
         vis       : np.ndarray (n,50)  bool
         meta      : dict
+
+to_device_sharded(cache, mesh) -> dict
+    Place cache arrays as JAX arrays sharded on axis 0 across mesh.
+    Trims n to the largest multiple of device count.
+    Returns:
+        volumes   : jnp array (n_used,50,48,48,48) float16, sharded P("data")
+        kp3d      : jnp array (n_used,50,3) float32, sharded P("data")
+        center3D  : jnp array (n_used,3)   float32, sharded P("data")
+        vis       : jnp array (n_used,50)  bool,    sharded P("data")
+        n_used    : int
+
+cached_batches(dev_cache, batch_size, *, shuffle=True, seed=0, drop_last=True) -> iterator
+    Yield {volumes, kp3d, center3D, vis} batches from device-resident arrays.
+    Each yielded batch is re-sharded with P("data") to stay device-resident.
+    batch_size must be divisible by device count.
 """
 
 from __future__ import annotations
 
 import json
 import os
-from typing import Iterable
+from typing import Iterable, Iterator
 
 import numpy as np
+
+# JAX imports deferred to function bodies so this module stays importable even
+# without a JAX installation (e.g. during write-only cache-building jobs).
+# They are imported at the top of each function that needs them.
 
 # Fixed volume shape constants — kept in sync with HybridNet3D.reproject_volume
 _NUM_JOINTS = 50
@@ -174,3 +193,137 @@ def load_cache(cache_dir: str, split: str) -> dict:
         "vis": vis,
         "meta": meta,
     }
+
+
+# ---------------------------------------------------------------------------
+# to_device_sharded
+# ---------------------------------------------------------------------------
+
+def to_device_sharded(cache: dict, mesh) -> dict:
+    """Place cache arrays as JAX device-resident arrays sharded on axis 0.
+
+    Trims the first axis (framesets) to the largest multiple of the mesh
+    device count so that axis-0 shards evenly.  Logs the number of dropped
+    framesets if any are discarded.
+
+    Args:
+        cache: Dict as returned by :func:`load_cache` (or a synthetic dict with
+               the same keys: ``volumes``, ``kp3d``, ``center3D``, ``vis``).
+               ``volumes`` may be a np.memmap or np.ndarray (fp16 or fp32).
+        mesh:  A :class:`jax.sharding.Mesh` with axis name ``"data"`` (e.g. from
+               :func:`jarvis_jax.sharding.data_parallel_mesh`).
+
+    Returns:
+        Dict with keys ``volumes`` (fp16), ``kp3d``, ``center3D``, ``vis`` as
+        sharded JAX arrays, plus ``n_used`` (int).
+    """
+    import jax
+    import jax.numpy as jnp
+    from jax.sharding import NamedSharding, PartitionSpec as P
+
+    nd = len(mesh.devices)
+    n = cache["volumes"].shape[0]
+    n_used = (n // nd) * nd
+
+    if n_used < n:
+        dropped = n - n_used
+        print(
+            f"to_device_sharded: trimming {n} -> {n_used} framesets "
+            f"(dropped {dropped} to align to {nd} devices)"
+        )
+
+    sharding = NamedSharding(mesh, P("data"))
+
+    def _put(arr, dtype=None):
+        # Read the memmap slice into RAM first (avoids repeated memmap seeks),
+        # then hand to device_put with the target sharding.
+        np_arr = np.asarray(arr[:n_used])
+        if dtype is not None:
+            np_arr = np_arr.astype(dtype)
+        return jax.device_put(jnp.asarray(np_arr), sharding)
+
+    volumes = _put(cache["volumes"], dtype=np.float16)
+    kp3d    = _put(cache["kp3d"])
+    center3D = _put(cache["center3D"])
+    vis     = _put(cache["vis"])
+
+    return {
+        "volumes":  volumes,
+        "kp3d":     kp3d,
+        "center3D": center3D,
+        "vis":      vis,
+        "n_used":   n_used,
+    }
+
+
+# ---------------------------------------------------------------------------
+# cached_batches
+# ---------------------------------------------------------------------------
+
+def cached_batches(
+    dev_cache: dict,
+    batch_size: int,
+    *,
+    shuffle: bool = True,
+    seed: int = 0,
+    drop_last: bool = True,
+) -> Iterator[dict]:
+    """Yield batches from GPU-resident sharded cache arrays.
+
+    Generates index batches (shuffled if requested), gathers rows from the
+    device-resident arrays, then re-shards each batch with ``P("data")`` so
+    the result stays device-resident.  No explicit host transfer occurs per
+    step: JAX gathers across shards and the re-shard keeps the result on GPU.
+
+    Args:
+        dev_cache:   Dict returned by :func:`to_device_sharded`.
+        batch_size:  Number of framesets per batch.  Must be divisible by the
+                     device count (the sharding requires even splitting).
+        shuffle:     Whether to shuffle frameset indices before batching.
+        seed:        RNG seed used when *shuffle* is True.
+        drop_last:   If True (default), drop the final partial batch.
+
+    Yields:
+        Dicts with keys ``volumes`` ``(B,50,48,48,48)`` fp16, ``kp3d``
+        ``(B,50,3)`` f32, ``center3D`` ``(B,3)`` f32, ``vis`` ``(B,50)`` bool;
+        each array sharded on axis 0 with ``P("data")``.
+    """
+    import jax
+    import jax.numpy as jnp
+    from jax.sharding import NamedSharding, PartitionSpec as P
+
+    n_used = dev_cache["n_used"]
+    nd = len(dev_cache["volumes"].sharding.mesh.devices)
+
+    if batch_size % nd != 0:
+        raise ValueError(
+            f"cached_batches: batch_size={batch_size} must be divisible by "
+            f"device count nd={nd}"
+        )
+
+    rng = np.random.default_rng(seed)
+    indices = np.arange(n_used)
+    if shuffle:
+        rng.shuffle(indices)
+
+    # Determine which mesh / sharding to use from the stored arrays
+    sharding = dev_cache["volumes"].sharding
+
+    keys = ("volumes", "kp3d", "center3D", "vis")
+
+    n_batches = n_used // batch_size
+    if not drop_last and (n_used % batch_size) != 0:
+        n_batches += 1
+
+    for i in range(n_batches):
+        idx = indices[i * batch_size : (i + 1) * batch_size]
+        if len(idx) < batch_size and drop_last:
+            break
+        # Gather rows from each sharded array then re-shard the result.
+        # arr[idx] triggers a JAX gather; re-shard with device_put keeps it
+        # on the same devices without a host round-trip.
+        batch = {}
+        for k in keys:
+            gathered = dev_cache[k][idx]
+            batch[k] = jax.device_put(gathered, sharding)
+        yield batch
