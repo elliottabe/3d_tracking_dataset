@@ -201,6 +201,42 @@ def make_cached_step(
 # Eval
 # ---------------------------------------------------------------------------
 
+def make_eval_step_jitted(grid_spacing: int = 1, roi_cube: int = 48):
+    """Return a jit-compiled eval step for the per-batch forward pass.
+
+    Args:
+        grid_spacing: World units per grid step.
+        roi_cube:     Full cube side-length in world units.
+
+    Returns:
+        eval_step(v2v, batch) -> (points3D, vis) where points3D is world coords
+    """
+    @nnx.jit
+    def eval_step(v2v: V2VNet, volumes, center3D):
+        # 1. Cast fp16 → f32
+        vol = volumes.astype(jnp.float32)               # (B, J, 48, 48, 48)
+
+        # 2. Transpose to channels-last for V2VNet
+        vol = jnp.transpose(vol, (0, 2, 3, 4, 1))      # (B, 48, 48, 48, J)
+
+        # 3. V2VNet with eval mode (use_running_average=True)
+        vol = v2v(vol, use_running_average=True)         # (B, 24, 24, 24, J)
+
+        # 4. Transpose to joint-first for soft_argmax
+        vol = jnp.transpose(vol, (0, 4, 1, 2, 3))      # (B, J, 24, 24, 24)
+
+        # 5. Softplus (matches HybridNet3D.__call__ step 9)
+        vol = jax.nn.softplus(vol)                      # (B, J, 24, 24, 24)
+
+        # 6. Soft-argmax → cube-local points; add center3D for world coords
+        points_local, _ = soft_argmax_3d(vol, grid_spacing=grid_spacing, roi_cube=roi_cube)
+        points3D = points_local + center3D[:, None, :]  # (B, J, 3) world
+
+        return points3D
+
+    return eval_step
+
+
 def eval_mpjpe_3d_cached(
     v2v: V2VNet,
     dev_cache: dict,
@@ -222,22 +258,15 @@ def eval_mpjpe_3d_cached(
         Mean 3D MPJPE in world units, or 0.0 if no valid joints.
     """
     v2v.eval()
+    eval_step = make_eval_step_jitted(grid_spacing=grid_spacing, roi_cube=roi_cube)
     total, count = 0.0, 0
 
     for batch in cached_batches(dev_cache, batch_size, shuffle=False, drop_last=False):
-        vol = batch["volumes"].astype(jnp.float32)
         kp3d = batch["kp3d"]
         vis = batch["vis"]
-        center3D = batch["center3D"]
 
-        # Apply same post-reproject transform as the train step (eval=no dropout)
-        vol = jnp.transpose(vol, (0, 2, 3, 4, 1))              # (B, 48, 48, 48, J)
-        vol = v2v(vol, use_running_average=True)                 # (B, 24, 24, 24, J)
-        vol = jnp.transpose(vol, (0, 4, 1, 2, 3))              # (B, J, 24, 24, 24)
-        vol = jax.nn.softplus(vol)
-
-        points_local, _ = soft_argmax_3d(vol, grid_spacing=grid_spacing, roi_cube=roi_cube)
-        pts = points_local + center3D[:, None, :]               # world coords
+        # Call the jit-compiled per-batch forward + soft_argmax
+        pts = eval_step(v2v, batch["volumes"], batch["center3D"])
 
         n = int(vis.sum())
         if n == 0:
@@ -261,7 +290,6 @@ def run_cached_training(
     ckpt_dir: str = None,
     tcfg: CachedConfig = None,
     save_every: int = 500,
-    vitpose_ckpt_for_meta_check: str = None,
     log_every: int = 50,
     eval_every: int = 500,
 ) -> dict:
@@ -276,7 +304,6 @@ def run_cached_training(
         ckpt_dir:   If given, use CheckpointManager for auto-resume.
         tcfg:       CachedConfig; defaults constructed if None.
         save_every: Checkpoint every N steps.
-        vitpose_ckpt_for_meta_check: Unused; accepted for API symmetry.
         log_every:  Print loss every N steps.
         eval_every: Evaluate 3D MPJPE every N steps.
 
@@ -377,7 +404,8 @@ def run_cached_training(
                 break
 
             final_loss = float(step_fn(v2v, opt, batch))
-            if first_loss is None:
+            # Capture first_loss only at the true first step of this run
+            if step_idx == start:
                 first_loss = final_loss
 
             if (step_idx + 1) % log_every == 0:
@@ -451,6 +479,7 @@ def main():
         tcfg=tcfg,
         save_every=args.save_every,
     )
+
 
 
 if __name__ == "__main__":
