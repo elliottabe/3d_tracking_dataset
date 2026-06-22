@@ -16,8 +16,10 @@ Load path (JAX-only)::
 
 import argparse
 
+import jax
 import orbax.checkpoint as ocp
 from flax import nnx
+from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 
 from jarvis_jax import ViTPoseConfig
 from jarvis_jax.models.vitpose import ViTPose
@@ -37,13 +39,23 @@ def load_vitpose(ckpt_dir: str, cfg: ViTPoseConfig) -> ViTPose:
     Uses ``nnx.eval_shape`` to build an abstract target so the restore does
     not require the original state object, then merges the restored state with
     the GraphDef to produce a live model.
+
+    The restore target is pinned to the CURRENT devices (replicated), so a
+    checkpoint saved on a different number of devices — e.g. trained on 8 GPUs —
+    loads on any topology (1/2/4 GPUs) without an Orbax topology mismatch.
+    Replicated rather than single-device, so sharded-batch inference also works.
     """
     # Build an abstract (shape-only) model to use as the restore target.
     m_abstract = nnx.eval_shape(lambda: ViTPose(cfg, rngs=nnx.Rngs(0)))
     gdef, abstract_state = nnx.split(m_abstract)
 
+    repl = NamedSharding(Mesh(jax.devices(), axis_names=("data",)), P())
+    target = jax.tree_util.tree_map(
+        lambda v: jax.ShapeDtypeStruct(v.shape, v.dtype, sharding=repl),
+        abstract_state)
+
     ckptr = ocp.StandardCheckpointer()
-    restored_state = ckptr.restore(ckpt_dir, target=abstract_state)
+    restored_state = ckptr.restore(ckpt_dir, target=target)
     return nnx.merge(gdef, restored_state)
 
 
