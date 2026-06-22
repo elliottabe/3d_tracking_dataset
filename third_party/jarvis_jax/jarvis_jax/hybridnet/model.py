@@ -51,7 +51,7 @@ def soft_argmax_3d(
         vol:          ``(B, J, G, G, G)`` raw v2vNet logits (any sign).
         grid_spacing: World-space units per grid step (default 1).
         roi_cube:     Full cube side length in world units (default 48).
-                      World coordinate: ``idx * grid_spacing * 2 - roi_cube``.
+                      World coordinate: ``idx * grid_spacing * 2 - roi_cube / 2.0``.
 
     Returns:
         points: ``(B, J, 3)`` world-space 3-D keypoints (before center3D offset).
@@ -88,10 +88,10 @@ def soft_argmax_3d(
     y = jnp.sum(hm * yy, axis=(2, 3, 4)) / norm[..., 0, 0, 0]
     z = jnp.sum(hm * zz, axis=(2, 3, 4)) / norm[..., 0, 0, 0]
 
-    # World-space scaling: idx * grid_spacing * 2 - roi_cube
-    x = x * grid_spacing * 2 - roi_cube   # (B, J)
-    y = y * grid_spacing * 2 - roi_cube
-    z = z * grid_spacing * 2 - roi_cube
+    # World-space scaling: idx * grid_spacing * 2 - roi_cube / 2.0
+    x = x * grid_spacing * 2 - roi_cube / 2.0   # (B, J)
+    y = y * grid_spacing * 2 - roi_cube / 2.0
+    z = z * grid_spacing * 2 - roi_cube / 2.0
 
     points = jnp.stack([x, y, z], axis=-1)  # (B, J, 3)
 
@@ -227,6 +227,8 @@ class HybridNet3D(nnx.Module):
         # 9. Apply softplus (matches PyTorch: heatmap_final = self.softplus(v2vNet_out))
         #    then call soft_argmax_3d. soft_argmax_3d applies relu internally,
         #    which is a no-op on softplus output (all values already positive).
+        #    Note: returned vol3d is single-softplus'd (the reference double-softpluses
+        #    the returned heatmap; single-softplus is deliberate and cleaner here).
         vol3d = jax.nn.softplus(vol3d)   # (B, J, 24, 24, 24)
 
         # 10. soft_argmax_3d: returns points_local (B,J,3) in cube-centred coords, conf (B,J)

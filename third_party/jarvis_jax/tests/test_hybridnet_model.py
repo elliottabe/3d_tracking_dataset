@@ -21,8 +21,8 @@ def test_soft_argmax_recovers_peak():
     vol = np.zeros((1, 1, G, G, G), dtype=np.float32)
     vol[0, 0, 5, 10, 15] = 10.0           # peak at grid index (5, 10, 15)
     pts, conf = soft_argmax_3d(jnp.asarray(vol), grid_spacing=1, roi_cube=48)
-    # grid index 5,10,15 -> world = idx*grid_spacing*2 - roi_cube
-    expect = np.array([5, 10, 15]) * 1 * 2 - 48
+    # grid index 5,10,15 -> world = idx*grid_spacing*2 - roi_cube/2.0
+    expect = np.array([5, 10, 15]) * 1 * 2 - 24
     assert np.allclose(np.asarray(pts)[0, 0], expect, atol=1.0), np.asarray(pts)[0, 0]
     assert float(conf[0, 0]) > 0
 
