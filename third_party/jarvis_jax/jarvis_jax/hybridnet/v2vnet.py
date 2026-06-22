@@ -29,6 +29,8 @@ class Basic3DBlock(nnx.Module):
             kernel_size=(kernel_size, kernel_size, kernel_size),
             strides=(stride, stride, stride),
             padding=((pad, pad), (pad, pad), (pad, pad)),
+            kernel_init=nnx.initializers.normal(0.001),
+            bias_init=nnx.initializers.zeros,
             rngs=rngs,
         )
         # InstanceNorm3d == GroupNorm with num_groups == num_features
@@ -55,6 +57,8 @@ class Res3DBlock(nnx.Module):
             kernel_size=(3, 3, 3),
             strides=(1, 1, 1),
             padding=((1, 1), (1, 1), (1, 1)),
+            kernel_init=nnx.initializers.normal(0.001),
+            bias_init=nnx.initializers.zeros,
             rngs=rngs,
         )
         self.norm1 = nnx.GroupNorm(num_features=out_planes, num_groups=out_planes, rngs=rngs)
@@ -63,6 +67,8 @@ class Res3DBlock(nnx.Module):
             kernel_size=(3, 3, 3),
             strides=(1, 1, 1),
             padding=((1, 1), (1, 1), (1, 1)),
+            kernel_init=nnx.initializers.normal(0.001),
+            bias_init=nnx.initializers.zeros,
             rngs=rngs,
         )
         self.norm2 = nnx.GroupNorm(num_features=out_planes, num_groups=out_planes, rngs=rngs)
@@ -94,6 +100,8 @@ class Upsample3DBlock(nnx.Module):
             kernel_size=(2, 2, 2),
             strides=(2, 2, 2),
             padding='VALID',
+            kernel_init=nnx.initializers.normal(0.001),
+            bias_init=nnx.initializers.zeros,
             rngs=rngs,
         )
         self.norm = nnx.GroupNorm(num_features=out_planes, num_groups=out_planes, rngs=rngs)
@@ -161,6 +169,8 @@ class V2VNet(nnx.Module):
             kernel_size=(1, 1, 1),
             strides=(1, 1, 1),
             padding='VALID',
+            kernel_init=nnx.initializers.normal(0.001),
+            bias_init=nnx.initializers.zeros,
             rngs=rngs,
         )
 
