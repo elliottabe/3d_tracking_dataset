@@ -203,6 +203,25 @@ def main(argv=None):
             batch = {key: np.stack([s[key] for s in samples], axis=0)
                      for key in samples[0]}
 
+            # Save original labels before padding inputs
+            kp3d_batch = batch["kp3d"]
+            c3d_batch = batch["center3D"]
+            vis_batch = batch["vis"]
+
+            # Pad inputs on axis 0 to device-multiple if necessary (fixes IndivisibleError)
+            # on partial batches. shard_batch requires axis-0 divisible by len(jax.devices()).
+            nd = len(jax.devices())
+            pad = (-B) % nd
+            if pad > 0:
+                batch["crops4"] = np.concatenate(
+                    [batch["crops4"], np.repeat(batch["crops4"][-1:], pad, axis=0)], axis=0)
+                batch["center3D"] = np.concatenate(
+                    [batch["center3D"], np.repeat(batch["center3D"][-1:], pad, axis=0)], axis=0)
+                batch["centerHM"] = np.concatenate(
+                    [batch["centerHM"], np.repeat(batch["centerHM"][-1:], pad, axis=0)], axis=0)
+                batch["cameraMatrices"] = np.concatenate(
+                    [batch["cameraMatrices"], np.repeat(batch["cameraMatrices"][-1:], pad, axis=0)], axis=0)
+
             # Shard inputs across devices
             with mesh:
                 crops4 = shard_batch(jnp.asarray(batch["crops4"]), mesh)
@@ -212,13 +231,15 @@ def main(argv=None):
 
                 vol = _reproject(crops4, center3D_b, centerHM, camMat)
 
-            # Pull to host; vol shape: (B, 50, 48, 48, 48)
+            # Pull to host; vol shape: (B_padded, 50, 48, 48, 48)
             vol_np = np.asarray(vol)
+            # Slice off padding to restore original batch size
+            vol_np = vol_np[:B]
 
-            # Accumulate labels for this batch
-            kp3d_acc[start:end] = batch["kp3d"]
-            c3d_acc[start:end] = batch["center3D"]
-            vis_acc[start:end] = batch["vis"]
+            # Accumulate labels for this batch (use original unpadded batch)
+            kp3d_acc[start:end] = kp3d_batch
+            c3d_acc[start:end] = c3d_batch
+            vis_acc[start:end] = vis_batch
 
             # Yield individual frameset volumes (fp16)
             for b in range(B):
