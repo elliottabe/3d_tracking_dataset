@@ -173,6 +173,11 @@ def main(argv=None):
     meta = dict(_META_GRID_PARAMS)
     meta["vitpose_ckpt"] = args.vitpose_ckpt
     meta["num_cameras"] = int(ds[0]["cameraMatrices"].shape[0])
+    # Carry the skeleton so the cached trainer can wire the graph-Laplacian
+    # bone prior (train_3d_cached reads meta["keypoint_names"]/["skeleton"]).
+    # Without this the cached run silently trains with zero edges.
+    meta["keypoint_names"] = list(ds.keypoint_names)
+    meta["skeleton"] = ds.skeleton
 
     # ------------------------------------------------------------------
     # Preallocate label accumulators (filled as volumes are generated)
