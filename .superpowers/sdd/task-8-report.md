@@ -1,78 +1,69 @@
-# Task 8 Report: timm MAE ViT-B Weight Exporter
+### Task 8 Report: 3D training loop (`train/train_3d.py`)
 
-## Summary
+**Status:** DONE — both tests pass; no regressions.
 
-Implemented a torch+timm CLI exporter that downloads MAE ViT-B/16 ImageNet weights and saves them to a `.npz` file for later loading into the NNX model (Task 9).
+**Commit:** `1b87d91` — `feat(jax-C): 3D training loop (frozen ViTPose + v2vNet), 3D-MPJPE eval, checkpoint resume`
 
-## Precondition: Lazy `__init__.py`
+---
 
-**Problem:** `jarvis_jax/__init__.py` eagerly imported `ViTPose` (which triggers jax import), breaking `import jarvis_jax` in the jarvis (torch-only) env.
+#### Freeze mechanism
 
-**Fix:** Replaced with a lazy `__getattr__` version:
-```python
-from jarvis_jax.config import ViTPoseConfig
-__all__ = ["ViTPoseConfig", "ViTPose"]
+Two-part freeze, both required:
 
-def __getattr__(name):
-    if name == "ViTPose":
-        from jarvis_jax.models.vitpose import ViTPose
-        return ViTPose
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-```
+1. **stop_gradient on heatmaps** (`train_3d.py:loss_fn`): after `model.predict_heatmaps()` produces `(B, nc, 224, 224, J)` float32 tensors, `jax.lax.stop_gradient(hm)` is applied before the reprojection → v2vNet path. This prevents any gradient from flowing back through the 86M-param ViTPose backbone, even if the optimizer were to somehow include those params.
 
-**Verified:**
-- `jarvis` env: `import jarvis_jax; print(jarvis_jax.ViTPoseConfig)` → works (no jax import error)
-- `3d_tracking` env: `from jarvis_jax import ViTPose` → `<class 'jarvis_jax.models.vitpose.ViTPose'>`
+2. **Path-based wrt-filter restricts optimizer to v2vnet subtree**: `_is_v2vnet_param(path, var)` checks `isinstance(var, nnx.Param) and path[0] == "v2vnet"`. This filter is passed as `wrt=` to both `nnx.Optimizer(model, tx, wrt=_is_v2vnet_param)` and `nnx.value_and_grad(..., argnums=DiffState(0, _is_v2vnet_param))`. The nnx path format inside these transforms is a flat tuple of attribute strings, e.g. `('v2vnet', 'encoder_decoder', ...)`, NOT the `jax.tree_util.keystr` bracket format `"['v2vnet']['encoder_decoder']..."` — a critical distinction.
 
-## Files Created
+**Freeze test result (CPU):**
+- `vitpose_delta = 0.000000e+00` (ViTPose params unchanged)
+- `v2vnet_delta = 2.607703e-08` (v2vNet params updated)
 
-- `third_party/jarvis_jax/jarvis_jax/convert/__init__.py` — empty package marker
-- `third_party/jarvis_jax/jarvis_jax/convert/export_mae_timm.py` — CLI exporter
-- `third_party/jarvis_jax/tests/test_export_mae.py` — pytest test (skips if timm absent)
+---
 
-## TDD Flow
+#### Loss trajectory (8-step smoke gate, GPU, batch_size=2)
 
-1. Wrote failing test: confirmed `ModuleNotFoundError: No module named 'jarvis_jax.convert'`
-2. Implemented exporter
-3. Test passed in jarvis env: `1 passed in 26.17s`
+| Step | Loss |
+|------|------|
+| 1    | 0.39309 (first_loss) |
+| 8    | 0.31204 (final_loss) |
 
-## Test Results
+Loss decreased 20.6% over 8 steps. Val 3D MPJPE = **12.239 mm** (world units).
 
-### jarvis env (torch+timm)
-```
-tests/test_export_mae.py::test_export_produces_expected_keys PASSED
-1 passed in 26.17s
-```
+---
 
-### 3d_tracking env (jax, regression)
-```
-8 passed, 9 warnings in 108.61s
-```
-(test_export_mae.py is skipped via `pytest.importorskip("timm")` in 3d_tracking; the 8 = prior 7 model tests + 1 skip counted as pass — actually 7 prior tests all pass, test_export_mae is collected but skipped)
+#### Full test suite
 
-## Artifact: `/tmp/mae_vitb.npz`
+`56 passed, 3 skipped, 0 failed` (598 s, 8 GPU)
 
-**Model used:** `vit_base_patch16_224.mae` (the MAE pretrained model — primary path, no fallback needed)
+Skips are pre-existing GPU/data/checkpoint guards in other test files.
 
-**Total arrays:** 151
+---
 
-**Key sample:**
+#### Fix note (2026-06-22): wire graph-Laplacian skeleton edges + train_3d cleanup
 
-| Key | Shape |
-|-----|-------|
-| `patch_embed.proj.weight` | `(768, 3, 16, 16)` |
-| `pos_embed` | `(1, 197, 768)` |
-| `blocks.0.attn.qkv.weight` | `(2304, 768)` |
-| `blocks.0.norm1.weight` | `(768,)` |
-| `norm.weight` | `(768,)` |
-| `cls_token` | `(1, 1, 768)` |
-| `__model_id__` | `vit_base_patch16_224.mae` |
+**Skeleton edge count:** 44 edges (from V3 COCO `keypoint_names` × `skeleton` fields).
 
-Note: `qkv.weight` in timm is stored transposed relative to torch convention — shape is `(2304, 768)` not `(768, 2304)`. Task 9 weight loader will need to handle this (or verify orientation matches).
+**Changes made:**
 
-## Notes for Task 9
+1. `jarvis_jax/train/losses_3d.py` — `build_skeleton_edges`: added dict-format support (`keypointA`/`keypointB` keys) alongside existing tuple/list format; the V3 COCO `skeleton` entries are dicts, so the prior was silently producing 0 edges before.
 
-- The `pos_embed` shape `(1, 197, 768)` = 1 + 196 patches (14×14 grid for 224px). The NNX model uses 784+1=785 tokens for ViTPose (4× more patches for heatmap resolution) — Task 9 will need to interpolate pos_embed.
-- `cls_token` is present at `(1, 1, 768)`.
-- `blocks.N.attn.qkv.weight` is fused Q+K+V: shape `(2304, 768)` = `3*768 × 768`.
-- The `.mae` timm variant drops the classification head (`num_classes=0`); no `head.*` keys in the npz.
+2. `jarvis_jax/data/v3_3d.py` — `V3FramesetDataset.__init__`: added `self.keypoint_names` and `self.skeleton` attributes from the COCO json (raw lists).
+
+3. `jarvis_jax/train/train_3d.py`:
+   - Replaced hardcoded empty `ei/ej` with `build_skeleton_edges(train_ds.keypoint_names, train_ds.skeleton)`.
+   - Added `print(f"skeleton edges wired: {len(ei)} ...")` in `run_training_3d`.
+   - Fixed `laplacian_weight` default from `1.0` to `0.0` (prior stays OFF by default; enable via `--laplacian-weight`).
+   - Moved inline imports (`reproject_heatmaps`, `soft_argmax_3d`) from inside `loss_fn` to top-of-file.
+   - Added sync comment in `loss_fn` noting parallel forward path with `HybridNet3D.__call__`.
+
+4. `jarvis_jax/hybridnet/model.py` — `HybridNet3D.__call__`: added sync comment noting parallel forward path in `train_3d.py::loss_fn`.
+
+**Test results (2026-06-22):** `6 passed` in `tests/test_train_3d.py tests/test_v3_3d.py` (167 s).
+Smoke test output confirmed `skeleton edges wired: 44`.
+
+---
+
+#### Files created
+
+- `third_party/jarvis_jax/jarvis_jax/train/train_3d.py` — `HybridNetConfig`, `make_v2v_optimizer`, `make_train_step_3d`, `eval_mpjpe_3d`, `run_training_3d`, `main()`
+- `third_party/jarvis_jax/tests/test_train_3d.py` — freeze test (CPU) + smoke gate (GPU)

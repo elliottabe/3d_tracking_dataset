@@ -112,6 +112,10 @@ class V3FramesetDataset:
         with open(ann_path) as f:
             coco = json.load(f)
 
+        # Expose keypoint names and skeleton edges for graph-Laplacian prior wiring
+        self.keypoint_names: list[str] = coco.get("keypoint_names", [])
+        self.skeleton: list = coco.get("skeleton", [])
+
         # Build lookup tables
         self._id2img = {im["id"]: im for im in coco["images"]}
         # Map image_id -> single annotation (one fly per image in this dataset)

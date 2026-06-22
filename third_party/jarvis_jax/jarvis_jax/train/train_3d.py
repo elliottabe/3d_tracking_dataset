@@ -33,7 +33,8 @@ from jarvis_jax.config import ViTPoseConfig
 from jarvis_jax.convert.build_checkpoint import load_vitpose
 from jarvis_jax.data.v3_3d import V3FramesetDataset, frameset_batches
 from jarvis_jax.eval.mpjpe_3d import mpjpe_3d
-from jarvis_jax.hybridnet.model import HybridNet3D
+from jarvis_jax.hybridnet.model import HybridNet3D, soft_argmax_3d
+from jarvis_jax.hybridnet.reproject import reproject_heatmaps
 from jarvis_jax.hybridnet.v2vnet import V2VNet
 from jarvis_jax.sharding import data_parallel_mesh, shard_batch, replicate
 from jarvis_jax.train.checkpoint import make_manager, save_step, restore_latest
@@ -53,7 +54,7 @@ class HybridNetConfig:
     warmup_steps: int = 200
     total_steps: int = 2000
     batch_size: int = 4
-    laplacian_weight: float = 1.0
+    laplacian_weight: float = 0.0  # OFF by default; enable via --laplacian-weight
     sigma: float = 2.0
     seed: int = 0
 
@@ -151,8 +152,9 @@ def make_train_step_3d(
         hm = jnp.transpose(hm, (0, 1, 4, 2, 3))
 
         # Reproject → V2VNet → soft-argmax (via the v2vnet sub-path)
-        from jarvis_jax.hybridnet.reproject import reproject_heatmaps
-        from jarvis_jax.hybridnet.model import soft_argmax_3d
+        # NOTE: this is a parallel forward path to HybridNet3D.__call__ in model.py,
+        # inserting stop_gradient after ViTPose. Keep grid/pad/transpose constants
+        # (grid_size=48, grid_spacing=1, heatmap_size=226, pad=(1,1,1,1)) in sync.
         vol3d = reproject_heatmaps(
             hm, center3D, centerHM, cameraMatrices,
             grid_size=48, grid_spacing=1, heatmap_size=226,
@@ -355,9 +357,10 @@ def run_training_3d(
     train_ds = V3FramesetDataset(root, "train")
     val_ds = V3FramesetDataset(root, "val", recordings=[val_recording])
 
-    # --- Skeleton edges (empty — no labelled skeleton in cfg) ---
-    ei = np.zeros((0,), dtype=np.int32)
-    ej = np.zeros((0,), dtype=np.int32)
+    # --- Skeleton edges from V3 dataset COCO annotations ---
+    ei, ej = build_skeleton_edges(train_ds.keypoint_names, train_ds.skeleton)
+    print(f"skeleton edges wired: {len(ei)} (graph-Laplacian prior active when "
+          f"laplacian_weight={tcfg.laplacian_weight} > 0)")
 
     # --- Train step ---
     step_fn = make_train_step_3d(

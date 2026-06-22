@@ -188,6 +188,10 @@ class HybridNet3D(nnx.Module):
             points3D: ``(B, J, 3)``  world-space 3-D keypoints.
             conf:    ``(B, J)``  per-joint confidence in [0, 1].
         """
+        # NOTE: this forward is paralleled by loss_fn in train/train_3d.py, which
+        # inserts stop_gradient after ViTPose. Keep grid/pad/transpose constants
+        # (grid_size=48, grid_spacing=1, heatmap_size=226, pad=(1,1,1,1)) in sync.
+
         # 1. 2-D heatmaps: (B, num_cam, 224, 224, J) — ViTPose is always frozen/eval
         hm = self.predict_heatmaps(crops4_u8)      # (B, num_cam, 224, 224, J)
 

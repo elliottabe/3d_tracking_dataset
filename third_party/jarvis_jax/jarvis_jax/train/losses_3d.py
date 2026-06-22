@@ -51,7 +51,12 @@ def build_skeleton_edges(
     name_to_idx = {n: i for i, n in enumerate(keypoint_names)}
     ei_list, ej_list = [], []
     for bone in skeleton:
-        a, b = bone[0], bone[1]
+        # Support both tuple/list pairs and dicts with keypointA/keypointB keys
+        # (the V3 COCO json uses the dict format; legacy callers may pass tuples).
+        if isinstance(bone, dict):
+            a, b = bone["keypointA"], bone["keypointB"]
+        else:
+            a, b = bone[0], bone[1]
         if a in name_to_idx and b in name_to_idx:
             ei_list.append(name_to_idx[a])
             ej_list.append(name_to_idx[b])
