@@ -167,7 +167,7 @@ def main():
                    help='SLURM partition (default: ckpt-g2, preemptible)')
     p.add_argument('--cpus', type=int, default=32, help='CPUs per job (default: 32)')
     p.add_argument('--mem', type=int, default=128, help='Memory GB (default: 128)')
-    p.add_argument('--time', default='8:00:00', help='Per-allocation time limit')
+    p.add_argument('--time', default='3-00:00:00', help='Per-allocation time limit')
     p.add_argument('--requeue', dest='requeue', action='store_true', default=None,
                    help='Add #SBATCH --requeue (default: on for ckpt* partitions)')
     p.add_argument('--no-requeue', dest='requeue', action='store_false',

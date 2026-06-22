@@ -167,6 +167,8 @@ def heatmap3d_mse(
     Returns:
         Scalar foreground-weighted masked MSE loss.
     """
+    assert grid_spacing == 1, "heatmap3d_mse grid-index inverse assumes grid_spacing==1; must match soft_argmax_3d"
+
     B, J, G, _, _ = pred_vol.shape
 
     # 1. Convert GT world coords to grid indices

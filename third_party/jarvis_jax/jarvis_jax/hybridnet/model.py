@@ -11,7 +11,7 @@ Key design decisions
     - per-joint normalization over the G^3 volume
     - expectation computed against ``arange(G)`` with ``indexing='ij'``
       → x→dim-2, y→dim-3, z→dim-4
-    - world scaling: ``idx * grid_spacing * 2 - roi_cube``
+    - world scaling: ``idx * grid_spacing * 2 - roi_cube / 2.0``
     - confidence: ``clamp(max_over_volume, max=255) / 255``
 * ``HybridNet3D.__call__`` transposes between channel conventions:
     - ViTPose out: (B, num_cam, H, W, J)  [channels-last]
@@ -57,6 +57,8 @@ def soft_argmax_3d(
         points: ``(B, J, 3)`` world-space 3-D keypoints (before center3D offset).
         conf:   ``(B, J)``  confidence in [0, 1], clamped max over the volume.
     """
+    assert grid_spacing == 1, "soft_argmax_3d world offset assumes grid_spacing==1 (offset=roi_cube/2); generalize to roi_cube/grid_spacing/2 + matching grid if this changes"
+
     # Apply relu to ensure non-negative volumes.
     # Using relu (not softplus) so that zero-valued voxels remain zero, which
     # allows sparse test volumes to yield exact peak recovery.
