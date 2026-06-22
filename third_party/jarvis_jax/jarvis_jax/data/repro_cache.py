@@ -162,12 +162,15 @@ def load_cache(cache_dir: str, split: str) -> dict:
         shape=(n, *_VOL_SHAPE),
     )
 
-    labels = np.load(_labels_path(cache_dir, split))
+    with np.load(_labels_path(cache_dir, split)) as f:
+        kp3d = f["kp3d"].copy()
+        center3D = f["center3D"].copy()
+        vis = f["vis"].copy()
 
     return {
         "volumes": mm,
-        "kp3d": labels["kp3d"],
-        "center3D": labels["center3D"],
-        "vis": labels["vis"],
+        "kp3d": kp3d,
+        "center3D": center3D,
+        "vis": vis,
         "meta": meta,
     }
