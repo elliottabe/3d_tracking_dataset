@@ -167,32 +167,35 @@ class HybridNet3D(nnx.Module):
         J = hm_flat.shape[-1]
         return hm_flat.reshape(B, num_cam, 224, 224, J)
 
-    def __call__(
+    def reproject_volume(
         self,
         crops4_u8: jnp.ndarray,          # (B, num_cam, 448, 448, 4) uint8
         center3D: jnp.ndarray,           # (B, 3)
         centerHM: jnp.ndarray,           # (B, num_cam, 2)
         cameraMatrices: jnp.ndarray,     # (B, num_cam, 4, 3)
-        *,
-        use_running_average: bool = False,
-    ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-        """Full 3-D pose prediction forward pass.
+    ) -> jnp.ndarray:                    # (B, J, 48, 48, 48)
+        """Compute the reprojected 3-D volume — the exact intermediate cached by the trainer.
+
+        Runs the frozen ViTPose front-end, pads heatmaps 224→226, and reprojects
+        into a ``(B, J, 48, 48, 48)`` volume (the pre-v2vNet, channels-first layout).
+        This is the value that the cached trainer precomputes and stores; the
+        remaining ``transpose → v2vNet → softplus → soft_argmax_3d`` steps are
+        applied by ``__call__``.
 
         Args:
             crops4_u8:       ``(B, num_cam, 448, 448, 4)`` uint8 RGBA crops.
             center3D:        ``(B, 3)``  3-D bounding-box centre (world coords).
             centerHM:        ``(B, num_cam, 2)``  2-D crop centre per camera.
             cameraMatrices:  ``(B, num_cam, 4, 3)``  DLT projection matrices.
-            use_running_average: Passed to V2VNet (controls dropout).
 
         Returns:
-            vol:     ``(B, J, 24, 24, 24)``  softplus-activated 3-D heatmap volume.
-            points3D: ``(B, J, 3)``  world-space 3-D keypoints.
-            conf:    ``(B, J)``  per-joint confidence in [0, 1].
+            ``(B, J, 48, 48, 48)``  reprojected volume in ``(B, J, D, H, W)``
+            layout, normalised by 255 — the direct input to the channels-last
+            transpose that precedes V2VNet.
         """
-        # NOTE: this forward is paralleled by loss_fn in train/train_3d.py, which
-        # inserts stop_gradient after ViTPose. Keep grid/pad/transpose constants
-        # (grid_size=48, grid_spacing=1, heatmap_size=226, pad=(1,1,1,1)) in sync.
+        # NOTE: Keep grid/pad/transpose constants in sync with __call__ and
+        # loss_fn in train/train_3d.py:
+        # (grid_size=48, grid_spacing=1, heatmap_size=226, pad=(1,1,1,1)).
 
         # 1. 2-D heatmaps: (B, num_cam, 224, 224, J) — ViTPose is always frozen/eval
         hm = self.predict_heatmaps(crops4_u8)      # (B, num_cam, 224, 224, J)
@@ -220,6 +223,38 @@ class HybridNet3D(nnx.Module):
 
         # 5. Divide by 255 (matches PyTorch: v2vNet(heatmaps3D / 255.))
         vol3d = vol3d / 255.0
+
+        return vol3d  # (B, J, 48, 48, 48)
+
+    def __call__(
+        self,
+        crops4_u8: jnp.ndarray,          # (B, num_cam, 448, 448, 4) uint8
+        center3D: jnp.ndarray,           # (B, 3)
+        centerHM: jnp.ndarray,           # (B, num_cam, 2)
+        cameraMatrices: jnp.ndarray,     # (B, num_cam, 4, 3)
+        *,
+        use_running_average: bool = False,
+    ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+        """Full 3-D pose prediction forward pass.
+
+        Args:
+            crops4_u8:       ``(B, num_cam, 448, 448, 4)`` uint8 RGBA crops.
+            center3D:        ``(B, 3)``  3-D bounding-box centre (world coords).
+            centerHM:        ``(B, num_cam, 2)``  2-D crop centre per camera.
+            cameraMatrices:  ``(B, num_cam, 4, 3)``  DLT projection matrices.
+            use_running_average: Passed to V2VNet (controls dropout).
+
+        Returns:
+            vol:     ``(B, J, 24, 24, 24)``  softplus-activated 3-D heatmap volume.
+            points3D: ``(B, J, 3)``  world-space 3-D keypoints.
+            conf:    ``(B, J)``  per-joint confidence in [0, 1].
+        """
+        # NOTE: this forward is paralleled by loss_fn in train/train_3d.py, which
+        # inserts stop_gradient after ViTPose. Keep grid/pad/transpose constants
+        # (grid_size=48, grid_spacing=1, heatmap_size=226, pad=(1,1,1,1)) in sync.
+
+        # 1–5. ViTPose → pad 224→226 → reproject → /255: (B, J, 48, 48, 48)
+        vol3d = self.reproject_volume(crops4_u8, center3D, centerHM, cameraMatrices)
 
         # 6. Transpose to (B, D, H, W, J) = (B, 48, 48, 48, J) for V2VNet
         vol3d = jnp.transpose(vol3d, (0, 2, 3, 4, 1))   # (B, 48, 48, 48, J)
