@@ -44,8 +44,9 @@ def test_heatmap3d_mse_in_grid_finite_and_out_of_grid_masked():
 
     # Must be finite
     assert jnp.isfinite(loss), f"loss is not finite: {loss}"
-    # Must be positive (the in-grid joint contributes MSE of non-zero Gaussian vs zero)
-    assert float(loss) > 0.0, f"expected positive loss, got {loss}"
+    # Must be clearly positive: fg-MSE dominates (missed Gaussian peak vs zero pred),
+    # so loss should be well above 0.01.
+    assert float(loss) > 0.01, f"expected fg-dominated positive loss > 0.01, got {loss}"
 
     # Now check that when both joints are out-of-grid, loss is 0 (all masked)
     gt_kp_oob = jnp.array([[[999.0, 999.0, 999.0], [999.0, 999.0, 999.0]]], dtype=jnp.float32)

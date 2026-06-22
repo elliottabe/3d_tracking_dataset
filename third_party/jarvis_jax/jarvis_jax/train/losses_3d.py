@@ -101,13 +101,13 @@ def graph_laplacian(
     dpred = pred[:, ei, :] - pred[:, ej, :]   # (B, E, 3)
     dgt = gt[:, ei, :] - gt[:, ej, :]         # (B, E, 3)
 
-    # Mask: both endpoints must be valid
+    # Mask: both endpoints must be valid — shape (B, E), one entry per bone
     emask = (valid[:, ei] & valid[:, ej]).astype(pred.dtype)  # (B, E)
-    emask = emask[..., None]                                   # (B, E, 1) for broadcast
 
-    sq_err = ((dpred - dgt) ** 2) * emask      # (B, E, 3)
-    total = sq_err.sum()
-    count = emask.sum() * 3                    # total scalar components
+    # Per-bone squared error: sum over 3 spatial components, then mask
+    sq_err = ((dpred - dgt) ** 2).sum(axis=-1)  # (B, E)
+    total = (sq_err * emask).sum()
+    count = emask.sum()                          # number of valid (sample, bone) pairs
     return total / jnp.maximum(count, 1.0)
 
 
@@ -124,6 +124,8 @@ def heatmap3d_mse(
     roi_cube: int = 48,
     center3D: jnp.ndarray,   # (B, 3)  3D bounding-box centre
     sigma: float = 2.0,
+    bg_weight: float = 0.1,
+    fg_thresh: float = 0.01,
 ) -> jnp.ndarray:
     """3-D Gaussian heatmap MSE loss for v2vNet output.
 
@@ -138,6 +140,13 @@ def heatmap3d_mse(
     as invalid (combined with the ``valid`` mask) so out-of-cube GT points do
     not produce a degenerate/clipped Gaussian target.
 
+    Foreground-weighted MSE (matching 2D ``heatmap_mse``): per joint, the
+    squared error is averaged separately over foreground voxels (target >
+    ``fg_thresh``) and background voxels, then combined as
+    ``mse_fg + bg_weight * mse_bg``. This prevents the sparse-target dilution
+    (~13 000× for G=24) that would otherwise collapse the model to predict
+    all-zeros.
+
     Args:
         pred_vol:     ``(B, J, G, G, G)`` softplus-activated v2vNet output.
         gt_kp:        ``(B, J, 3)`` ground-truth world-space 3D keypoints.
@@ -146,9 +155,12 @@ def heatmap3d_mse(
         roi_cube:     Full cube side-length in world units (default 48).
         center3D:     ``(B, 3)`` per-sample 3D bounding-box centre.
         sigma:        Gaussian standard deviation in grid units (default 2.0).
+        bg_weight:    Weight for background voxel MSE term (default 0.1).
+        fg_thresh:    Threshold above which a voxel is considered foreground
+                      in the GT Gaussian (default 0.01).
 
     Returns:
-        Scalar masked MSE loss.
+        Scalar foreground-weighted masked MSE loss.
     """
     B, J, G, _, _ = pred_vol.shape
 
@@ -191,10 +203,21 @@ def heatmap3d_mse(
     jv = joint_valid[:, :, None, None, None].astype(pred_vol.dtype)  # (B, J, 1, 1, 1)
     gauss = gauss * jv   # (B, J, G, G, G) — zeroed for invalid joints
 
-    # 6. MSE per voxel, then average over valid joints
+    # 6. Foreground-weighted MSE per joint
+    #    Mirrors heatmap_mse in losses.py: average fg/bg separately, then combine.
+    eps = 1e-6
     sq_err = (pred_vol - gauss) ** 2   # (B, J, G, G, G)
 
-    # Average per joint over G^3 voxels, then mask and average over valid joints
-    per_joint_mse = sq_err.mean(axis=(2, 3, 4))   # (B, J)
+    fg = (gauss > fg_thresh).astype(pred_vol.dtype)   # (B, J, G, G, G)
+    bg = 1.0 - fg
+
+    # Sum squared error over voxels per joint
+    nfg = fg.sum(axis=(2, 3, 4)) + eps   # (B, J)
+    nbg = bg.sum(axis=(2, 3, 4)) + eps   # (B, J)
+    mse_fg = (sq_err * fg).sum(axis=(2, 3, 4)) / nfg   # (B, J)
+    mse_bg = (sq_err * bg).sum(axis=(2, 3, 4)) / nbg   # (B, J)
+
+    per_joint_mse = mse_fg + bg_weight * mse_bg   # (B, J)
+
     w = joint_valid.astype(pred_vol.dtype)         # (B, J)
     return (per_joint_mse * w).sum() / jnp.maximum(w.sum(), 1.0)
