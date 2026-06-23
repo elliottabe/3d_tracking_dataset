@@ -169,3 +169,17 @@ def test_viz_main_from_cfg_maps_config(monkeypatch):
     assert captured["run1"] == "/a/final" and captured["run2"] == "/b/final"
     assert captured["sharpen2"] == 3.0
     assert captured["cache_dir"] == cfg.paths.cache_dir
+
+
+def test_build_checkpoint_main_from_cfg_maps_config(monkeypatch):
+    import importlib.util, os
+    path = os.path.join(CONFIG_DIR, "..", "jarvis_jax", "convert", "build_checkpoint.py")
+    spec = importlib.util.spec_from_file_location("build_checkpoint", os.path.abspath(path))
+    mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+    captured = {}
+    monkeypatch.setattr(mod, "run_build", lambda **kw: captured.update(kw), raising=False)
+    cfg = _compose(["paths=hyak", "model=vitpose", "+convert.out=/tmp/vit_ckpt"])
+    mod.main_from_cfg(cfg)
+    assert captured["npz"] == cfg.paths.mae_npz
+    assert captured["out"] == "/tmp/vit_ckpt"
+    assert captured["vitpose_cfg"].num_keypoints == 50
