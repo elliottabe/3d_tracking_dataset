@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-Submit a SLURM job to train the JAX ViTPose KeypointDetect model
-(third_party/jarvis_jax) on red_data_unified_V3.
+Submit a SLURM job to train the JAX HybridNet3D 3D pose model
+(third_party/jarvis_jax) using 3D ground-truth framesets from red_data_unified_V3.
 
-Companion to scripts/slurm_train.py (which trains the PyTorch JARVIS stack).
-This one trains the JAX/Flax ViTPose reimplementation: single-host data-parallel
-across N GPUs on one node, MAE-pretrained backbone, foreground-weighted heatmap
-loss, 2-group (backbone/head) LR fine-tune.
+Companion to scripts/slurm_train_vit.py (which trains the 2D ViTPose keypoint detector).
+This one trains the 3D HybridNet: single-host data-parallel across N GPUs on one node,
+frozen ViTPose backbone, 3D heatmap regression with graph-Laplacian bone prior, 3D soft-argmax.
 
 Preemption resume
 -----------------
@@ -20,16 +19,16 @@ that run; a fresh --run-name (the default, date-stamped) starts a new run.
 
 Usage:
     # Train on ckpt-g2 with 8 GPUs (preemptible, auto-resume), a fresh run:
-    python scripts/slurm_train_vit.py
+    python scripts/slurm_train_hybridnet.py
 
     # Resume / continue a specific run (same ckpt dir):
-    python scripts/slurm_train_vit.py --run-name v3_8gpu_20260620
+    python scripts/slurm_train_hybridnet.py --run-name hybridnet_v3_8gpu_20260620
 
     # Non-preemptible L40S node, 4 GPUs, custom hyperparams:
-    python scripts/slurm_train_vit.py --partition gpu-l40s --gpus 4 --batch 32 --lr 1e-3
+    python scripts/slurm_train_hybridnet.py --partition gpu-l40s --gpus 4 --batch 4 --lr 5e-4
 
     # See the script without submitting:
-    python scripts/slurm_train_vit.py --dry-run
+    python scripts/slurm_train_hybridnet.py --dry-run
 """
 
 import argparse
@@ -44,8 +43,8 @@ PKG_DIR = PROJECT_DIR / "third_party" / "jarvis_jax"
 
 # Persistent defaults (outside git; large artifacts / run outputs).
 DEFAULT_DATA_ROOT = "/gscratch/portia/eabe/data/Johnson_lab/red_data/red_data_unified_V3"
-DEFAULT_MAE_NPZ = "/gscratch/portia/eabe/data/Johnson_lab/mae_vitb.npz"
-DEFAULT_RUNS_ROOT = "/gscratch/portia/eabe/data/Johnson_lab/jax_vitpose_runs"
+DEFAULT_VITPOSE_CKPT = "/gscratch/portia/eabe/data/Johnson_lab/jax_vitpose_runs/v3_8gpu_20260620/final"
+DEFAULT_RUNS_ROOT = "/gscratch/portia/eabe/data/Johnson_lab/jax_hybridnet_runs"
 
 # Partition -> nodelist (from sinfo). Only partitions whose nodes have enough
 # GPUs-per-node for --gpus are valid for this single-host job.
@@ -83,11 +82,11 @@ def build_script(
     pkg_dir: Path,
     run_dir: str,
     data_root: str,
-    mae_npz: str,
+    vitpose_ckpt: str,
     steps: int,
     batch: int,
     lr: str,
-    backbone_lr_mult: str,
+    laplacian_weight: float,
     save_every: int,
 ) -> str:
     return f"""#!/bin/bash
@@ -116,15 +115,15 @@ echo "Node: $SLURMD_NODENAME  job: $SLURM_JOB_ID"
 nvidia-smi -L
 cd {pkg_dir}
 python -u -c "import jax; print('jax devices:', jax.device_count())"
-python -u -m jarvis_jax.scripts.train_keypoints \\
+python -u -m jarvis_jax.train.train_3d \\
     --root {data_root} \\
     --out {run_dir}/final \\
     --ckpt-dir {run_dir}/ckpt \\
-    --mae-npz {mae_npz} \\
+    --vitpose-ckpt {vitpose_ckpt} \\
     --steps {steps} \\
     --batch {batch} \\
     --lr {lr} \\
-    --backbone-lr-mult {backbone_lr_mult} \\
+    --laplacian-weight {laplacian_weight} \\
     --save-every {save_every}
 """
 
@@ -138,27 +137,29 @@ def main():
     p.add_argument('--runs-root', default=DEFAULT_RUNS_ROOT,
                    help=f'Parent dir for run outputs (default: {DEFAULT_RUNS_ROOT})')
     p.add_argument('--data-root', default=DEFAULT_DATA_ROOT,
-                   help='red_data_unified_V3 root')
-    p.add_argument('--mae-npz', default=DEFAULT_MAE_NPZ,
-                   help='MAE-pretrained ViT-B npz for backbone init')
+                   help='red_data_unified_V3 root with 3D framesets')
+    p.add_argument('--vitpose-ckpt', default=DEFAULT_VITPOSE_CKPT,
+                   help=f'Trained 2D ViTPose checkpoint for frozen backbone '
+                        f'(default: {DEFAULT_VITPOSE_CKPT})')
     p.add_argument('--gpus', type=int, default=8,
                    help='GPUs (all on ONE node; batch must be divisible by this). '
                         'Default: 8')
-    p.add_argument('--batch', type=int, default=128,
-                   help='Global batch size (split across --gpus). Default: 64 (8/GPU)')
+    p.add_argument('--batch', type=int, default=8,
+                   help='Global batch size (split across --gpus). Default: 8 (1/GPU; '
+                        '3D framesets are heavier than 2D crops)')
     p.add_argument('--steps', type=int, default=20000, help='Total optimizer steps')
-    p.add_argument('--lr', type=float, default=1e-3,
-                   help='BASE head learning rate, calibrated at --base-batch. The '
+    p.add_argument('--lr', type=float, default=3e-4,
+                   help='BASE learning rate, calibrated at --base-batch. The '
                         'actual LR passed to the trainer is this scaled to --batch '
-                        'by --lr-scaling (default base: 1e-3 @ batch 8)')
+                        'by --lr-scaling (default base: 3e-4 @ batch 8)')
     p.add_argument('--base-batch', type=int, default=8,
                    help='Batch size at which --lr is calibrated (default: 8)')
     p.add_argument('--lr-scaling', choices=['none', 'linear', 'sqrt'], default='sqrt',
                    help="How to scale --lr from --base-batch to --batch: 'sqrt' "
                         "(recommended for AdamW), 'linear' (lr*ratio), or 'none'. "
                         "Default: sqrt")
-    p.add_argument('--backbone-lr-mult', default='0.1',
-                   help='Backbone LR = lr * this (default: 0.1)')
+    p.add_argument('--laplacian-weight', type=float, default=0.0,
+                   help='Weight for graph-Laplacian bone prior loss (default: 0.0, off)')
     p.add_argument('--save-every', type=int, default=500,
                    help='Checkpoint cadence in steps (default: 500)')
     p.add_argument('--conda-env', default='3d_tracking',
@@ -194,7 +195,7 @@ def main():
 
     # Resolve the run dir ONCE here, so it is a fixed literal in the script and
     # survives requeue (date computed at submit time, not inside the job).
-    run_name = args.run_name or f"v3_{args.gpus}gpu_{time.strftime('%Y%m%d_%H%M%S')}"
+    run_name = args.run_name or f"hybridnet_v3_{args.gpus}gpu_{time.strftime('%Y%m%d_%H%M%S')}"
     run_dir = str(Path(args.runs_root) / run_name)
 
     # Default: requeue on for preemptible ckpt* partitions.
@@ -208,7 +209,7 @@ def main():
 
     resuming = (Path(run_dir) / "ckpt").is_dir()
 
-    job_name = f"jaxvit_{run_name}"[:60]
+    job_name = f"hybridnet_{run_name}"[:60]
     script = build_script(
         job_name=job_name,
         partition=args.partition,
@@ -222,11 +223,11 @@ def main():
         pkg_dir=PKG_DIR,
         run_dir=run_dir,
         data_root=args.data_root,
-        mae_npz=args.mae_npz,
+        vitpose_ckpt=args.vitpose_ckpt,
         steps=args.steps,
         batch=args.batch,
         lr=lr_str,
-        backbone_lr_mult=args.backbone_lr_mult,
+        laplacian_weight=args.laplacian_weight,
         save_every=args.save_every,
     )
 
@@ -240,8 +241,8 @@ def main():
     else:
         lr_note = (f"lr {lr_str} ({args.lr_scaling}-scaled from {args.lr:g} "
                    f"@ base-batch {args.base_batch} -> batch {args.batch})")
-    print(f"Train   : {args.steps} steps, {lr_note}, backbone x{args.backbone_lr_mult}, "
-          f"save every {args.save_every}")
+    print(f"Train   : {args.steps} steps, {lr_note}, "
+          f"laplacian-weight {args.laplacian_weight}, save every {args.save_every}")
 
     if args.dry_run:
         print("\n--- script (dry-run) ---")

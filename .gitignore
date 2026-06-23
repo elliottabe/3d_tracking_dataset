@@ -218,3 +218,8 @@ Archive/
 figures/
 OutFiles/
 docs/superpowers/
+# Large reprojection parity fixture (93MB) — regenerate via jarvis_jax.convert.export_reproject_fixture (torch env)
+third_party/jarvis_jax/jarvis_jax/convert/reproject_fixture.npz
+
+# Superpowers SDD scratch (ledger, briefs, reports, review diffs)
+.superpowers/

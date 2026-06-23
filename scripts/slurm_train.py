@@ -137,6 +137,9 @@ set -x
 source ~/.bashrc
 micromamba activate {conda_env}
 unset LD_LIBRARY_PATH
+# 3d_tracking (py3.12) packages need a newer libstdc++ than system /lib64;
+# preload the env's own (no-op/harmless for the jarvis env too).
+export LD_PRELOAD="$CONDA_PREFIX/lib/libstdc++.so.6"
 echo "Node: $SLURMD_NODENAME"
 nvidia-smi
 cd {jarvis_root}
