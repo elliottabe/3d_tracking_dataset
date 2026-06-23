@@ -18,7 +18,7 @@ Preemption resume
 -----------------
 The job is single-host (JAX sees only the local node's GPUs), so --gpus all land
 on ONE node. ckpt* partitions are preemptible, so the job is submitted with
---requeue and a FIXED run directory: --ckpt-dir is a literal baked into the
+--requeue and a FIXED run directory: run_id is a literal baked into the
 script at submit time (NOT derived from $SLURM_JOB_ID or date inside the job), so
 a preempt+requeue reruns the same script and the trainer's restore_latest()
 picks up from the last checkpoint. Re-submitting with the same --run-name resumes
@@ -26,20 +26,19 @@ that run; a fresh --run-name (the default, date-stamped) starts a new run.
 
 Usage:
     # Train on ckpt-g2 with 8 GPUs (preemptible, auto-resume), a fresh run:
-    python scripts/slurm_train_3d_cached.py
+    python scripts/slurm_train_3d_cached.py --run-name myrun
 
     # Resume / continue a specific run (same ckpt dir):
     python scripts/slurm_train_3d_cached.py --run-name cached3d_v3_8gpu_20260620
 
-    # Non-preemptible L40S node, 4 GPUs, custom hyperparams:
-    python scripts/slurm_train_3d_cached.py --partition gpu-l40s --gpus 4 --batch 128 --lr 5e-4
+    # Pass Hydra overrides (forwarded to both compose and job body):
+    python scripts/slurm_train_3d_cached.py --run-name myrun train.total_steps=30000 train.sharpen=3
 
     # See the script without submitting:
-    python scripts/slurm_train_3d_cached.py --dry-run
+    python scripts/slurm_train_3d_cached.py --run-name t --dry-run train.total_steps=30000 train.sharpen=3
 """
 
 import argparse
-import math
 import subprocess
 import sys
 import time
@@ -48,14 +47,7 @@ from pathlib import Path
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 PKG_DIR = PROJECT_DIR / "third_party" / "jarvis_jax"
 
-# Persistent defaults (outside git; large artifacts / run outputs).
-DEFAULT_DATA_ROOT = "/gscratch/portia/eabe/data/Johnson_lab/red_data/red_data_unified_V3"
-DEFAULT_VITPOSE_CKPT = "/gscratch/portia/eabe/data/Johnson_lab/jax_vitpose_runs/v3_8gpu_20260620/final"
-DEFAULT_CACHE_DIR = "/gscratch/portia/eabe/data/Johnson_lab/jax_repro_cache/v3"
-DEFAULT_RUNS_ROOT = "/gscratch/portia/eabe/data/Johnson_lab/jax_cached3d_runs"
-
-# Partition -> nodelist (from sinfo). Only partitions whose nodes have enough
-# GPUs-per-node for --gpus are valid for this single-host job.
+# GPU nodelists from sinfo — only used for single-host partitions
 GPU_NODELISTS = {
     'gpu-a40':  'g[3040-3047,3050-3057,3060-3067,3070-3077]',
     'gpu-a100': 'g[3080-3087]',
@@ -64,6 +56,19 @@ GPU_NODELISTS = {
     'gpu-h200': 'g[3125-3132]',
     'ckpt-g2':  'g[3090-3137]',
 }
+
+
+def compose_cfg(paths: str, slurm: str, run_name: str, passthrough: list[str]):
+    """Compose a Hydra config at submit time to read slurm/paths values."""
+    sys.path.insert(0, str(PKG_DIR))
+    from jarvis_jax.hydra_utils import CONFIG_DIR, register_resolvers
+    from hydra import initialize_config_dir, compose
+    register_resolvers()
+    overrides = [f"paths={paths}", f"slurm={slurm}", f"run_id={run_name}",
+                 "train=cached3d"] + passthrough
+    with initialize_config_dir(version_base=None, config_dir=CONFIG_DIR):
+        cfg = compose(config_name="config", overrides=overrides)
+    return cfg
 
 
 def slurm_submit(script: str) -> str:
@@ -80,6 +85,7 @@ def build_script(
     *,
     job_name: str,
     partition: str,
+    account: str,
     nodelist_line: str,
     requeue_line: str,
     gpus: int,
@@ -87,21 +93,19 @@ def build_script(
     mem: int,
     time_limit: str,
     conda_env: str,
+    mail_user: str,
+    exclude_line: str,
     pkg_dir: Path,
     run_dir: str,
-    data_root: str,
-    vitpose_ckpt: str,
     cache_dir: str,
-    steps: int,
-    batch: int,
-    lr: str,
-    laplacian_weight: float,
-    save_every: int,
+    run_name: str,
+    paths: str,
+    overrides_str: str,
 ) -> str:
     return f"""#!/bin/bash
 #SBATCH --job-name={job_name}
 #SBATCH --partition={partition}
-#SBATCH --account=portia
+#SBATCH --account={account}
 #SBATCH --time={time_limit}
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
@@ -111,9 +115,9 @@ def build_script(
 #SBATCH --open-mode=append
 #SBATCH -o {run_dir}/slurm-%j.out
 #SBATCH --mail-type=END,FAIL,REQUEUE
-#SBATCH --mail-user=eabe@uw.edu
+#SBATCH --mail-user={mail_user}
 {nodelist_line}
-#SBATCH --exclude=g[3107,3115,3109]
+{exclude_line}
 {requeue_line}
 set -x
 source ~/.bashrc
@@ -125,18 +129,11 @@ nvidia-smi -L
 cd {pkg_dir}
 python -u -c "import jax; print('jax devices:', jax.device_count())"
 # Precompute cache if absent (train split)
-[ -f {cache_dir}/train_meta.json ] || python -u scripts/precompute_repro_cache.py --root {data_root} --vitpose-ckpt {vitpose_ckpt} --cache-dir {cache_dir} --split train
+[ -f {cache_dir}/train_meta.json ] || python -u scripts/precompute_repro_cache.py paths={paths} cache.split=train
 # Precompute cache if absent (val split)
-[ -f {cache_dir}/val_meta.json ] || python -u scripts/precompute_repro_cache.py --root {data_root} --vitpose-ckpt {vitpose_ckpt} --cache-dir {cache_dir} --split val
+[ -f {cache_dir}/val_meta.json ] || python -u scripts/precompute_repro_cache.py paths={paths} cache.split=val
 python -u -m jarvis_jax.train.train_3d_cached \\
-    --cache-dir {cache_dir} \\
-    --out {run_dir}/final \\
-    --ckpt-dir {run_dir}/ckpt \\
-    --steps {steps} \\
-    --batch {batch} \\
-    --lr {lr} \\
-    --laplacian-weight {laplacian_weight} \\
-    --save-every {save_every}
+    run_id={run_name} train=cached3d paths={paths}{overrides_str}
 """
 
 
@@ -144,123 +141,70 @@ def main():
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument('--run-name', default=None,
-                   help='Run directory name under the runs root. Resuming uses the '
-                        'same name (its ckpt-dir). Default: date-stamped fresh run.')
-    p.add_argument('--runs-root', default=DEFAULT_RUNS_ROOT,
-                   help=f'Parent dir for run outputs (default: {DEFAULT_RUNS_ROOT})')
-    p.add_argument('--root', default=DEFAULT_DATA_ROOT,
-                   help='red_data_unified_V3 root with 3D framesets (for precompute)')
-    p.add_argument('--vitpose-ckpt', default=DEFAULT_VITPOSE_CKPT,
-                   help=f'Trained 2D ViTPose checkpoint for frozen backbone '
-                        f'(default: {DEFAULT_VITPOSE_CKPT})')
-    p.add_argument('--cache-dir', default=DEFAULT_CACHE_DIR,
-                   help=f'Shared cache dir for precomputed volume heatmaps '
-                        f'(default: {DEFAULT_CACHE_DIR})')
-    p.add_argument('--gpus', type=int, default=8,
-                   help='GPUs (all on ONE node; batch must be divisible by this). '
-                        'Default: 8')
-    p.add_argument('--batch', type=int, default=256,
-                   help='Global batch size (split across --gpus). Cached steps are '
-                        'tiny, so larger batches are fine. Must be divisible by '
-                        '--gpus. Default: 256 (32/GPU)')
-    p.add_argument('--steps', type=int, default=20000, help='Total optimizer steps')
-    p.add_argument('--lr', type=float, default=3e-4,
-                   help='BASE learning rate, calibrated at --base-batch. The '
-                        'actual LR passed to the trainer is this scaled to --batch '
-                        'by --lr-scaling (default base: 3e-4 @ batch 256)')
-    p.add_argument('--base-batch', type=int, default=256,
-                   help='Batch size at which --lr is calibrated (default: 256)')
-    p.add_argument('--lr-scaling', choices=['none', 'linear', 'sqrt'], default='sqrt',
-                   help="How to scale --lr from --base-batch to --batch: 'sqrt' "
-                        "(recommended for AdamW), 'linear' (lr*ratio), or 'none'. "
-                        "Default: sqrt")
-    p.add_argument('--laplacian-weight', type=float, default=0.0,
-                   help='Weight for graph-Laplacian bone prior loss (default: 0.0, off)')
-    p.add_argument('--save-every', type=int, default=1000,
-                   help='Checkpoint cadence in steps (default: 1000)')
-    p.add_argument('--conda-env', default='3d_tracking',
-                   help='micromamba/conda env to activate (default: 3d_tracking)')
-    p.add_argument('--partition', default='ckpt-g2',
-                   help='SLURM partition (default: ckpt-g2, preemptible)')
-    p.add_argument('--cpus', type=int, default=32, help='CPUs per job (default: 32)')
-    p.add_argument('--mem', type=int, default=128, help='Memory GB (default: 128)')
-    p.add_argument('--time', default='3-00:00:00', help='Per-allocation time limit')
-    p.add_argument('--requeue', dest='requeue', action='store_true', default=None,
-                   help='Add #SBATCH --requeue (default: on for ckpt* partitions)')
-    p.add_argument('--no-requeue', dest='requeue', action='store_false',
-                   help='Disable automatic requeue on preemption')
+                   help='Run directory name (run_id). Resuming uses the same name. '
+                        'Default: date-stamped fresh run.')
+    p.add_argument('--paths', default='hyak',
+                   help='Hydra paths config group (default: hyak)')
+    p.add_argument('--slurm', default='ckpt_g2',
+                   help='Hydra slurm config group (default: ckpt_g2)')
     p.add_argument('--dry-run', action='store_true',
                    help='Print the script without submitting')
-    args = p.parse_args()
-
-    if args.batch % args.gpus != 0:
-        print(f"Error: --batch ({args.batch}) must be divisible by --gpus "
-              f"({args.gpus}) for data-parallel sharding.", file=sys.stderr)
-        sys.exit(1)
+    args, passthrough = p.parse_known_args()
 
     if not PKG_DIR.is_dir():
         print(f"Error: jarvis_jax package not found at {PKG_DIR}", file=sys.stderr)
         sys.exit(1)
 
-    # Scale the base LR (calibrated at --base-batch) to the actual --batch.
-    # sqrt is the safe default for AdamW; linear over-scales adaptive optimizers.
-    ratio = args.batch / args.base_batch
-    factor = {'none': 1.0, 'linear': ratio, 'sqrt': math.sqrt(ratio)}[args.lr_scaling]
-    eff_lr = args.lr * factor
-    lr_str = f"{eff_lr:.3e}"
+    run_name = args.run_name or f"cached3d_v3_{time.strftime('%Y%m%d_%H%M%S')}"
 
-    # Resolve the run dir ONCE here, so it is a fixed literal in the script and
-    # survives requeue (date computed at submit time, not inside the job).
-    run_name = args.run_name or f"cached3d_v3_{args.gpus}gpu_{time.strftime('%Y%m%d_%H%M%S')}"
-    run_dir = str(Path(args.runs_root) / run_name)
+    # Compose config at submit time to read slurm/paths values.
+    cfg = compose_cfg(args.paths, args.slurm, run_name, passthrough)
+    sl = cfg.slurm
+    pt = cfg.paths
 
-    # Default: requeue on for preemptible ckpt* partitions.
-    requeue = args.requeue
-    if requeue is None:
-        requeue = args.partition.startswith('ckpt')
-    requeue_line = "#SBATCH --requeue" if requeue else ""
+    run_dir = str(Path(pt.runs_root) / run_name)
+    cache_dir = str(pt.cache_dir)
 
-    nodelist_line = (f"#SBATCH --nodelist={GPU_NODELISTS[args.partition]}"
-                     if args.partition in GPU_NODELISTS else "")
+    requeue_line = "#SBATCH --requeue" if sl.requeue else ""
+    nodelist_line = (f"#SBATCH --nodelist={sl.nodelist}"
+                     if getattr(sl, 'nodelist', None) else "")
+    exclude_line = (f"#SBATCH --exclude={sl.exclude}"
+                    if getattr(sl, 'exclude', None) else "")
+
+    # Build the Hydra overrides string for the job body command
+    overrides_str = (" " + " ".join(passthrough)) if passthrough else ""
 
     resuming = (Path(run_dir) / "ckpt").is_dir()
-
     job_name = f"cached3d_{run_name}"[:60]
+
     script = build_script(
         job_name=job_name,
-        partition=args.partition,
+        partition=sl.partition,
+        account=sl.account,
         nodelist_line=nodelist_line,
         requeue_line=requeue_line,
-        gpus=args.gpus,
-        cpus=args.cpus,
-        mem=args.mem,
-        time_limit=args.time,
-        conda_env=args.conda_env,
+        gpus=sl.gpus,
+        cpus=sl.cpus,
+        mem=sl.mem,
+        time_limit=sl.time,
+        conda_env=sl.conda_env,
+        mail_user=sl.mail_user,
+        exclude_line=exclude_line,
         pkg_dir=PKG_DIR,
         run_dir=run_dir,
-        data_root=args.root,
-        vitpose_ckpt=args.vitpose_ckpt,
-        cache_dir=args.cache_dir,
-        steps=args.steps,
-        batch=args.batch,
-        lr=lr_str,
-        laplacian_weight=args.laplacian_weight,
-        save_every=args.save_every,
+        cache_dir=cache_dir,
+        run_name=run_name,
+        paths=args.paths,
+        overrides_str=overrides_str,
     )
 
     print(f"Run dir : {run_dir}"
           f"{'  (RESUMING — ckpt/ exists)' if resuming else '  (fresh)'}")
-    print(f"Compute : {args.partition}, {args.gpus} GPU(s)/1 node, "
-          f"batch {args.batch} ({args.batch // args.gpus}/GPU), "
-          f"{'requeue on' if requeue else 'requeue off'}")
-    if args.lr_scaling == 'none' or args.batch == args.base_batch:
-        lr_note = f"lr {lr_str}"
-    else:
-        lr_note = (f"lr {lr_str} ({args.lr_scaling}-scaled from {args.lr:g} "
-                   f"@ base-batch {args.base_batch} -> batch {args.batch})")
-    print(f"Train   : {args.steps} steps, {lr_note}, "
-          f"laplacian-weight {args.laplacian_weight}, save every {args.save_every}")
-    print(f"Cache   : {args.cache_dir} (precompute-if-absent)")
+    print(f"Compute : {sl.partition}, {sl.gpus} GPU(s)/1 node, "
+          f"{'requeue on' if sl.requeue else 'requeue off'}")
+    print(f"Cache   : {cache_dir} (precompute-if-absent)")
+    if passthrough:
+        print(f"Overrides: {' '.join(passthrough)}")
 
     if args.dry_run:
         print("\n--- script (dry-run) ---")
