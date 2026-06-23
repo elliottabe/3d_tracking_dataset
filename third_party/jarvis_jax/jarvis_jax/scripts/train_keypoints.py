@@ -6,13 +6,16 @@ patch-embed channel learns. End-to-end localization evidence comes from a real
 run of this script (the synthetic overfit gate was dropped as flaky — see
 tests/test_train_step.py).
 
-CLI:
+CLI (Hydra; see configs/):
     python -m jarvis_jax.scripts.train_keypoints \\
-        --root /gscratch/portia/eabe/data/Johnson_lab/red_data/red_data_unified_V3 \\
-        --out /tmp/vitpose_kp_ckpt --steps 2000 --batch 8 --lr 3e-4
+        run_id=myrun train=vit2d model=vitpose paths=hyak
 """
-import argparse
 import os
+
+import hydra
+from jarvis_jax.hydra_utils import CONFIG_DIR, register_resolvers, build_dataclass, run_dir_for
+
+register_resolvers()
 
 import jax
 import jax.numpy as jnp
@@ -42,10 +45,11 @@ def _epochs(ds, batch_size, base_seed):
 
 
 def run_training(root, *, out_dir, mae_npz=DEFAULT_MAE_NPZ, tcfg=None,
+                 vitpose_cfg=None,
                  val_recording="2026_05_27_11_56_05",
                  log_every=50, eval_every=500, smoke=False,
                  ckpt_dir=None, save_every=500):
-    cfg = ViTPoseConfig()
+    cfg = vitpose_cfg if vitpose_cfg is not None else ViTPoseConfig()
     tcfg = tcfg or TrainConfig()
     if smoke:
         # batch must be divisible by the number of devices for data-parallel sharding
@@ -118,25 +122,28 @@ def run_training(root, *, out_dir, mae_npz=DEFAULT_MAE_NPZ, tcfg=None,
             "steps": tcfg.total_steps}
 
 
-def main():
-    ap = argparse.ArgumentParser(description="Train ViTPose KeypointDetect (JAX).")
-    ap.add_argument("--root", required=True)
-    ap.add_argument("--out", required=True)
-    ap.add_argument("--mae-npz", default=DEFAULT_MAE_NPZ)
-    ap.add_argument("--steps", type=int, default=2000)
-    ap.add_argument("--batch", type=int, default=32)
-    ap.add_argument("--lr", type=float, default=1.2e-3)
-    ap.add_argument("--backbone-lr-mult", type=float, default=0.1)
-    ap.add_argument("--smoke", action="store_true")
-    ap.add_argument("--ckpt-dir", default=None)
-    ap.add_argument("--save-every", type=int, default=500)
-    args = ap.parse_args()
+def main_from_cfg(cfg):
+    tcfg = build_dataclass(TrainConfig, cfg.train)
+    # Build ViTPoseConfig robustly: works whether model=vitpose (flat cfg.model.*)
+    # OR model=hybridnet (ViT nested at cfg.model.vitpose).
+    model_node = cfg.model.get("vitpose", cfg.model)
+    vitpose_cfg = build_dataclass(ViTPoseConfig, model_node)
+    run_dir = run_dir_for(cfg)
+    return run_training(
+        cfg.paths.data_root,
+        out_dir=os.path.join(run_dir, "final"),
+        mae_npz=cfg.paths.mae_npz,
+        tcfg=tcfg,
+        vitpose_cfg=vitpose_cfg,
+        smoke=bool(cfg.train.get("smoke", False)),
+        ckpt_dir=os.path.join(run_dir, "ckpt"),
+        save_every=cfg.train.save_every,
+    )
 
-    tcfg = TrainConfig(total_steps=args.steps, batch_size=args.batch, lr=args.lr,
-                       backbone_lr_mult=args.backbone_lr_mult)
-    run_training(args.root, out_dir=args.out, mae_npz=args.mae_npz,
-                 tcfg=tcfg, smoke=args.smoke,
-                 ckpt_dir=args.ckpt_dir, save_every=args.save_every)
+
+@hydra.main(version_base=None, config_path=CONFIG_DIR, config_name="config")
+def main(cfg):
+    main_from_cfg(cfg)
 
 
 if __name__ == "__main__":

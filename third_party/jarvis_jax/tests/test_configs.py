@@ -118,3 +118,22 @@ def test_cached3d_main_from_cfg_maps_config(monkeypatch):
     assert captured["out_dir"].endswith("unittest/final")
     assert captured["ckpt_dir"].endswith("unittest/ckpt")
     assert captured["save_every"] == cfg.train.save_every
+
+
+def test_vit2d_main_from_cfg_maps_config(monkeypatch):
+    import importlib.util, os
+    path = os.path.join(CONFIG_DIR, "..", "jarvis_jax", "scripts", "train_keypoints.py")
+    spec = importlib.util.spec_from_file_location("train_keypoints", os.path.abspath(path))
+    mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+    captured = {}
+    monkeypatch.setattr(mod, "run_training",
+                        lambda root, **kw: captured.update(root=root, **kw))
+    cfg = _compose(["paths=hyak", "model=vitpose", "train=vit2d", "run_id=vit_unittest",
+                    "train.total_steps=7", "train.batch_size=16"])
+    mod.main_from_cfg(cfg)
+    assert captured["tcfg"].total_steps == 7
+    assert captured["tcfg"].batch_size == 16
+    assert captured["tcfg"].backbone_lr_mult == 0.1
+    assert captured["root"] == cfg.paths.data_root
+    assert captured["out_dir"].endswith("vit_unittest/final")
+    assert captured["vitpose_cfg"].num_keypoints == 50
