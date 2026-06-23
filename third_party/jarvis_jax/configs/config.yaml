@@ -1,0 +1,14 @@
+defaults:
+  - _self_
+  - paths: hyak
+
+run_id: run
+note: ''
+
+hydra:
+  run:
+    dir: ${paths.runs_root}/${run_id}
+  job:
+    config:
+      override_dirname:
+        exclude_keys: [paths, slurm, run_id, note]
