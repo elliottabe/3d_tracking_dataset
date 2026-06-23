@@ -8,12 +8,9 @@ Only the v2vNet sub-module is optimised (ViTPose weights are frozen):
      nnx.Param variables inside the ``model.v2vnet`` subtree, so AdamW never
      updates any ViTPose parameter.
 
-CLI:
-    python -m jarvis_jax.train.train_3d \\
-        --root /gscratch/portia/eabe/data/Johnson_lab/red_data/red_data_unified_V3 \\
-        --out /tmp/hybridnet3d_ckpt \\
-        --vitpose-ckpt /gscratch/portia/eabe/data/Johnson_lab/jax_vitpose_runs/v3_8gpu_20260620/final \\
-        --steps 2000 --batch 4 --lr 1e-4
+CLI (Hydra; see configs/):
+    python -m jarvis_jax.train.train_3d run_id=myrun train=inline3d \\
+        train.total_steps=2000 paths=hyak
 """
 import dataclasses
 import os
