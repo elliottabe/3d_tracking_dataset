@@ -15,11 +15,9 @@ Per-step transform (matches HybridNet3D.__call__ post-reproject path exactly)
   → soft_argmax_3d(grid_spacing=1, roi_cube=48)
   → heatmap3d_mse + lw * graph_laplacian
 
-CLI:
-    python -m jarvis_jax.train.train_3d_cached \\
-        --cache-dir /path/to/repro_cache \\
-        --out /path/to/output \\
-        --steps 20000 --batch 64 --lr 3e-4
+CLI (Hydra; see configs/):
+    python -m jarvis_jax.train.train_3d_cached run_id=myrun train=cached3d \\
+        train.total_steps=20000 train.sharpen=3 paths=hyak
 """
 from __future__ import annotations
 
