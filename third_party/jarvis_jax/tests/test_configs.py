@@ -66,3 +66,19 @@ def test_model_hybridnet_composes_shared_vit():
     assert cfg.model.vitpose.num_keypoints == 50
     assert cfg.model.vitpose.img_size == 448
     assert cfg.model.v2vnet.in_channels == 50
+
+
+def test_train_slurm_viz_groups_resolve():
+    cfg = _compose(["paths=hyak", "train=cached3d", "slurm=ckpt_g2", "viz=default"])
+    OmegaConf.resolve(cfg)
+    assert cfg.train.total_steps > 0
+    assert cfg.train.sharpen == 3.0
+    assert cfg.train.save_every > 0
+    assert cfg.slurm.partition
+    assert cfg.slurm.gpus >= 1
+
+
+def test_full_default_config_resolves():
+    cfg = _compose([])  # all defaults from config.yaml
+    OmegaConf.resolve(cfg)
+    assert cfg.train and cfg.model and cfg.paths and cfg.slurm

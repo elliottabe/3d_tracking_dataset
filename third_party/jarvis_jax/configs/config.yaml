@@ -4,6 +4,9 @@ defaults:
   - model: hybridnet
   - data: v3
   - cache: default
+  - train: cached3d
+  - slurm: ckpt_g2
+  - viz: default
 
 run_id: run
 note: ''

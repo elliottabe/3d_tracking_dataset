@@ -1,0 +1,14 @@
+# @package train
+lr: 3.0e-4
+weight_decay: 0.05
+warmup_steps: 100
+total_steps: 20000
+batch_size: 64
+laplacian_weight: 0.05
+sigma: 2.0
+sharpen: 3.0
+seed: 0
+# run_cached_training loop args (not CachedConfig fields):
+save_every: 1000
+log_every: 50
+eval_every: 500

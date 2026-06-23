@@ -1,0 +1,12 @@
+# @package slurm
+partition: gpu-l40s
+account: portia
+gpus: 4
+cpus: 32
+mem: 128
+time: '3-00:00:00'
+requeue: false
+nodelist: 'g[3100-3114,3120-3124,3133-3137]'
+exclude: 'g[3107,3115,3109]'
+conda_env: 3d_tracking
+mail_user: eabe@uw.edu

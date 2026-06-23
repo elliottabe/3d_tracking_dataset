@@ -1,0 +1,9 @@
+# @package viz
+run1: ''
+run2: ''
+sharpen1: 1.0
+sharpen2: 3.0
+n_framesets: 4
+out: ${paths.runs_root}/viz_compare
+# diag_sharpen_sweep:
+sharpens: '1,1.5,2,2.5,3,4,6,8'
