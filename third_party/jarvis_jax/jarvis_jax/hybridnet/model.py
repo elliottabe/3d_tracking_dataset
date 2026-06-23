@@ -42,6 +42,7 @@ def soft_argmax_3d(
     *,
     grid_spacing: int = 1,
     roi_cube: int = 48,
+    sharpen: float = 1.0,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Differentiable 3D soft-argmax over a volumetric heatmap.
 
@@ -52,6 +53,16 @@ def soft_argmax_3d(
         grid_spacing: World-space units per grid step (default 1).
         roi_cube:     Full cube side length in world units (default 48).
                       World coordinate: ``idx * grid_spacing * 2 - roi_cube / 2.0``.
+        sharpen:      Exponent applied to the non-negative heatmap before taking
+                      the expectation (default 1.0 = original behavior, exact
+                      PyTorch-reference parity). Values >1 suppress the low
+                      background "floor" spread across all ``G^3`` voxels — that
+                      floor biases the expectation toward the grid centroid
+                      (``center3D``), shrinking the predicted skeleton inward
+                      (see scripts/diag_shrinkage.py). A one-hot volume recovers
+                      its exact peak for any ``sharpen``. ``conf`` is always
+                      computed from the un-sharpened heatmap so its scale is
+                      unchanged.
 
     Returns:
         points: ``(B, J, 3)`` world-space 3-D keypoints (before center3D offset).
@@ -65,7 +76,10 @@ def soft_argmax_3d(
     # In HybridNet3D, softplus is applied to the v2vNet output before calling
     # this function, matching the PyTorch reference exactly; relu is then a
     # no-op on the already-positive softplus output.
-    hm = jax.nn.relu(vol)   # (B, J, G, G, G)
+    hm0 = jax.nn.relu(vol)   # (B, J, G, G, G) — un-sharpened, used for conf
+    # Sharpen the distribution before the expectation (center-bias fix).
+    # sharpen=1.0 leaves hm0 untouched (byte-identical to the original path).
+    hm = hm0 ** sharpen if sharpen != 1.0 else hm0
 
     G = hm.shape[2]
 
@@ -98,7 +112,8 @@ def soft_argmax_3d(
     points = jnp.stack([x, y, z], axis=-1)  # (B, J, 3)
 
     # Confidence: clamp(max over the G^3 volume, max=255) / 255
-    hm_flat = hm.reshape(*hm.shape[:2], -1)          # (B, J, G^3)
+    # Computed on the UN-sharpened heatmap so its scale is independent of sharpen.
+    hm_flat = hm0.reshape(*hm0.shape[:2], -1)         # (B, J, G^3)
     vol_max = jnp.max(hm_flat, axis=-1)               # (B, J)
     conf = jnp.clip(vol_max, 0.0, 255.0) / 255.0     # (B, J)
 
@@ -137,6 +152,9 @@ class HybridNet3D(nnx.Module):
         self.vitpose = vitpose
         self.v2vnet = v2vnet
         self.cfg = cfg
+        # soft-argmax sharpening exponent (center-bias fix); read from cfg if
+        # present, else 1.0 (original behavior). See soft_argmax_3d / sweep diag.
+        self.sharpen = float(getattr(cfg, "sharpen", 1.0))
 
     def predict_heatmaps(
         self,
@@ -273,7 +291,8 @@ class HybridNet3D(nnx.Module):
         vol3d = jax.nn.softplus(vol3d)   # (B, J, 24, 24, 24)
 
         # 10. soft_argmax_3d: returns points_local (B,J,3) in cube-centred coords, conf (B,J)
-        points_local, conf = soft_argmax_3d(vol3d, grid_spacing=1, roi_cube=48)
+        points_local, conf = soft_argmax_3d(vol3d, grid_spacing=1, roi_cube=48,
+                                            sharpen=self.sharpen)
 
         # 11. Add center3D offset to get world coordinates
         #     center3D: (B, 3) → broadcast to (B, 1, 3)

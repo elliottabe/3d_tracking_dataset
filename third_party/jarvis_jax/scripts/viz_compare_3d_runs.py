@@ -50,7 +50,7 @@ def load_v2v(final_dir):
     return nnx.merge(gdef, restored)
 
 
-def predict_3d(v2v, volumes_np, center3D_np, batch=32):
+def predict_3d(v2v, volumes_np, center3D_np, batch=32, sharpen=1.0):
     """volumes_np (N,J,48,48,48) fp16, center3D_np (N,3) -> (N,J,3) world."""
     v2v.eval()
 
@@ -61,7 +61,7 @@ def predict_3d(v2v, volumes_np, center3D_np, batch=32):
         vol = v2v(vol, use_running_average=True)        # (B,24,24,24,J)
         vol = jnp.transpose(vol, (0, 4, 1, 2, 3))      # (B,J,24,24,24)
         vol = jax.nn.softplus(vol)
-        pl, _ = soft_argmax_3d(vol, grid_spacing=1, roi_cube=48)
+        pl, _ = soft_argmax_3d(vol, grid_spacing=1, roi_cube=48, sharpen=sharpen)
         return pl + c3d[:, None, :]
 
     out = []
@@ -207,9 +207,13 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--root", default="/gscratch/portia/eabe/data/Johnson_lab/red_data/red_data_unified_V3")
     ap.add_argument("--cache-dir", default="/gscratch/portia/eabe/data/Johnson_lab/jax_repro_cache/v3")
-    ap.add_argument("--run1", default="/gscratch/portia/eabe/data/Johnson_lab/jax_cached3d_runs/here_run1/final")
-    ap.add_argument("--run2", default="/gscratch/portia/eabe/data/Johnson_lab/jax_cached3d_runs/here_run2/final")
+    ap.add_argument("--run1", default="/gscratch/portia/eabe/data/Johnson_lab/jax_cached3d_runs/here_run2/final")
+    ap.add_argument("--run2", default="/gscratch/portia/eabe/data/Johnson_lab/jax_cached3d_runs/here_run3/final")
     ap.add_argument("--out", default="/gscratch/portia/eabe/data/Johnson_lab/jax_cached3d_runs/viz_compare")
+    ap.add_argument("--sharpen1", type=float, default=1.0,
+                    help="soft-argmax sharpen exponent for run1 (center-bias fix)")
+    ap.add_argument("--sharpen2", type=float, default=1.0,
+                    help="soft-argmax sharpen exponent for run2")
     args = ap.parse_args()
     os.makedirs(args.out, exist_ok=True)
 
@@ -238,8 +242,8 @@ def main():
     print("[viz] running inference for run1 + run2")
     v1 = load_v2v(args.run1)
     v2 = load_v2v(args.run2)
-    pred1 = predict_3d(v1, vols, c3d_all)
-    pred2 = predict_3d(v2, vols, c3d_all)
+    pred1 = predict_3d(v1, vols, c3d_all, sharpen=args.sharpen1)
+    pred2 = predict_3d(v2, vols, c3d_all, sharpen=args.sharpen2)
 
     # per-frameset MPJPE
     m1 = np.array([per_frameset_mpjpe(pred1[i], gt_all[i], vis_all[i]) for i in range(N)])

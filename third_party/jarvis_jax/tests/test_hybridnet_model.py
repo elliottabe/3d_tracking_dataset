@@ -27,6 +27,38 @@ def test_soft_argmax_recovers_peak():
     assert float(conf[0, 0]) > 0
 
 
+def test_soft_argmax_sharpen_onehot_exact():
+    """sharpen>1 must not change exact peak recovery on a one-hot volume."""
+    G = 24
+    vol = np.zeros((1, 1, G, G, G), dtype=np.float32)
+    vol[0, 0, 5, 10, 15] = 10.0
+    expect = np.array([5, 10, 15]) * 2 - 24
+    for s in (1.0, 2.0, 4.0):
+        pts, _ = soft_argmax_3d(jnp.asarray(vol), grid_spacing=1, roi_cube=48, sharpen=s)
+        assert np.allclose(np.asarray(pts)[0, 0], expect, atol=1.0), (s, pts[0, 0])
+
+
+def test_soft_argmax_sharpen_reduces_center_bias():
+    """A diffuse blob + background floor biases the expectation toward the grid
+    centroid; sharpen>1 suppresses the floor and recovers the true peak."""
+    G = 24
+    peak = np.array([18, 12, 6])              # off-center (centroid ~11.5)
+    ii, jj, kk = np.meshgrid(np.arange(G), np.arange(G), np.arange(G), indexing="ij")
+    d2 = (ii - peak[0]) ** 2 + (jj - peak[1]) ** 2 + (kk - peak[2]) ** 2
+    blob = np.exp(-d2 / (2 * 2.0 ** 2)).astype(np.float32)   # Gaussian, sigma=2
+    vol = (blob + 0.05).astype(np.float32)[None, None]       # + uniform floor
+    expect = peak * 2 - 24                                   # world coords
+
+    p1, _ = soft_argmax_3d(jnp.asarray(vol), grid_spacing=1, roi_cube=48, sharpen=1.0)
+    p3, _ = soft_argmax_3d(jnp.asarray(vol), grid_spacing=1, roi_cube=48, sharpen=3.0)
+    err1 = float(np.linalg.norm(np.asarray(p1)[0, 0] - expect))
+    err3 = float(np.linalg.norm(np.asarray(p3)[0, 0] - expect))
+
+    # The floor pulls sharpen=1 toward center; sharpen=3 must be much closer.
+    assert err3 < err1, f"sharpen did not reduce bias: err1={err1:.2f} err3={err3:.2f}"
+    assert err3 < 1.0, f"sharpen=3 should recover the peak (err3={err3:.2f})"
+
+
 def test_soft_argmax_shape():
     B, J, G = 2, 5, 24
     vol = jnp.ones((B, J, G, G, G), dtype=jnp.float32)

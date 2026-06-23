@@ -58,3 +58,40 @@ def test_cached_step_reduces_loss():
     assert np.isfinite(losses).all(), f"Non-finite loss encountered: {losses}"
     assert losses[-1] < losses[0], (
         f"Loss did NOT decrease: first={losses[0]:.6f}  last={losses[-1]:.6f}")
+
+
+# ---------------------------------------------------------------------------
+# (b) Run-config persistence — no GPU
+# ---------------------------------------------------------------------------
+
+def test_save_run_config_writes_json_and_appends_history(tmp_path):
+    """run_config.json holds the latest config; history appends one line/launch."""
+    import json
+    from jarvis_jax.train.train_3d_cached import save_run_config
+
+    run_dir = str(tmp_path / "myrun")
+
+    # First launch: 20000-step config.
+    cfg1 = {"total_steps": 20000, "batch_size": 64, "lr": 3e-4,
+            "laplacian_weight": 0.05, "resumed_from_step": 0}
+    path = save_run_config(run_dir, cfg1)
+    assert path == os.path.join(run_dir, "run_config.json")
+    with open(path) as f:
+        latest = json.load(f)
+    assert latest == cfg1
+
+    # Resume launch: extended to 30000, resumed from 20000.
+    cfg2 = {**cfg1, "total_steps": 30000, "resumed_from_step": 20000}
+    save_run_config(run_dir, cfg2)
+
+    # run_config.json reflects the LATEST config (the resume).
+    with open(os.path.join(run_dir, "run_config.json")) as f:
+        assert json.load(f)["total_steps"] == 30000
+
+    # History keeps BOTH launches, in order.
+    hist_path = os.path.join(run_dir, "run_config_history.jsonl")
+    with open(hist_path) as f:
+        lines = [json.loads(ln) for ln in f if ln.strip()]
+    assert len(lines) == 2
+    assert lines[0]["total_steps"] == 20000 and lines[0]["resumed_from_step"] == 0
+    assert lines[1]["total_steps"] == 30000 and lines[1]["resumed_from_step"] == 20000

@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import datetime
 import json
 import os
 
@@ -60,6 +61,7 @@ class CachedConfig:
     batch_size: int = 64
     laplacian_weight: float = 0.0   # OFF by default; enable via --laplacian-weight
     sigma: float = 2.0
+    sharpen: float = 3.0            # soft-argmax sharpening exponent (center-bias fix)
     seed: int = 0
 
 
@@ -118,6 +120,7 @@ def make_cached_step(
     grid_spacing: int = 1,
     roi_cube: int = 48,
     sigma: float = 2.0,
+    sharpen: float = 1.0,
 ):
     """Return an nnx.jit-compiled train step for the cached v2vNet trainer.
 
@@ -165,7 +168,8 @@ def make_cached_step(
         pred_vol = vol
 
         # 6. Soft-argmax → cube-local points; add center3D for world coords
-        points_local, _ = soft_argmax_3d(pred_vol, grid_spacing=grid_spacing, roi_cube=roi_cube)
+        points_local, _ = soft_argmax_3d(pred_vol, grid_spacing=grid_spacing,
+                                          roi_cube=roi_cube, sharpen=sharpen)
         points3D = points_local + center3D[:, None, :]  # (B, J, 3) world
 
         # 7. Losses
@@ -201,12 +205,13 @@ def make_cached_step(
 # Eval
 # ---------------------------------------------------------------------------
 
-def make_eval_step_jitted(grid_spacing: int = 1, roi_cube: int = 48):
+def make_eval_step_jitted(grid_spacing: int = 1, roi_cube: int = 48, sharpen: float = 1.0):
     """Return a jit-compiled eval step for the per-batch forward pass.
 
     Args:
         grid_spacing: World units per grid step.
         roi_cube:     Full cube side-length in world units.
+        sharpen:      soft-argmax sharpening exponent (center-bias fix).
 
     Returns:
         eval_step(v2v, batch) -> (points3D, vis) where points3D is world coords
@@ -229,7 +234,8 @@ def make_eval_step_jitted(grid_spacing: int = 1, roi_cube: int = 48):
         vol = jax.nn.softplus(vol)                      # (B, J, 24, 24, 24)
 
         # 6. Soft-argmax → cube-local points; add center3D for world coords
-        points_local, _ = soft_argmax_3d(vol, grid_spacing=grid_spacing, roi_cube=roi_cube)
+        points_local, _ = soft_argmax_3d(vol, grid_spacing=grid_spacing,
+                                         roi_cube=roi_cube, sharpen=sharpen)
         points3D = points_local + center3D[:, None, :]  # (B, J, 3) world
 
         return points3D
@@ -244,6 +250,7 @@ def eval_mpjpe_3d_cached(
     *,
     grid_spacing: int = 1,
     roi_cube: int = 48,
+    sharpen: float = 1.0,
 ) -> float:
     """Mean 3D MPJPE over the cached val set (model in eval mode).
 
@@ -253,12 +260,14 @@ def eval_mpjpe_3d_cached(
         batch_size:  Samples per eval batch.
         grid_spacing: World units per grid step.
         roi_cube:     Full cube side-length in world units.
+        sharpen:      soft-argmax sharpening exponent (center-bias fix).
 
     Returns:
         Mean 3D MPJPE in world units, or 0.0 if no valid joints.
     """
     v2v.eval()
-    eval_step = make_eval_step_jitted(grid_spacing=grid_spacing, roi_cube=roi_cube)
+    eval_step = make_eval_step_jitted(grid_spacing=grid_spacing, roi_cube=roi_cube,
+                                      sharpen=sharpen)
     total, count = 0.0, 0
 
     for batch in cached_batches(dev_cache, batch_size, shuffle=False, drop_last=False):
@@ -282,6 +291,32 @@ def eval_mpjpe_3d_cached(
 # ---------------------------------------------------------------------------
 # run_cached_training
 # ---------------------------------------------------------------------------
+
+def save_run_config(run_dir: str, config: dict) -> str:
+    """Persist a run's effective config for easy later recovery.
+
+    Writes two files into ``run_dir``:
+      - ``run_config.json``: the latest effective config (overwritten each
+        launch, so it always reflects the most recent settings — e.g. the
+        extended ``total_steps`` after a resume).
+      - ``run_config_history.jsonl``: one JSON line appended per launch, so a
+        resume never erases the original config (full provenance of the run).
+
+    Args:
+        run_dir: Directory to write the config files into (created if absent).
+        config:  JSON-serialisable dict of the effective run configuration.
+
+    Returns:
+        Path to the written ``run_config.json``.
+    """
+    os.makedirs(run_dir, exist_ok=True)
+    latest = os.path.join(run_dir, "run_config.json")
+    with open(latest, "w") as f:
+        json.dump(config, f, indent=2, default=str)
+    with open(os.path.join(run_dir, "run_config_history.jsonl"), "a") as f:
+        f.write(json.dumps(config, default=str) + "\n")
+    return latest
+
 
 def run_cached_training(
     cache_dir: str,
@@ -376,6 +411,30 @@ def run_cached_training(
         if start:
             print(f"Resuming from checkpoint at step {start}")
 
+    # --- Persist the effective run config for easy later recovery ---
+    # run_dir is the directory that holds ckpt/ and final/ (their parent).
+    run_dir = os.path.dirname((ckpt_dir or out_dir).rstrip("/")) or "."
+    config_record = {
+        "timestamp": datetime.datetime.now().isoformat(timespec="seconds"),
+        **dataclasses.asdict(tcfg),
+        "save_every": save_every,
+        "log_every": log_every,
+        "eval_every": eval_every,
+        "cache_dir": cache_dir,
+        "out_dir": out_dir,
+        "ckpt_dir": ckpt_dir,
+        "resumed_from_step": int(start),
+        "n_train_samples": int(train_cache["volumes"].shape[0]),
+        "n_val_samples": int(val_cache["volumes"].shape[0]) if val_cache is not None else 0,
+        "n_joints": int(J),
+        "n_devices": int(n_dev),
+        "n_skeleton_edges": int(len(ei)),
+        "graph_laplacian_active": bool(len(ei) > 0 and tcfg.laplacian_weight > 0),
+        "cache_vitpose_ckpt": meta.get("vitpose_ckpt"),
+        "cache_grid_size": meta.get("grid_size"),
+    }
+    print(f"Wrote run config -> {save_run_config(run_dir, config_record)}")
+
     # --- Replicate across mesh (critical: must happen AFTER restore) ---
     gdef_v, st_v = nnx.split(v2v)
     v2v = nnx.merge(gdef_v, replicate(st_v, mesh))
@@ -387,7 +446,9 @@ def run_cached_training(
         laplacian_weight=tcfg.laplacian_weight,
         ei=ei, ej=ej,
         grid_spacing=1, roi_cube=48, sigma=tcfg.sigma,
+        sharpen=tcfg.sharpen,
     )
+    print(f"soft-argmax sharpen exponent: {tcfg.sharpen} (center-bias fix; 1.0=off)")
 
     first_loss = None
     final_loss = 0.0
@@ -412,7 +473,8 @@ def run_cached_training(
                 print(f"step {step_idx + 1}/{tcfg.total_steps}  loss {final_loss:.5f}")
 
             if (step_idx + 1) % eval_every == 0 and val_dev is not None:
-                val_e = eval_mpjpe_3d_cached(v2v, val_dev, tcfg.batch_size)
+                val_e = eval_mpjpe_3d_cached(v2v, val_dev, tcfg.batch_size,
+                                             sharpen=tcfg.sharpen)
                 print(f"  val 3D MPJPE {val_e:.3f}")
 
             if mngr is not None and (step_idx + 1) % save_every == 0:
@@ -430,7 +492,8 @@ def run_cached_training(
     # Final eval
     val_mpjpe = 0.0
     if val_dev is not None:
-        val_mpjpe = eval_mpjpe_3d_cached(v2v, val_dev, tcfg.batch_size)
+        val_mpjpe = eval_mpjpe_3d_cached(v2v, val_dev, tcfg.batch_size,
+                                         sharpen=tcfg.sharpen)
         print(f"Final val 3D MPJPE {val_mpjpe:.3f}")
 
     # Save final checkpoint with StandardCheckpointer
@@ -463,6 +526,8 @@ def main():
     ap.add_argument("--batch", type=int, default=64)
     ap.add_argument("--lr", type=float, default=3e-4)
     ap.add_argument("--laplacian-weight", type=float, default=0.0)
+    ap.add_argument("--sharpen", type=float, default=3.0,
+                    help="soft-argmax sharpening exponent (center-bias fix; 1.0=off)")
     ap.add_argument("--save-every", type=int, default=500)
     args = ap.parse_args()
 
@@ -471,6 +536,7 @@ def main():
         batch_size=args.batch,
         lr=args.lr,
         laplacian_weight=args.laplacian_weight,
+        sharpen=args.sharpen,
     )
     run_cached_training(
         args.cache_dir,
