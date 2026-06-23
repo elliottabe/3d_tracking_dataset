@@ -40,16 +40,6 @@ from pathlib import Path
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 PKG_DIR = PROJECT_DIR / "third_party" / "jarvis_jax"
 
-# GPU nodelists from sinfo — only used for single-host partitions
-GPU_NODELISTS = {
-    'gpu-a40':  'g[3040-3047,3050-3057,3060-3067,3070-3077]',
-    'gpu-a100': 'g[3080-3087]',
-    'gpu-l40':  'g[3090-3099,3115-3119]',
-    'gpu-l40s': 'g[3100-3114,3120-3124,3133-3137]',
-    'gpu-h200': 'g[3125-3132]',
-    'ckpt-g2':  'g[3090-3137]',
-}
-
 
 def compose_cfg(paths: str, slurm: str, run_name: str, passthrough: list[str]):
     """Compose a Hydra config at submit time to read slurm/paths values."""
@@ -58,7 +48,8 @@ def compose_cfg(paths: str, slurm: str, run_name: str, passthrough: list[str]):
     from hydra import initialize_config_dir, compose
     register_resolvers()
     overrides = [f"paths={paths}", f"slurm={slurm}", f"run_id={run_name}",
-                 "train=inline3d", "model=hybridnet"] + passthrough
+                 "train=inline3d", "model=hybridnet",
+                 "paths.runs_root=${paths.hybridnet_runs_root}"] + passthrough
     with initialize_config_dir(version_base=None, config_dir=CONFIG_DIR):
         cfg = compose(config_name="config", overrides=overrides)
     return cfg
@@ -121,7 +112,8 @@ nvidia-smi -L
 cd {pkg_dir}
 python -u -c "import jax; print('jax devices:', jax.device_count())"
 python -u -m jarvis_jax.train.train_3d \\
-    run_id={run_name} train=inline3d model=hybridnet paths={paths}{overrides_str}
+    run_id={run_name} train=inline3d model=hybridnet paths={paths} \\
+    'paths.runs_root=${{paths.hybridnet_runs_root}}'{overrides_str}
 """
 
 
@@ -150,7 +142,7 @@ def main():
     sl = cfg.slurm
     pt = cfg.paths
 
-    run_dir = str(Path(pt.runs_root) / run_name)
+    run_dir = str(Path(pt.hybridnet_runs_root) / run_name)
 
     requeue_line = "#SBATCH --requeue" if sl.requeue else ""
     nodelist_line = (f"#SBATCH --nodelist={sl.nodelist}"

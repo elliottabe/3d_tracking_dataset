@@ -41,16 +41,6 @@ from pathlib import Path
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 PKG_DIR = PROJECT_DIR / "third_party" / "jarvis_jax"
 
-# GPU nodelists from sinfo — only used for single-host partitions
-GPU_NODELISTS = {
-    'gpu-a40':  'g[3040-3047,3050-3057,3060-3067,3070-3077]',
-    'gpu-a100': 'g[3080-3087]',
-    'gpu-l40':  'g[3090-3099,3115-3119]',
-    'gpu-l40s': 'g[3100-3114,3120-3124,3133-3137]',
-    'gpu-h200': 'g[3125-3132]',
-    'ckpt-g2':  'g[3090-3137]',
-}
-
 
 def compose_cfg(paths: str, slurm: str, run_name: str, passthrough: list[str]):
     """Compose a Hydra config at submit time to read slurm/paths values."""
@@ -125,7 +115,7 @@ cd {pkg_dir}
 python -u -c "import jax; print('jax devices:', jax.device_count())"
 python -u -m jarvis_jax.scripts.train_keypoints \\
     run_id={run_name} model=vitpose train=vit2d paths={paths} \\
-    "paths.runs_root=${{paths.vit_runs_root}}"{overrides_str}
+    'paths.runs_root=${{paths.vit_runs_root}}'{overrides_str}
 """
 
 
