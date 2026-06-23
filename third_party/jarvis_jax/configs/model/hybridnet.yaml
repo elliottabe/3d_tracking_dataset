@@ -1,0 +1,18 @@
+# @package model
+roi_cube: 48
+grid_spacing: 1
+num_cameras: 7
+sharpen: 3.0
+vitpose:
+  img_size: 448
+  patch: 16
+  in_ch: 4
+  embed_dim: 768
+  depth: 12
+  num_heads: 12
+  mlp_ratio: 4
+  num_keypoints: 50
+  heatmap_size: 224
+v2vnet:
+  in_channels: 50
+  out_channels: 50

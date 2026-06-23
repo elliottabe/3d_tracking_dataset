@@ -1,0 +1,6 @@
+# @package data
+name: v3
+root: ${paths.data_root}
+num_cameras: 7
+num_joints: 50
+recordings: null   # null = all

@@ -1,0 +1,10 @@
+# @package model.vitpose
+img_size: 448
+patch: 16
+in_ch: 4
+embed_dim: 768
+depth: 12
+num_heads: 12
+mlp_ratio: 4
+num_keypoints: 50
+heatmap_size: 224

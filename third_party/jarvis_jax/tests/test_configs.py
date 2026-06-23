@@ -32,3 +32,15 @@ def test_build_dataclass_filters_unknown_keys():
     node = OmegaConf.create({"a": 10, "b": 20, "extra": 99})
     out = build_dataclass(C, node)
     assert out == C(a=10, b=20)
+
+
+def test_model_data_cache_groups_resolve():
+    cfg = _compose(["paths=hyak", "model=hybridnet", "data=v3", "cache=default"])
+    OmegaConf.resolve(cfg)
+    assert cfg.model.roi_cube == 48
+    assert cfg.model.grid_spacing == 1
+    assert cfg.model.num_cameras == 7
+    assert cfg.model.sharpen == 3.0
+    assert cfg.model.vitpose.num_keypoints == 50
+    assert cfg.data.num_joints == 50
+    assert cfg.cache.split in ("train", "val")
