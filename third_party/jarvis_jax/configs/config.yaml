@@ -1,6 +1,9 @@
 defaults:
   - _self_
   - paths: hyak
+  - model: hybridnet
+  - data: v3
+  - cache: default
 
 run_id: run
 note: ''
