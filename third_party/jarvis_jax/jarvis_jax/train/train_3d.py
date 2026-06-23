@@ -15,12 +15,12 @@ CLI:
         --vitpose-ckpt /gscratch/portia/eabe/data/Johnson_lab/jax_vitpose_runs/v3_8gpu_20260620/final \\
         --steps 2000 --batch 4 --lr 1e-4
 """
-import argparse
 import dataclasses
 import os
 import queue
 import threading
 
+import hydra
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -36,11 +36,14 @@ from jarvis_jax.eval.mpjpe_3d import mpjpe_3d
 from jarvis_jax.hybridnet.model import HybridNet3D, soft_argmax_3d
 from jarvis_jax.hybridnet.reproject import reproject_heatmaps
 from jarvis_jax.hybridnet.v2vnet import V2VNet
+from jarvis_jax.hydra_utils import CONFIG_DIR, register_resolvers, build_dataclass, run_dir_for
 from jarvis_jax.sharding import data_parallel_mesh, shard_batch, replicate
 from jarvis_jax.train.checkpoint import make_manager, save_step, restore_latest
 from jarvis_jax.train.losses_3d import (
     heatmap3d_mse, graph_laplacian, build_skeleton_edges,
 )
+
+register_resolvers()
 
 
 # ---------------------------------------------------------------------------
@@ -412,38 +415,25 @@ def run_training_3d(
 # main()
 # ---------------------------------------------------------------------------
 
-def main():
-    ap = argparse.ArgumentParser(
-        description="Train HybridNet3D v2vNet (frozen ViTPose front-end, JAX).")
-    ap.add_argument("--root", required=True,
-                    help="Root of the V3 dataset")
-    ap.add_argument("--out", required=True,
-                    help="Output directory for the final checkpoint")
-    ap.add_argument("--vitpose-ckpt", required=True,
-                    help="Pre-trained ViTPose checkpoint directory")
-    ap.add_argument("--ckpt-dir", default=None,
-                    help="CheckpointManager directory for auto-resume")
-    ap.add_argument("--steps", type=int, default=2000)
-    ap.add_argument("--batch", type=int, default=4)
-    ap.add_argument("--lr", type=float, default=1e-4)
-    ap.add_argument("--laplacian-weight", type=float, default=1.0)
-    ap.add_argument("--save-every", type=int, default=500)
-    args = ap.parse_args()
-
-    tcfg = HybridNetConfig(
-        total_steps=args.steps,
-        batch_size=args.batch,
-        lr=args.lr,
-        laplacian_weight=args.laplacian_weight,
-    )
-    run_training_3d(
-        args.root,
-        out_dir=args.out,
-        vitpose_ckpt=args.vitpose_ckpt,
-        ckpt_dir=args.ckpt_dir,
+def main_from_cfg(cfg):
+    """Map a composed Hydra config into HybridNetConfig + run inline-3D training."""
+    tcfg = build_dataclass(HybridNetConfig, cfg.train)
+    run_dir = run_dir_for(cfg)
+    return run_training_3d(
+        cfg.paths.data_root,
+        out_dir=os.path.join(run_dir, "final"),
+        vitpose_ckpt=cfg.paths.vitpose_ckpt,
+        ckpt_dir=os.path.join(run_dir, "ckpt"),
         tcfg=tcfg,
-        save_every=args.save_every,
+        save_every=cfg.train.save_every,
+        log_every=cfg.train.log_every,
+        eval_every=cfg.train.eval_every,
     )
+
+
+@hydra.main(version_base=None, config_path=CONFIG_DIR, config_name="config")
+def main(cfg):
+    main_from_cfg(cfg)
 
 
 if __name__ == "__main__":

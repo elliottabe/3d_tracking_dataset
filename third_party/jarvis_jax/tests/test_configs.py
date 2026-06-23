@@ -120,6 +120,23 @@ def test_cached3d_main_from_cfg_maps_config(monkeypatch):
     assert captured["save_every"] == cfg.train.save_every
 
 
+def test_inline3d_main_from_cfg_maps_config(monkeypatch):
+    import jarvis_jax.train.train_3d as m
+    captured = {}
+    def fake_run(root, *, out_dir, vitpose_ckpt, ckpt_dir, tcfg, save_every, log_every, eval_every):
+        captured.update(root=root, out_dir=out_dir, vitpose_ckpt=vitpose_ckpt,
+                        ckpt_dir=ckpt_dir, tcfg=tcfg, save_every=save_every)
+        return {"val_mpjpe_3d": 0.0}
+    monkeypatch.setattr(m, "run_training_3d", fake_run)
+    cfg = _compose(["paths=hyak", "train=inline3d", "run_id=inl_unittest", "train.total_steps=9"])
+    m.main_from_cfg(cfg)
+    assert captured["tcfg"].total_steps == 9
+    assert captured["root"] == cfg.paths.data_root
+    assert captured["vitpose_ckpt"] == cfg.paths.vitpose_ckpt
+    assert captured["out_dir"].endswith("inl_unittest/final")
+    assert captured["ckpt_dir"].endswith("inl_unittest/ckpt")
+
+
 def test_vit2d_main_from_cfg_maps_config(monkeypatch):
     import importlib.util, os
     path = os.path.join(CONFIG_DIR, "..", "jarvis_jax", "scripts", "train_keypoints.py")
