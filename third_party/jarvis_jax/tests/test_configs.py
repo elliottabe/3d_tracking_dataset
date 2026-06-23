@@ -82,3 +82,23 @@ def test_full_default_config_resolves():
     cfg = _compose([])  # all defaults from config.yaml
     OmegaConf.resolve(cfg)
     assert cfg.train and cfg.model and cfg.paths and cfg.slurm
+
+
+def test_cached3d_main_from_cfg_maps_config(monkeypatch):
+    import jarvis_jax.train.train_3d_cached as m
+    captured = {}
+
+    def fake_run(cache_dir, *, out_dir, ckpt_dir, tcfg, save_every, log_every, eval_every):
+        captured.update(cache_dir=cache_dir, out_dir=out_dir, ckpt_dir=ckpt_dir,
+                        tcfg=tcfg, save_every=save_every, eval_every=eval_every)
+        return {"val_mpjpe_3d": 0.0}
+
+    monkeypatch.setattr(m, "run_cached_training", fake_run)
+    cfg = _compose(["paths=hyak", "train=cached3d", "run_id=unittest",
+                    "train.total_steps=5", "train.sharpen=3"])
+    m.main_from_cfg(cfg)
+    assert captured["tcfg"].total_steps == 5
+    assert captured["tcfg"].sharpen == 3.0
+    assert captured["out_dir"].endswith("unittest/final")
+    assert captured["ckpt_dir"].endswith("unittest/ckpt")
+    assert captured["save_every"] == cfg.train.save_every

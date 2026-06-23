@@ -23,12 +23,12 @@ CLI:
 """
 from __future__ import annotations
 
-import argparse
 import dataclasses
 import datetime
 import json
 import os
 
+import hydra
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -36,6 +36,10 @@ import optax
 import orbax.checkpoint as ocp
 from flax import nnx
 from flax.nnx.transforms.autodiff import DiffState
+
+from jarvis_jax.hydra_utils import CONFIG_DIR, register_resolvers, build_dataclass, run_dir_for
+
+register_resolvers()
 
 from jarvis_jax.data.repro_cache import load_cache, to_device_sharded, cached_batches
 from jarvis_jax.eval.mpjpe_3d import mpjpe_3d
@@ -513,39 +517,24 @@ def run_cached_training(
 # main()
 # ---------------------------------------------------------------------------
 
-def main():
-    ap = argparse.ArgumentParser(
-        description="Train v2vNet on GPU-resident reprojected-volume cache (no ViTPose).")
-    ap.add_argument("--cache-dir", required=True,
-                    help="Directory containing precomputed cache files")
-    ap.add_argument("--out", required=True,
-                    help="Output directory for the final checkpoint")
-    ap.add_argument("--ckpt-dir", default=None,
-                    help="CheckpointManager directory for auto-resume")
-    ap.add_argument("--steps", type=int, default=20000)
-    ap.add_argument("--batch", type=int, default=64)
-    ap.add_argument("--lr", type=float, default=3e-4)
-    ap.add_argument("--laplacian-weight", type=float, default=0.0)
-    ap.add_argument("--sharpen", type=float, default=3.0,
-                    help="soft-argmax sharpening exponent (center-bias fix; 1.0=off)")
-    ap.add_argument("--save-every", type=int, default=500)
-    args = ap.parse_args()
-
-    tcfg = CachedConfig(
-        total_steps=args.steps,
-        batch_size=args.batch,
-        lr=args.lr,
-        laplacian_weight=args.laplacian_weight,
-        sharpen=args.sharpen,
-    )
-    run_cached_training(
-        args.cache_dir,
-        out_dir=args.out,
-        ckpt_dir=args.ckpt_dir,
+def main_from_cfg(cfg):
+    """Map a composed Hydra config into CachedConfig + run cached training."""
+    tcfg = build_dataclass(CachedConfig, cfg.train)
+    run_dir = run_dir_for(cfg)
+    return run_cached_training(
+        cfg.paths.cache_dir,
+        out_dir=os.path.join(run_dir, "final"),
+        ckpt_dir=os.path.join(run_dir, "ckpt"),
         tcfg=tcfg,
-        save_every=args.save_every,
+        save_every=cfg.train.save_every,
+        log_every=cfg.train.log_every,
+        eval_every=cfg.train.eval_every,
     )
 
+
+@hydra.main(version_base=None, config_path=CONFIG_DIR, config_name="config")
+def main(cfg):
+    main_from_cfg(cfg)
 
 
 if __name__ == "__main__":
