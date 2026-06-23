@@ -14,8 +14,9 @@ margin shrinks/goes negative. Reports correlations + a global shrink factor +
 the worst frameset, and writes scatter plots.
 """
 import os
-import argparse
 import numpy as np
+import hydra
+from jarvis_jax.hydra_utils import CONFIG_DIR, register_resolvers
 import jax
 import jax.numpy as jnp
 import matplotlib
@@ -62,22 +63,20 @@ def forward_volume(v2v, volumes_np, batch=16):
     return np.concatenate(out, axis=0)
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--cache-dir", default="/gscratch/portia/eabe/data/Johnson_lab/jax_repro_cache/v3")
-    ap.add_argument("--run", default="/gscratch/portia/eabe/data/Johnson_lab/jax_cached3d_runs/here_run3/final")
-    ap.add_argument("--out", default="/gscratch/portia/eabe/data/Johnson_lab/jax_cached3d_runs/viz_compare")
-    args = ap.parse_args()
-    os.makedirs(args.out, exist_ok=True)
+register_resolvers()
+
+
+def run_diag(*, cache_dir, run, out):
+    os.makedirs(out, exist_ok=True)
 
     print("[diag] loading val cache + run3 model")
-    cache = load_cache(args.cache_dir, "val")
+    cache = load_cache(cache_dir, "val")
     vols = cache["volumes"]                  # (N,J,48,48,48) fp16
     gt = np.asarray(cache["kp3d"])           # (N,J,3) world
     c3d = np.asarray(cache["center3D"])      # (N,3)
     vis = np.asarray(cache["vis"])           # (N,J) bool
     N = vols.shape[0]
-    v2v = load_v2v(args.run)
+    v2v = load_v2v(run)
 
     print("[diag] forward (softplus volumes)")
     vol = forward_volume(v2v, vols)          # (N,J,G,G,G)
@@ -179,9 +178,22 @@ def main():
                        f"| {100*frac_out:.1f}% outside")
     fig.suptitle("Shrinkage diagnostic — run3 val (soft-argmax center-bias test)", fontsize=14)
     fig.tight_layout(rect=[0, 0, 1, 0.97])
-    out_png = os.path.join(args.out, "shrinkage_diag.png")
+    out_png = os.path.join(out, "shrinkage_diag.png")
     fig.savefig(out_png, dpi=110)
     print(f"\n[diag] wrote {out_png}")
+
+
+def main_from_cfg(cfg):
+    return run_diag(
+        cache_dir=cfg.paths.cache_dir,
+        run=cfg.viz.run2,
+        out=cfg.viz.out,
+    )
+
+
+@hydra.main(version_base=None, config_path=CONFIG_DIR, config_name="config")
+def main(cfg):
+    main_from_cfg(cfg)
 
 
 if __name__ == "__main__":

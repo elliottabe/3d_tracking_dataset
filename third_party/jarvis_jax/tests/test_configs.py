@@ -154,3 +154,18 @@ def test_vit2d_main_from_cfg_maps_config(monkeypatch):
     assert captured["root"] == cfg.paths.data_root
     assert captured["out_dir"].endswith("vit_unittest/final")
     assert captured["vitpose_cfg"].num_keypoints == 50
+
+
+def test_viz_main_from_cfg_maps_config(monkeypatch):
+    import importlib.util, os
+    path = os.path.join(os.path.dirname(CONFIG_DIR), "scripts", "viz_compare_3d_runs.py")
+    spec = importlib.util.spec_from_file_location("viz_compare_3d_runs", path)
+    mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+    captured = {}
+    monkeypatch.setattr(mod, "run_compare", lambda **kw: captured.update(kw), raising=False)
+    cfg = _compose(["paths=hyak", "viz=default",
+                    "viz.run1=/a/final", "viz.run2=/b/final", "viz.sharpen2=3"])
+    mod.main_from_cfg(cfg)
+    assert captured["run1"] == "/a/final" and captured["run2"] == "/b/final"
+    assert captured["sharpen2"] == 3.0
+    assert captured["cache_dir"] == cfg.paths.cache_dir

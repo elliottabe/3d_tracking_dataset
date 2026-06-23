@@ -15,8 +15,9 @@ Reprojection: full-image px = (x,y,z,1) @ cameraMatrices[c] (4,3), then /w.
 Crop-local px = full_px - centerHM[c] + CROP/2  (centerHM = crop_origin + CROP/2).
 """
 import os
-import argparse
 import numpy as np
+import hydra
+from jarvis_jax.hydra_utils import CONFIG_DIR, register_resolvers
 import jax
 import jax.numpy as jnp
 import matplotlib
@@ -203,28 +204,20 @@ def make_summary_fig(m1_all, m2_all, pe1, pe2, kp_names, out_png):
 
 
 # --------------------------------------------------------------------------
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--root", default="/gscratch/portia/eabe/data/Johnson_lab/red_data/red_data_unified_V3")
-    ap.add_argument("--cache-dir", default="/gscratch/portia/eabe/data/Johnson_lab/jax_repro_cache/v3")
-    ap.add_argument("--run1", default="/gscratch/portia/eabe/data/Johnson_lab/jax_cached3d_runs/here_run2/final")
-    ap.add_argument("--run2", default="/gscratch/portia/eabe/data/Johnson_lab/jax_cached3d_runs/here_run3/final")
-    ap.add_argument("--out", default="/gscratch/portia/eabe/data/Johnson_lab/jax_cached3d_runs/viz_compare")
-    ap.add_argument("--sharpen1", type=float, default=1.0,
-                    help="soft-argmax sharpen exponent for run1 (center-bias fix)")
-    ap.add_argument("--sharpen2", type=float, default=1.0,
-                    help="soft-argmax sharpen exponent for run2")
-    args = ap.parse_args()
-    os.makedirs(args.out, exist_ok=True)
+register_resolvers()
+
+
+def run_compare(*, root, cache_dir, run1, run2, out, sharpen1, sharpen2):
+    os.makedirs(out, exist_ok=True)
 
     print("[viz] loading val cache + dataset")
-    cache = load_cache(args.cache_dir, "val")
+    cache = load_cache(cache_dir, "val")
     vols = cache["volumes"]                 # (N,J,48,48,48) fp16 memmap
     gt_all = np.asarray(cache["kp3d"])      # (N,J,3)
     c3d_all = np.asarray(cache["center3D"]) # (N,3)
     vis_all = np.asarray(cache["vis"])      # (N,J) bool
     N = vols.shape[0]
-    ds = V3FramesetDataset(args.root, "val")
+    ds = V3FramesetDataset(root, "val")
     kp_names = list(ds.keypoint_names)
     ei, ej = build_skeleton_edges(kp_names, ds.skeleton)
     edges = (np.asarray(ei), np.asarray(ej))
@@ -240,10 +233,10 @@ def main():
     print("[viz] alignment OK (cache idx == dataset idx)")
 
     print("[viz] running inference for run1 + run2")
-    v1 = load_v2v(args.run1)
-    v2 = load_v2v(args.run2)
-    pred1 = predict_3d(v1, vols, c3d_all, sharpen=args.sharpen1)
-    pred2 = predict_3d(v2, vols, c3d_all, sharpen=args.sharpen2)
+    v1 = load_v2v(run1)
+    v2 = load_v2v(run2)
+    pred1 = predict_3d(v1, vols, c3d_all, sharpen=sharpen1)
+    pred2 = predict_3d(v2, vols, c3d_all, sharpen=sharpen2)
 
     # per-frameset MPJPE
     m1 = np.array([per_frameset_mpjpe(pred1[i], gt_all[i], vis_all[i]) for i in range(N)])
@@ -276,11 +269,28 @@ def main():
             s["crops4"], vis_all[idx], gt_all[idx], pred1[idx], pred2[idx],
             np.asarray(s["cameraMatrices"]), np.asarray(s["centerHM"]),
             edges, kp_names,
-            os.path.join(args.out, f"frameset_{tag}_{idx}.png"))
+            os.path.join(out, f"frameset_{tag}_{idx}.png"))
 
     make_summary_fig(m1, m2, pe1, pe2, kp_names,
-                     os.path.join(args.out, "summary.png"))
-    print(f"[viz] done -> {args.out}")
+                     os.path.join(out, "summary.png"))
+    print(f"[viz] done -> {out}")
+
+
+def main_from_cfg(cfg):
+    return run_compare(
+        root=cfg.paths.data_root,
+        cache_dir=cfg.paths.cache_dir,
+        run1=cfg.viz.run1,
+        run2=cfg.viz.run2,
+        out=cfg.viz.out,
+        sharpen1=cfg.viz.sharpen1,
+        sharpen2=cfg.viz.sharpen2,
+    )
+
+
+@hydra.main(version_base=None, config_path=CONFIG_DIR, config_name="config")
+def main(cfg):
+    main_from_cfg(cfg)
 
 
 if __name__ == "__main__":

@@ -6,8 +6,9 @@ the soft-argmax post-hoc and reports val MPJPE + the global pred/gt radius ratio
 retraining, and which exponent is best?
 """
 import os
-import argparse
 import numpy as np
+import hydra
+from jarvis_jax.hydra_utils import CONFIG_DIR, register_resolvers
 import jax
 import jax.numpy as jnp
 import orbax.checkpoint as ocp
@@ -63,27 +64,24 @@ def soft_argmax_np(vol, sharpen):
     return np.stack([mx, my, mz], -1) * 2.0 - ROI / 2.0
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--cache-dir", default="/gscratch/portia/eabe/data/Johnson_lab/jax_repro_cache/v3")
-    ap.add_argument("--run", default="/gscratch/portia/eabe/data/Johnson_lab/jax_cached3d_runs/here_run3/final")
-    ap.add_argument("--sharpens", default="1,1.5,2,2.5,3,4,6,8")
-    args = ap.parse_args()
+register_resolvers()
 
-    cache = load_cache(args.cache_dir, "val")
+
+def run_sweep(*, cache_dir, run, sharpens):
+    cache = load_cache(cache_dir, "val")
     gt = np.asarray(cache["kp3d"])
     c3d = np.asarray(cache["center3D"])
     vis = np.asarray(cache["vis"])
     gt_local = gt - c3d[:, None, :]
     gt_r = np.linalg.norm(gt_local, axis=-1)[vis]
 
-    print(f"[sweep] forward volumes for {args.run}")
-    v2v = load_v2v(args.run)
+    print(f"[sweep] forward volumes for {run}")
+    v2v = load_v2v(run)
     vol = forward_volume(v2v, cache["volumes"])
 
     print(f"\n{'sharpen':>8} {'MPJPE':>8} {'pred/gt_radius':>15} {'%shrink':>8}")
     best = None
-    for p in [float(x) for x in args.sharpens.split(",")]:
+    for p in [float(x) for x in sharpens.split(",")]:
         pred_local = soft_argmax_np(vol, p)
         pos_err = np.linalg.norm(pred_local - gt_local, axis=-1)[vis]
         pred_r = np.linalg.norm(pred_local, axis=-1)[vis]
@@ -93,6 +91,19 @@ def main():
         if best is None or mpjpe < best[1]:
             best = (p, mpjpe, ratio)
     print(f"\n[sweep] best: sharpen={best[0]}  MPJPE={best[1]:.3f}  pred/gt={best[2]:.3f}")
+
+
+def main_from_cfg(cfg):
+    return run_sweep(
+        cache_dir=cfg.paths.cache_dir,
+        run=cfg.viz.run2,
+        sharpens=cfg.viz.sharpens,
+    )
+
+
+@hydra.main(version_base=None, config_path=CONFIG_DIR, config_name="config")
+def main(cfg):
+    main_from_cfg(cfg)
 
 
 if __name__ == "__main__":
