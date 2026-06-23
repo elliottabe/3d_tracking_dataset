@@ -4,26 +4,23 @@ Sweeps all framesets in the requested split, runs frozen ViTPose + reproject
 (HybridNet3D.reproject_volume), and streams fp16 volumes to a memmap so the
 v2vNet trainer can skip the expensive front-end on every step.
 
-Usage
------
+Usage (Hydra)
+-------------
     python scripts/precompute_repro_cache.py \\
-        --root     /data/red_data_unified_V3 \\
-        --vitpose-ckpt /data/jax_vitpose_runs/v3_8gpu_20260620/final \\
-        --cache-dir /tmp/repro_cache \\
-        --split    val \\
-        --batch    8 \\
-        --limit    0       # 0 = all
-        --force            # overwrite existing cache
+        paths=hyak cache=default \\
+        cache.split=val \\
+        cache.batch=8 \\
+        cache.limit=0 \\
+        cache.force=false
 
 Idempotent: if <split>_meta.json exists and the 'vitpose_ckpt', 'grid_size',
 'grid_spacing', 'roi_cube', 'heatmap_size' keys match (and --limit matches n),
 and the volume file has the expected size, the precompute is skipped unless
---force is given.
+cache.force=true is given.
 """
 
 from __future__ import annotations
 
-import argparse
 import json
 import os
 import sys
@@ -39,29 +36,14 @@ _REPO = os.path.dirname(_HERE)
 if _REPO not in sys.path:
     sys.path.insert(0, _REPO)
 
+import hydra
+from jarvis_jax.hydra_utils import CONFIG_DIR, register_resolvers, build_dataclass
+
+register_resolvers()
+
 # Fixed volume shape constants — kept in sync with repro_cache.py
 _NUM_JOINTS = 50
 _GRID = 48
-
-
-def _parse_args(argv=None):
-    ap = argparse.ArgumentParser(
-        description="Precompute reprojected volumes for HybridNet cached training.")
-    ap.add_argument("--root", required=True,
-                    help="Root of the V3 dataset (contains annotations/, train/, val/).")
-    ap.add_argument("--vitpose-ckpt", required=True,
-                    help="Orbax ViTPose checkpoint directory.")
-    ap.add_argument("--cache-dir", required=True,
-                    help="Output directory for the cache files.")
-    ap.add_argument("--split", default="val",
-                    help="Dataset split: 'train' or 'val' (default: val).")
-    ap.add_argument("--batch", type=int, default=8,
-                    help="Framesets per batch (default: 8).")
-    ap.add_argument("--limit", type=int, default=0,
-                    help="Cache only the first N framesets; 0 = all (default: 0).")
-    ap.add_argument("--force", action="store_true",
-                    help="Overwrite existing cache even if meta matches.")
-    return ap.parse_args(argv)
 
 
 # Grid params written into meta — single source of truth for the staleness check
@@ -111,9 +93,29 @@ def _cache_is_valid(
         return False
 
 
-def main(argv=None):
-    args = _parse_args(argv)
+def run_precompute(
+    *,
+    root: str,
+    vitpose_ckpt: str,
+    cache_dir: str,
+    split: str,
+    batch: int,
+    limit: int,
+    force: bool,
+    vitpose_cfg=None,
+):
+    """Precompute reprojected volumes and write them to a memmap cache.
 
+    Args:
+        root:        Root of the V3 dataset (contains annotations/, train/, val/).
+        vitpose_ckpt: Orbax ViTPose checkpoint directory.
+        cache_dir:   Output directory for the cache files.
+        split:       Dataset split: 'train' or 'val'.
+        batch:       Framesets per batch.
+        limit:       Cache only the first N framesets; 0 = all.
+        force:       Overwrite existing cache even if meta matches.
+        vitpose_cfg: Optional ViTPoseConfig instance; built from defaults if None.
+    """
     from flax import nnx
 
     from jarvis_jax.config import ViTPoseConfig
@@ -124,33 +126,33 @@ def main(argv=None):
     from jarvis_jax.hybridnet.v2vnet import V2VNet
     from jarvis_jax.sharding import data_parallel_mesh, replicate, shard_batch
 
-    cfg = ViTPoseConfig()
+    if vitpose_cfg is None:
+        vitpose_cfg = ViTPoseConfig()
 
     # ------------------------------------------------------------------
     # Load dataset to determine n
     # ------------------------------------------------------------------
-    print(f"[precompute] Loading dataset: {args.root} split={args.split}")
-    ds = V3FramesetDataset(args.root, args.split)
+    print(f"[precompute] Loading dataset: {root} split={split}")
+    ds = V3FramesetDataset(root, split)
     total = len(ds)
-    n = min(args.limit, total) if args.limit > 0 else total
+    n = min(limit, total) if limit > 0 else total
     print(f"[precompute] {total} framesets in split; will cache {n}")
 
     # ------------------------------------------------------------------
     # Idempotency check
     # ------------------------------------------------------------------
-    if not args.force and _cache_is_valid(args.cache_dir, args.split,
-                                           args.vitpose_ckpt, n):
-        print(f"[precompute] Cache already valid at {args.cache_dir} "
-              f"(split={args.split}, n={n}). Use --force to recompute.")
+    if not force and _cache_is_valid(cache_dir, split, vitpose_ckpt, n):
+        print(f"[precompute] Cache already valid at {cache_dir} "
+              f"(split={split}, n={n}). Use cache.force=true to recompute.")
         return
 
     # ------------------------------------------------------------------
     # Build model
     # ------------------------------------------------------------------
-    print(f"[precompute] Loading ViTPose from {args.vitpose_ckpt}")
-    vitpose = load_vitpose(args.vitpose_ckpt, cfg)
-    v2vnet = V2VNet(cfg.num_keypoints, cfg.num_keypoints, rngs=nnx.Rngs(0))
-    model = HybridNet3D(vitpose, v2vnet, cfg)
+    print(f"[precompute] Loading ViTPose from {vitpose_ckpt}")
+    vitpose = load_vitpose(vitpose_ckpt, vitpose_cfg)
+    v2vnet = V2VNet(vitpose_cfg.num_keypoints, vitpose_cfg.num_keypoints, rngs=nnx.Rngs(0))
+    model = HybridNet3D(vitpose, v2vnet, vitpose_cfg)
 
     # ------------------------------------------------------------------
     # Replicate model across devices
@@ -171,7 +173,7 @@ def main(argv=None):
     # Build meta dict
     # ------------------------------------------------------------------
     meta = dict(_META_GRID_PARAMS)
-    meta["vitpose_ckpt"] = args.vitpose_ckpt
+    meta["vitpose_ckpt"] = vitpose_ckpt
     meta["num_cameras"] = int(ds[0]["cameraMatrices"].shape[0])
     # Carry the skeleton so the cached trainer can wire the graph-Laplacian
     # bone prior (train_3d_cached reads meta["keypoint_names"]/["skeleton"]).
@@ -193,7 +195,7 @@ def main(argv=None):
     # write_cache consumes the generator (filling them), then writes labels.
     # ------------------------------------------------------------------
     indices = np.arange(n)  # first n, in order (shuffle=False)
-    batch_size = args.batch
+    batch_size = batch
     t0 = time.perf_counter()
     written_count = [0]  # mutable counter accessible inside generator
 
@@ -205,34 +207,34 @@ def main(argv=None):
 
             # Load samples (manual index sweep to enforce --limit exactly)
             samples = [ds[int(i)] for i in sel]
-            batch = {key: np.stack([s[key] for s in samples], axis=0)
-                     for key in samples[0]}
+            batch_data = {key: np.stack([s[key] for s in samples], axis=0)
+                         for key in samples[0]}
 
             # Save original labels before padding inputs
-            kp3d_batch = batch["kp3d"]
-            c3d_batch = batch["center3D"]
-            vis_batch = batch["vis"]
+            kp3d_batch = batch_data["kp3d"]
+            c3d_batch = batch_data["center3D"]
+            vis_batch = batch_data["vis"]
 
             # Pad inputs on axis 0 to device-multiple if necessary (fixes IndivisibleError)
             # on partial batches. shard_batch requires axis-0 divisible by len(jax.devices()).
             nd = len(jax.devices())
             pad = (-B) % nd
             if pad > 0:
-                batch["crops4"] = np.concatenate(
-                    [batch["crops4"], np.repeat(batch["crops4"][-1:], pad, axis=0)], axis=0)
-                batch["center3D"] = np.concatenate(
-                    [batch["center3D"], np.repeat(batch["center3D"][-1:], pad, axis=0)], axis=0)
-                batch["centerHM"] = np.concatenate(
-                    [batch["centerHM"], np.repeat(batch["centerHM"][-1:], pad, axis=0)], axis=0)
-                batch["cameraMatrices"] = np.concatenate(
-                    [batch["cameraMatrices"], np.repeat(batch["cameraMatrices"][-1:], pad, axis=0)], axis=0)
+                batch_data["crops4"] = np.concatenate(
+                    [batch_data["crops4"], np.repeat(batch_data["crops4"][-1:], pad, axis=0)], axis=0)
+                batch_data["center3D"] = np.concatenate(
+                    [batch_data["center3D"], np.repeat(batch_data["center3D"][-1:], pad, axis=0)], axis=0)
+                batch_data["centerHM"] = np.concatenate(
+                    [batch_data["centerHM"], np.repeat(batch_data["centerHM"][-1:], pad, axis=0)], axis=0)
+                batch_data["cameraMatrices"] = np.concatenate(
+                    [batch_data["cameraMatrices"], np.repeat(batch_data["cameraMatrices"][-1:], pad, axis=0)], axis=0)
 
             # Shard inputs across devices
             with mesh:
-                crops4 = shard_batch(jnp.asarray(batch["crops4"]), mesh)
-                center3D_b = shard_batch(jnp.asarray(batch["center3D"]), mesh)
-                centerHM = shard_batch(jnp.asarray(batch["centerHM"]), mesh)
-                camMat = shard_batch(jnp.asarray(batch["cameraMatrices"]), mesh)
+                crops4 = shard_batch(jnp.asarray(batch_data["crops4"]), mesh)
+                center3D_b = shard_batch(jnp.asarray(batch_data["center3D"]), mesh)
+                centerHM = shard_batch(jnp.asarray(batch_data["centerHM"]), mesh)
+                camMat = shard_batch(jnp.asarray(batch_data["cameraMatrices"]), mesh)
 
                 vol = _reproject(crops4, center3D_b, centerHM, camMat)
 
@@ -262,8 +264,8 @@ def main(argv=None):
     # then writes labels + meta in one place (no duplicated logic here)
     # ------------------------------------------------------------------
     write_cache(
-        args.cache_dir,
-        args.split,
+        cache_dir,
+        split,
         volumes_iter=_volumes_generator(),
         n=n,
         kp3d=kp3d_acc,
@@ -273,18 +275,18 @@ def main(argv=None):
     )
 
     elapsed = time.perf_counter() - t0
-    vol_path = os.path.join(args.cache_dir, f"{args.split}_volumes.f16")
+    vol_path = os.path.join(cache_dir, f"{split}_volumes.f16")
     vol_size_gb = os.path.getsize(vol_path) / 1e9
     print(f"\n[precompute] Done in {elapsed:.1f}s")
     print(f"[precompute] {vol_path}  ({vol_size_gb:.2f} GB)")
-    print(f"[precompute] labels: {args.split}_labels.npz")
-    print(f"[precompute] meta:   {args.split}_meta.json")
+    print(f"[precompute] labels: {split}_labels.npz")
+    print(f"[precompute] meta:   {split}_meta.json")
 
     # ------------------------------------------------------------------
     # Quick load_cache round-trip check
     # ------------------------------------------------------------------
     print("\n[precompute] Round-trip check via load_cache ...")
-    c = load_cache(args.cache_dir, args.split)
+    c = load_cache(cache_dir, split)
     assert c["volumes"].shape == (n, _NUM_JOINTS, _GRID, _GRID, _GRID), (
         f"Unexpected shape: {c['volumes'].shape}")
     assert c["volumes"].dtype == np.float16
@@ -297,6 +299,27 @@ def main(argv=None):
           f"range=[{vmin:.4f}, {vmax:.4f}]")
     assert finite_frac == 1.0, f"Non-finite values in cached volumes: {1-finite_frac:.2%}"
     print("[precompute] Round-trip OK.")
+
+
+def main_from_cfg(cfg):
+    """Map a composed Hydra config into run_precompute kwargs and run."""
+    from jarvis_jax.config import ViTPoseConfig
+    vitpose_cfg = build_dataclass(ViTPoseConfig, cfg.model.vitpose)
+    return run_precompute(
+        root=cfg.paths.data_root,
+        vitpose_ckpt=cfg.paths.vitpose_ckpt,
+        cache_dir=cfg.paths.cache_dir,
+        split=cfg.cache.split,
+        batch=cfg.cache.batch,
+        limit=cfg.cache.limit,
+        force=cfg.cache.force,
+        vitpose_cfg=vitpose_cfg,
+    )
+
+
+@hydra.main(version_base=None, config_path=CONFIG_DIR, config_name="config")
+def main(cfg):
+    main_from_cfg(cfg)
 
 
 if __name__ == "__main__":
