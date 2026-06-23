@@ -1,4 +1,10 @@
 # @package model
+# Composes the SHARED ViT (model/vitpose.yaml) + v2vnet into the 3D HybridNet,
+# so the ViT architecture lives in exactly one place.
+# Packaging note: vitpose.yaml declares `# @package model` (so `model=vitpose`
+# lands its fields at cfg.model.* for 2D training). The `@vitpose` target below
+# overrides that, mounting the SAME file at cfg.model.vitpose.* here. One file
+# serves both: flat at model.* standalone, nested at model.vitpose.* when composed.
 defaults:
   - /model/vitpose@vitpose
   - /model/v2vnet@v2vnet

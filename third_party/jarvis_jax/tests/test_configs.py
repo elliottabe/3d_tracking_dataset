@@ -43,7 +43,7 @@ def test_model_data_cache_groups_resolve():
     assert cfg.model.sharpen == 3.0
     assert cfg.model.vitpose.num_keypoints == 50
     assert cfg.data.num_joints == 50
-    assert cfg.cache.split in ("train", "val")
+    assert cfg.cache.split == "val"
 
 
 def test_model_vitpose_standalone_resolves():
