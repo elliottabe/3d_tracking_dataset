@@ -1,4 +1,4 @@
-# @package model.vitpose
+# @package model
 img_size: 448
 patch: 16
 in_ch: 4

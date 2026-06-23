@@ -44,3 +44,25 @@ def test_model_data_cache_groups_resolve():
     assert cfg.model.vitpose.num_keypoints == 50
     assert cfg.data.num_joints == 50
     assert cfg.cache.split in ("train", "val")
+
+
+def test_model_vitpose_standalone_resolves():
+    # model=vitpose puts the ViT fields directly at cfg.model.* (for 2D training).
+    cfg = _compose(["paths=hyak", "model=vitpose"])
+    OmegaConf.resolve(cfg)
+    assert cfg.model.num_keypoints == 50
+    assert cfg.model.img_size == 448
+
+
+def test_model_hybridnet_composes_shared_vit():
+    # model=hybridnet composes the SAME vitpose config, mounted under model.vitpose,
+    # plus v2vnet + 3D params — one ViT definition, no duplication.
+    cfg = _compose(["paths=hyak", "model=hybridnet"])
+    OmegaConf.resolve(cfg)
+    assert cfg.model.roi_cube == 48
+    assert cfg.model.grid_spacing == 1
+    assert cfg.model.num_cameras == 7
+    assert cfg.model.sharpen == 3.0
+    assert cfg.model.vitpose.num_keypoints == 50
+    assert cfg.model.vitpose.img_size == 448
+    assert cfg.model.v2vnet.in_channels == 50
