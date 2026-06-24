@@ -118,3 +118,15 @@ def estimate_center3d_from_masks(crops4, centerHM, cameraMatrices,
         if n_valid[i] >= 2 and np.all(np.isfinite(pts3d[i])):
             out[i] = quantize_center3d(pts3d[i][None, :], grid_spacing)
     return out, n_valid
+
+
+def project_center_to_cameras(center3D, cameraMatrices):
+    """Project one 3D point to each camera's full-image px (perspective divide).
+
+    Inverse convention of triangulate_dlt_batched: cameraMatrices (nc,4,3) = P.T,
+    so proj = [X,Y,Z,1] @ M -> (3,), px = proj[:2]/proj[2].
+    """
+    M = np.asarray(cameraMatrices, np.float64)            # (nc,4,3)
+    ph = np.concatenate([np.asarray(center3D, np.float64), [1.0]])  # (4,)
+    proj = ph @ M                                          # (nc,3)
+    return (proj[:, :2] / proj[:, 2:3]).astype(np.float32)  # (nc,2)

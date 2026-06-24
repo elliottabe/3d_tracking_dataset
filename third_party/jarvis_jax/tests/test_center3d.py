@@ -91,3 +91,15 @@ def test_estimate_center3d_close_to_gt():
     err = float(np.linalg.norm(np.asarray(center3D)[0] - s["center3D"]))
     # mask-centroid center vs GT keypoint-midrange center: expect within ~one ROI half-cube
     assert err < 24.0, f"center3D too far from GT: {err}"
+
+
+def test_project_center_to_cameras_inverts_triangulation():
+    from jarvis_jax.geometry.center3d import project_center_to_cameras
+    CALIB = "/gscratch/portia/eabe/data/Johnson_lab/red_data/red_data_unified_V3/calib_params/2026_01_13_18_47_45"
+    rt = ReprojectionTool(CALIB)
+    cm = rt.camera_matrices.astype(np.float32)            # (nc,4,3)
+    X = np.array([4.0, -6.0, 11.0], np.float32)
+    px = project_center_to_cameras(X, cm)                  # (nc,2)
+    assert px.shape == (cm.shape[0], 2)
+    back = np.asarray(triangulate_dlt_batched(px[None], cm[None], np.ones((1, cm.shape[0]), bool)))[0]
+    assert np.linalg.norm(back - X) < 1e-2, back
