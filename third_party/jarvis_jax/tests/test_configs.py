@@ -199,3 +199,20 @@ def test_predict_main_from_cfg_maps_config(monkeypatch):
     assert captured["vitpose_ckpt"] == cfg.paths.vitpose_ckpt
     assert captured["v2v_final"].endswith("run4/final")
     assert captured["sharpen"] == cfg.model.sharpen
+
+
+def test_sam3_main_from_cfg_maps_config(monkeypatch):
+    import importlib.util, os
+    path = os.path.join(os.path.dirname(CONFIG_DIR), "scripts", "sam3_masks.py")
+    spec = importlib.util.spec_from_file_location("sam3_masks", path)
+    mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+    captured = {}
+    monkeypatch.setattr(mod, "run_sam3_masks", lambda **kw: captured.update(kw) or {"n_bouts": 0}, raising=False)
+    cfg = _compose(["paths=hyak", "sam3=default", "sam3.limit=1",
+                    "sam3.session_dir=/s/rec", "sam3.num_animals=2"])
+    mod.main_from_cfg(cfg)
+    assert captured["session_dir"] == "/s/rec"
+    assert captured["limit"] == 1
+    assert captured["num_animals"] == 2
+    assert captured["project"] == cfg.sam3.project
+    assert captured["sam3"]["sam3_version"] == cfg.sam3.sam3_version

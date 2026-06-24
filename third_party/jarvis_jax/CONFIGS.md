@@ -28,6 +28,8 @@ configs/
 ├── slurm/
 │   ├── ckpt_g2.yaml         # ckpt-g2 partition; 8 GPUs (default)
 │   └── gpu_l40s.yaml        # gpu-l40s partition; 4 GPUs
+├── sam3/
+│   └── default.yaml         # SAM3 mask+identity settings (default)
 └── viz/
     └── default.yaml         # Visualization & diagnostic settings (default)
 ```
@@ -46,6 +48,8 @@ defaults:
   - train: cached3d
   - slurm: ckpt_g2
   - viz: default
+  - predict: default
+  - sam3: default
 ```
 
 Each can be overridden at the command line (see Override Syntax below).
@@ -262,6 +266,68 @@ Run roots depend on the training mode:
 - **Inline 3D** (`train=inline3d`): `${paths.hybridnet_runs_root}` (e.g., `jax_hybridnet_runs`)
 
 On Hyak, these expand to `/gscratch/portia/eabe/data/Johnson_lab/jax_*_runs/` by default.
+
+### SAM3 Masks (D2 — input for D3 pipeline)
+
+Runs the JARVIS PyTorch SAM3 video tracker over a session's courtship bouts,
+writing per-bout `sam3_masks.npz` + a `manifest.json` that D3 consumes.
+
+**Env prelude (required — SAM3 needs cu13 libs):**
+
+```bash
+conda activate 3d_tracking
+export LD_PRELOAD="$CONDA_PREFIX/lib/libstdc++.so.6"
+export LD_LIBRARY_PATH="$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cu13/lib"
+```
+
+**One-bout smoke (reload existing npz, fast):**
+
+```bash
+cd third_party/jarvis_jax && python scripts/sam3_masks.py \
+    paths=hyak sam3=default sam3.bout_ids=4 sam3.reuse_masks=true
+```
+
+**Full session (all bouts, ~7.5 min/bout × 7 cameras):**
+
+```bash
+cd third_party/jarvis_jax && python scripts/sam3_masks.py \
+    paths=hyak sam3=default
+```
+
+**One-bout first validation:**
+
+```bash
+cd third_party/jarvis_jax && python scripts/sam3_masks.py \
+    paths=hyak sam3=default sam3.limit=1 sam3.reuse_masks=false
+```
+
+**Key config keys (`sam3=default`):**
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `project` | `red_data_unified` | JARVIS project name |
+| `session_dir` | Session0/2025_10_20... | Absolute path to recording session |
+| `bouts_csv` | `courtship_bouts_unified_summary.csv` | Bouts CSV (relative to session_dir) |
+| `out` | `${paths.runs_root}/sam3_masks/session0` | Output root for npz + manifest |
+| `num_animals` | `2` | Number of flies to track |
+| `limit` | `0` | Max bouts (0 = all) |
+| `bout_ids` | `''` | Comma-separated bout_idx filter ('' = all) |
+| `reuse_masks` | `true` | Skip bouts whose npz already exists |
+| `sam3_compile` | `false` | Keep false with cu13 env prelude |
+| `jarvis_root` | Github JARVIS clone | Path owning `projects/red_data_unified`; falls back to `JARVIS_ROOT` env var |
+
+**Outputs (under `sam3.out`):**
+
+```
+${sam3.out}/
+├── bout_00001/sam3_masks.npz    # per-bout masks + centroids + identities
+├── bout_00002/sam3_masks.npz
+├── ...
+└── manifest.json                # session metadata + per-bout stats (D3 input)
+```
+
+`manifest.json` lists `session_dir`, `session_tag`, `sam3_settings`, `n_bouts`,
+and per-bout stats (`num_frames`, `mean_cams_valid_per_frame`, `npz` path, etc.).
 
 ## Exceptions (Still Argparse)
 

@@ -8,6 +8,7 @@ defaults:
   - slurm: ckpt_g2
   - viz: default
   - predict: default
+  - sam3: default
 
 run_id: run
 note: ''

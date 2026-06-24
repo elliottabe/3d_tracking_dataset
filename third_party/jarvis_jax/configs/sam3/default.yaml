@@ -1,0 +1,19 @@
+# @package sam3
+project: red_data_unified
+session_dir: /gscratch/portia/eabe/data/Johnson_lab/Video_recordings/courtship/Session0/2025_10_20_13_20_04
+bouts_csv: courtship_bouts_unified_summary.csv   # relative -> joined to session_dir
+out: ${paths.runs_root}/sam3_masks/session0
+num_animals: 2
+limit: 0           # 0 = all bouts
+bout_ids: ''       # '' = all; else comma-separated bout_idx
+reuse_masks: true  # skip bouts whose sam3_masks.npz already exists
+sam3_version: sam3.1
+sam3_gpu: 0
+sam3_compile: false
+sam3_text: insect
+sam3_checkpoint: null
+# JARVIS checkout that owns the projects/ directory (red_data_unified lives here,
+# not in third_party/JARVIS-HybridNet). Set to null to fall back to the
+# JARVIS_ROOT env var, then third_party/JARVIS-HybridNet (which has no
+# red_data_unified project and will fail — always set one or the other).
+jarvis_root: /mmfs1/gscratch/portia/eabe/Research/Github/JARVIS-HybridNet
