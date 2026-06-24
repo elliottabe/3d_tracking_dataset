@@ -1,5 +1,8 @@
 """Hydra entrypoint: batched JAX 3D inference + V3-val validation + npz output."""
 import os, sys
+import time
+import threading
+import queue
 import numpy as np
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -12,8 +15,52 @@ from jarvis_jax.hydra_utils import CONFIG_DIR, register_resolvers, run_dir_for
 register_resolvers()
 
 
+def _prefetch_framesets(ds, indices, batch, nd, q, stop):
+    """Background loader: yields padded device-multiple batches as numpy stacks."""
+    for i0 in range(0, len(indices), batch):
+        if stop.is_set():
+            break
+        idx = indices[i0:i0 + batch]
+        if len(idx) % nd:
+            idx = idx + idx[-1:] * (nd - (len(idx) % nd))
+        crops = np.stack([ds[i]["crops4"] for i in idx])
+        chm = np.stack([ds[i]["centerHM"] for i in idx]).astype("float32")
+        cams = np.stack([ds[i]["cameraMatrices"] for i in idx]).astype("float32")
+        q.put((crops, chm, cams, len(idx)))
+    q.put(None)
+
+
+def benchmark_throughput(model, ds, *, batch, n, nd):
+    """Time predict_batch over n framesets; one warmup batch (JIT) excluded."""
+    from jarvis_jax.predict.infer_3d import predict_batch
+    n -= n % nd
+    indices = list(range(min(n, len(ds))))
+    # warmup (compile)
+    w = indices[:batch]
+    predict_batch(model,
+                  np.stack([ds[i]["crops4"] for i in w]),
+                  np.stack([ds[i]["centerHM"] for i in w]).astype("float32"),
+                  np.stack([ds[i]["cameraMatrices"] for i in w]).astype("float32"))
+    q, stop = queue.Queue(maxsize=2), threading.Event()
+    t = threading.Thread(target=_prefetch_framesets,
+                         args=(ds, indices, batch, nd, q, stop), daemon=True)
+    t.start()
+    t0 = time.time(); done = 0
+    while True:
+        item = q.get()
+        if item is None:
+            break
+        crops, chm, cams, keep = item
+        kp, _, _ = predict_batch(model, crops, chm, cams)
+        kp.block_until_ready() if hasattr(kp, "block_until_ready") else np.asarray(kp)
+        done += keep
+    dt = time.time() - t0
+    stop.set()
+    return {"frames_per_s": done / dt, "ms_per_frameset": 1000 * dt / done}
+
+
 def run_predict(*, root, split, vitpose_ckpt, v2v_final, out, sharpen, batch,
-                limit, validate):
+                limit, validate, benchmark=False):
     from jarvis_jax.data.v3_3d import V3FramesetDataset
     from jarvis_jax.predict.infer_3d import load_inference_model, predict_batch
     from jarvis_jax.geometry.center3d import estimate_center3d_from_masks
@@ -27,22 +74,35 @@ def run_predict(*, root, split, vitpose_ckpt, v2v_final, out, sharpen, batch,
 
     model = load_inference_model(vitpose_ckpt, v2v_final, sharpen=sharpen)
 
+    if benchmark:
+        r = benchmark_throughput(model, ds, batch=batch, n=n, nd=nd)
+        print(f"[benchmark] frames/s={r['frames_per_s']:.2f}  ms/frameset={r['ms_per_frameset']:.3f}")
+        return r
+
+    indices = list(range(n))
+    pq, stop = queue.Queue(maxsize=2), threading.Event()
+    loader = threading.Thread(target=_prefetch_framesets,
+                              args=(ds, indices, batch, nd, pq, stop), daemon=True)
+    loader.start()
+
     all_kp, all_conf, all_c3d, all_gt, all_vis = [], [], [], [], []
-    for i0 in range(0, n, batch):
-        idx = list(range(i0, min(i0 + batch, n)))
-        if len(idx) % nd:                            # pad to device-multiple, trim after
-            pad = nd - (len(idx) % nd); idx += idx[-1:] * pad
-        else:
-            pad = 0
-        crops = np.stack([ds[i]["crops4"] for i in idx])
-        chm = np.stack([ds[i]["centerHM"] for i in idx]).astype("float32")
-        cams = np.stack([ds[i]["cameraMatrices"] for i in idx]).astype("float32")
+    i0 = 0
+    while True:
+        item = pq.get()
+        if item is None:
+            break
+        crops, chm, cams, n_full = item
+        orig_n = min(batch, n - i0)
+        keep = orig_n if orig_n > 0 else n_full
         kp, conf, c3d = predict_batch(model, crops, chm, cams)
-        keep = len(idx) - pad
-        all_kp.append(kp[:keep]); all_conf.append(conf[:keep]); all_c3d.append(c3d[:keep])
+        all_kp.append(np.asarray(kp[:keep])); all_conf.append(np.asarray(conf[:keep]))
+        all_c3d.append(np.asarray(c3d[:keep]))
         if validate:
-            all_gt.append(np.stack([ds[i]["kp3d"] for i in idx[:keep]]))
-            all_vis.append(np.stack([ds[i]["vis"] for i in idx[:keep]]))
+            real_idx = indices[i0:i0 + keep]
+            all_gt.append(np.stack([ds[j]["kp3d"] for j in real_idx]))
+            all_vis.append(np.stack([ds[j]["vis"] for j in real_idx]))
+        i0 += keep
+    stop.set()
 
     kp = np.concatenate(all_kp); conf = np.concatenate(all_conf)
     c3d = np.concatenate(all_c3d)
@@ -93,6 +153,7 @@ def main_from_cfg(cfg):
         batch=cfg.predict.batch,
         limit=cfg.predict.limit,
         validate=cfg.predict.validate,
+        benchmark=cfg.predict.benchmark,
     )
 
 

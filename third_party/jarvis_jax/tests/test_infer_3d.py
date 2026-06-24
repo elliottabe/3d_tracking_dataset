@@ -39,3 +39,21 @@ def test_predict_batch_finite_and_batch_invariant():
     print(f"\nbatch-invariance max abs diff: {diff:.6f}")
     assert np.allclose(np.asarray(kp[0]), np.asarray(kp1[0]), atol=1e-3), \
         f"batch-invariance failed: max diff {diff:.4f} > 1e-3 (sharding/jit bug)"
+
+
+@needs_gpu
+def test_benchmark_throughput_reports_rate():
+    import importlib.util, os
+    import jarvis_jax, os as _os
+    pkg_root = _os.path.dirname(_os.path.dirname(jarvis_jax.__file__))
+    spec = importlib.util.spec_from_file_location(
+        "predict_3d", _os.path.join(pkg_root, "scripts", "predict_3d.py"))
+    mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+    from jarvis_jax.predict.infer_3d import load_inference_model
+    from jarvis_jax.data.v3_3d import V3FramesetDataset
+    import jax
+    ds = V3FramesetDataset(ROOT, "val")
+    model = load_inference_model(VIT, RUN4, sharpen=3.0)
+    nd = jax.device_count(); B = max(nd, 4) - (max(nd, 4) % nd)
+    r = mod.benchmark_throughput(model, ds, batch=B, n=B * 2, nd=nd)
+    assert r["frames_per_s"] > 0 and r["ms_per_frameset"] > 0
