@@ -87,3 +87,34 @@ def triangulate_dlt_batched(points2d, cameraMatrices, valid):
     _, _, Vh = jnp.linalg.svd(A, full_matrices=False)                   # Vh (B,4,4)
     X = Vh[:, -1, :]                                                    # (B,4) null vec
     return X[:, :3] / X[:, 3:4]
+
+
+def estimate_center3d_from_masks(crops4, centerHM, cameraMatrices,
+                                 *, grid_spacing: int = 1, crop: int = 448):
+    """GT-free center3D from triangulated SAM3 mask centroids, lattice-snapped.
+
+    Composes mask_centroids -> centroids_to_fullpx -> triangulate_dlt_batched
+    -> per-item quantize_center3d.
+
+    Args:
+        crops4:         (B, nc, H, W, 4) uint8 array with mask in channel 3.
+        centerHM:       (B, nc, 2) float32 crop center in full-image pixels.
+        cameraMatrices: (B, nc, 4, 3) float32 DLT projection matrices.
+        grid_spacing:   world units per grid step (default 1, matching V3).
+        crop:           crop size in pixels (default 448).
+
+    Returns:
+        center3D: (B, 3) float32 lattice-snapped 3D centers.
+        n_valid:  (B,) int32 number of valid cameras per batch item.
+                  Items with n_valid < 2 have center3D = zeros.
+    """
+    centroids, valid = mask_centroids(crops4)                 # (B,nc,2),(B,nc)
+    full = centroids_to_fullpx(centroids, centerHM, crop)     # (B,nc,2)
+    pts3d = triangulate_dlt_batched(full, cameraMatrices, valid)  # (B,3)
+    pts3d = np.asarray(pts3d)
+    n_valid = np.asarray(valid).sum(axis=1).astype(np.int32)  # (B,)
+    out = np.zeros((pts3d.shape[0], 3), np.float32)
+    for i in range(pts3d.shape[0]):
+        if n_valid[i] >= 2 and np.all(np.isfinite(pts3d[i])):
+            out[i] = quantize_center3d(pts3d[i][None, :], grid_spacing)
+    return out, n_valid

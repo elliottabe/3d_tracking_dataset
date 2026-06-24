@@ -1,7 +1,8 @@
 import numpy as np
 import jax.numpy as jnp
-from jarvis_jax.geometry.center3d import quantize_center3d, mask_centroids, centroids_to_fullpx, triangulate_dlt_batched
+from jarvis_jax.geometry.center3d import quantize_center3d, mask_centroids, centroids_to_fullpx, triangulate_dlt_batched, estimate_center3d_from_masks
 from jarvis_jax.geometry.reprojection_tool import ReprojectionTool
+from jarvis_jax.data.v3_3d import V3FramesetDataset
 
 CALIB = "/gscratch/portia/eabe/data/Johnson_lab/red_data/red_data_unified_V3/calib_params/2026_01_13_18_47_45"
 
@@ -74,3 +75,19 @@ def test_batched_dlt_drops_invalid_camera():
     p2 = pts2d[None].copy(); p2[0, 0] = 9999.0              # garbage in dropped cam
     out = np.asarray(triangulate_dlt_batched(p2, cm[None], valid))[0]
     assert np.linalg.norm(out - X) < 1e-1, out             # still recovered
+
+
+ROOT = "/gscratch/portia/eabe/data/Johnson_lab/red_data/red_data_unified_V3"
+
+
+def test_estimate_center3d_close_to_gt():
+    ds = V3FramesetDataset(ROOT, "val")
+    s = ds[0]
+    crops4 = s["crops4"][None]            # (1,nc,448,448,4)
+    centerHM = s["centerHM"][None].astype("float32")
+    cams = s["cameraMatrices"][None].astype("float32")
+    center3D, n_valid = estimate_center3d_from_masks(crops4, centerHM, cams)
+    assert int(n_valid[0]) >= 2
+    err = float(np.linalg.norm(np.asarray(center3D)[0] - s["center3D"]))
+    # mask-centroid center vs GT keypoint-midrange center: expect within ~one ROI half-cube
+    assert err < 24.0, f"center3D too far from GT: {err}"
