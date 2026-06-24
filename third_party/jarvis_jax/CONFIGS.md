@@ -30,6 +30,8 @@ configs/
 │   └── gpu_l40s.yaml        # gpu-l40s partition; 4 GPUs
 ├── sam3/
 │   └── default.yaml         # SAM3 mask+identity settings (default)
+├── predict_session/
+│   └── default.yaml         # D3 session 3D inference settings (default)
 └── viz/
     └── default.yaml         # Visualization & diagnostic settings (default)
 ```
@@ -50,6 +52,7 @@ defaults:
   - viz: default
   - predict: default
   - sam3: default
+  - predict_session: default
 ```
 
 Each can be overridden at the command line (see Override Syntax below).
@@ -328,6 +331,81 @@ ${sam3.out}/
 
 `manifest.json` lists `session_dir`, `session_tag`, `sam3_settings`, `n_bouts`,
 and per-bout stats (`num_frames`, `mean_cams_valid_per_frame`, `npz` path, etc.).
+
+### Session Prediction (D3)
+
+Runs JAX 3D inference over every bout in a session, writing per-fly
+`data3D_fly{N}.csv` files in a Predictions\_3D-compatible layout.
+Consumes the `manifest.json` + per-bout `sam3_masks.npz` written by the
+D2 SAM3 step above.
+
+**D2 -> D3 chain:**
+
+```
+sam3_masks.py  (D2)  -->  predict_session.py  (D3)  -->  preprocess_keypoints_for_ik.py  (STAC)
+  sam3.out/manifest.json                                  data3D_fly{N}.csv
+  sam3.out/bout_XXXXX/sam3_masks.npz
+```
+
+**Env prelude (cv2 needs libstdc++):**
+
+```bash
+conda activate 3d_tracking
+export LD_PRELOAD="$CONDA_PREFIX/lib/libstdc++.so.6"
+```
+
+**One-bout smoke test (bout 4):**
+
+```bash
+cd third_party/jarvis_jax && python scripts/predict_session.py \
+    paths=hyak model=hybridnet predict_session=default \
+    run_id=run4 \
+    predict_session.masks_dir=/path/to/sam3_out \
+    predict_session.out=/tmp/d3_b4 \
+    predict_session.bout_ids=4
+```
+
+**Full session (all bouts from manifest):**
+
+```bash
+cd third_party/jarvis_jax && python scripts/predict_session.py \
+    paths=hyak model=hybridnet predict_session=default \
+    run_id=run4 \
+    predict_session.masks_dir='${paths.runs_root}/sam3_masks/session0' \
+    predict_session.out='${paths.runs_root}/predict_session/session0'
+```
+
+Note: full-session runs are GPU-intensive; submit via sbatch/ckpt-g2 rather
+than running on the login node.
+
+**Key config keys (`predict_session=default`):**
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `project` | `red_data_unified` | JARVIS project name (for camera calibration) |
+| `session_dir` | Session0/2025_10_20... | Absolute path to recording session |
+| `masks_dir` | `${paths.runs_root}/sam3_masks/session0` | D2 output root (contains manifest.json + bout dirs) |
+| `out` | `${paths.runs_root}/predict_session/session0` | Output root for per-fly CSVs |
+| `jarvis_root` | Github JARVIS clone | Path owning `projects/red_data_unified` |
+| `num_animals` | `2` | Number of flies |
+| `batch` | `8` | Inference batch size |
+| `bout_ids` | `''` | Comma-separated bout_idx filter ('' = all) |
+| `limit` | `0` | Max bouts to process (0 = all) |
+
+**Outputs (under `predict_session.out`):**
+
+```
+${predict_session.out}/
+├── data3D_fly0.csv    # per-fly concatenated 3D keypoints (2-row header + N frames)
+├── data3D_fly1.csv
+└── bout_XXXXX/
+    └── data3D_fly0.csv  # per-bout intermediate
+    └── data3D_fly1.csv
+```
+
+Each CSV uses a 2-row header (`keypoint_name` / `x,y,z,confidence`) and one row
+per frame. These feed directly into `preprocess_keypoints_for_ik.py` for STAC
+inverse kinematics.
 
 ## Exceptions (Still Argparse)
 

@@ -216,3 +216,21 @@ def test_sam3_main_from_cfg_maps_config(monkeypatch):
     assert captured["num_animals"] == 2
     assert captured["project"] == cfg.sam3.project
     assert captured["sam3"]["sam3_version"] == cfg.sam3.sam3_version
+
+
+def test_predict_session_main_from_cfg_maps_config(monkeypatch):
+    import importlib.util, os
+    path = os.path.join(os.path.dirname(CONFIG_DIR), "scripts", "predict_session.py")
+    spec = importlib.util.spec_from_file_location("predict_session", path)
+    mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+    captured = {}
+    monkeypatch.setattr(mod, "run_predict_session", lambda **kw: captured.update(kw) or {}, raising=False)
+    cfg = _compose(["paths=hyak", "model=hybridnet", "predict_session=default",
+                    "run_id=run4", "predict_session.session_dir=/s/rec",
+                    "predict_session.masks_dir=/m", "predict_session.bout_ids=4"])
+    mod.main_from_cfg(cfg)
+    assert captured["session_dir"] == "/s/rec" and captured["masks_dir"] == "/m"
+    assert captured["bout_ids"] == [4]
+    assert captured["vitpose_ckpt"] == cfg.paths.vitpose_ckpt
+    assert captured["v2v_final"].endswith("run4/final")
+    assert captured["sharpen"] == cfg.model.sharpen

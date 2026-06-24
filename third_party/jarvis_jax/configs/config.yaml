@@ -9,6 +9,7 @@ defaults:
   - viz: default
   - predict: default
   - sam3: default
+  - predict_session: default
 
 run_id: run
 note: ''

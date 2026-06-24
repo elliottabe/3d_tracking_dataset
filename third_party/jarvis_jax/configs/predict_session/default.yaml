@@ -1,0 +1,10 @@
+# @package predict_session
+project: red_data_unified
+session_dir: /gscratch/portia/eabe/data/Johnson_lab/Video_recordings/courtship/Session0/2025_10_20_13_20_04
+masks_dir: ${paths.runs_root}/sam3_masks/session0     # D2 output
+out: ${paths.runs_root}/predict_session/session0      # Predictions_3D-style output
+jarvis_root: /gscratch/portia/eabe/Research/Github/JARVIS-HybridNet
+num_animals: 2
+batch: 8
+bout_ids: ''       # '' = all (from manifest); else comma-separated bout_idx
+limit: 0
