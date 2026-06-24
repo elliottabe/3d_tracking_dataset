@@ -108,3 +108,98 @@ python -u scripts/predict_session.py paths={paths} model=hybridnet predict_sessi
     run_id={run_name} predict_session.session_dir={session_dir} \\
     predict_session.masks_dir={masks_dir} predict_session.out={out}{overrides_str}
 """
+
+
+def compose_cfg(paths: str, slurm: str, run_name: str, passthrough: list[str]):
+    """Compose a Hydra config at submit time to read slurm/paths values."""
+    sys.path.insert(0, str(PKG_DIR))
+    from jarvis_jax.hydra_utils import CONFIG_DIR, register_resolvers
+    from hydra import initialize_config_dir, compose
+    register_resolvers()
+    overrides = [f"paths={paths}", f"slurm={slurm}", f"run_id={run_name}",
+                 "model=hybridnet", "predict_session=default", "sam3=default"] + passthrough
+    with initialize_config_dir(version_base=None, config_dir=CONFIG_DIR):
+        cfg = compose(config_name="config", overrides=overrides)
+    return cfg
+
+
+def slurm_submit(script: str) -> str:
+    """Submit a job script via stdin and return its job id."""
+    try:
+        out = subprocess.check_output(["sbatch"], input=script, universal_newlines=True)
+        return out.strip().split()[-1]
+    except subprocess.CalledProcessError as e:
+        print(f"Error submitting job: {e.output}", file=sys.stderr)
+        sys.exit(1)
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__,
+                                formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument('--run-name', required=True,
+                   help='Trained v2vNet run to predict with (run_id); the predict '
+                        'entrypoint loads ${paths.runs_root}/${run_id}/final. e.g. run4')
+    p.add_argument('--session-dir', default=None,
+                   help='Session video dir. Default: the sam3/predict_session config default (Session0).')
+    p.add_argument('--out', default=None,
+                   help='Output root. Default: ${paths.runs_root}/predict_session/<run-name>. '
+                        'Masks go in <out>/sam3_masks; both stages share it (resume-safe).')
+    p.add_argument('--paths', default='hyak', help='Hydra paths config group (default: hyak)')
+    p.add_argument('--slurm', default='ckpt_g2', help='Hydra slurm config group (default: ckpt_g2)')
+    p.add_argument('--dry-run', action='store_true', help='Print the script without submitting')
+    args, passthrough = p.parse_known_args()
+
+    if not PKG_DIR.is_dir():
+        print(f"Error: jarvis_jax package not found at {PKG_DIR}", file=sys.stderr)
+        sys.exit(1)
+
+    cfg = compose_cfg(args.paths, args.slurm, args.run_name, passthrough)
+    sl = cfg.slurm
+
+    session_dir = args.session_dir or cfg.predict_session.session_dir
+    out = args.out or f"{cfg.paths.runs_root}/predict_session/{args.run_name}"
+    masks_dir = f"{out}/sam3_masks"
+    log_dir = out
+
+    requeue_line = "#SBATCH --requeue" if sl.requeue else ""
+    nodelist_line = (f"#SBATCH --nodelist={sl.nodelist}"
+                     if getattr(sl, 'nodelist', None) else "")
+    exclude_line = (f"#SBATCH --exclude={sl.exclude}"
+                    if getattr(sl, 'exclude', None) else "")
+    overrides_str = (" " + " ".join(passthrough)) if passthrough else ""
+    job_name = f"predsess_{args.run_name}"[:60]
+
+    script = build_script(
+        job_name=job_name,
+        partition=sl.partition, account=sl.account,
+        nodelist_line=nodelist_line, exclude_line=exclude_line, requeue_line=requeue_line,
+        gpus=sl.gpus, cpus=sl.cpus, mem=sl.mem, time_limit=sl.time,
+        conda_env=sl.conda_env, mail_user=sl.mail_user,
+        pkg_dir=PKG_DIR, log_dir=log_dir,
+        run_name=args.run_name, paths=args.paths,
+        session_dir=session_dir, masks_dir=masks_dir, out=out,
+        overrides_str=overrides_str,
+    )
+
+    print(f"Model   : run_id={args.run_name} -> {cfg.paths.runs_root}/{args.run_name}/final")
+    print(f"Session : {session_dir}")
+    print(f"Out     : {out}  (masks -> {masks_dir})")
+    print(f"Compute : {sl.partition}, {sl.gpus} GPU(s)/1 node, "
+          f"{'requeue on' if sl.requeue else 'requeue off'}")
+    if passthrough:
+        print(f"Overrides: {' '.join(passthrough)}")
+
+    if args.dry_run:
+        print("\n--- script (dry-run) ---")
+        print(script)
+        return
+
+    Path(out).mkdir(parents=True, exist_ok=True)  # for the -o log path
+    jid = slurm_submit(script)
+    print(f"\nSubmitted {job_name}: {jid}")
+    print(f"Monitor : squeue -j {jid}")
+    print(f"Log     : {out}/slurm-{jid}.out")
+
+
+if __name__ == "__main__":
+    main()

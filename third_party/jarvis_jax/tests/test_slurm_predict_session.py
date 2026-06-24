@@ -1,4 +1,6 @@
 import importlib.util
+import subprocess
+import sys
 from pathlib import Path
 
 # Load the repo-root launcher module by absolute path (it lives outside the package).
@@ -82,3 +84,25 @@ def test_passthrough_appended_to_both_stages():
     s = _sample_script()
     # the override string is appended to both commands
     assert s.count("predict_session.batch=8") == 2
+
+
+def test_dry_run_emits_full_script():
+    """End-to-end: --dry-run composes the real configs and prints a submittable script."""
+    repo = Path(__file__).resolve().parents[3]
+    out = subprocess.run(
+        [sys.executable, "scripts/slurm_predict_session.py",
+         "--run-name", "run4", "--dry-run"],
+        cwd=repo, capture_output=True, text=True,
+    )
+    assert out.returncode == 0, f"launcher failed:\nSTDOUT:\n{out.stdout}\nSTDERR:\n{out.stderr}"
+    s = out.stdout
+    # real slurm/ckpt_g2 + paths/hyak values flowed through
+    assert "#SBATCH --partition=ckpt-g2" in s
+    assert "#SBATCH --gpus=8" in s
+    assert "#SBATCH --requeue" in s
+    # both stages present, in order, with the coupling + env discipline
+    assert s.index("scripts/sam3_masks.py") < s.index("scripts/predict_session.py")
+    assert "sam3.sam3_compile=false" in s
+    assert "run_id=run4" in s
+    assert "predict_session/run4/sam3_masks" in s   # masks under the out dir
+    assert s.index("unset LD_LIBRARY_PATH") < s.index("scripts/predict_session.py")
