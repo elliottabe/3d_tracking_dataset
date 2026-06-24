@@ -46,6 +46,7 @@ import numpy as np
 from PIL import Image
 
 from jarvis_jax.data.transforms import crop_origin
+from jarvis_jax.geometry.center3d import quantize_center3d
 from jarvis_jax.geometry.reprojection_tool import ReprojectionTool
 
 _CROP = 448
@@ -242,19 +243,7 @@ class V3FramesetDataset:
         #   center3D[d] = int((max_d + min_d) / grid_spacing / 2) * grid_spacing
         # ------------------------------------------------------------------
         vis_kp = kp3d[vis]  # (K, 3) where K = number of visible joints
-        if vis_kp.shape[0] == 0:
-            center3D = np.zeros(3, dtype=np.float32)
-        else:
-            # Filter out zero coordinates per axis (matching dataset3D sentinel check)
-            center3D_parts = []
-            for d in range(3):
-                coords = vis_kp[:, d]
-                non_zero = coords[coords != 0]
-                if non_zero.size == 0:
-                    non_zero = coords  # fallback
-                mid = (float(np.max(non_zero)) + float(np.min(non_zero))) / float(_GRID_SPACING) / 2.0
-                center3D_parts.append(int(mid) * _GRID_SPACING)
-            center3D = np.array(center3D_parts, dtype=np.float32)
+        center3D = quantize_center3d(vis_kp, _GRID_SPACING)
 
         return {
             "crops4": crops4,            # (num_cam, 448, 448, 4) uint8
