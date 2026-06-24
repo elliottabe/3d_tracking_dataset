@@ -1,6 +1,9 @@
 import numpy as np
 import jax.numpy as jnp
-from jarvis_jax.geometry.center3d import quantize_center3d, mask_centroids, centroids_to_fullpx
+from jarvis_jax.geometry.center3d import quantize_center3d, mask_centroids, centroids_to_fullpx, triangulate_dlt_batched
+from jarvis_jax.geometry.reprojection_tool import ReprojectionTool
+
+CALIB = "/gscratch/portia/eabe/data/Johnson_lab/red_data/red_data_unified_V3/calib_params/2026_01_13_18_47_45"
 
 
 def test_quantize_matches_v3_recipe():
@@ -44,3 +47,30 @@ def test_centroids_to_fullpx():
     centerHM = jnp.array([[[500.0, 300.0]]])  # crop center in full px
     full = centroids_to_fullpx(cent, centerHM, crop=448)
     assert jnp.allclose(full[0, 0], jnp.array([500.0, 300.0]))  # 224 + 500 - 224
+
+
+def test_batched_dlt_recovers_known_point():
+    rt = ReprojectionTool(CALIB)
+    cm = rt.camera_matrices.astype(np.float32)        # (nc,4,3)
+    nc = cm.shape[0]
+    X = np.array([3.0, -5.0, 12.0])                   # known 3D point
+    pts2d = rt.reproject_point(X)                     # (nc,2) full px
+    B = 1
+    cmb = cm[None]                                    # (1,nc,4,3)
+    p2 = pts2d.astype(np.float32)[None]               # (1,nc,2)
+    valid = np.ones((1, nc), bool)
+    out = np.asarray(triangulate_dlt_batched(p2, cmb, valid))[0]
+    assert np.linalg.norm(out - X) < 1e-2, out
+    # matches the reference reconstruct_point
+    ref = rt.reconstruct_point(pts2d)
+    assert np.linalg.norm(out - ref) < 1e-3
+
+
+def test_batched_dlt_drops_invalid_camera():
+    rt = ReprojectionTool(CALIB)
+    cm = rt.camera_matrices.astype(np.float32); nc = cm.shape[0]
+    X = np.array([1.0, 2.0, 9.0]); pts2d = rt.reproject_point(X).astype(np.float32)
+    valid = np.ones((1, nc), bool); valid[0, 0] = False     # drop cam 0
+    p2 = pts2d[None].copy(); p2[0, 0] = 9999.0              # garbage in dropped cam
+    out = np.asarray(triangulate_dlt_batched(p2, cm[None], valid))[0]
+    assert np.linalg.norm(out - X) < 1e-1, out             # still recovered

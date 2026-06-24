@@ -65,3 +65,25 @@ def centroids_to_fullpx(centroids, centerHM, crop: int = 448):
         (B, nc, 2) float32 full-image pixel coordinates.
     """
     return centroids + centerHM - crop / 2.0
+
+
+def triangulate_dlt_batched(points2d, cameraMatrices, valid):
+    """Batched DLT triangulation. Invalid cameras contribute zero rows.
+
+    Args:
+        points2d:       (B, nc, 2) full-image px [u, v].
+        cameraMatrices: (B, nc, 4, 3) = P.T (P is the 3x4 DLT matrix).
+        valid:          (B, nc) bool.
+    Returns:
+        (B, 3) triangulated points (perspective-divided).
+    """
+    points2d = jnp.asarray(points2d, jnp.float32)
+    P = jnp.swapaxes(jnp.asarray(cameraMatrices, jnp.float32), -1, -2)  # (B,nc,3,4)
+    u = points2d[..., 0:1]; v = points2d[..., 1:2]                      # (B,nc,1)
+    row_u = u * P[:, :, 2, :] - P[:, :, 0, :]                           # (B,nc,4)
+    row_v = v * P[:, :, 2, :] - P[:, :, 1, :]                           # (B,nc,4)
+    w = valid[..., None].astype(jnp.float32)                            # (B,nc,1)
+    A = jnp.concatenate([row_u * w, row_v * w], axis=1)                 # (B,2nc,4)
+    _, _, Vh = jnp.linalg.svd(A, full_matrices=False)                   # Vh (B,4,4)
+    X = Vh[:, -1, :]                                                    # (B,4) null vec
+    return X[:, :3] / X[:, 3:4]
