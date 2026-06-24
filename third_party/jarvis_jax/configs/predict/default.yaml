@@ -1,6 +1,8 @@
 # @package predict
 split: val
-batch: 64
+# Inference batch = framesets per step; each runs num_cameras (=7) ViT-B forwards,
+# so memory scales as batch*7. batch=64 (448 ViT-B) OOMs a 46GB GPU; 16 is safe.
+batch: 16
 limit: 0          # 0 = all framesets
 validate: true    # compute center3D-error + MPJPE on V3 val (needs GT)
 benchmark: false  # when true, run throughput benchmark and print frames/s + ms/frameset
