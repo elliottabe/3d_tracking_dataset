@@ -166,6 +166,10 @@ def main():
                      if getattr(sl, 'nodelist', None) else "")
     exclude_line = (f"#SBATCH --exclude={sl.exclude}"
                     if getattr(sl, 'exclude', None) else "")
+    # Passthrough is appended to BOTH stage commands. This is safe: config.yaml
+    # composes all groups (sam3, predict_session, ...), so a key meant for one
+    # stage (e.g. predict_session.batch) exists in the other's merged config and
+    # is accepted-but-ignored rather than failing Hydra's struct check.
     overrides_str = (" " + " ".join(passthrough)) if passthrough else ""
     job_name = f"predsess_{args.run_name}"[:60]
 
