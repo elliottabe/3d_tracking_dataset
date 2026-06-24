@@ -1,5 +1,6 @@
 """GT-free 3D ROI center estimation for inference (SAM3 mask centroids)."""
 import numpy as np
+import jax.numpy as jnp
 
 
 def quantize_center3d(pts, grid_spacing: int = 1):
@@ -27,3 +28,40 @@ def quantize_center3d(pts, grid_spacing: int = 1):
         mid = (float(np.max(nz)) + float(np.min(nz))) / float(grid_spacing) / 2.0
         out.append(int(mid) * grid_spacing)
     return np.array(out, dtype=np.float32)
+
+
+def mask_centroids(crops4):
+    """Per-camera SAM3 mask centroid in crop pixel space (x, y).
+
+    Args:
+        crops4: (B, nc, H, W, 4) uint8 array, mask in channel 3 (last).
+
+    Returns:
+        centroids: (B, nc, 2) float32 [x, y] in crop pixel space.
+        valid: (B, nc) bool indicating whether mask is non-empty.
+    """
+    m = crops4[..., 3].astype(jnp.float32)            # (B,nc,H,W)
+    H, W = m.shape[-2], m.shape[-1]
+    xs = jnp.arange(W, dtype=jnp.float32)
+    ys = jnp.arange(H, dtype=jnp.float32)
+    msum = m.sum(axis=(-1, -2))                        # (B,nc)
+    denom = jnp.clip(msum, 1.0, None)
+    cx = (m.sum(axis=-2) * xs).sum(-1) / denom         # sum over y -> (B,nc,W) * xs
+    cy = (m.sum(axis=-1) * ys).sum(-1) / denom         # sum over x -> (B,nc,H) * ys
+    centroids = jnp.stack([cx, cy], axis=-1)           # (B,nc,2) [x,y]
+    valid = msum > 0
+    return centroids, valid
+
+
+def centroids_to_fullpx(centroids, centerHM, crop: int = 448):
+    """Map crop-space centroids to full-image px: centroid + (centerHM - crop/2).
+
+    Args:
+        centroids: (B, nc, 2) float32 in crop-space [x, y].
+        centerHM: (B, nc, 2) float32 crop center in full-image px.
+        crop: crop size in pixels (default 448).
+
+    Returns:
+        (B, nc, 2) float32 full-image pixel coordinates.
+    """
+    return centroids + centerHM - crop / 2.0

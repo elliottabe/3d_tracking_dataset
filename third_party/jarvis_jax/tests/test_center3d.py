@@ -1,5 +1,6 @@
 import numpy as np
-from jarvis_jax.geometry.center3d import quantize_center3d
+import jax.numpy as jnp
+from jarvis_jax.geometry.center3d import quantize_center3d, mask_centroids, centroids_to_fullpx
 
 
 def test_quantize_matches_v3_recipe():
@@ -20,3 +21,26 @@ def test_quantize_single_point_is_lattice_snap():
 def test_quantize_empty_returns_zeros():
     out = quantize_center3d(np.zeros((0, 3), np.float32), grid_spacing=1)
     assert out.tolist() == [0.0, 0.0, 0.0]
+
+
+def test_mask_centroids_single_blob():
+    crops = jnp.zeros((1, 2, 448, 448, 4), jnp.uint8)
+    crops = crops.at[0, 0, 100, 200, 3].set(1)   # cam0 mask pixel at (y=100,x=200)
+    crops = crops.at[0, 1, 50, 60, 3].set(1)     # cam1 at (y=50,x=60)
+    cent, valid = mask_centroids(crops)
+    assert bool(valid[0, 0]) and bool(valid[0, 1])
+    assert jnp.allclose(cent[0, 0], jnp.array([200.0, 100.0]))  # [x, y]
+    assert jnp.allclose(cent[0, 1], jnp.array([60.0, 50.0]))
+
+
+def test_mask_centroids_empty_marks_invalid():
+    crops = jnp.zeros((1, 1, 448, 448, 4), jnp.uint8)  # all-zero mask
+    cent, valid = mask_centroids(crops)
+    assert not bool(valid[0, 0])
+
+
+def test_centroids_to_fullpx():
+    cent = jnp.array([[[224.0, 224.0]]])      # crop center
+    centerHM = jnp.array([[[500.0, 300.0]]])  # crop center in full px
+    full = centroids_to_fullpx(cent, centerHM, crop=448)
+    assert jnp.allclose(full[0, 0], jnp.array([500.0, 300.0]))  # 224 + 500 - 224
