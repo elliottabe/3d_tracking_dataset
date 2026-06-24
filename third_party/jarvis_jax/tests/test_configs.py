@@ -183,3 +183,19 @@ def test_build_checkpoint_main_from_cfg_maps_config(monkeypatch):
     assert captured["npz"] == cfg.paths.mae_npz
     assert captured["out"] == "/tmp/vit_ckpt"
     assert captured["vitpose_cfg"].num_keypoints == 50
+
+
+def test_predict_main_from_cfg_maps_config(monkeypatch):
+    import importlib.util, os
+    path = os.path.join(os.path.dirname(CONFIG_DIR), "scripts", "predict_3d.py")
+    spec = importlib.util.spec_from_file_location("predict_3d", path)
+    mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+    captured = {}
+    monkeypatch.setattr(mod, "run_predict", lambda **kw: captured.update(kw), raising=False)
+    cfg = _compose(["paths=hyak", "model=hybridnet", "predict=default",
+                    "run_id=run4", "predict.split=val", "predict.batch=8"])
+    mod.main_from_cfg(cfg)
+    assert captured["split"] == "val" and captured["batch"] == 8
+    assert captured["vitpose_ckpt"] == cfg.paths.vitpose_ckpt
+    assert captured["v2v_final"].endswith("run4/final")
+    assert captured["sharpen"] == cfg.model.sharpen

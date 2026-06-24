@@ -1,0 +1,6 @@
+# @package predict
+split: val
+batch: 64
+limit: 0          # 0 = all framesets
+validate: true    # compute center3D-error + MPJPE on V3 val (needs GT)
+out: ${paths.runs_root}/${run_id}/predict_${predict.split}.npz
