@@ -43,3 +43,16 @@ def test_build_frameset_too_few_valid_returns_none():
     valid = np.zeros(nc, bool); valid[0] = True   # only 1 valid
     crops4, centerHM, n_valid = build_frameset(frames, masks, cents, valid, cm)
     assert crops4 is None and n_valid == 1
+
+
+def test_reorder_matrices_by_name():
+    import numpy as np
+    from jarvis_jax.predict.session_predict import reorder_matrices_by_name
+    jax_names = ["CamA", "CamB", "CamC"]
+    mats = np.arange(3 * 4 * 3).reshape(3, 4, 3).astype(np.float32)
+    target = ["CamC", "CamA", "CamB"]
+    out = reorder_matrices_by_name(jax_names, mats, target)
+    assert np.array_equal(out[0], mats[2]) and np.array_equal(out[1], mats[0])
+    import pytest
+    with pytest.raises(KeyError):
+        reorder_matrices_by_name(jax_names, mats, ["CamA", "CamX", "CamB"])
