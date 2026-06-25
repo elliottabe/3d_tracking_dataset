@@ -23,23 +23,23 @@ register_resolvers()
 
 
 def main_from_cfg(cfg):
+    import torch
+    from jarvis_jax.predict.sam3_driver import resolve_gpus, run_sam3_masks_multi
     s = cfg.sam3
     bout_ids = [int(x) for x in str(s.bout_ids).split(",") if str(x).strip()] or None
     jarvis_root = s.jarvis_root if s.jarvis_root else None
-    return run_sam3_masks(
-        project=s.project,
-        session_dir=s.session_dir,
-        bouts_csv=s.bouts_csv,
-        out=s.out,
-        num_animals=s.num_animals,
-        limit=s.limit,
-        bout_ids=bout_ids,
-        reuse_masks=s.reuse_masks,
-        jarvis_root=jarvis_root,
-        sam3={"sam3_version": s.sam3_version, "gpu_id": s.sam3_gpu,
-              "compile": s.sam3_compile, "text_prompt": s.sam3_text,
-              "checkpoint_path": s.sam3_checkpoint},
-    )
+    sam3_kwargs = {"sam3_version": s.sam3_version, "gpu_id": s.sam3_gpu,
+                   "compile": s.sam3_compile, "text_prompt": s.sam3_text,
+                   "checkpoint_path": s.sam3_checkpoint}
+    common = dict(project=s.project, session_dir=s.session_dir,
+                  bouts_csv=s.bouts_csv, out=s.out, num_animals=s.num_animals,
+                  limit=s.limit, bout_ids=bout_ids, reuse_masks=s.reuse_masks,
+                  jarvis_root=jarvis_root, sam3=sam3_kwargs)
+    device_count = torch.cuda.device_count() if torch.cuda.is_available() else 0
+    gpus = resolve_gpus(s.gpus, env=os.environ, device_count=device_count)
+    if len(gpus) > 1:
+        return run_sam3_masks_multi(gpus=gpus, **common)
+    return run_sam3_masks(manifest_name=s.manifest_name, **common)
 
 
 @hydra.main(version_base=None, config_path=CONFIG_DIR, config_name="config")

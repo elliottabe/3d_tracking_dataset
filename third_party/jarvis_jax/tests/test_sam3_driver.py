@@ -290,3 +290,61 @@ def test_merge_manifests_dedupes(tmp_path):
     m = merge_manifests([str(p0), str(p1)], base={})
     assert [b["bout_idx"] for b in m["bouts"]] == [1, 2]
     assert m["n_bouts"] == 2
+
+
+def test_run_sam3_masks_multi_dispatch(tmp_path, monkeypatch):
+    """Dispatcher splits bouts across GPUs, launches one worker per non-empty
+    block, and merges per-worker partials into manifest.json — no real GPU."""
+    import json as _json
+    import subprocess
+    from jarvis_jax.predict import sam3_driver
+
+    # A bouts CSV with 4 bouts for our session tag.
+    session = "/data/SessionT/rec"            # tag -> "SessionT/rec"
+    csv = tmp_path / "b.csv"
+    csv.write_text(
+        "fly_id,bout_idx,start_frame,end_frame\n"
+        "SessionT/rec,0,0,10\n"
+        "SessionT/rec,1,20,30\n"
+        "SessionT/rec,2,40,50\n"
+        "SessionT/rec,3,60,70\n")
+    out = tmp_path / "out"
+
+    launched = []
+
+    class _FakePopen:
+        def __init__(self, argv, env=None):
+            self.argv = argv
+            # parse the overrides this worker received
+            ov = {a.split("=", 1)[0]: a.split("=", 1)[1]
+                  for a in argv if "=" in a and a.startswith("sam3.")}
+            launched.append((env["CUDA_VISIBLE_DEVICES"], ov["sam3.bout_ids"]))
+            # emulate the worker: write a partial manifest for its bout subset
+            ids = [int(x) for x in ov["sam3.bout_ids"].split(",")]
+            os.makedirs(ov["sam3.out"], exist_ok=True)
+            partial = os.path.join(ov["sam3.out"], ov["sam3.manifest_name"])
+            with open(partial, "w") as f:
+                _json.dump({"bouts": [{"bout_idx": i, "num_frames": 11}
+                                      for i in ids]}, f)
+
+        def wait(self):
+            return 0
+
+    monkeypatch.setattr(subprocess, "Popen", _FakePopen)
+
+    man = sam3_driver.run_sam3_masks_multi(
+        gpus=[0, 1], project="red_data_unified", session_dir=session,
+        bouts_csv=str(csv), out=str(out), num_animals=2,
+        jarvis_root="/jr", sam3={"sam3_version": "sam3.1", "gpu_id": 0,
+                                 "compile": False, "text_prompt": "insect",
+                                 "checkpoint_path": None},
+        python="/py", script="/s/sam3_masks.py")
+
+    # two workers launched, contiguous split [0,1] / [2,3]
+    assert sorted(launched) == [("0", "0,1"), ("1", "2,3")]
+    # merged manifest written once, with all 4 bouts sorted
+    merged = _json.loads((out / "manifest.json").read_text())
+    assert [b["bout_idx"] for b in merged["bouts"]] == [0, 1, 2, 3]
+    assert merged["n_bouts"] == 4
+    assert merged["session_tag"] == "SessionT/rec"
+    assert man["n_bouts"] == 4 and man.get("failures") == []

@@ -186,7 +186,7 @@ def merge_manifests(partial_paths, *, base):
 
 def run_sam3_masks(*, project, session_dir, bouts_csv, out, num_animals=2,
                    limit=0, bout_ids=None, reuse_masks=True, sam3=None,
-                   jarvis_root=None):
+                   jarvis_root=None, manifest_name="manifest.json"):
     """Run SAM3 video tracking + identity over a session's bouts, writing a
     per-bout sam3_masks.npz + a session manifest.
 
@@ -329,8 +329,85 @@ def run_sam3_masks(*, project, session_dir, bouts_csv, out, num_animals=2,
               f"{st['seconds']}s -> {npz_path}")
 
     manifest = build_manifest(session_dir, tag, sam3, per_bout)
-    manifest_path = os.path.join(out, "manifest.json")
+    manifest_path = os.path.join(out, manifest_name)
     with open(manifest_path, "w") as f:
         json.dump(manifest, f, indent=2)
-    print(f"[sam3] wrote {len(per_bout)} bouts + manifest.json to {out}")
+    print(f"[sam3] wrote {len(per_bout)} bouts + {manifest_name} to {out}")
     return manifest
+
+
+def run_sam3_masks_multi(*, gpus, project, session_dir, bouts_csv, out,
+                         num_animals=2, limit=0, bout_ids=None,
+                         reuse_masks=True, jarvis_root=None, sam3=None,
+                         python=None, script=None):
+    """Fan a session's bouts across multiple GPUs: one subprocess per GPU, each
+    re-invoking scripts/sam3_masks.py (single-GPU) on a contiguous bout subset.
+    The parent merges per-worker partial manifests into out/manifest.json.
+
+    Falls back to the single-GPU run_sam3_masks when <=1 GPU or <=1 bout.
+    """
+    import json
+    import subprocess
+    import sys
+    import tempfile
+
+    sam3 = dict(sam3 or {})
+    tag = session_tag_for(session_dir)
+    csv_path = (bouts_csv if os.path.isabs(bouts_csv)
+                else os.path.join(session_dir, bouts_csv))
+    bouts = parse_bouts(csv_path, tag, limit=limit, bout_ids=bout_ids)
+    all_ids = [b["bout_idx"] for b in bouts]
+
+    if len(gpus) <= 1 or len(all_ids) <= 1:
+        return run_sam3_masks(
+            project=project, session_dir=session_dir, bouts_csv=bouts_csv,
+            out=out, num_animals=num_animals, limit=limit, bout_ids=bout_ids,
+            reuse_masks=reuse_masks, sam3=sam3, jarvis_root=jarvis_root)
+
+    os.makedirs(out, exist_ok=True)
+    groups = split_bouts_contiguous(all_ids, len(gpus))
+    python = python or sys.executable
+    if script is None:
+        script = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.dirname(
+                os.path.abspath(__file__)))),
+            "scripts", "sam3_masks.py")
+
+    procs = []
+    partials = []
+    for gpu, grp in zip(gpus, groups):
+        if not grp:
+            continue
+        mname = f"manifest.gpu{gpu}.json"
+        env, argv = build_worker_cmd(
+            python=python, script=script, gpu=gpu, bout_ids=grp,
+            session_dir=session_dir, out=out, project=project,
+            bouts_csv=csv_path, num_animals=num_animals,
+            reuse_masks=reuse_masks, jarvis_root=jarvis_root,
+            sam3_version=sam3.get("sam3_version", "sam3.1"),
+            sam3_compile=sam3.get("compile", False),
+            sam3_text=sam3.get("text_prompt", "insect"),
+            sam3_checkpoint=sam3.get("checkpoint_path", None),
+            manifest_name=mname,
+            inductor_cache_dir=os.path.join(
+                tempfile.gettempdir(), f"torchinductor_gpu{gpu}"))
+        print(f"[sam3-multi] GPU {gpu}: {len(grp)} bouts {grp}")
+        procs.append((gpu, subprocess.Popen(argv, env=env)))
+        partials.append(os.path.join(out, mname))
+
+    failures = []
+    for gpu, p in procs:
+        rc = p.wait()
+        if rc != 0:
+            failures.append(gpu)
+            print(f"[sam3-multi] GPU {gpu} worker FAILED (exit {rc})")
+
+    existing = [pp for pp in partials if os.path.isfile(pp)]
+    base = build_manifest(session_dir, tag, sam3, [])
+    merged = merge_manifests(existing, base=base)
+    with open(os.path.join(out, "manifest.json"), "w") as f:
+        json.dump(merged, f, indent=2)
+    merged["failures"] = failures
+    print(f"[sam3-multi] merged {merged['n_bouts']} bouts -> manifest.json "
+          f"({len(failures)} GPU failures)")
+    return merged

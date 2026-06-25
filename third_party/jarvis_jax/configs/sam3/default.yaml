@@ -9,6 +9,12 @@ bout_ids: ''       # '' = all; else comma-separated bout_idx
 reuse_masks: true  # skip bouts whose sam3_masks.npz already exists
 sam3_version: sam3.1
 sam3_gpu: 0
+gpus: null         # null/[] = use all visible GPUs (CUDA_VISIBLE_DEVICES, else
+                   # torch.cuda.device_count()); a list like [0,1] overrides.
+                   # >1 GPU -> bouts are fanned out one subprocess per GPU.
+manifest_name: manifest.json   # internal: multi-GPU workers write per-GPU
+                               # partials (manifest.gpu<id>.json); the parent
+                               # merges them into manifest.json.
 sam3_compile: false
 sam3_text: insect
 sam3_checkpoint: null
