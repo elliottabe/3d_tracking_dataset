@@ -49,9 +49,9 @@ def main():
                    help='Comma-separated recording names to include (default: all)')
     p.add_argument('--dataset', default=None,
                    help='Dataset name (default: derive from each recording path)')
-    p.add_argument('--paths', default='hyak')
-    p.add_argument('--slurm', default='ckpt_g2')
-    p.add_argument('--dry-run', action='store_true')
+    p.add_argument('--paths', default='hyak', help='Hydra paths config group (default: hyak)')
+    p.add_argument('--slurm', default='ckpt_g2', help='Hydra slurm config group (default: ckpt_g2)')
+    p.add_argument('--dry-run', action='store_true', help='Print each job script without submitting')
     args, passthrough = p.parse_known_args()
 
     if not PKG_DIR.is_dir():

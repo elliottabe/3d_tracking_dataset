@@ -15,9 +15,10 @@ def session_tag_for(session_dir: str) -> str:
 
 
 def parse_bouts(csv_path, session_tag, *, limit: int = 0, bout_ids=None):
-    """Rows of the bouts CSV whose fly_id == session_tag, as
-    {bout_idx, start, end, n}. limit>0 keeps the first N; bout_ids (iterable)
-    keeps only those bout_idx."""
+    """Rows of the bouts CSV as {bout_idx, start, end, n}. Filtered to
+    fly_id == session_tag ONLY when the CSV has a fly_id column; a fly_id-less
+    CSV (e.g. Session1 good_bouts.csv) is already per-recording so all rows are
+    kept. limit>0 keeps the first N; bout_ids (iterable) keeps only those bout_idx."""
     ids = set(int(b) for b in bout_ids) if bout_ids else None
     out = []
     with open(csv_path, newline="") as f:
