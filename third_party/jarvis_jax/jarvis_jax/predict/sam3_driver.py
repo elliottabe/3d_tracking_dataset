@@ -410,4 +410,14 @@ def run_sam3_masks_multi(*, gpus, project, session_dir, bouts_csv, out,
     merged["failures"] = failures
     print(f"[sam3-multi] merged {merged['n_bouts']} bouts -> manifest.json "
           f"({len(failures)} GPU failures)")
+    # The partial manifest (above) is written first so a re-run with
+    # reuse_masks=true resumes the finished bouts. But if any worker failed we
+    # raise: the masks are incomplete, and a caller (e.g. the SLURM launcher's
+    # sequential job) must NOT proceed to the D3 predict stage on a partial
+    # session. Failing loudly lets requeue + reuse_masks finish stage 1 first.
+    if failures:
+        raise RuntimeError(
+            f"[sam3-multi] {len(failures)} GPU worker(s) failed: {failures}. "
+            f"Partial manifest written to {out}/manifest.json; re-run "
+            f"(reuse_masks=true) to finish the remaining bouts.")
     return merged
