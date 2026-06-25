@@ -104,5 +104,7 @@ def test_dry_run_emits_full_script():
     assert s.index("scripts/sam3_masks.py") < s.index("scripts/predict_session.py")
     assert "sam3.sam3_compile=false" in s
     assert "run_id=run4" in s
-    assert "predict_session/run4/sam3_masks" in s   # masks under the out dir
+    # masks now live in the processed tree, as a sibling of predictions
+    assert "processed/courtship/Session0/2025_10_20_13_20_04/sam3_masks" in s
+    assert "processed/courtship/Session0/2025_10_20_13_20_04/predictions" in s
     assert s.index("unset LD_LIBRARY_PATH") < s.index("scripts/predict_session.py")

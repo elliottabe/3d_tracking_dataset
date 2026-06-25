@@ -13,8 +13,9 @@ has TWO sequential stages on one multi-GPU node:
 
 --run-name selects the TRAINED v2vNet run to predict with (run_id): the predict
 entrypoint loads ${paths.runs_root}/${run_id}/final. Output + masks live under
---out (default ${paths.runs_root}/predict_session/<run-name>); masks go in
-<out>/sam3_masks and are passed to both stages so stage 2 reads stage 1's output.
+--out (default ${paths.processed_root}/<dataset>/SessionN/<rec>); masks go in
+<out>/sam3_masks and predictions go in <out>/predictions; both stages share the
+same root so stage 2 reads stage 1's output.
 
 Per-stage CUDA libs: SAM3 (PyTorch) needs the cu13 wheels on LD_LIBRARY_PATH;
 JAX needs its own bundled CUDA, so LD_LIBRARY_PATH is unset before stage 2
@@ -141,9 +142,11 @@ def main():
                         'entrypoint loads ${paths.runs_root}/${run_id}/final. e.g. run4')
     p.add_argument('--session-dir', default=None,
                    help='Session video dir. Default: the sam3/predict_session config default (Session0).')
+    p.add_argument('--dataset', default=None,
+                   help='Dataset name for the processed path (default: derive from --session-dir)')
     p.add_argument('--out', default=None,
-                   help='Output root. Default: ${paths.runs_root}/predict_session/<run-name>. '
-                        'Masks go in <out>/sam3_masks; both stages share it (resume-safe).')
+                   help='Output root. Default: ${paths.processed_root}/<dataset>/SessionN/<rec>. '
+                        'Masks go in <out>/sam3_masks; predictions in <out>/predictions (resume-safe).')
     p.add_argument('--paths', default='hyak', help='Hydra paths config group (default: hyak)')
     p.add_argument('--slurm', default='ckpt_g2', help='Hydra slurm config group (default: ckpt_g2)')
     p.add_argument('--dry-run', action='store_true', help='Print the script without submitting')
@@ -156,10 +159,13 @@ def main():
     cfg = compose_cfg(args.paths, args.slurm, args.run_name, passthrough)
     sl = cfg.slurm
 
+    from jarvis_jax.predict.paths_util import processed_dir_for
     session_dir = args.session_dir or cfg.predict_session.session_dir
-    out = args.out or f"{cfg.paths.runs_root}/predict_session/{args.run_name}"
-    masks_dir = f"{out}/sam3_masks"
-    log_dir = out
+    out_root = args.out or processed_dir_for(
+        cfg.paths.processed_root, session_dir, dataset=args.dataset)
+    masks_dir = f"{out_root}/sam3_masks"
+    out = f"{out_root}/predictions"
+    log_dir = out_root
 
     requeue_line = "#SBATCH --requeue" if sl.requeue else ""
     nodelist_line = (f"#SBATCH --nodelist={sl.nodelist}"
@@ -187,7 +193,7 @@ def main():
 
     print(f"Model   : run_id={args.run_name} -> {cfg.paths.runs_root}/{args.run_name}/final")
     print(f"Session : {session_dir}")
-    print(f"Out     : {out}  (masks -> {masks_dir})")
+    print(f"Out     : {out_root}  (masks -> {masks_dir}, predictions -> {out})")
     print(f"Compute : {sl.partition}, {sl.gpus} GPU(s)/1 node, "
           f"{'requeue on' if sl.requeue else 'requeue off'}")
     if passthrough:
@@ -198,11 +204,11 @@ def main():
         print(script)
         return
 
-    Path(out).mkdir(parents=True, exist_ok=True)  # for the -o log path
+    Path(out_root).mkdir(parents=True, exist_ok=True)  # for the -o log path
     jid = slurm_submit(script)
     print(f"\nSubmitted {job_name}: {jid}")
     print(f"Monitor : squeue -j {jid}")
-    print(f"Log     : {out}/slurm-{jid}.out")
+    print(f"Log     : {out_root}/slurm-{jid}.out")
 
 
 if __name__ == "__main__":
