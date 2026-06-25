@@ -374,7 +374,6 @@ def run_sam3_masks_multi(*, gpus, project, session_dir, bouts_csv, out,
             "scripts", "sam3_masks.py")
 
     procs = []
-    partials = []
     for gpu, grp in zip(gpus, groups):
         if not grp:
             continue
@@ -392,17 +391,24 @@ def run_sam3_masks_multi(*, gpus, project, session_dir, bouts_csv, out,
             inductor_cache_dir=os.path.join(
                 tempfile.gettempdir(), f"torchinductor_gpu{gpu}"))
         print(f"[sam3-multi] GPU {gpu}: {len(grp)} bouts {grp}")
-        procs.append((gpu, subprocess.Popen(argv, env=env)))
-        partials.append(os.path.join(out, mname))
+        procs.append((gpu, subprocess.Popen(argv, env=env),
+                      os.path.join(out, mname)))
 
     failures = []
-    for gpu, p in procs:
+    existing = []
+    for gpu, p, partial in procs:
         rc = p.wait()
         if rc != 0:
             failures.append(gpu)
             print(f"[sam3-multi] GPU {gpu} worker FAILED (exit {rc})")
-
-    existing = [pp for pp in partials if os.path.isfile(pp)]
+        elif not os.path.isfile(partial):
+            # Clean exit but no manifest written = bouts silently lost; treat as
+            # a failure so the merge never hands D3 a partial session unnoticed.
+            failures.append(gpu)
+            print(f"[sam3-multi] GPU {gpu} exited 0 but wrote no manifest "
+                  f"({partial}) — treating as failed")
+        else:
+            existing.append(partial)
     base = build_manifest(session_dir, tag, sam3, [])
     merged = merge_manifests(existing, base=base)
     with open(os.path.join(out, "manifest.json"), "w") as f:

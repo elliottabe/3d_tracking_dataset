@@ -399,3 +399,52 @@ def test_run_sam3_masks_multi_raises_on_worker_failure(tmp_path, monkeypatch):
     # GPU-0 bouts [0,1] are present.
     merged = _json.loads((out / "manifest.json").read_text())
     assert [b["bout_idx"] for b in merged["bouts"]] == [0, 1]
+
+
+def test_run_sam3_masks_multi_raises_on_clean_exit_no_manifest(tmp_path, monkeypatch):
+    """A worker that exits 0 but writes no manifest is treated as a failure (its
+    bouts would otherwise vanish silently from the merge)."""
+    import json as _json
+    import subprocess
+    import pytest as _pytest
+    from jarvis_jax.predict import sam3_driver
+
+    session = "/data/SessionT/rec"
+    csv = tmp_path / "b.csv"
+    csv.write_text(
+        "fly_id,bout_idx,start_frame,end_frame\n"
+        "SessionT/rec,0,0,10\n"
+        "SessionT/rec,1,20,30\n"
+        "SessionT/rec,2,40,50\n"
+        "SessionT/rec,3,60,70\n")
+    out = tmp_path / "out"
+
+    class _FakePopen:
+        def __init__(self, argv, env=None):
+            ov = {a.split("=", 1)[0]: a.split("=", 1)[1]
+                  for a in argv if "=" in a and a.startswith("sam3.")}
+            self._gpu = env["CUDA_VISIBLE_DEVICES"]
+            os.makedirs(ov["sam3.out"], exist_ok=True)
+            # GPU 0 writes its partial; GPU 1 exits 0 but writes nothing.
+            if self._gpu == "0":
+                ids = [int(x) for x in ov["sam3.bout_ids"].split(",")]
+                with open(os.path.join(ov["sam3.out"], ov["sam3.manifest_name"]),
+                          "w") as f:
+                    _json.dump({"bouts": [{"bout_idx": i} for i in ids]}, f)
+
+        def wait(self):
+            return 0   # both exit cleanly
+
+    monkeypatch.setattr(subprocess, "Popen", _FakePopen)
+
+    with _pytest.raises(RuntimeError, match="worker"):
+        sam3_driver.run_sam3_masks_multi(
+            gpus=[0, 1], project="red_data_unified", session_dir=session,
+            bouts_csv=str(csv), out=str(out), num_animals=2, jarvis_root="/jr",
+            sam3={"sam3_version": "sam3.1", "gpu_id": 0, "compile": False,
+                  "text_prompt": "insect", "checkpoint_path": None},
+            python="/py", script="/s/sam3_masks.py")
+
+    # Only GPU-0's bouts merged; GPU-1 (no manifest) was treated as failed.
+    merged = _json.loads((out / "manifest.json").read_text())
+    assert [b["bout_idx"] for b in merged["bouts"]] == [0, 1]
