@@ -58,3 +58,12 @@ def test_no_source_raises(tmp_path):
     os.makedirs(str(rec))
     with pytest.raises(FileNotFoundError):
         resolve_bout_summary(recording_dir=str(rec), processed_dir=str(proc), dataset="courtship")
+
+
+def test_source_missing_required_column_raises(tmp_path):
+    # A source file exists but lacks a required column (no start_frame) -> ValueError
+    rec = tmp_path / "rec"; proc = tmp_path / "proc"
+    _write(str(rec / "courtship_bout_summary.csv"),
+           ["bout_idx", "end_frame", "mean_score"], [[0, 200, 0.5]])
+    with pytest.raises(ValueError):
+        resolve_bout_summary(recording_dir=str(rec), processed_dir=str(proc), dataset="courtship")
