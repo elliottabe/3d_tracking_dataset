@@ -25,16 +25,24 @@ register_resolvers()
 def main_from_cfg(cfg):
     import torch
     from jarvis_jax.predict.sam3_driver import resolve_gpus, run_sam3_masks_multi
+    from jarvis_jax.predict.paths_util import dataset_for, processed_dir_for, resolve_auto
+    from jarvis_jax.predict.bouts_resolve import resolve_bout_summary
     s = cfg.sam3
+    dataset = s.dataset if s.dataset else dataset_for(s.session_dir)
+    processed_dir = processed_dir_for(cfg.paths.processed_root, s.session_dir, dataset=dataset)
+    out = resolve_auto(s.out, os.path.join(processed_dir, "sam3_masks"))
+    bouts_csv = resolve_auto(s.bouts_csv, None)
+    if bouts_csv is None:
+        bouts_csv = resolve_bout_summary(
+            recording_dir=s.session_dir, processed_dir=processed_dir, dataset=dataset)
     bout_ids = [int(x) for x in str(s.bout_ids).split(",") if str(x).strip()] or None
     jarvis_root = s.jarvis_root if s.jarvis_root else None
     sam3_kwargs = {"sam3_version": s.sam3_version, "gpu_id": s.sam3_gpu,
                    "compile": s.sam3_compile, "text_prompt": s.sam3_text,
                    "checkpoint_path": s.sam3_checkpoint}
-    common = dict(project=s.project, session_dir=s.session_dir,
-                  bouts_csv=s.bouts_csv, out=s.out, num_animals=s.num_animals,
-                  limit=s.limit, bout_ids=bout_ids, reuse_masks=s.reuse_masks,
-                  jarvis_root=jarvis_root, sam3=sam3_kwargs)
+    common = dict(project=s.project, session_dir=s.session_dir, bouts_csv=bouts_csv,
+                  out=out, num_animals=s.num_animals, limit=s.limit, bout_ids=bout_ids,
+                  reuse_masks=s.reuse_masks, jarvis_root=jarvis_root, sam3=sam3_kwargs)
     device_count = torch.cuda.device_count() if torch.cuda.is_available() else 0
     gpus = resolve_gpus(s.gpus, env=os.environ, device_count=device_count)
     if len(gpus) > 1:

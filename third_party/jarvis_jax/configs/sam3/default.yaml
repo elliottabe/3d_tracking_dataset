@@ -1,8 +1,9 @@
 # @package sam3
 project: red_data_unified
 session_dir: /gscratch/portia/eabe/data/Johnson_lab/Video_recordings/courtship/Session0/2025_10_20_13_20_04
-bouts_csv: courtship_bouts_unified_summary.csv   # relative -> joined to session_dir
-out: ${paths.runs_root}/sam3_masks/session0
+bouts_csv: auto   # auto -> resolve canonical {dataset}_bout_summary.csv in the processed dir
+out: auto   # auto -> <processed_dir>/sam3_masks
+dataset: null            # null -> derive from session_dir (.../<dataset>/SessionN/<rec>)
 num_animals: 2
 limit: 0           # 0 = all bouts
 bout_ids: ''       # '' = all; else comma-separated bout_idx

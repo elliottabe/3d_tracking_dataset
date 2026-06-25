@@ -28,11 +28,16 @@ register_resolvers()
 
 
 def main_from_cfg(cfg):
+    from jarvis_jax.predict.paths_util import dataset_for, processed_dir_for, resolve_auto
     ps = cfg.predict_session
+    dataset = ps.dataset if ps.dataset else dataset_for(ps.session_dir)
+    processed_dir = processed_dir_for(cfg.paths.processed_root, ps.session_dir, dataset=dataset)
+    out = resolve_auto(ps.out, os.path.join(processed_dir, "predictions"))
+    masks_dir = resolve_auto(ps.masks_dir, os.path.join(processed_dir, "sam3_masks"))
     bout_ids = [int(x) for x in str(ps.bout_ids).split(",") if str(x).strip()] or None
     run_dir = run_dir_for(cfg)
     return run_predict_session(
-        session_dir=ps.session_dir, masks_dir=ps.masks_dir, out=ps.out,
+        session_dir=ps.session_dir, masks_dir=masks_dir, out=out,
         project=ps.project, jarvis_root=(ps.jarvis_root or None),
         v2v_final=os.path.join(run_dir, "final"),
         vitpose_ckpt=cfg.paths.vitpose_ckpt, sharpen=cfg.model.sharpen,
