@@ -5,6 +5,7 @@ PyTorch bits). Produces per-bout sam3_masks.npz + a session manifest for the
 JAX D3 pipeline to consume.
 """
 import csv
+import math
 import os
 
 
@@ -71,6 +72,116 @@ def build_manifest(session_dir, session_tag, sam3_settings, per_bout) -> dict:
         "n_bouts": len(per_bout),
         "bouts": list(per_bout),
     }
+
+
+def resolve_gpus(spec, *, env=None, device_count=None):
+    """Resolve the sam3.gpus config value to a list of GPU ids.
+
+    Order: explicit non-empty list `spec` -> CUDA_VISIBLE_DEVICES in `env`
+    -> range(device_count). `env`/`device_count` are injected for testability
+    (production passes os.environ and torch.cuda.device_count()).
+    """
+    if spec is not None:
+        try:
+            ids = [int(x) for x in list(spec)]
+        except TypeError:
+            ids = []
+        if ids:
+            return ids
+    if env is None:
+        env = os.environ
+    cvd = env.get("CUDA_VISIBLE_DEVICES", "") or ""
+    if cvd.strip():
+        return [int(x) for x in cvd.split(",") if x.strip()]
+    if device_count is None:
+        import torch
+        device_count = torch.cuda.device_count()
+    return list(range(int(device_count)))
+
+
+def split_bouts_contiguous(bout_ids, n_gpus):
+    """Split bout_ids into n_gpus contiguous blocks (ceil per block). The result
+    always has exactly n_gpus entries; trailing blocks are [] when there are
+    fewer bouts than GPUs."""
+    n = len(bout_ids)
+    per = math.ceil(n / n_gpus) if n_gpus > 0 else n
+    groups = []
+    for gi in range(n_gpus):
+        s = gi * per
+        e = min(s + per, n)
+        groups.append(list(bout_ids[s:e]) if s < n else [])
+    return groups
+
+
+def _ov(v):
+    """Format a value as a Hydra override RHS (None -> 'null')."""
+    if v is None:
+        return "null"
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    return str(v)
+
+
+def build_worker_cmd(*, python, script, gpu, bout_ids, session_dir, out, project,
+                     bouts_csv, num_animals, reuse_masks, jarvis_root,
+                     sam3_version, sam3_compile, sam3_text, sam3_checkpoint,
+                     manifest_name, inductor_cache_dir, base_env=None):
+    """Build the (env, argv) for one single-GPU SAM3 worker subprocess.
+
+    Overrides every sam3.* field explicitly so the worker does not depend on the
+    parent's Hydra groups. `sam3.gpus=[0]` is the recursion guard: with
+    CUDA_VISIBLE_DEVICES=<gpu> the worker sees one device as cuda:0 and runs the
+    single-GPU path on sam3.sam3_gpu=0.
+    """
+    bout_csv = ",".join(str(b) for b in bout_ids)
+    argv = [
+        python, script,
+        "sam3=default",
+        "sam3.gpus=[0]",
+        "sam3.sam3_gpu=0",
+        f"sam3.bout_ids={bout_csv}",
+        "sam3.limit=0",
+        f"sam3.session_dir={session_dir}",
+        f"sam3.out={out}",
+        f"sam3.bouts_csv={bouts_csv}",
+        f"sam3.project={project}",
+        f"sam3.num_animals={num_animals}",
+        f"sam3.reuse_masks={_ov(bool(reuse_masks))}",
+        f"sam3.jarvis_root={_ov(jarvis_root)}",
+        f"sam3.sam3_version={sam3_version}",
+        f"sam3.sam3_compile={_ov(bool(sam3_compile))}",
+        f"sam3.sam3_text={sam3_text}",
+        f"sam3.sam3_checkpoint={_ov(sam3_checkpoint)}",
+        f"sam3.manifest_name={manifest_name}",
+    ]
+    env = dict(base_env if base_env is not None else os.environ)
+    env["CUDA_VISIBLE_DEVICES"] = str(gpu)
+    env["TORCHINDUCTOR_CACHE_DIR"] = inductor_cache_dir
+    env["TOKENIZERS_PARALLELISM"] = "false"
+    return env, argv
+
+
+def merge_manifests(partial_paths, *, base):
+    """Merge per-worker partial manifests into one. Concatenates each partial's
+    `bouts`, dedupes by bout_idx, sorts by bout_idx; copies `base` for the
+    session-level fields and sets n_bouts/bouts."""
+    import json
+    bouts = []
+    seen = set()
+    for p in partial_paths:
+        with open(p) as f:
+            m = json.load(f)
+        for b in m.get("bouts", []):
+            bi = b.get("bout_idx")
+            if bi in seen:
+                continue
+            seen.add(bi)
+            bouts.append(b)
+    bouts.sort(key=lambda b: (b.get("bout_idx") is None, b.get("bout_idx")))
+    merged = dict(base)
+    merged["n_bouts"] = len(bouts)
+    merged["bouts"] = bouts
+    return merged
 
 
 def run_sam3_masks(*, project, session_dir, bouts_csv, out, num_animals=2,

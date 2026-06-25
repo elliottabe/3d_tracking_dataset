@@ -181,3 +181,112 @@ def test_run_sam3_masks_one_bout(tmp_path):
                 f"fly 0 centroid jumps suspiciously often (swap_ratio={swap_ratio_0:.2f})")
             assert swap_ratio_1 < 0.5, (
                 f"fly 1 centroid jumps suspiciously often (swap_ratio={swap_ratio_1:.2f})")
+
+
+# ---------------------------------------------------------------------------
+# Pure helpers for multi-GPU bout fan-out (Task 1)
+# ---------------------------------------------------------------------------
+
+from jarvis_jax.predict.sam3_driver import (
+    resolve_gpus, split_bouts_contiguous, build_worker_cmd, merge_manifests,
+)
+
+
+def test_resolve_gpus_explicit_list():
+    assert resolve_gpus([0, 1, 3], env={}, device_count=8) == [0, 1, 3]
+    # OmegaConf-style list is just an iterable of ints
+    assert resolve_gpus((2, 5), env={}, device_count=8) == [2, 5]
+
+
+def test_resolve_gpus_from_cuda_visible_devices():
+    assert resolve_gpus(None, env={"CUDA_VISIBLE_DEVICES": "2,3,5"},
+                        device_count=8) == [2, 3, 5]
+    # empty/whitespace entries ignored
+    assert resolve_gpus(None, env={"CUDA_VISIBLE_DEVICES": "1, ,4"},
+                        device_count=8) == [1, 4]
+
+
+def test_resolve_gpus_auto_range():
+    assert resolve_gpus(None, env={}, device_count=4) == [0, 1, 2, 3]
+    # empty explicit list falls through to auto
+    assert resolve_gpus([], env={}, device_count=2) == [0, 1]
+    # CUDA_VISIBLE_DEVICES empty string -> auto
+    assert resolve_gpus(None, env={"CUDA_VISIBLE_DEVICES": ""},
+                        device_count=3) == [0, 1, 2]
+
+
+def test_split_bouts_contiguous():
+    assert split_bouts_contiguous([1, 2, 3, 4, 5], 2) == [[1, 2, 3], [4, 5]]
+    assert split_bouts_contiguous([1, 2, 3, 4], 2) == [[1, 2], [3, 4]]
+    # fewer bouts than GPUs -> trailing empty blocks, length == n_gpus
+    assert split_bouts_contiguous([1, 2], 3) == [[1], [2], []]
+    assert split_bouts_contiguous([], 2) == [[], []]
+
+
+def test_build_worker_cmd():
+    env, argv = build_worker_cmd(
+        python="/py", script="/s/sam3_masks.py", gpu=3, bout_ids=[4, 5, 6],
+        session_dir="/data/sess", out="/o", project="red_data_unified",
+        bouts_csv="/data/b.csv", num_animals=2, reuse_masks=True,
+        jarvis_root="/jr", sam3_version="sam3.1", sam3_compile=False,
+        sam3_text="insect", sam3_checkpoint=None,
+        manifest_name="manifest.gpu3.json", inductor_cache_dir="/tmp/ti_gpu3",
+        base_env={"PATH": "/usr/bin"},
+    )
+    assert argv[0] == "/py" and argv[1] == "/s/sam3_masks.py"
+    assert "sam3.gpus=[0]" in argv          # recursion guard
+    assert "sam3.sam3_gpu=0" in argv
+    assert "sam3.bout_ids=4,5,6" in argv    # this worker's subset
+    assert "sam3.limit=0" in argv
+    assert "sam3.out=/o" in argv            # shared out dir
+    assert "sam3.session_dir=/data/sess" in argv
+    assert "sam3.bouts_csv=/data/b.csv" in argv
+    assert "sam3.reuse_masks=true" in argv
+    assert "sam3.jarvis_root=/jr" in argv
+    assert "sam3.sam3_compile=false" in argv
+    assert "sam3.sam3_checkpoint=null" in argv   # None -> Hydra null
+    assert "sam3.manifest_name=manifest.gpu3.json" in argv
+    assert env["CUDA_VISIBLE_DEVICES"] == "3"
+    assert env["TORCHINDUCTOR_CACHE_DIR"] == "/tmp/ti_gpu3"
+    assert env["TOKENIZERS_PARALLELISM"] == "false"
+    assert env["PATH"] == "/usr/bin"         # base_env preserved
+
+
+def test_build_worker_cmd_jarvis_root_none():
+    env, argv = build_worker_cmd(
+        python="p", script="s", gpu=0, bout_ids=[1], session_dir="d", out="o",
+        project="proj", bouts_csv="c", num_animals=2, reuse_masks=False,
+        jarvis_root=None, sam3_version="sam3.1", sam3_compile=True,
+        sam3_text="insect", sam3_checkpoint="/ckpt", manifest_name="m.json",
+        inductor_cache_dir="/t", base_env={},
+    )
+    assert "sam3.jarvis_root=null" in argv
+    assert "sam3.reuse_masks=false" in argv
+    assert "sam3.sam3_compile=true" in argv
+    assert "sam3.sam3_checkpoint=/ckpt" in argv
+
+
+def test_merge_manifests(tmp_path):
+    import json as _json
+    p0 = tmp_path / "manifest.gpu0.json"
+    p1 = tmp_path / "manifest.gpu1.json"
+    p0.write_text(_json.dumps({"bouts": [{"bout_idx": 3, "num_frames": 5},
+                                         {"bout_idx": 1, "num_frames": 7}]}))
+    p1.write_text(_json.dumps({"bouts": [{"bout_idx": 2, "num_frames": 9}]}))
+    base = {"session_dir": "/s", "session_tag": "S/rec",
+            "sam3_settings": {"sam3_version": "sam3.1"}}
+    m = merge_manifests([str(p0), str(p1)], base=base)
+    assert [b["bout_idx"] for b in m["bouts"]] == [1, 2, 3]   # sorted
+    assert m["n_bouts"] == 3
+    assert m["session_tag"] == "S/rec"                        # base preserved
+    assert m["sam3_settings"]["sam3_version"] == "sam3.1"
+
+
+def test_merge_manifests_dedupes(tmp_path):
+    import json as _json
+    p0 = tmp_path / "a.json"; p1 = tmp_path / "b.json"
+    p0.write_text(_json.dumps({"bouts": [{"bout_idx": 1}]}))
+    p1.write_text(_json.dumps({"bouts": [{"bout_idx": 1}, {"bout_idx": 2}]}))
+    m = merge_manifests([str(p0), str(p1)], base={})
+    assert [b["bout_idx"] for b in m["bouts"]] == [1, 2]
+    assert m["n_bouts"] == 2
