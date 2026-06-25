@@ -141,6 +141,7 @@ def run_sam3_masks(*, project, session_dir, bouts_csv, out, num_animals=2,
     from jarvis.utils.reprojection import get_repro_tool
     from jarvis.prediction.sam3_video_tracker import SAM3VideoTracker
     import predict3D_multianimal as pmod  # save_bout_masks, LoadedBoutMasks, MASKS_FILENAME
+    import torch
 
     pm = ProjectManager()
     # Override parent_dir so ProjectManager looks for projects in jarvis_root.
@@ -189,7 +190,15 @@ def run_sam3_masks(*, project, session_dir, bouts_csv, out, num_animals=2,
 
             bm = tracker.process_bout(
                 video_paths, b["start"], b["n"], num_animals=num_animals)
-            bm.assign_identities(repro_tool, num_animals=num_animals)
+            # SAM3's predictors enter a process-wide bf16 autocast
+            # (self.bf16_context.__enter__() with no matching __exit__), so it
+            # stays active after process_bout() returns. That leaks into the
+            # reprojection geometry in assign_identities: torch.matmul/solve run
+            # in bfloat16, which (a) drops the sub-pixel triangulation residuals
+            # used to disambiguate fly0/fly1 below bf16 precision and (b) makes
+            # r[cam].numpy() raise "unsupported ScalarType BFloat16". Force fp32.
+            with torch.autocast(device_type="cuda", enabled=False):
+                bm.assign_identities(repro_tool, num_animals=num_animals)
             pmod.save_bout_masks(bm, bout_out, num_animals)
             lm = pmod.LoadedBoutMasks(npz_path)
 
