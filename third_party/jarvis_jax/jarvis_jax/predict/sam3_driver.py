@@ -21,8 +21,12 @@ def parse_bouts(csv_path, session_tag, *, limit: int = 0, bout_ids=None):
     ids = set(int(b) for b in bout_ids) if bout_ids else None
     out = []
     with open(csv_path, newline="") as f:
-        for r in csv.DictReader(f):
-            if session_tag and r.get("fly_id") != session_tag:
+        reader = csv.DictReader(f)
+        has_fly_id = reader.fieldnames is not None and "fly_id" in reader.fieldnames
+        for r in reader:
+            # Only filter by fly_id when the column exists; a fly_id-less CSV
+            # (e.g. Session1 good_bouts.csv) is already per-recording -> keep all.
+            if has_fly_id and session_tag and r.get("fly_id") != session_tag:
                 continue
             bi = int(r["bout_idx"])
             if ids is not None and bi not in ids:

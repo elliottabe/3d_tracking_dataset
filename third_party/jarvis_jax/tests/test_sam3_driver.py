@@ -28,6 +28,27 @@ def test_parse_bouts_filters_and_limits(tmp_path):
     assert [r["bout_idx"] for r in parse_bouts(str(csv), "Session0/rec", bout_ids=[2])] == [2]
 
 
+def test_parse_bouts_no_fly_id_column_keeps_all(tmp_path):
+    # Session1 good_bouts schema: no fly_id column -> every row is this recording's
+    csv = tmp_path / "good.csv"
+    csv.write_text(
+        "bout_idx,start_frame,end_frame,n_frames,mean_score\n"
+        "0,100,200,101,0.5\n"
+        "1,300,350,51,0.4\n")
+    rows = parse_bouts(str(csv), "Session1/whatever")
+    assert [r["bout_idx"] for r in rows] == [0, 1]
+    assert rows[0] == {"bout_idx": 0, "start": 100, "end": 200, "n": 101}
+
+
+def test_parse_bouts_with_fly_id_still_filters(tmp_path):
+    csv = tmp_path / "u.csv"
+    csv.write_text(
+        "fly_id,bout_idx,start_frame,end_frame\n"
+        "S/rec,1,10,20\n"
+        "OTHER/rec,2,30,40\n")
+    assert [r["bout_idx"] for r in parse_bouts(str(csv), "S/rec")] == [1]
+
+
 def test_video_paths_for_orders_by_camera(tmp_path):
     for cam in ("CamA", "CamB"):
         (tmp_path / f"{cam}.mp4").write_bytes(b"x")
