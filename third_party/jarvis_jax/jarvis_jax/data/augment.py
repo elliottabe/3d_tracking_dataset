@@ -98,3 +98,55 @@ def affine_batch(key, img4_u8, kp_xy, vis, *, rot_deg, scale_min, scale_max,
     inb = ((kp_out[..., 0] >= 0) & (kp_out[..., 0] < heatmap_size)
            & (kp_out[..., 1] >= 0) & (kp_out[..., 1] < heatmap_size))
     return img_out, kp_out, (vis & inb)
+
+
+def flip_batch(key, img4_u8, kp_xy, vis, lr_swap, flip_p, heatmap_size):
+    """Per-sample horizontal flip with L/R keypoint-index swap."""
+    B = img4_u8.shape[0]
+    do = jax.random.bernoulli(key, p=flip_p, shape=(B,))
+    img_f = img4_u8[:, :, ::-1, :]
+    img_out = jnp.where(do[:, None, None, None], img_f, img4_u8)
+    kp_sw = kp_xy[:, lr_swap, :]
+    vis_sw = vis[:, lr_swap]
+    kp_x = (heatmap_size - 1) - kp_sw[..., 0]
+    kp_flip = jnp.stack([kp_x, kp_sw[..., 1]], axis=-1)
+    kp_out = jnp.where(do[:, None, None], kp_flip, kp_xy)
+    vis_out = jnp.where(do[:, None], vis_sw, vis)
+    return img_out, kp_out, vis_out
+
+
+def cutout_batch(key, img4_u8, n, frac):
+    """Zero up to n random square boxes (side ~frac*W) in RGB (channels 0-2)."""
+    B, H, W, _ = img4_u8.shape
+    side = max(1, int(round(frac * W)))
+    out = img4_u8
+    xs = jnp.arange(W)[None, :]
+    ys = jnp.arange(H)[None, :]
+    for j in range(int(n)):
+        k1, k2 = jax.random.split(jax.random.fold_in(key, j))
+        cx = jax.random.randint(k1, (B,), 0, W)
+        cy = jax.random.randint(k2, (B,), 0, H)
+        x0 = (cx - side // 2)[:, None]; x1 = (cx + side // 2)[:, None]
+        y0 = (cy - side // 2)[:, None]; y1 = (cy + side // 2)[:, None]
+        mx = (xs >= x0) & (xs < x1)        # (B,W)
+        my = (ys >= y0) & (ys < y1)        # (B,H)
+        box = my[:, :, None] & mx[:, None, :]   # (B,H,W)
+        keep = (~box)[..., None].astype(out.dtype)
+        rgb = out[..., :3] * keep
+        out = jnp.concatenate([rgb, out[..., 3:]], axis=-1)
+    return out
+
+
+def photometric_batch(key, img4_u8, brightness, contrast, gamma):
+    """Per-sample brightness/contrast/gamma jitter on RGB (channels 0-2)."""
+    B = img4_u8.shape[0]
+    k1, k2, k3 = jax.random.split(key, 3)
+    b = jax.random.uniform(k1, (B, 1, 1, 1), minval=-brightness, maxval=brightness)
+    c = jax.random.uniform(k2, (B, 1, 1, 1), minval=1 - contrast, maxval=1 + contrast)
+    g = jax.random.uniform(k3, (B, 1, 1, 1), minval=1 - gamma, maxval=1 + gamma)
+    rgb = img4_u8[..., :3].astype(jnp.float32) / 255.0
+    mean = rgb.mean(axis=(1, 2, 3), keepdims=True)
+    rgb = (rgb - mean) * c + mean + b
+    rgb = jnp.clip(rgb, 0.0, 1.0) ** g
+    rgb = jnp.clip(jnp.round(rgb * 255.0), 0, 255).astype(img4_u8.dtype)
+    return jnp.concatenate([rgb, img4_u8[..., 3:]], axis=-1)

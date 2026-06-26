@@ -75,3 +75,39 @@ def test_affine_batch_offcrop_sets_vis_false():
     assert out_kp.shape == kp.shape
     # at least some keypoints fall off-crop and are marked invisible
     assert bool((~out_vis).any())
+
+
+from jarvis_jax.data.augment import flip_batch, cutout_batch, photometric_batch
+
+
+def test_flip_batch_mirrors_x_and_swaps_indices():
+    sw = build_lr_swap(V3_NAMES)
+    K = len(V3_NAMES)
+    img = jnp.asarray(np.random.RandomState(1).randint(0, 256, (1, 8, 8, 4), dtype=np.uint8))
+    kp = jnp.asarray(np.random.RandomState(2).uniform(0, 16, (1, K, 2)).astype(np.float32))
+    vis = jnp.ones((1, K), bool)
+    # flip_p=1.0 -> always flip (deterministic)
+    fi, fk, fv = flip_batch(jax.random.PRNGKey(0), img, kp, vis, sw, 1.0, heatmap_size=16)
+    # image mirrored along width
+    assert jnp.array_equal(fi[0], img[0, :, ::-1, :])
+    idxL = V3_NAMES.index("EyeL"); idxR = V3_NAMES.index("EyeR")
+    # the flipped EyeL slot holds the mirrored original EyeR x
+    assert abs(float(fk[0, idxL, 0]) - (15.0 - float(kp[0, idxR, 0]))) < 1e-3
+    assert abs(float(fk[0, idxL, 1]) - float(kp[0, idxR, 1])) < 1e-3
+
+
+def test_cutout_zeros_rgb_keeps_mask_and_kp():
+    img = jnp.full((1, 16, 16, 4), 100, jnp.uint8)
+    out = cutout_batch(jax.random.PRNGKey(0), img, n=2, frac=0.5)
+    assert out.shape == img.shape
+    assert int((out[..., :3] == 0).sum()) > 0          # some RGB erased
+    assert jnp.array_equal(out[..., 3], img[..., 3])   # mask channel intact
+
+
+def test_photometric_changes_rgb_within_range_keeps_mask():
+    img = jnp.asarray(np.random.RandomState(3).randint(0, 256, (2, 16, 16, 4), dtype=np.uint8))
+    out = photometric_batch(jax.random.PRNGKey(0), img, 0.3, 0.3, 0.3)
+    assert out.shape == img.shape and out.dtype == jnp.uint8
+    assert int(out[..., :3].max()) <= 255 and int(out[..., :3].min()) >= 0
+    assert not jnp.array_equal(out[..., :3], img[..., :3])   # RGB changed
+    assert jnp.array_equal(out[..., 3], img[..., 3])         # mask intact
