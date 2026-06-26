@@ -53,9 +53,15 @@ def make_optimizer(model, cfg):
     return nnx.Optimizer(model, tx, wrt=nnx.Param)
 
 
-def make_train_step(mask_weight):
-    """Return an nnx.jit train step (renders heatmaps + normalizes on device)."""
+def make_train_step(mask_weight, aug_params=None, lr_swap=None, heatmap_size=224):
+    """Return an nnx.jit train step. When aug_params.enabled, the batch is
+    augmented on-device (using the per-step `key`) before normalize/render."""
+    from jarvis_jax.data.augment import augment_batch, AugParams
     mw = float(mask_weight)
+    ap = aug_params if aug_params is not None else AugParams(enabled=False)
+    if ap.enabled and lr_swap is None:
+        raise ValueError("augmentation enabled but lr_swap is None")
+    swap = jnp.asarray(lr_swap) if lr_swap is not None else None
 
     def loss_fn(model, img4_u8, kp_xy, vis):
         img = normalize_image(img4_u8)
@@ -65,13 +71,15 @@ def make_train_step(mask_weight):
         if mw > 0.0:
             mask = img[..., 3]
             mask224 = jax.image.resize(
-                mask, (mask.shape[0], pred.shape[1], pred.shape[2]),
-                method="nearest")
+                mask, (mask.shape[0], pred.shape[1], pred.shape[2]), method="nearest")
             loss = loss + mw * mask_containment(pred, mask224)
         return loss
 
     @nnx.jit
-    def step(model, optimizer, img4_u8, kp_xy, vis):
+    def step(model, optimizer, key, img4_u8, kp_xy, vis):
+        if ap.enabled:
+            img4_u8, kp_xy, vis = augment_batch(
+                key, img4_u8, kp_xy, vis, ap, swap, heatmap_size)
         loss, grads = nnx.value_and_grad(loss_fn)(model, img4_u8, kp_xy, vis)
         optimizer.update(model, grads)
         return loss

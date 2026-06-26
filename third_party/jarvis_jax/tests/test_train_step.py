@@ -40,11 +40,13 @@ def test_train_step_reduces_loss_with_finite_grads():
     model = ViTPose(cfg, rngs=nnx.Rngs(0))
     tcfg = TrainConfig(total_steps=20, lr=1e-3, warmup_steps=2)
     opt = make_optimizer(model, tcfg)
-    step = make_train_step(mask_weight=0.0)
-
+    # augmentation off here: this is a deterministic wiring gate, not an aug test
+    step = make_train_step(mask_weight=0.0)   # aug_params=None -> disabled
     import jax.numpy as jnp
     img4j, kpj, visj = jnp.asarray(img4), jnp.asarray(kp), jnp.asarray(vis)
-    losses = [float(step(model, opt, img4j, kpj, visj)) for _ in range(20)]
+    k = jax.random.PRNGKey(0)
+    losses = [float(step(model, opt, jax.random.fold_in(k, t), img4j, kpj, visj))
+              for t in range(20)]
 
     assert np.isfinite(losses).all(), f"non-finite loss encountered: {losses}"
     # A clear, robust reduction (not a marginal epsilon) proves gradients flowed

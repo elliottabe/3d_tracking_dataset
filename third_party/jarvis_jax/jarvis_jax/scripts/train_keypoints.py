@@ -10,6 +10,7 @@ CLI (Hydra; see configs/):
     python -m jarvis_jax.scripts.train_keypoints \\
         run_id=myrun train=vit2d model=vitpose paths=hyak
 """
+import json
 import os
 
 import hydra
@@ -31,6 +32,7 @@ from jarvis_jax.sharding import data_parallel_mesh, replicate
 from jarvis_jax.train.train import (
     TrainConfig, make_optimizer, make_train_step, eval_mpjpe,
 )
+from jarvis_jax.data.augment import build_lr_swap, AugParams
 from jarvis_jax.train.checkpoint import make_manager, save_step, restore_latest
 
 DEFAULT_MAE_NPZ = "/gscratch/portia/eabe/data/Johnson_lab/mae_vitb.npz"
@@ -45,7 +47,7 @@ def _epochs(ds, batch_size, base_seed):
 
 
 def run_training(root, *, out_dir, mae_npz=DEFAULT_MAE_NPZ, tcfg=None,
-                 vitpose_cfg=None,
+                 vitpose_cfg=None, aug_params=None,
                  val_recording="2026_05_27_11_56_05",
                  log_every=50, eval_every=500, smoke=False,
                  ckpt_dir=None, save_every=500):
@@ -78,7 +80,12 @@ def run_training(root, *, out_dir, mae_npz=DEFAULT_MAE_NPZ, tcfg=None,
         if start:
             print(f"resuming from checkpoint at step {start}")
 
-    step = make_train_step(tcfg.mask_weight)
+    names = json.load(open(
+        os.path.join(root, "annotations", "instances_train.json")))["keypoint_names"]
+    lr_swap = build_lr_swap(names)
+    aug = aug_params if aug_params is not None else AugParams()
+    step = make_train_step(tcfg.mask_weight, aug, lr_swap, heatmap_size=cfg.heatmap_size)
+    base_key = jax.random.PRNGKey(tcfg.seed)
     mesh = data_parallel_mesh()
 
     # Replicate params + optimizer state across the mesh so the data-sharded
@@ -100,7 +107,8 @@ def run_training(root, *, out_dir, mae_npz=DEFAULT_MAE_NPZ, tcfg=None,
     final_loss = 0.0
     for i in range(start, tcfg.total_steps):
         img4_u8, kp_xy, vis = next(dev_stream)
-        final_loss = float(step(model, opt, img4_u8, kp_xy, vis))
+        final_loss = float(step(model, opt, jax.random.fold_in(base_key, i),
+                                img4_u8, kp_xy, vis))
         if (i + 1) % log_every == 0:
             print(f"step {i+1}/{tcfg.total_steps} loss {final_loss:.5f}")
         if (i + 1) % eval_every == 0:
@@ -128,6 +136,7 @@ def main_from_cfg(cfg):
     # OR model=hybridnet (ViT nested at cfg.model.vitpose).
     model_node = cfg.model.get("vitpose", cfg.model)
     vitpose_cfg = build_dataclass(ViTPoseConfig, model_node)
+    aug_params = build_dataclass(AugParams, cfg.aug)
     run_dir = run_dir_for(cfg)
     return run_training(
         cfg.paths.data_root,
@@ -135,6 +144,7 @@ def main_from_cfg(cfg):
         mae_npz=cfg.paths.mae_npz,
         tcfg=tcfg,
         vitpose_cfg=vitpose_cfg,
+        aug_params=aug_params,
         smoke=bool(cfg.train.get("smoke", False)),
         ckpt_dir=os.path.join(run_dir, "ckpt"),
         save_every=cfg.train.save_every,
