@@ -37,3 +37,64 @@ def build_lr_swap(names):
     assert np.array_equal(arr[arr], np.arange(len(names))), \
         "lr_swap is not an involution — check keypoint L/R naming"
     return arr
+
+
+def _rot(theta):
+    c, s = jnp.cos(theta), jnp.sin(theta)
+    return jnp.array([[c, -s], [s, c]])
+
+
+def affine_warp_image(img, theta, s, tx, ty):
+    """Inverse-sample warp of (H,W,C) float32 about its center. Output =
+    center + s*R(theta)*(src-center) + (tx,ty)*W  (so src is solved inversely).
+    Bilinear, out-of-bounds -> 0."""
+    H, W, C = img.shape
+    cx = W / 2.0
+    cy = H / 2.0
+    ys, xs = jnp.meshgrid(jnp.arange(H), jnp.arange(W), indexing="ij")
+    ox = xs.astype(jnp.float32) - cx - tx * W
+    oy = ys.astype(jnp.float32) - cy - ty * W
+    inv = _rot(-theta) / s
+    src_x = inv[0, 0] * ox + inv[0, 1] * oy + cx
+    src_y = inv[1, 0] * ox + inv[1, 1] * oy + cy
+
+    def samp(ch):
+        return jax.scipy.ndimage.map_coordinates(
+            ch, [src_y, src_x], order=1, mode="constant", cval=0.0)
+
+    return jnp.stack([samp(img[..., k]) for k in range(C)], axis=-1)
+
+
+def affine_transform_kp(kp, theta, s, tx, ty, heatmap_size):
+    """Forward affine on (K,2) keypoints (x,y) in heatmap coords."""
+    c = heatmap_size / 2.0
+    R = _rot(theta)
+    rel = kp - jnp.array([c, c])
+    nx = R[0, 0] * rel[:, 0] + R[0, 1] * rel[:, 1]
+    ny = R[1, 0] * rel[:, 0] + R[1, 1] * rel[:, 1]
+    out_x = c + s * nx + tx * heatmap_size
+    out_y = c + s * ny + ty * heatmap_size
+    return jnp.stack([out_x, out_y], axis=-1)
+
+
+def affine_batch(key, img4_u8, kp_xy, vis, *, rot_deg, scale_min, scale_max,
+                 translate_frac, heatmap_size):
+    """Per-sample random affine over a batch. Warps the image (mask channel
+    re-binarized), transforms keypoints, and ANDs an in-bounds mask into vis."""
+    B = img4_u8.shape[0]
+    k1, k2, k3, k4 = jax.random.split(key, 4)
+    theta = jnp.deg2rad(jax.random.uniform(k1, (B,), minval=-rot_deg, maxval=rot_deg))
+    s = jax.random.uniform(k2, (B,), minval=scale_min, maxval=scale_max)
+    tx = jax.random.uniform(k3, (B,), minval=-translate_frac, maxval=translate_frac)
+    ty = jax.random.uniform(k4, (B,), minval=-translate_frac, maxval=translate_frac)
+
+    warped = jax.vmap(affine_warp_image)(img4_u8.astype(jnp.float32), theta, s, tx, ty)
+    warped = warped.at[..., 3].set((warped[..., 3] > 0.5).astype(jnp.float32))
+    img_out = jnp.clip(jnp.round(warped), 0, 255).astype(jnp.uint8)
+
+    kp_out = jax.vmap(
+        lambda k, th, ss, a, b: affine_transform_kp(k, th, ss, a, b, heatmap_size)
+    )(kp_xy, theta, s, tx, ty)
+    inb = ((kp_out[..., 0] >= 0) & (kp_out[..., 0] < heatmap_size)
+           & (kp_out[..., 1] >= 0) & (kp_out[..., 1] < heatmap_size))
+    return img_out, kp_out, (vis & inb)
