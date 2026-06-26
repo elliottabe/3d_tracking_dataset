@@ -100,6 +100,7 @@ def run_training(root, *, out_dir, mae_npz=DEFAULT_MAE_NPZ, tcfg=None,
 
     train_ds = V3Dataset(root, "train")
     val_ds = V3Dataset(root, "val", recordings=[val_recording])
+    val_ds_all = V3Dataset(root, "val")     # full val = the truthful headline metric
 
     host_stream = _epochs(train_ds, tcfg.batch_size, tcfg.seed)
     dev_stream = prefetch(host_stream, mesh, depth=2)
@@ -112,7 +113,9 @@ def run_training(root, *, out_dir, mae_npz=DEFAULT_MAE_NPZ, tcfg=None,
         if (i + 1) % log_every == 0:
             print(f"step {i+1}/{tcfg.total_steps} loss {final_loss:.5f}")
         if (i + 1) % eval_every == 0:
-            print(f"  val MPJPE {eval_mpjpe(model, val_ds, tcfg.batch_size):.3f}px")
+            full = eval_mpjpe(model, val_ds_all, tcfg.batch_size)
+            fem = eval_mpjpe(model, val_ds, tcfg.batch_size)
+            print(f"  val MPJPE {full:.3f}px (female {val_recording}: {fem:.3f}px)")
         if mngr is not None and (i + 1) % save_every == 0:
             save_step(mngr, i + 1, model, opt)
 
@@ -120,8 +123,10 @@ def run_training(root, *, out_dir, mae_npz=DEFAULT_MAE_NPZ, tcfg=None,
         save_step(mngr, tcfg.total_steps, model, opt)
         mngr.wait_until_finished()
 
-    val_mpjpe = eval_mpjpe(model, val_ds, tcfg.batch_size)
-    print(f"final val MPJPE {val_mpjpe:.3f}px")
+    val_mpjpe = eval_mpjpe(model, val_ds_all, tcfg.batch_size)
+    fem_mpjpe = eval_mpjpe(model, val_ds, tcfg.batch_size)
+    print(f"final val MPJPE {val_mpjpe:.3f}px "
+          f"(female {val_recording}: {fem_mpjpe:.3f}px)")
 
     ckptr = ocp.StandardCheckpointer()
     ckptr.save(out_dir, nnx.split(model)[1], force=True)
