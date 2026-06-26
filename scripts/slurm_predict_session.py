@@ -98,6 +98,7 @@ export LD_PRELOAD="$CONDA_PREFIX/lib/libstdc++.so.6"   # cv2 (both stages)
 echo "Node: $SLURMD_NODENAME  job: $SLURM_JOB_ID"
 nvidia-smi -L
 cd {pkg_dir}
+set -e   # fail-fast: if Stage 1 (SAM3) errors, do NOT run Stage 2 on partial masks
 # --- Stage 1: SAM3 masks (PyTorch; needs cu13 CUDA libs) ---
 export LD_LIBRARY_PATH="$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cu13/lib"
 python -u scripts/sam3_masks.py paths={paths} sam3=default \\

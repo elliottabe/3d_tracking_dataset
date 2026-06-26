@@ -257,7 +257,7 @@ def test_build_worker_cmd():
     assert argv[0] == "/py" and argv[1] == "/s/sam3_masks.py"
     assert "sam3.gpus=[0]" in argv          # recursion guard
     assert "sam3.sam3_gpu=0" in argv
-    assert "sam3.bout_ids=4,5,6" in argv    # this worker's subset
+    assert "sam3.bout_ids='4,5,6'" in argv  # QUOTED so Hydra parses it as a string
     assert "sam3.limit=0" in argv
     assert "sam3.out=/o" in argv            # shared out dir
     assert "sam3.session_dir=/data/sess" in argv
@@ -285,6 +285,29 @@ def test_build_worker_cmd_jarvis_root_none():
     assert "sam3.reuse_masks=false" in argv
     assert "sam3.sam3_compile=true" in argv
     assert "sam3.sam3_checkpoint=/ckpt" in argv
+
+
+def test_build_worker_cmd_overrides_parse_through_hydra():
+    """Regression: the worker overrides must actually compose under Hydra.
+    A bare comma value (sam3.bout_ids=1,2,3) raises 'Ambiguous value'; this
+    confirms the quoted form parses to the expected string. (The dispatcher's
+    mocked Popen never exercised real Hydra, so this gap shipped a broken run.)"""
+    from hydra import initialize_config_dir, compose
+    from jarvis_jax.hydra_utils import CONFIG_DIR, register_resolvers
+    register_resolvers()
+    _, argv = build_worker_cmd(
+        python="/py", script="/s/sam3_masks.py", gpu=2, bout_ids=[17, 18, 19, 20],
+        session_dir="/d/courtship/Session1/rec", out="/o", project="red_data_unified",
+        bouts_csv="/d/b.csv", num_animals=2, reuse_masks=True, jarvis_root="/jr",
+        sam3_version="sam3.1", sam3_compile=False, sam3_text="insect",
+        sam3_checkpoint=None, manifest_name="manifest.gpu2.json",
+        inductor_cache_dir="/tmp/ti2", base_env={})
+    overrides = argv[2:]   # everything after [python, script]
+    with initialize_config_dir(version_base=None, config_dir=CONFIG_DIR):
+        cfg = compose(config_name="config", overrides=overrides)  # must NOT raise
+    assert str(cfg.sam3.bout_ids) == "17,18,19,20"
+    # the entrypoint parses it the same way it parses a user-supplied value
+    assert [int(x) for x in str(cfg.sam3.bout_ids).split(",") if str(x).strip()] == [17, 18, 19, 20]
 
 
 def test_merge_manifests(tmp_path):
@@ -339,9 +362,9 @@ def test_run_sam3_masks_multi_dispatch(tmp_path, monkeypatch):
             # parse the overrides this worker received
             ov = {a.split("=", 1)[0]: a.split("=", 1)[1]
                   for a in argv if "=" in a and a.startswith("sam3.")}
-            launched.append((env["CUDA_VISIBLE_DEVICES"], ov["sam3.bout_ids"]))
+            launched.append((env["CUDA_VISIBLE_DEVICES"], ov["sam3.bout_ids"].strip("'")))
             # emulate the worker: write a partial manifest for its bout subset
-            ids = [int(x) for x in ov["sam3.bout_ids"].split(",")]
+            ids = [int(x) for x in ov["sam3.bout_ids"].strip("'").split(",")]
             os.makedirs(ov["sam3.out"], exist_ok=True)
             partial = os.path.join(ov["sam3.out"], ov["sam3.manifest_name"])
             with open(partial, "w") as f:
@@ -395,7 +418,7 @@ def test_run_sam3_masks_multi_raises_on_worker_failure(tmp_path, monkeypatch):
             ov = {a.split("=", 1)[0]: a.split("=", 1)[1]
                   for a in argv if "=" in a and a.startswith("sam3.")}
             self._gpu = env["CUDA_VISIBLE_DEVICES"]
-            ids = [int(x) for x in ov["sam3.bout_ids"].split(",")]
+            ids = [int(x) for x in ov["sam3.bout_ids"].strip("'").split(",")]
             os.makedirs(ov["sam3.out"], exist_ok=True)
             # GPU 0 succeeds (writes its partial); GPU 1 "fails" (no partial).
             if self._gpu == "0":
@@ -448,7 +471,7 @@ def test_run_sam3_masks_multi_raises_on_clean_exit_no_manifest(tmp_path, monkeyp
             os.makedirs(ov["sam3.out"], exist_ok=True)
             # GPU 0 writes its partial; GPU 1 exits 0 but writes nothing.
             if self._gpu == "0":
-                ids = [int(x) for x in ov["sam3.bout_ids"].split(",")]
+                ids = [int(x) for x in ov["sam3.bout_ids"].strip("'").split(",")]
                 with open(os.path.join(ov["sam3.out"], ov["sam3.manifest_name"]),
                           "w") as f:
                     _json.dump({"bouts": [{"bout_idx": i} for i in ids]}, f)

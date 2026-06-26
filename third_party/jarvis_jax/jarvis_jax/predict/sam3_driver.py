@@ -144,7 +144,10 @@ def build_worker_cmd(*, python, script, gpu, bout_ids, session_dir, out, project
         "sam3=default",
         "sam3.gpus=[0]",
         "sam3.sam3_gpu=0",
-        f"sam3.bout_ids={bout_csv}",
+        # Quote the comma value so Hydra parses it as a STRING (the entrypoint
+        # does str(bout_ids).split(",")). Unquoted "1,2,3" -> Hydra "Ambiguous
+        # value"; bracketed [1,2,3] -> a list that str().split(",") mangles.
+        f"sam3.bout_ids='{bout_csv}'",
         "sam3.limit=0",
         f"sam3.session_dir={session_dir}",
         f"sam3.out={out}",
