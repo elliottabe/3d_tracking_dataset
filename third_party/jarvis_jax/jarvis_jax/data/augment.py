@@ -150,3 +150,34 @@ def photometric_batch(key, img4_u8, brightness, contrast, gamma):
     rgb = jnp.clip(rgb, 0.0, 1.0) ** g
     rgb = jnp.clip(jnp.round(rgb * 255.0), 0, 255).astype(img4_u8.dtype)
     return jnp.concatenate([rgb, img4_u8[..., 3:]], axis=-1)
+
+
+@dataclasses.dataclass(frozen=True)
+class AugParams:
+    enabled: bool = True
+    rot_deg: float = 30.0
+    scale_min: float = 0.8
+    scale_max: float = 1.25
+    translate_frac: float = 0.1
+    flip_p: float = 0.5
+    cutout_n: int = 2
+    cutout_frac: float = 0.25
+    brightness: float = 0.2
+    contrast: float = 0.2
+    gamma: float = 0.2
+
+
+def augment_batch(key, img4_u8, kp_xy, vis, params, lr_swap, heatmap_size=224):
+    """Apply the full augmentation pipeline to a batch. Identity when
+    params.enabled is False. Order: affine -> flip -> cutout -> photometric."""
+    if not params.enabled:
+        return img4_u8, kp_xy, vis
+    kg, kf, kc, kp_ = jax.random.split(key, 4)
+    img, kp, vis = affine_batch(
+        kg, img4_u8, kp_xy, vis, rot_deg=params.rot_deg,
+        scale_min=params.scale_min, scale_max=params.scale_max,
+        translate_frac=params.translate_frac, heatmap_size=heatmap_size)
+    img, kp, vis = flip_batch(kf, img, kp, vis, lr_swap, params.flip_p, heatmap_size)
+    img = cutout_batch(kc, img, params.cutout_n, params.cutout_frac)
+    img = photometric_batch(kp_, img, params.brightness, params.contrast, params.gamma)
+    return img, kp, vis

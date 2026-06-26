@@ -10,6 +10,7 @@ defaults:
   - predict: default
   - sam3: default
   - predict_session: default
+  - aug: default
 
 run_id: run
 note: ''

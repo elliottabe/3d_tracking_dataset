@@ -1,0 +1,12 @@
+# @package aug
+enabled: true
+rot_deg: 30          # +/- rotation degrees
+scale_min: 0.8
+scale_max: 1.25
+translate_frac: 0.1  # +/- fraction of the crop
+flip_p: 0.5          # horizontal flip probability (with L/R keypoint swap)
+cutout_n: 2          # number of erased boxes
+cutout_frac: 0.25    # box side as a fraction of the crop
+brightness: 0.2
+contrast: 0.2
+gamma: 0.2

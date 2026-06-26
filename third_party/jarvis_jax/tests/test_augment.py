@@ -111,3 +111,38 @@ def test_photometric_changes_rgb_within_range_keeps_mask():
     assert int(out[..., :3].max()) <= 255 and int(out[..., :3].min()) >= 0
     assert not jnp.array_equal(out[..., :3], img[..., :3])   # RGB changed
     assert jnp.array_equal(out[..., 3], img[..., 3])         # mask intact
+
+
+from jarvis_jax.data.augment import AugParams, augment_batch
+
+
+def test_augment_disabled_is_identity():
+    rng = np.random.RandomState(0)
+    img = jnp.asarray(rng.randint(0, 256, (2, 32, 32, 4), dtype=np.uint8))
+    kp = jnp.asarray(rng.uniform(0, 16, (2, 50, 2)).astype(np.float32))
+    vis = jnp.ones((2, 50), bool)
+    sw = build_lr_swap(V3_NAMES)
+    oi, ok, ov = augment_batch(jax.random.PRNGKey(0), img, kp, vis,
+                               AugParams(enabled=False), sw, heatmap_size=16)
+    assert jnp.array_equal(oi, img) and jnp.array_equal(ok, kp) and jnp.array_equal(ov, vis)
+
+
+def test_augment_enabled_preserves_shapes_and_dtypes():
+    rng = np.random.RandomState(0)
+    img = jnp.asarray(rng.randint(0, 256, (2, 32, 32, 4), dtype=np.uint8))
+    kp = jnp.asarray(rng.uniform(2, 14, (2, 50, 2)).astype(np.float32))
+    vis = jnp.ones((2, 50), bool)
+    sw = build_lr_swap(V3_NAMES)
+    oi, ok, ov = augment_batch(jax.random.PRNGKey(0), img, kp, vis,
+                               AugParams(enabled=True), sw, heatmap_size=16)
+    assert oi.shape == img.shape and oi.dtype == jnp.uint8
+    assert ok.shape == kp.shape and ov.shape == vis.shape and ov.dtype == jnp.bool_
+
+
+def test_aug_config_composes():
+    from hydra import initialize_config_dir, compose
+    from jarvis_jax.hydra_utils import CONFIG_DIR, register_resolvers
+    register_resolvers()
+    with initialize_config_dir(version_base=None, config_dir=CONFIG_DIR):
+        cfg = compose(config_name="config", overrides=["paths=hyak", "aug=default"])
+    assert cfg.aug.enabled is True and cfg.aug.rot_deg == 30 and cfg.aug.flip_p == 0.5
