@@ -233,7 +233,7 @@ def _enable_sam3_lowmem(predictor):
 
 def run_sam3_masks(*, project, session_dir, bouts_csv, out, num_animals=2,
                    limit=0, bout_ids=None, reuse_masks=True, sam3=None,
-                   jarvis_root=None, manifest_name="manifest.json"):
+                   jarvis_root=None, manifest_name="manifest.json", lowmem=True):
     """Run SAM3 video tracking + identity over a session's bouts, writing a
     per-bout sam3_masks.npz + a session manifest.
 
@@ -345,6 +345,11 @@ def run_sam3_masks(*, project, session_dir, bouts_csv, out, num_animals=2,
                     checkpoint_path=sam3.get("checkpoint_path", None))
                 tracker_load_time = round(time.time() - t_load, 1)
                 print(f"[sam3] SAM3VideoTracker loaded in {tracker_load_time}s")
+                if lowmem:
+                    nlm = _enable_sam3_lowmem(tracker.predictor)
+                    print(f"[sam3] low-mem eval enabled on {nlm} module(s)" if nlm
+                          else "[sam3] WARNING: lowmem requested but no SAM3 "
+                               "module exposed offload_output_to_cpu_for_eval")
 
             bm = tracker.process_bout(
                 video_paths, b["start"], b["n"], num_animals=num_animals)

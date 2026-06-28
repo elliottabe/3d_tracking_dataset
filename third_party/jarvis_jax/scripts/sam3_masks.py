@@ -47,7 +47,7 @@ def main_from_cfg(cfg):
     gpus = resolve_gpus(s.gpus, env=os.environ, device_count=device_count)
     if len(gpus) > 1:
         return run_sam3_masks_multi(gpus=gpus, **common)
-    return run_sam3_masks(manifest_name=s.manifest_name, **common)
+    return run_sam3_masks(manifest_name=s.manifest_name, lowmem=s.lowmem, **common)
 
 
 @hydra.main(version_base=None, config_path=CONFIG_DIR, config_name="config")

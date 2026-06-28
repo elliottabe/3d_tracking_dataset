@@ -8,6 +8,8 @@ num_animals: 2
 limit: 0           # 0 = all bouts
 bout_ids: ''       # '' = all; else comma-separated bout_idx
 reuse_masks: true  # skip bouts whose sam3_masks.npz already exists
+lowmem: true       # bound GPU memory on long bouts: offload SAM3 per-frame
+                   # outputs to CPU + trim past memory (set False to disable)
 sam3_version: sam3.1
 sam3_gpu: 0
 gpus: null         # null/[] = use all visible GPUs (CUDA_VISIBLE_DEVICES, else
