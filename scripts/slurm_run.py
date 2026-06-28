@@ -293,5 +293,13 @@ python ./scripts/slurm_run.py --dataset courtship --anatomy v1 --paths hyak --ba
 python ./scripts/slurm_run.py --dataset courtship --anatomy v1 --paths hyak --base-dir /gscratch/portia/eabe/data/Johnson_lab/courtship/Session1_bouts_04172026 --extra=--force --dry-run
 
 
+cd /gscratch/portia/eabe/Research/MyRepos/3d_tracking_dataset/third_party/jarvis_jax
+conda activate 3d_tracking
+
+CACHE=/gscratch/portia/eabe/data/Johnson_lab/jax_repro_cache/v3
+RUN=/gscratch/portia/eabe/data/Johnson_lab/jax_cached3d_runs/here_run1
+
+XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 python -u -m jarvis_jax.train.train_3d_cached  --cache-dir "$CACHE" --out "$RUN/final" --ckpt-dir "$RUN/ckpt"  --steps 20000 --batch 64 --lr 3e-4 --laplacian-weight 0.05 --save-every 1000
+
 
 '''

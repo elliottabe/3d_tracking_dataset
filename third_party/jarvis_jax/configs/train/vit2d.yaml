@@ -2,13 +2,13 @@
 lr: 1.0e-3
 weight_decay: 0.05
 warmup_steps: 100
-total_steps: 20000
+total_steps: 30000
 batch_size: 32
 mask_weight: 0.0
 backbone_lr_mult: 0.1
 seed: 0
 # loop / launcher args:
-base_batch: 8
+base_batch: 64
 lr_scaling: sqrt
-save_every: 500
+save_every: 1000
 smoke: false
