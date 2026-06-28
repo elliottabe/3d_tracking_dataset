@@ -492,3 +492,56 @@ def test_run_sam3_masks_multi_raises_on_clean_exit_no_manifest(tmp_path, monkeyp
     # Only GPU-0's bouts merged; GPU-1 (no manifest) was treated as failed.
     merged = _json.loads((out / "manifest.json").read_text())
     assert [b["bout_idx"] for b in merged["bouts"]] == [0, 1]
+
+
+def test_enable_sam3_lowmem_on_module():
+    import torch.nn as nn
+    from jarvis_jax.predict.sam3_driver import _enable_sam3_lowmem
+
+    class Leaf(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.offload_output_to_cpu_for_eval = False
+            self.trim_past_non_cond_mem_for_eval = False
+
+    class Parent(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.child = Leaf()
+
+    p = Parent()
+    n = _enable_sam3_lowmem(p)
+    assert n == 1
+    assert p.child.offload_output_to_cpu_for_eval is True
+    assert p.child.trim_past_non_cond_mem_for_eval is True
+
+
+def test_enable_sam3_lowmem_on_wrapper_object():
+    import torch.nn as nn
+    from jarvis_jax.predict.sam3_driver import _enable_sam3_lowmem
+
+    class Leaf(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.offload_output_to_cpu_for_eval = False
+            self.trim_past_non_cond_mem_for_eval = False
+
+    class Wrapper:                    # not an nn.Module (request-handler style)
+        def __init__(self):
+            self.model = Leaf()
+
+    w = Wrapper()
+    n = _enable_sam3_lowmem(w)
+    assert n == 1
+    assert w.model.offload_output_to_cpu_for_eval is True
+    assert w.model.trim_past_non_cond_mem_for_eval is True
+
+
+def test_enable_sam3_lowmem_none_found_returns_zero():
+    import torch.nn as nn
+    from jarvis_jax.predict.sam3_driver import _enable_sam3_lowmem
+
+    class Empty(nn.Module):
+        pass
+
+    assert _enable_sam3_lowmem(Empty()) == 0

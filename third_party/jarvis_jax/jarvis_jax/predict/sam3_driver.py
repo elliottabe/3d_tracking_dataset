@@ -192,6 +192,45 @@ def merge_manifests(partial_paths, *, base):
     return merged
 
 
+def _enable_sam3_lowmem(predictor):
+    """Enable SAM3's long-video memory bounding on the multiplex tracker.
+
+    Sets offload_output_to_cpu_for_eval (move per-frame outputs off-GPU) and
+    trim_past_non_cond_mem_for_eval (drop stored past-frame outputs) on every
+    module that exposes them. Both are read at propagation time, so setting them
+    on the constructed tracker takes effect and bounds GPU memory regardless of
+    bout length. Returns the number of modules updated (0 => warn upstream)."""
+    import torch.nn as nn
+    n = 0
+    seen = set()
+
+    def _apply(obj):
+        nonlocal n
+        if hasattr(obj, "offload_output_to_cpu_for_eval"):
+            obj.offload_output_to_cpu_for_eval = True
+            if hasattr(obj, "trim_past_non_cond_mem_for_eval"):
+                obj.trim_past_non_cond_mem_for_eval = True
+            n += 1
+
+    def _walk(obj, depth=0):
+        if id(obj) in seen or depth > 4:
+            return
+        seen.add(id(obj))
+        if isinstance(obj, nn.Module):
+            for m in obj.modules():
+                _apply(m)
+            return
+        _apply(obj)
+        d = getattr(obj, "__dict__", None)
+        if d:
+            for v in list(d.values()):
+                if isinstance(v, nn.Module) or hasattr(v, "__dict__"):
+                    _walk(v, depth + 1)
+
+    _walk(predictor)
+    return n
+
+
 def run_sam3_masks(*, project, session_dir, bouts_csv, out, num_animals=2,
                    limit=0, bout_ids=None, reuse_masks=True, sam3=None,
                    jarvis_root=None, manifest_name="manifest.json"):
