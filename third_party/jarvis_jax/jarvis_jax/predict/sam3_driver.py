@@ -195,11 +195,15 @@ def merge_manifests(partial_paths, *, base):
 def _enable_sam3_lowmem(predictor):
     """Enable SAM3's long-video memory bounding on the multiplex tracker.
 
-    Sets offload_output_to_cpu_for_eval (move per-frame outputs off-GPU) and
-    trim_past_non_cond_mem_for_eval (drop stored past-frame outputs) on every
-    module that exposes them. Both are read at propagation time, so setting them
-    on the constructed tracker takes effect and bounds GPU memory regardless of
-    bout length. Returns the number of modules updated (0 => warn upstream)."""
+    Sets offload_output_to_cpu_for_eval=True (move per-frame outputs off-GPU) on
+    every module that exposes it. This is the flag that bounds GPU memory on long
+    bouts; it's read at propagation time, so setting it on the constructed tracker
+    takes effect. Returns the number of modules updated (0 => warn upstream).
+
+    NOTE: we deliberately do NOT set trim_past_non_cond_mem_for_eval — its trim
+    path (_trim_past_out) assumes point-prompt inputs and raises
+    KeyError('multistep_point_inputs') under our text-prompted multiplex tracking.
+    offload_output_to_cpu_for_eval alone bounds the memory we need."""
     import torch.nn as nn
     n = 0
     seen = set()
@@ -208,8 +212,6 @@ def _enable_sam3_lowmem(predictor):
         nonlocal n
         if hasattr(obj, "offload_output_to_cpu_for_eval"):
             obj.offload_output_to_cpu_for_eval = True
-            if hasattr(obj, "trim_past_non_cond_mem_for_eval"):
-                obj.trim_past_non_cond_mem_for_eval = True
             n += 1
 
     def _walk(obj, depth=0):
@@ -258,9 +260,9 @@ def run_sam3_masks(*, project, session_dir, bouts_csv, out, num_animals=2,
               (which has no projects — pass an explicit path or set the env
               var when the third_party copy is used).
         manifest_name: Filename for the session manifest written under `out`.
-        lowmem: If True, after building the tracker enable SAM3's long-video
-              eval flags (offload_output_to_cpu_for_eval + trim_past_non_cond_
-              mem_for_eval) so GPU memory stays bounded on long bouts.
+        lowmem: If True, after building the tracker set SAM3's
+              offload_output_to_cpu_for_eval so GPU memory stays bounded on long
+              bouts (per-frame outputs offloaded to CPU).
 
     Returns:
         The manifest dict (also written to <out>/manifest.json).

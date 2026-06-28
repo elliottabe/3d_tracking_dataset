@@ -513,7 +513,8 @@ def test_enable_sam3_lowmem_on_module():
     n = _enable_sam3_lowmem(p)
     assert n == 1
     assert p.child.offload_output_to_cpu_for_eval is True
-    assert p.child.trim_past_non_cond_mem_for_eval is True
+    # trim is deliberately NOT enabled (KeyError in the text-prompt multiplex path)
+    assert p.child.trim_past_non_cond_mem_for_eval is False
 
 
 def test_enable_sam3_lowmem_on_wrapper_object():
@@ -534,7 +535,7 @@ def test_enable_sam3_lowmem_on_wrapper_object():
     n = _enable_sam3_lowmem(w)
     assert n == 1
     assert w.model.offload_output_to_cpu_for_eval is True
-    assert w.model.trim_past_non_cond_mem_for_eval is True
+    assert w.model.trim_past_non_cond_mem_for_eval is False  # deliberately not set
 
 
 def test_enable_sam3_lowmem_none_found_returns_zero():
