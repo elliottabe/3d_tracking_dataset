@@ -257,6 +257,10 @@ def run_sam3_masks(*, project, session_dir, bouts_csv, out, num_animals=2,
               JARVIS_ROOT env var, then falls back to the third_party copy
               (which has no projects — pass an explicit path or set the env
               var when the third_party copy is used).
+        manifest_name: Filename for the session manifest written under `out`.
+        lowmem: If True, after building the tracker enable SAM3's long-video
+              eval flags (offload_output_to_cpu_for_eval + trim_past_non_cond_
+              mem_for_eval) so GPU memory stays bounded on long bouts.
 
     Returns:
         The manifest dict (also written to <out>/manifest.json).
