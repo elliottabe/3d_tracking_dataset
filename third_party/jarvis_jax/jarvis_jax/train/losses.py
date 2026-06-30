@@ -3,7 +3,8 @@ import jax
 import jax.numpy as jnp
 
 
-def heatmap_mse(pred, gt, vis, bg_weight=0.1, fg_thresh=0.01, eps=1e-6):
+def heatmap_mse(pred, gt, vis, bg_weight=0.1, fg_thresh=0.01, eps=1e-6,
+                joint_weight=None):
     """Foreground-weighted heatmap MSE. pred,gt: (B,H,W,K); vis: (B,K) bool.
 
     Plain mean-MSE over all H*W pixels dilutes the sparse keypoint-foreground
@@ -12,6 +13,9 @@ def heatmap_mse(pred, gt, vis, bg_weight=0.1, fg_thresh=0.01, eps=1e-6):
     foreground (gt > fg_thresh) and background pixels per keypoint, then combine
     as mse_fg + bg_weight * mse_bg. This gives the peak a full-strength gradient.
     Averaged over visible keypoints only.
+
+    ``joint_weight`` (optional ``(K,)``) scales each channel's contribution — used
+    to emphasise hard channels (e.g. wing vertices) during a focused fine-tune.
     """
     d = (pred - gt) ** 2
     fg = (gt > fg_thresh).astype(pred.dtype)
@@ -20,6 +24,8 @@ def heatmap_mse(pred, gt, vis, bg_weight=0.1, fg_thresh=0.01, eps=1e-6):
     per_kp = (d * fg).sum(axis=(1, 2)) / nfg + bg_weight * (
         (d * (1.0 - fg)).sum(axis=(1, 2)) / nbg)          # (B,K)
     w = vis.astype(pred.dtype)
+    if joint_weight is not None:
+        w = w * jnp.asarray(joint_weight, dtype=pred.dtype)[None, :]
     return (per_kp * w).sum() / jnp.maximum(w.sum(), 1.0)
 
 

@@ -41,7 +41,8 @@ def main_from_cfg(cfg):
         project=ps.project, jarvis_root=(ps.jarvis_root or None),
         v2v_final=os.path.join(run_dir, "final"),
         vitpose_ckpt=cfg.paths.vitpose_ckpt, sharpen=cfg.model.sharpen,
-        num_animals=ps.num_animals, batch=ps.batch, bout_ids=bout_ids, limit=ps.limit)
+        num_animals=ps.num_animals, batch=ps.batch, bout_ids=bout_ids, limit=ps.limit,
+        num_keypoints=int(ps.get("num_keypoints", 50)))
 
 
 @hydra.main(version_base=None, config_path=CONFIG_DIR, config_name="config")

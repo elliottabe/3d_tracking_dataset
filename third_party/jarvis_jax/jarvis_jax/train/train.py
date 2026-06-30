@@ -53,21 +53,28 @@ def make_optimizer(model, cfg):
     return nnx.Optimizer(model, tx, wrt=nnx.Param)
 
 
-def make_train_step(mask_weight, aug_params=None, lr_swap=None, heatmap_size=224):
+def make_train_step(mask_weight, aug_params=None, lr_swap=None, heatmap_size=224,
+                    sigma=7.0, joint_weight=None):
     """Return an nnx.jit train step. When aug_params.enabled, the batch is
-    augmented on-device (using the per-step `key`) before normalize/render."""
+    augmented on-device (using the per-step `key`) before normalize/render.
+
+    ``sigma`` (scalar or per-channel ``(K,)``) sets the target Gaussian width, and
+    ``joint_weight`` (optional ``(K,)``) re-weights each channel's loss — used by
+    the CSE wing fine-tune to sharpen + emphasise the densely-packed wing verts."""
     from jarvis_jax.data.augment import augment_batch, AugParams
     mw = float(mask_weight)
     ap = aug_params if aug_params is not None else AugParams(enabled=False)
     if ap.enabled and lr_swap is None:
         raise ValueError("augmentation enabled but lr_swap is None")
     swap = jnp.asarray(lr_swap) if lr_swap is not None else None
+    sig = jnp.asarray(sigma, dtype=jnp.float32)
+    jw = None if joint_weight is None else jnp.asarray(joint_weight, dtype=jnp.float32)
 
     def loss_fn(model, img4_u8, kp_xy, vis):
         img = normalize_image(img4_u8)
-        hm = render_heatmaps(kp_xy, vis)
+        hm = render_heatmaps(kp_xy, vis, heatmap_size=heatmap_size, sigma=sig)
         pred = model(img, use_running_average=False)
-        loss = heatmap_mse(pred, hm, vis)
+        loss = heatmap_mse(pred, hm, vis, joint_weight=jw)
         if mw > 0.0:
             mask = img[..., 3]
             mask224 = jax.image.resize(

@@ -34,7 +34,7 @@ def load_inference_model(vitpose_ckpt, v2v_final_dir, *, sharpen=3.0, num_keypoi
         across the data-parallel mesh.  ``model._mesh`` holds the
         :class:`jax.sharding.Mesh` for use in :func:`predict_batch`.
     """
-    vit_cfg = ViTPoseConfig()
+    vit_cfg = ViTPoseConfig(num_keypoints=num_keypoints)
     vitpose = load_vitpose(vitpose_ckpt, vit_cfg)
 
     v2v = V2VNet(num_keypoints, num_keypoints, rngs=nnx.Rngs(0))
@@ -56,16 +56,31 @@ def load_inference_model(vitpose_ckpt, v2v_final_dir, *, sharpen=3.0, num_keypoi
     return model
 
 
-def _make_step():
+def _make_steps():
+    # Split the forward into two jitted stages with a host barrier between them.
+    # A single fused jit of ViTPose+reproject+V2VNet needs ~33 GiB at J=250 and
+    # OOMs a 48 GB GPU; separate jits each peak at their own (much smaller) max
+    # and free between, while the (B,J,48^3) volume handoff is <1 GB.
+    from jarvis_jax.hybridnet.model import soft_argmax_3d
+
     @nnx.jit
-    def step(model, crops4, center3D, centerHM, cameraMatrices):
-        _, kp3d, conf = model(crops4, center3D, centerHM, cameraMatrices,
-                              use_running_average=True)
-        return kp3d, conf
-    return step
+    def step_vol(model, crops4, center3D, centerHM, cameraMatrices):
+        # ViTPose -> pad -> reproject -> /255  ->  (B, J, 48, 48, 48)
+        return model.reproject_volume(crops4, center3D, centerHM, cameraMatrices)
+
+    @nnx.jit
+    def step_3d(model, vol3d, center3D):
+        v = jnp.transpose(vol3d, (0, 2, 3, 4, 1))          # (B,48,48,48,J)
+        v = model.v2vnet(v, use_running_average=True)
+        v = jnp.transpose(v, (0, 4, 1, 2, 3))
+        v = jax.nn.softplus(v)
+        pts, conf = soft_argmax_3d(v, grid_spacing=1, roi_cube=48, sharpen=model.sharpen)
+        return pts + center3D[:, None, :], conf
+
+    return step_vol, step_3d
 
 
-_STEP = _make_step()
+_STEP_VOL, _STEP_3D = _make_steps()
 
 
 def predict_batch(model, crops4, centerHM, cameraMatrices):
@@ -80,8 +95,8 @@ def predict_batch(model, crops4, centerHM, cameraMatrices):
         cameraMatrices: ``(B, nc, 4, 3)`` float32 DLT projection matrices.
 
     Returns:
-        kp3d:    ``(B, 50, 3)`` float32 world-space 3-D keypoints.
-        conf:    ``(B, 50)`` float32 per-joint confidence in [0, 1].
+        kp3d:    ``(B, J, 3)`` float32 world-space 3-D joints (J = num_keypoints).
+        conf:    ``(B, J)`` float32 per-joint confidence in [0, 1].
         center3D: ``(B, 3)`` float32 lattice-snapped 3D centres from SAM3 masks.
     """
     center3D, _ = estimate_center3d_from_masks(
@@ -92,5 +107,9 @@ def predict_batch(model, crops4, centerHM, cameraMatrices):
     c3 = shard_batch(jnp.asarray(center3D), mesh)
     chm = shard_batch(jnp.asarray(np.asarray(centerHM), dtype=jnp.float32), mesh)
     cam = shard_batch(jnp.asarray(np.asarray(cameraMatrices), dtype=jnp.float32), mesh)
-    kp3d, conf = _STEP(model, cr, c3, chm, cam)
+    # Stage 1: ViTPose + reproject -> volume; host round-trip frees stage-1 memory.
+    vol = np.asarray(_STEP_VOL(model, cr, c3, chm, cam))
+    vol = shard_batch(jnp.asarray(vol), mesh)
+    # Stage 2: V2VNet + soft-argmax -> 3-D joints.
+    kp3d, conf = _STEP_3D(model, vol, c3)
     return np.asarray(kp3d), np.asarray(conf), center3D

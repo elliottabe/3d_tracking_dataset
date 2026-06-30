@@ -17,7 +17,12 @@ def normalize_image(img4_u8):
 
 
 def render_heatmaps(kp_xy, vis, heatmap_size=224, sigma=7.0):
-    """(B,K,2) heatmap-coord keypoints + (B,K) vis -> (B,H,W,K) Gaussians."""
+    """(B,K,2) heatmap-coord keypoints + (B,K) vis -> (B,H,W,K) Gaussians.
+
+    ``sigma`` may be a scalar (all channels) or a per-channel ``(K,)`` array — the
+    latter lets densely-packed channels (e.g. wing vertices) use a tighter Gaussian
+    so neighbouring peaks stay resolvable instead of merging into one blob.
+    """
     ys = jnp.arange(heatmap_size, dtype=jnp.float32)
     xs = jnp.arange(heatmap_size, dtype=jnp.float32)
     gy, gx = jnp.meshgrid(ys, xs, indexing="ij")          # (H,W)
@@ -25,5 +30,8 @@ def render_heatmaps(kp_xy, vis, heatmap_size=224, sigma=7.0):
     gy = gy[None, :, :, None]
     cx = kp_xy[:, None, None, :, 0]                        # (B,1,1,K)
     cy = kp_xy[:, None, None, :, 1]
-    hm = jnp.exp(-(((gx - cx) ** 2) + ((gy - cy) ** 2)) / (2.0 * sigma * sigma))
+    s = jnp.asarray(sigma, dtype=jnp.float32)
+    if s.ndim == 1:                                        # per-channel (K,) -> (1,1,1,K)
+        s = s[None, None, None, :]
+    hm = jnp.exp(-(((gx - cx) ** 2) + ((gy - cy) ** 2)) / (2.0 * s * s))
     return hm * vis[:, None, None, :].astype(jnp.float32)

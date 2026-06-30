@@ -173,12 +173,14 @@ def load_cache(cache_dir: str, split: str) -> dict:
         meta = json.load(f)
 
     n = int(meta["n"])
+    # J defaults to 50 for legacy caches; CSE caches store n_joints (e.g. 250).
+    J = int(meta.get("n_joints", _NUM_JOINTS))
 
     mm = np.memmap(
         _vol_path(cache_dir, split),
         dtype=np.float16,
         mode="r",
-        shape=(n, *_VOL_SHAPE),
+        shape=(n, J, _GRID, _GRID, _GRID),
     )
 
     with np.load(_labels_path(cache_dir, split)) as f:

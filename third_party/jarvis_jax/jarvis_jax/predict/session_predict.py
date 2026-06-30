@@ -141,7 +141,7 @@ def _read_frame(caps, frame_idx):
 
 def run_predict_session(*, session_dir, masks_dir, out, project, jarvis_root,
                         v2v_final, vitpose_ckpt, sharpen, num_animals=2, batch=8,
-                        bout_ids=None, limit=0, data_root=None):
+                        bout_ids=None, limit=0, data_root=None, num_keypoints=50):
     """Orchestrate 3-D inference for all requested bouts in one session.
 
     Reads D2 SAM3 masks from *masks_dir*, opens per-camera videos from
@@ -199,13 +199,18 @@ def run_predict_session(*, session_dir, masks_dir, out, project, jarvis_root,
     # Camera geometry (names + projection matrices) in JARVIS/D2 axis order.
     camera_names, cameraMatrices = session_geometry(project, session_dir, jarvis_root)
 
-    # Joint names from the V3 dataset (50 keypoints).
+    # Joint names: 50 V3 keypoints, then vtx_0..(M-1) canonical vertices for dense pose.
     from jarvis_jax.data.v3_3d import V3FramesetDataset
     root = data_root or "/gscratch/portia/eabe/data/Johnson_lab/red_data/red_data_unified_V3"
     joint_names = list(V3FramesetDataset(root, "val").keypoint_names)
+    if num_keypoints > len(joint_names):
+        joint_names += [f"vtx_{i}" for i in range(num_keypoints - len(joint_names))]
+    elif num_keypoints < len(joint_names):
+        joint_names = joint_names[:num_keypoints]
 
     # Load frozen ViTPose + V2VNet inference model, replicated across devices.
-    model = load_inference_model(vitpose_ckpt, v2v_final, sharpen=sharpen)
+    model = load_inference_model(vitpose_ckpt, v2v_final, sharpen=sharpen,
+                                 num_keypoints=num_keypoints)
     nd = jax.device_count()
 
     # Open one VideoCapture per camera (sequential read within each bout).

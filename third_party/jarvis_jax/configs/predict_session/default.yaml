@@ -6,6 +6,7 @@ out: auto      # auto -> <processed_dir>/predictions
 dataset: null   # null -> derive from session_dir
 jarvis_root: /gscratch/portia/eabe/Research/Github/JARVIS-HybridNet
 num_animals: 2
+num_keypoints: 250   # 50 keypoints + 200 canonical vertices (dense pose); 50 for legacy kp-only
 batch: 8
 bout_ids: ''       # '' = all (from manifest); else comma-separated bout_idx
 limit: 0
