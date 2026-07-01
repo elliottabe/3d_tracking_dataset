@@ -357,6 +357,32 @@ def _wing_fk_indices(mesh_npz: str) -> np.ndarray:
     ], dtype=np.int32)
 
 
+def _wing_joint_qpos_indices(mj_model: mujoco.MjModel) -> dict:
+    """qpos indices of the hinge joints on the ``wing_left``/``wing_right``
+    bodies (yaw/roll/pitch), keyed by side.
+
+    Used by ``run_single_fly``'s ``wing_angle_pred``/``wing_angle_stac``
+    metrics: unlike the tip-prox FK distance (a geom-intrinsic constant,
+    invariant to qpos -- removed, see module history), these joint angles
+    directly reflect how the wing was actually posed by the solve.
+    """
+    out = {"left": [], "right": []}
+    for j in range(mj_model.njnt):
+        if mj_model.jnt_type[j] != mujoco.mjtJoint.mjJNT_HINGE:
+            continue
+        body = mujoco.mj_id2name(mj_model, mujoco.mjtObj.mjOBJ_BODY, mj_model.jnt_bodyid[j])
+        if not body:
+            continue
+        bl = body.lower()
+        if "wing" not in bl:
+            continue
+        if "left" in bl:
+            out["left"].append(int(mj_model.jnt_qposadr[j]))
+        elif "right" in bl:
+            out["right"].append(int(mj_model.jnt_qposadr[j]))
+    return out
+
+
 def _load_sam_mask(root, split, file_name, ann_id):
     """Load the SAM mask matching ``ann_id`` for one camera image.
 
@@ -377,7 +403,7 @@ def _load_sam_mask(root, split, file_name, ann_id):
     return z["masks"][sel[0]].astype(bool) if len(sel) else None
 
 
-def _augment_wing_markers_stac_order(kp_data, kps_to_opt, tips_list, kp_names, *, wing_weight=5.0, min_cams=2):
+def _augment_wing_markers_stac_order(kp_data, kps_to_opt, tips_list, kp_names, *, wing_weight=2.0, min_cams=2, only_missing=True):
     """Apply ``marker_augment.augment_wing_markers`` to STAC-ordered kp arrays.
 
     ``augment_wing_markers.WING_MARKER_IDS`` hardcodes coco ``keypoint_names``
@@ -432,6 +458,7 @@ def _augment_wing_markers_stac_order(kp_data, kps_to_opt, tips_list, kp_names, *
 
     coco_kp2, coco_w2 = augment_wing_markers(
         coco_kp, coco_w, tips_list, wing_weight=wing_weight, min_cams=min_cams,
+        only_missing=only_missing,
     )
 
     kp_data2 = np.array(kp_data, dtype=np.float64, copy=True)
@@ -602,7 +629,8 @@ def run_single_fly(
     split: str = "val",
     calib_dir: str | None = None,
     use_silhouette: bool = True,
-    wing_weight: float = 5.0,
+    wing_weight: float = 2.0,
+    only_missing: bool = True,
     max_frames: int = 0,
     smooth_weight: float = 0.1,
     n_iter: int = 50,
@@ -631,7 +659,16 @@ def run_single_fly(
         use_silhouette: If True, augment wing markers from SAM silhouettes
             before solving (the Phase-2 pipeline); if False, solve on the
             raw STAC kp_data only (baseline, Task 5's ablation control).
-        wing_weight: Passed to ``augment_wing_markers``.
+        wing_weight: Passed to ``augment_wing_markers``. Default lowered to
+            2.0 (from 5.0) to avoid over-dragging the whole-body solve when
+            a wing marker is filled.
+        only_missing: Passed to ``augment_wing_markers`` (confidence gate).
+            Default True: only fills wing markers that are missing/withheld
+            (all-NaN) for that frame; a marker with real GT/tracked data is
+            left untouched. This makes augmentation a no-op on full GT data
+            (``use_silhouette=True`` must not worsen ``reproj_px`` relative
+            to the ``use_silhouette=False`` baseline) and only actually fills
+            markers in Task 5's withheld-keypoint ablation.
         max_frames: If >0, only process/solve the first ``max_frames`` frames
             (for fast smoke tests / dev iteration).
         smooth_weight: Passed to ``solve_ik``.
@@ -642,9 +679,22 @@ def run_single_fly(
     Returns:
         dict with keys:
           qpos_shape: tuple, solved qpos.shape (T, nq).
-          wing_len_pred: mean over frames/sides of |tip-prox| under the
-            SOLVED qpos (reposed via FK), in MODEL-frame units.
-          wing_len_stac: same, under the stored ik-h5 (STAC) q_init.
+          wing_tip_err_px / wing_tip_err_mm: per-side (left/right) mean
+            distance, over frames with a valid SAM-triangulated tip, between
+            the FK-reposed wing-tip vertex under the SOLVED qpos (mapped
+            MODEL->mm via the per-frame umeyama bridge) and that frame's
+            SAM-triangulated tip (also mm). ``_px`` additionally reprojects
+            both into each visible camera and averages the pixel distance.
+            NaN if ``n_frames_with_tips`` is 0 (e.g. ``use_silhouette=False``).
+            Replaces the old ``wing_len_pred``/``wing_len_stac`` (tip-to-prox
+            FK distance), which is a geom-intrinsic constant -- tip and prox
+            share one rigid wing geom, so that distance does not move with
+            qpos and was not a useful fit metric.
+          wing_angle_pred / wing_angle_stac: dict {"left": [...], "right":
+            [...]} of the wing hinge joint angle(s) (radians; yaw/roll/pitch,
+            per ``_wing_joint_qpos_indices``), mean over frames, under the
+            SOLVED qpos vs. the stored ik-h5 (STAC) q_init respectively --
+            shows whether/how the wing pose actually changed.
           reproj_px: mean reprojection error (px) of the 50 kp sites (under
             solved qpos, mapped MODEL->mm via the per-frame umeyama bridge)
             against the refined-calib DLT triangulation of the annotated
@@ -697,8 +747,11 @@ def run_single_fly(
             1 for f in tips_list if f.get("left") is not None or f.get("right") is not None
         )
         kp_data, kps_to_opt = _augment_wing_markers_stac_order(
-            kp_data, kps_to_opt, tips_list, inputs["kp_names"], wing_weight=wing_weight,
+            kp_data, kps_to_opt, tips_list, inputs["kp_names"],
+            wing_weight=wing_weight, only_missing=only_missing,
         )
+    else:
+        tips_list = None
 
     small = dict(inputs)
     small["q_init"] = q_init
@@ -716,16 +769,26 @@ def run_single_fly(
     fk = make_fk_repose(anat)
     fk_idx = _wing_fk_indices(mesh_npz)  # [L-prox, L-tip, R-prox, R-tip], full-vertex-array indices
 
-    def _wing_lengths(qtraj):
-        lens = []
-        for t in range(qtraj.shape[0]):
-            v = np.asarray(fk(jnp.asarray(qtraj[t].astype(np.float32)), indices=fk_idx))
-            lens.append(np.linalg.norm(v[1] - v[0]))  # left tip - left prox
-            lens.append(np.linalg.norm(v[3] - v[2]))  # right tip - right prox
-        return float(np.mean(lens)) if lens else float("nan")
+    # wing_angle_{pred,stac}: mean hinge joint angle(s) (yaw/roll/pitch, rad)
+    # for each wing side, under the solved vs. stored qpos -- shows whether
+    # the wing pose actually moved (replaces the old tip-prox FK distance,
+    # which is invariant to qpos since tip+prox share one rigid wing geom).
+    # Uses anat["m"] (raw mujoco.MjModel from model_xml, no mjx wrapping) --
+    # mj_id2name/jnt_* introspection needs a real MjModel, not the mjx.Model
+    # used for the solve itself; joint/qpos layout is identical either way
+    # since the keypoint <site> elements build_solver_inputs adds don't
+    # affect joints or qpos.
+    wing_joint_idx = _wing_joint_qpos_indices(anat["m"])
 
-    wing_len_pred = _wing_lengths(qpos)
-    wing_len_stac = _wing_lengths(np.asarray(inputs["q_init"][:T]))
+    def _wing_angles(qtraj):
+        qtraj = np.asarray(qtraj)
+        return {
+            side: [float(np.mean(qtraj[:, qi])) for qi in idxs]
+            for side, idxs in wing_joint_idx.items()
+        }
+
+    wing_angle_pred = _wing_angles(qpos)
+    wing_angle_stac = _wing_angles(np.asarray(inputs["q_init"][:T]))
 
     # reprojection error: solved qpos site positions (MODEL) -> mm (per-frame
     # umeyama bridge against refined-calib triangulated coco keypoints) ->
@@ -740,6 +803,12 @@ def run_single_fly(
     name2coco = {n: i for i, n in enumerate(coco_kpnames)}
 
     reproj_errs = []
+    # wing_tip_err_{mm,px}: FK-reposed wing-tip vertex under the SOLVED qpos
+    # (mapped MODEL->mm via the same per-frame umeyama bridge) vs. that
+    # frame's SAM-triangulated tip (also MODEL->mm), per side. Measures how
+    # well the fitted wing actually reaches the silhouette-derived target.
+    tip_err_mm = {"left": [], "right": []}
+    tip_err_px = {"left": [], "right": []}
     site_idxs = inputs["site_idxs"]
     mjx_model, mjx_data = inputs["mjx_model"], inputs["mjx_data"]
     for t in range(T):
@@ -768,12 +837,38 @@ def run_single_fly(
                 if kp2d[ci, 2] > 0:
                     reproj_errs.append(float(np.linalg.norm(uv_pred_all[c] - kp2d[ci, :2])))
 
+        if tips_list is not None:
+            frame_tips = tips_list[t]
+            wing_verts = np.asarray(fk(jnp.asarray(qpos[t].astype(np.float32)), indices=fk_idx))
+            tip_model = {"left": wing_verts[1], "right": wing_verts[3]}
+            for side in ("left", "right"):
+                entry = frame_tips.get(side)
+                if entry is None:
+                    continue
+                sam_tip_model, _ncam = entry
+                pred_tip_mm = _model_to_mm(tip_model[side][None], s, R, tr)[0]
+                sam_tip_mm = _model_to_mm(np.asarray(sam_tip_model)[None], s, R, tr)[0]
+                tip_err_mm[side].append(float(np.linalg.norm(pred_tip_mm - sam_tip_mm)))
+
+                uv_pred = rt.reproject_point(pred_tip_mm)  # (n_cam, 2)
+                uv_sam = rt.reproject_point(sam_tip_mm)    # (n_cam, 2)
+                for c in cam2img:
+                    tip_err_px[side].append(float(np.linalg.norm(uv_pred[c] - uv_sam[c])))
+
     reproj_px = float(np.mean(reproj_errs)) if reproj_errs else float("nan")
+    wing_tip_err_mm = {
+        side: (float(np.mean(v)) if v else float("nan")) for side, v in tip_err_mm.items()
+    }
+    wing_tip_err_px = {
+        side: (float(np.mean(v)) if v else float("nan")) for side, v in tip_err_px.items()
+    }
 
     return dict(
         qpos_shape=tuple(qpos.shape),
-        wing_len_pred=wing_len_pred,
-        wing_len_stac=wing_len_stac,
+        wing_tip_err_px=wing_tip_err_px,
+        wing_tip_err_mm=wing_tip_err_mm,
+        wing_angle_pred=wing_angle_pred,
+        wing_angle_stac=wing_angle_stac,
         reproj_px=reproj_px,
         n_frames_with_tips=n_frames_with_tips,
     )

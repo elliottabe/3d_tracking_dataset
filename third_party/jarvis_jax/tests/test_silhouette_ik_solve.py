@@ -1,6 +1,8 @@
-import os, numpy as np, pytest
+import os, numpy as np, pytest, mujoco
 from jarvis_jax.cse.silhouette_ik_solve import (
     build_solver_inputs, solve_ik, run_single_fly, _model_to_mm, _mm_to_model,
+    _wing_fk_indices, _wing_joint_qpos_indices, _augment_wing_markers_stac_order,
+    _COCO_KEYPOINT_NAMES,
 )
 from stac_mjx import utils as stac_utils
 
@@ -126,13 +128,19 @@ def test_model_mm_bridge_roundtrips():
     np.testing.assert_allclose(pts_model2, pts_model, atol=1e-8)
 
 
+_REPORT_KEYS = {
+    "qpos_shape", "wing_tip_err_px", "wing_tip_err_mm",
+    "wing_angle_pred", "wing_angle_stac", "reproj_px", "n_frames_with_tips",
+}
+
+
 @pytest.mark.skipif(not os.path.exists(IK), reason="STAC ik h5 not present")
 def test_run_single_fly_baseline_wiring(tmp_path):
     """Driver-wiring smoke test: run_single_fly(use_silhouette=False) on a
     4-frame slice must return the documented report keys with finite values
     and write the qpos npz. Exercises build_solver_inputs -> solve_ik ->
-    report-metric assembly (FK wing length + reprojection) without touching
-    the SAM-mask/silhouette extraction path.
+    report-metric assembly (wing angle + reprojection) without touching the
+    SAM-mask/silhouette extraction path.
     """
     report = run_single_fly(
         RECORDING,
@@ -146,16 +154,153 @@ def test_run_single_fly_baseline_wiring(tmp_path):
         n_iter=20,
         out_dir=str(tmp_path),
     )
-    assert set(report) >= {
-        "qpos_shape", "wing_len_pred", "wing_len_stac", "reproj_px", "n_frames_with_tips",
-    }
+    assert set(report) >= _REPORT_KEYS
     assert report["qpos_shape"] == (4, 93)
     assert report["n_frames_with_tips"] == 0
-    assert np.isfinite(report["wing_len_pred"])
-    assert np.isfinite(report["wing_len_stac"])
+    # no silhouette extraction was run -> no tip-error samples (NaN per side)
+    assert all(np.isnan(v) for v in report["wing_tip_err_px"].values())
+    assert all(np.isnan(v) for v in report["wing_tip_err_mm"].values())
+    assert set(report["wing_angle_pred"]) == {"left", "right"}
+    assert set(report["wing_angle_stac"]) == {"left", "right"}
+    assert all(np.isfinite(a) for v in report["wing_angle_pred"].values() for a in v)
+    assert all(np.isfinite(a) for v in report["wing_angle_stac"].values() for a in v)
     assert np.isfinite(report["reproj_px"])
 
     out_path = os.path.join(str(tmp_path), f"{RECORDING}_qpos.npz")
     assert os.path.exists(out_path)
     saved = np.load(out_path)
     assert saved["qpos"].shape == (4, 93)
+
+
+@pytest.mark.skipif(not os.path.exists(IK), reason="STAC ik h5 not present")
+def test_run_single_fly_silhouette_wiring_does_not_worsen_reproj(tmp_path):
+    """use_silhouette=True end-to-end wiring test on a 4-frame slice (Task 4
+    review fix): with only_missing=True (the default) and full GT wing
+    keypoints present, augment_wing_markers is a no-op, so reproj_px here
+    must match the use_silhouette=False baseline -- NOT the ~4x-worse value
+    (2.13->8.42px) the unconditional-override bug produced.
+    """
+    report_false = run_single_fly(
+        RECORDING,
+        ik_h5=IK,
+        model_xml=XML,
+        mesh_npz=MESH,
+        root=ROOT,
+        split="val",
+        use_silhouette=False,
+        max_frames=4,
+        n_iter=20,
+        out_dir=str(tmp_path / "baseline"),
+    )
+    report_true = run_single_fly(
+        RECORDING,
+        ik_h5=IK,
+        model_xml=XML,
+        mesh_npz=MESH,
+        root=ROOT,
+        split="val",
+        use_silhouette=True,
+        max_frames=4,
+        n_iter=20,
+        out_dir=str(tmp_path / "silhouette"),
+    )
+    assert set(report_true) >= _REPORT_KEYS
+    assert report_true["qpos_shape"] == (4, 93)
+    assert np.isfinite(report_true["reproj_px"])
+    # confidence-gated augmentation on full GT data must not worsen reproj
+    # relative to the no-silhouette baseline (allow a small numerical slack).
+    assert report_true["reproj_px"] <= report_false["reproj_px"] * 1.1 + 0.5, (
+        f"use_silhouette=True reproj_px={report_true['reproj_px']:.3f} is worse than "
+        f"the use_silhouette=False baseline={report_false['reproj_px']:.3f}; "
+        "the confidence gate (only_missing) should make augmentation a no-op "
+        "when GT wing keypoints are present."
+    )
+
+    out_path = os.path.join(str(tmp_path / "silhouette"), f"{RECORDING}_qpos.npz")
+    assert os.path.exists(out_path)
+
+
+def test_wing_fk_indices_land_on_wing_geoms_not_thorax():
+    """_wing_fk_indices must select vertices on the wing membrane geoms
+    (left=29, right=35 for this mesh), not the thorax. Regression test for
+    the bug where passing wing_side_vertices' fps-relative indices straight
+    into make_fk_repose silently selected thorax_collision vertices instead
+    (their FK-reposed distance is ~constant regardless of wing pose).
+    """
+    idx = _wing_fk_indices(MESH)  # [L-prox, L-tip, R-prox, R-tip], full-vertex-array indices
+    z = np.load(MESH, allow_pickle=True)
+    vgeom = z["vertex_geom"]
+    m = mujoco.MjModel.from_xml_path(XML)
+
+    l_prox_geom, l_tip_geom, r_prox_geom, r_tip_geom = vgeom[idx]
+    assert l_prox_geom == 29 and l_tip_geom == 29
+    assert r_prox_geom == 35 and r_tip_geom == 35
+
+    l_name = mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_GEOM, 29)
+    r_name = mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_GEOM, 35)
+    assert "wing" in l_name.lower() and "left" in l_name.lower()
+    assert "wing" in r_name.lower() and "right" in r_name.lower()
+    assert "thorax" not in l_name.lower() and "thorax" not in r_name.lower()
+
+
+def test_wing_joint_qpos_indices_match_model():
+    """_wing_joint_qpos_indices must resolve to the wing hinge joints'
+    actual qpos addresses (yaw/roll/pitch per side for this fly model), used
+    by run_single_fly's wing_angle_pred/wing_angle_stac metrics.
+    """
+    m = mujoco.MjModel.from_xml_path(XML)
+    idx = _wing_joint_qpos_indices(m)
+    assert idx == {"left": [7, 8, 9], "right": [10, 11, 12]}
+
+
+def test_stac_order_bridge_writes_stac_indices_6_7_8_9_not_29():
+    """_augment_wing_markers_stac_order must write the STAC-ordered wing
+    marker indices (WingL_V12=6, WingL_V13=7, WingR_V12=8, WingR_V13=9 for
+    this fly model's kp_names) and must NOT touch STAC idx 29 (T2L_TaT1, a
+    leg marker) -- regression test for the coco/STAC index-permutation bug
+    described in _augment_wing_markers_stac_order's docstring.
+    """
+    kp_names = [
+        "Scutellum", "WingL_base", "WingR_base", "Antenna_Base", "EyeL", "EyeR",
+        "WingL_V12", "WingL_V13", "WingR_V12", "WingR_V13", "Abd_A4", "Abd_tip",
+        "T1L_ThxCx", "T1L_Tro", "T1L_FeTi", "T1L_TiTa", "T1L_TaT1", "T1L_TaT3", "T1L_TaTip",
+        "T1R_ThxCx", "T1R_Tro", "T1R_FeTi", "T1R_TiTa", "T1R_TaT1", "T1R_TaT3", "T1R_TaTip",
+        "T2L_Tro", "T2L_FeTi", "T2L_TiTa", "T2L_TaT1", "T2L_TaT3", "T2L_TaTip",
+        "T2R_Tro", "T2R_FeTi", "T2R_TiTa", "T2R_TaT1", "T2R_TaT3", "T2R_TaTip",
+        "T3L_Tro", "T3L_FeTi", "T3L_TiTa", "T3L_TaT1", "T3L_TaT3", "T3L_TaTip",
+        "T3R_Tro", "T3R_FeTi", "T3R_TiTa", "T3R_TaT1", "T3R_TaT3", "T3R_TaTip",
+    ]
+    assert kp_names.index("WingL_V12") == 6
+    assert kp_names.index("WingL_V13") == 7
+    assert kp_names.index("WingR_V12") == 8
+    assert kp_names.index("WingR_V13") == 9
+    assert kp_names.index("T2L_TaT1") == 29
+    # sanity: every name used here is a real coco keypoint name (the schema
+    # WING_MARKER_IDS/_COCO_KEYPOINT_NAMES are defined against).
+    assert set(kp_names) <= set(_COCO_KEYPOINT_NAMES)
+
+    n_kp = len(kp_names)
+    T = 1
+    kp_data = np.full((T, n_kp, 3), np.nan)  # all missing -> only_missing=True fills them
+    kps_to_opt = np.ones(n_kp * 3)
+    # pin the leg marker at STAC idx 29 to a known present (finite) value,
+    # to detect any accidental overwrite.
+    kp_data[0, 29] = [42.0, 43.0, 44.0]
+
+    tips_list = [{"left": (np.array([1.0, 2.0, 3.0]), 3),
+                  "right": (np.array([4.0, 5.0, 6.0]), 3)}]
+
+    kp_data2, kps_to_opt2 = _augment_wing_markers_stac_order(
+        kp_data, kps_to_opt, tips_list, kp_names, wing_weight=2.0, min_cams=2,
+    )
+
+    for j in (6, 7):  # WingL_V12, WingL_V13
+        assert np.allclose(kp_data2[0, j], [1.0, 2.0, 3.0])
+        assert np.allclose(kps_to_opt2[j * 3:j * 3 + 3], 2.0)
+    for j in (8, 9):  # WingR_V12, WingR_V13
+        assert np.allclose(kp_data2[0, j], [4.0, 5.0, 6.0])
+        assert np.allclose(kps_to_opt2[j * 3:j * 3 + 3], 2.0)
+
+    # STAC idx 29 (a leg marker, T2L_TaT1) must be untouched.
+    assert np.allclose(kp_data2[0, 29], [42.0, 43.0, 44.0])
+    assert np.allclose(kps_to_opt2[29 * 3:29 * 3 + 3], 1.0)
