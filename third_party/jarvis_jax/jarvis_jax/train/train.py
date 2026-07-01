@@ -19,6 +19,7 @@ class TrainConfig:
     total_steps: int = 2000
     batch_size: int = 8
     mask_weight: float = 0.0
+    mask_dilate: int = 0        # dilate the mask (px) before the containment penalty (0 = off)
     # Backbone learning-rate multiplier (full fine-tune with a smaller LR on the
     # MAE-pretrained ViT than on the fresh decoder head — ViTPose-standard, more
     # stable than a single LR). 1.0 = uniform LR. Everything still trains, so the
@@ -54,15 +55,19 @@ def make_optimizer(model, cfg):
 
 
 def make_train_step(mask_weight, aug_params=None, lr_swap=None, heatmap_size=224,
-                    sigma=7.0, joint_weight=None):
+                    sigma=7.0, joint_weight=None, mask_dilate=0):
     """Return an nnx.jit train step. When aug_params.enabled, the batch is
     augmented on-device (using the per-step `key`) before normalize/render.
 
     ``sigma`` (scalar or per-channel ``(K,)``) sets the target Gaussian width, and
     ``joint_weight`` (optional ``(K,)``) re-weights each channel's loss — used by
-    the CSE wing fine-tune to sharpen + emphasise the densely-packed wing verts."""
+    the CSE wing fine-tune to sharpen + emphasise the densely-packed wing verts.
+    ``mask_dilate`` (static int) grows the SAM mask before the containment
+    penalty (Phase 5 edge slack); captured as a Python int at call time like
+    ``mask_weight``, so the jitted step recompiles per distinct value."""
     from jarvis_jax.data.augment import augment_batch, AugParams
     mw = float(mask_weight)
+    md = int(mask_dilate)
     ap = aug_params if aug_params is not None else AugParams(enabled=False)
     if ap.enabled and lr_swap is None:
         raise ValueError("augmentation enabled but lr_swap is None")
@@ -79,7 +84,7 @@ def make_train_step(mask_weight, aug_params=None, lr_swap=None, heatmap_size=224
             mask = img[..., 3]
             mask224 = jax.image.resize(
                 mask, (mask.shape[0], pred.shape[1], pred.shape[2]), method="nearest")
-            loss = loss + mw * mask_containment(pred, mask224)
+            loss = loss + mw * mask_containment(pred, mask224, dilate=md)
         return loss
 
     @nnx.jit

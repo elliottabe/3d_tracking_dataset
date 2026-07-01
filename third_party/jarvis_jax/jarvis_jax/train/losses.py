@@ -29,11 +29,17 @@ def heatmap_mse(pred, gt, vis, bg_weight=0.1, fg_thresh=0.01, eps=1e-6,
     return (per_kp * w).sum() / jnp.maximum(w.sum(), 1.0)
 
 
-def mask_containment(pred, mask224, eps=1e-6):
-    """Fraction of positive predicted heatmap mass outside the mask.
+def mask_containment(pred, mask224, *, dilate=0, eps=1e-6):
+    """Fraction of positive predicted heatmap mass outside the (dilated) mask.
 
     pred: (B,H,W,K); mask224: (B,H,W) float {0,1}. Returns a scalar in [0,1].
+    ``dilate`` (static int) grows the mask by a dilate x dilate max-pool before
+    the penalty (edge slack for wings/legs that legitimately extend past the raw
+    SAM mask). dilate=0 == the original behaviour. Monotone non-increasing in
+    dilate. Mirrors the PyTorch mask_containment_loss dilation.
     """
+    from jarvis_jax.models.dilation import dilate_mask_jax
+    m = dilate_mask_jax(mask224, dilate) if dilate and dilate > 1 else mask224
     p = jax.nn.relu(pred)                                 # positive mass
-    outside = p * (1.0 - mask224[..., None])
+    outside = p * (1.0 - m[..., None])
     return outside.sum() / (p.sum() + eps)
