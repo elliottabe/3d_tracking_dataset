@@ -189,7 +189,12 @@ def link_recording(coco_path, recording, calib_dir, *, split="val", n_flies=2,
 
     Returns {fs_key: {fly_id: {cam_idx: ann_id}}}. Camera indices are
     ReprojectionTool indices (sorted-lexicographic Cam*.yaml order); the camera
-    a coco image belongs to is parsed from its file_name (``<split>/<cam>/...``).
+    a coco image belongs to is parsed from its file_name, whose second path
+    component is the camera name (``<recording>/<cam>/<frame>.jpg``).
+
+    Split selection is the caller's responsibility via ``coco_path`` (e.g.
+    ``instances_val.json``); the ``split`` kwarg is retained for API symmetry
+    with the other cse drivers and does not itself filter this COCO file.
     """
     coco = json.load(open(coco_path))
     id2file = {im["id"]: im["file_name"] for im in coco["images"]}
