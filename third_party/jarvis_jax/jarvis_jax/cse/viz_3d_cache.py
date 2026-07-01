@@ -38,7 +38,10 @@ def main():
     fps = mz[f"fps_{nv}"]; seg = mz["vertex_segment"][fps]
     id2n = {int(s): (n.decode() if isinstance(n, bytes) else n)
             for s, n in zip(mz["seg_ids"], mz["seg_names"])}
-    iswing = np.array(["wing" in id2n[int(s)] for s in seg])
+    names = [id2n[int(s)].lower() for s in seg]
+    leg_sub = ("coxa", "trochanter", "femur", "tibia", "tarsus", "claw")
+    iswing = np.array(["wing" in nm for nm in names])
+    isleg = np.array([any(s in nm for s in leg_sub) for nm in names])
 
     # restore the LATEST committed V2VNet checkpoint (training may still be writing newer steps)
     v2v = V2VNet(J, J, rngs=nnx.Rngs(0))
@@ -63,23 +66,28 @@ def main():
 
     def _spread(P):
         return float(np.nanmedian(np.linalg.norm(P - np.nanmean(P, 0), axis=1))) if len(P) >= 2 else np.nan
-    sp_p, sp_g, werr = [], [], []
-    for b in range(len(idxs)):
-        wm = iswing & visn[b, nkp:]
-        sp_p.append(_spread(pred[b, nkp:][wm])); sp_g.append(_spread(gt[b, nkp:][wm]))
-        if wm.any():
-            werr.append(np.linalg.norm(pred[b, nkp:][wm] - gt[b, nkp:][wm], axis=1))
-    rp, rg = float(np.nanmedian(sp_p)), float(np.nanmedian(sp_g))
-    ratio = rp / rg if rg else float("nan")
-    wing_mpjpe = float(np.median(np.concatenate(werr))) if werr else float("nan")
+
+    def _stats(mask):                                   # (spread_ratio, pred_sp, gt_sp, mpjpe) over vis=1
+        sp, sg, er = [], [], []
+        for b in range(len(idxs)):
+            mm = mask & visn[b, nkp:]
+            sp.append(_spread(pred[b, nkp:][mm])); sg.append(_spread(gt[b, nkp:][mm]))
+            if mm.any():
+                er.append(np.linalg.norm(pred[b, nkp:][mm] - gt[b, nkp:][mm], axis=1))
+        p, g = float(np.nanmedian(sp)), float(np.nanmedian(sg))
+        return (p / g if g else np.nan), p, g, (float(np.median(np.concatenate(er))) if er else np.nan)
+    ratio, rp, rg, wing_mpjpe = _stats(iswing)
+    leg_ratio, lp, lg, leg_mpjpe = _stats(isleg)
 
     c = (a.n + 1) // 2
     fig = plt.figure(figsize=(4.4 * c, 9))
     for k, b in enumerate(range(len(idxs))):
         ax = fig.add_subplot(2, c, k + 1, projection="3d")
-        blm = (~iswing) & visn[b, nkp:]; wm = iswing & visn[b, nkp:]
+        bodym = (~iswing) & (~isleg) & visn[b, nkp:]
+        legm = isleg & visn[b, nkp:]; wm = iswing & visn[b, nkp:]
         P = pred[b, nkp:]; G = gt[b, nkp:]
-        ax.scatter(P[blm, 0], P[blm, 1], P[blm, 2], s=6, c="0.6", linewidths=0)
+        ax.scatter(P[bodym, 0], P[bodym, 1], P[bodym, 2], s=6, c="0.6", linewidths=0)
+        ax.scatter(P[legm, 0], P[legm, 1], P[legm, 2], s=7, c="dodgerblue", linewidths=0)
         ax.scatter(G[wm, 0], G[wm, 1], G[wm, 2], s=26, facecolors="none",
                    edgecolors="lime", linewidths=0.6, label="GT wing")
         ax.scatter(P[wm, 0], P[wm, 1], P[wm, 2], s=12, c="red", linewidths=0, label="pred wing")
@@ -87,12 +95,13 @@ def main():
         ax.view_init(elev=18, azim=-60)
         for axis in (ax.xaxis, ax.yaxis, ax.zaxis):
             axis.set_ticklabels([])
-    fig.suptitle(f"V2VNet-{J} @step{step} 3-D (pred wing=red, GT wing=lime, body/leg=gray) | "
-                 f"3D wing MPJPE {wing_mpjpe:.2f} | 3D wing spread pred/GT {rp:.1f}/{rg:.1f} ({ratio:.2f})  "
-                 f"[2D was 0.79]")
+    fig.suptitle(f"V2VNet-{J} @step{step} 3-D (pred wing=red, GT wing=lime, leg=blue, body=gray) | "
+                 f"3D MPJPE wing {wing_mpjpe:.2f} / leg {leg_mpjpe:.2f} | "
+                 f"3D spread pred/GT  wing {ratio:.2f}  leg {leg_ratio:.2f}   [2D: wing 0.79 leg 0.96]")
     os.makedirs(os.path.dirname(a.out), exist_ok=True)
     fig.tight_layout(); fig.savefig(a.out, dpi=120)
-    print(f"wrote {a.out}  3D wing MPJPE {wing_mpjpe:.2f}  spread pred {rp:.2f}/GT {rg:.2f}  ratio {ratio:.2f}")
+    print(f"wrote {a.out}  3D MPJPE wing {wing_mpjpe:.2f}/leg {leg_mpjpe:.2f}  "
+          f"wing_spread {rp:.2f}/{rg:.2f} ({ratio:.2f})  leg_spread {lp:.2f}/{lg:.2f} ({leg_ratio:.2f})")
 
 
 if __name__ == "__main__":
