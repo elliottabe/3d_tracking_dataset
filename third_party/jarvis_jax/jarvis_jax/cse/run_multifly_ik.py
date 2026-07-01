@@ -44,7 +44,7 @@ from jarvis_jax.cse.identity_link import link_recording
 from jarvis_jax.cse.multifly_bout import build_fly_bout
 from jarvis_jax.cse import run_stac_bout
 from jarvis_jax.cse.silhouette_ik_solve import (
-    build_solver_inputs, solve_ik, run_single_fly,
+    build_solver_inputs, solve_ik, run_single_fly, run_ablation,
 )
 
 # The exact overrides used by sbatch_cse_pilot.sh / sbatch_cse_array.sh to
@@ -137,6 +137,56 @@ def _run_stac_fallback(bout_h5, fallback_ik_h5, out_h5):
     return out_h5
 
 
+def _prepare_fly_ik(
+    recording, fly_dir, coco_path, calib_dir, identity_map, fly_id,
+    anatomy_yaml, model_xml, stac_config_dir, split, stac_overrides,
+    *, stac_fallback=False, fallback_ik_h5=DEFAULT_FALLBACK_IK_H5,
+):
+    """Build one fly's de-collapsed bout + per-fly STAC ik_h5.
+
+    Shared by ``run_multifly_ik`` and ``run_multifly_ablation`` so the
+    bout-build + STAC-invocation block (with its fallback escape hatch) is
+    not duplicated. Primary path: real per-fly STAC solve via
+    ``run_stac_bout.run``. If ``stac_fallback=True`` OR the primary solve
+    raises, falls back to the fixed-anatomy escape hatch (see module
+    docstring / ``_run_stac_fallback``).
+
+    Returns:
+        (bout_h5: str, ik_h5: str, solve_path: "stac" | "fallback").
+    """
+    os.makedirs(fly_dir, exist_ok=True)
+
+    # 1) per-fly bout (de-collapsed triangulation). Written at
+    # fly_dir/<rec>_bout.h5 so run_single_fly's/run_ablation's bout-derivation
+    # (dirname(dirname(ik_h5))/<rec>_bout.h5) resolves back to it -- verified
+    # against silhouette_ik_solve's actual code (bout_h5 =
+    # os.path.join(os.path.dirname(os.path.dirname(ik_h5)),
+    # f"{recording}_bout.h5")).
+    bout_h5 = os.path.join(fly_dir, f"{recording}_bout.h5")
+    bout_h5, _ = build_fly_bout(
+        coco_path, calib_dir, recording, identity_map, fly_id,
+        anatomy_yaml, model_xml, bout_h5, split=split)
+
+    # 2) per-fly STAC solve -> per-fly ik_h5 (see path-derivation note above:
+    # ik_h5's directory must be fly_dir/<rec>/ so that
+    # dirname(dirname(ik_h5)) == fly_dir).
+    ik_h5 = os.path.join(fly_dir, recording, "Fruitfly_ik_v1_cse.h5")
+    solve_path = "stac"
+    if stac_fallback:
+        solve_path = "fallback"
+        _run_stac_fallback(bout_h5, fallback_ik_h5, ik_h5)
+    else:
+        try:
+            run_stac_bout.run(bout_h5, ik_h5, stac_config_dir, list(stac_overrides))
+        except Exception as exc:  # pragma: no cover - exercised only on real STAC failure
+            print(f"[run_multifly_ik] fly{fly_id}: primary STAC solve failed "
+                  f"({type(exc).__name__}: {exc}); falling back to fixed-anatomy escape hatch")
+            solve_path = "fallback"
+            _run_stac_fallback(bout_h5, fallback_ik_h5, ik_h5)
+
+    return bout_h5, ik_h5, solve_path
+
+
 def run_multifly_ik(
     recording,
     *,
@@ -195,35 +245,13 @@ def run_multifly_ik(
     flies = {}
     for fid in range(n_flies):
         fly_dir = os.path.join(out_dir, f"fly{fid}")
-        os.makedirs(fly_dir, exist_ok=True)
 
-        # 1) per-fly bout (de-collapsed triangulation). Written at
-        # fly_dir/<rec>_bout.h5 so run_single_fly's bout-derivation
-        # (dirname(dirname(ik_h5))/<rec>_bout.h5) resolves back to it --
-        # verified against silhouette_ik_solve.run_single_fly's actual code
-        # (bout_h5 = os.path.join(os.path.dirname(os.path.dirname(ik_h5)),
-        # f"{recording}_bout.h5")).
-        bout_h5 = os.path.join(fly_dir, f"{recording}_bout.h5")
-        bout_h5, scale = build_fly_bout(
-            coco_path, calib_dir, recording, identity_map, fid,
-            anatomy_yaml, model_xml, bout_h5, split=split)
-
-        # 2) per-fly STAC solve -> per-fly ik_h5 (see path-derivation note
-        # above: ik_h5's directory must be fly_dir/<rec>/ so that
-        # dirname(dirname(ik_h5)) == fly_dir).
-        ik_h5 = os.path.join(fly_dir, recording, "Fruitfly_ik_v1_cse.h5")
-        solve_path = "stac"
-        if stac_fallback:
-            solve_path = "fallback"
-            _run_stac_fallback(bout_h5, fallback_ik_h5, ik_h5)
-        else:
-            try:
-                run_stac_bout.run(bout_h5, ik_h5, stac_config_dir, list(stac_overrides))
-            except Exception as exc:  # pragma: no cover - exercised only on real STAC failure
-                print(f"[run_multifly_ik] fly{fid}: primary STAC solve failed "
-                      f"({type(exc).__name__}: {exc}); falling back to fixed-anatomy escape hatch")
-                solve_path = "fallback"
-                _run_stac_fallback(bout_h5, fallback_ik_h5, ik_h5)
+        # 1)+2) per-fly bout (de-collapsed triangulation) + per-fly STAC
+        # solve -> per-fly ik_h5 (or the fixed-anatomy fallback escape hatch).
+        bout_h5, ik_h5, solve_path = _prepare_fly_ik(
+            recording, fly_dir, coco_path, calib_dir, identity_map, fid,
+            anatomy_yaml, model_xml, stac_config_dir, split, stac_overrides,
+            stac_fallback=stac_fallback, fallback_ik_h5=fallback_ik_h5)
 
         # 3) per-fly silhouette IK (with THIS fly's ann selection + per-fly ik_h5).
         ann_map = ann_id_by_image_for_fly(identity_map, coco_path, recording, fid)
@@ -243,3 +271,88 @@ def run_multifly_ik(
             "report": report, "solve_path": solve_path,
         }
     return {"identity_map_size": len(identity_map), "flies": flies}
+
+
+def run_multifly_ablation(
+    recording,
+    *,
+    root,
+    calib_dir,
+    anatomy_yaml,
+    model_xml,
+    mesh_npz,
+    stac_config_dir,
+    out_dir,
+    split="val",
+    ablate_fly_id=1,
+    coco_path=None,
+    max_frames=0,
+    n_iter=50,
+    wing_weight=0.5,
+    smooth_weight=0.1,
+    corridor=12.0,
+    stac_overrides=DEFAULT_STAC_OVERRIDES,
+    stac_fallback=False,
+    fallback_ik_h5=DEFAULT_FALLBACK_IK_H5,
+):
+    """Courtship validation: 2nd-fly keypoint-withhold ablation (Task 6).
+
+    Demonstrates the spec's "female rides on silhouette": withholds
+    ``ablate_fly_id``'s wing keypoints and confirms the silhouette condition
+    recovers wing extent toward the SAM-triangulated tip, while BOTH flies
+    still reproject cleanly.
+
+    Pipeline: ``link_recording`` -> per-fly ``_prepare_fly_ik`` (bout + STAC)
+    for BOTH flies -> ``run_ablation`` on ``ablate_fly_id`` with its
+    ``ann_id_by_image`` -> ``run_single_fly`` on the other fly to confirm
+    clean reprojection.
+
+    Args:
+        ablate_fly_id: which fly slot (0 or 1) has its wing keypoints
+            withheld for the ablation. Default 1 (the "female" slot per
+            user decision 2), but the identity map's fly0/fly1 slots are
+            otherwise arbitrary (sex disambiguation is out of scope).
+
+    Returns:
+        {"ablation": <run_ablation dict for ablate_fly_id>,
+         "other_fly": {"fly_id": int, "reproj_px": float},
+         "ablate_fly_id": int}
+    """
+    if coco_path is None:
+        coco_path = os.path.join(root, "annotations", f"instances_{split}.json")
+    identity_map = link_recording(coco_path, recording, calib_dir, split=split, n_flies=2)
+    os.makedirs(out_dir, exist_ok=True)
+
+    other_fly_id = 1 - ablate_fly_id
+
+    # ablated fly: build bout + STAC, then run_ablation with its ann selection.
+    ab_dir = os.path.join(out_dir, f"fly{ablate_fly_id}")
+    _, ab_ik, _ = _prepare_fly_ik(
+        recording, ab_dir, coco_path, calib_dir, identity_map, ablate_fly_id,
+        anatomy_yaml, model_xml, stac_config_dir, split, stac_overrides,
+        stac_fallback=stac_fallback, fallback_ik_h5=fallback_ik_h5)
+    ab_ann = ann_id_by_image_for_fly(identity_map, coco_path, recording, ablate_fly_id)
+    ablation = run_ablation(
+        recording, ik_h5=ab_ik, model_xml=model_xml, mesh_npz=mesh_npz, root=root,
+        split=split, calib_dir=calib_dir, wing_weight=wing_weight,
+        max_frames=max_frames, smooth_weight=smooth_weight, n_iter=n_iter,
+        corridor=corridor, out_dir=ab_dir, ann_id_by_image=ab_ann)
+
+    # other fly: build bout + STAC, run_single_fly to confirm clean reprojection.
+    ot_dir = os.path.join(out_dir, f"fly{other_fly_id}")
+    _, ot_ik, _ = _prepare_fly_ik(
+        recording, ot_dir, coco_path, calib_dir, identity_map, other_fly_id,
+        anatomy_yaml, model_xml, stac_config_dir, split, stac_overrides,
+        stac_fallback=stac_fallback, fallback_ik_h5=fallback_ik_h5)
+    ot_ann = ann_id_by_image_for_fly(identity_map, coco_path, recording, other_fly_id)
+    ot_report = run_single_fly(
+        recording, ik_h5=ot_ik, model_xml=model_xml, mesh_npz=mesh_npz, root=root,
+        split=split, calib_dir=calib_dir, use_silhouette=True, wing_weight=wing_weight,
+        max_frames=max_frames, smooth_weight=smooth_weight, n_iter=n_iter,
+        corridor=corridor, out_dir=ot_dir, ann_id_by_image=ot_ann)
+
+    return {
+        "ablation": ablation,
+        "other_fly": {"fly_id": other_fly_id, "reproj_px": ot_report["reproj_px"]},
+        "ablate_fly_id": ablate_fly_id,
+    }

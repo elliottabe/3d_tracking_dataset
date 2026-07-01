@@ -79,3 +79,31 @@ def test_run_multifly_ik_both_flies_reproject_cleanly(tmp_path):
     q1 = np.load(os.path.join(str(tmp_path), "fly1", f"{REC}_qpos.npz"))["qpos"]
     n = min(len(q0), len(q1))
     assert np.linalg.norm(q0[:n] - q1[:n]) > 1e-3, "fly0/fly1 qpos identical (collapse)"
+
+
+@pytest.mark.skipif(not _HAVE, reason="courtship coco / model / mesh / stac config not present")
+def test_run_multifly_ablation_recovers_second_fly_wing(tmp_path):
+    """GPU real run: withhold fly1's wing keypoints; the silhouette condition (c)
+    must recover wing extent toward the SAM tip (recovery_to_sam > 0) while the
+    OTHER fly still reprojects cleanly."""
+    from jarvis_jax.cse.run_multifly_ik import run_multifly_ablation
+    out = run_multifly_ablation(
+        REC, root=ROOT, calib_dir=CALIB, anatomy_yaml=ANATOMY, model_xml=XML,
+        mesh_npz=MESH, stac_config_dir=STAC_CFG, out_dir=str(tmp_path),
+        split="val", ablate_fly_id=1, coco_path=COCO, max_frames=16, n_iter=30,
+    )
+    ab = out["ablation"]
+    assert set(ab["conditions"]) == {"reference", "baseline", "silhouette"}
+    assert out["ablate_fly_id"] == 1
+    # both flies reproject cleanly: the non-ablated fly's reproj_px is bounded,
+    # and the ablated fly's non-wing reproj_px (silhouette condition) is bounded.
+    assert np.isfinite(out["other_fly"]["reproj_px"]) and out["other_fly"]["reproj_px"] < 12.0
+    assert np.isfinite(ab["conditions"]["silhouette"]["reproj_px"])
+    assert ab["conditions"]["silhouette"]["reproj_px"] < 15.0
+    # the silhouette must recover the withheld wing toward the SAM extent on at
+    # least one side (positive recovery vs the SAM-triangulated tip).
+    assert ab["n_frames_with_tips"] > 0, "no SAM wing tips extracted for fly1"
+    rec = ab["recovery_ratio_to_sam_mm"]
+    assert any(np.isfinite(rec[s]) and rec[s] > 0.0 for s in ("left", "right")), (
+        f"silhouette did not recover fly1's withheld wing toward SAM: {rec}"
+    )
