@@ -96,6 +96,8 @@ def link_frameset(anns_by_cam, cam_mats, *, n_flies=2, ref_cam=None,
     full_cams = [c for c in anns_by_cam if len(anns_by_cam[c]) >= n_flies]
     if not full_cams:
         return {fid: {} for fid in range(n_flies)}
+    # Callers should key anns_by_cam by canonical camera index so full_cams[0]
+    # (the default ref camera below) is deterministic.
     if ref_cam is None or ref_cam not in full_cams:
         ref_cam = full_cams[0]
 
@@ -121,6 +123,11 @@ def link_frameset(anns_by_cam, cam_mats, *, n_flies=2, ref_cam=None,
                 total += score_assignment(obs, [ref_cam, cam], cam_mats)
             if total < best_total:
                 best_total, best_perm = total, perm
+        if best_perm is None:
+            # No candidate permutation triangulated at this camera (e.g. all
+            # anns' keypoints have v=0). Drop the camera rather than crash;
+            # the fly is simply not observed there.
+            continue
         for fly in range(n_flies):
             assign[fly][cam] = best_perm[fly]
 

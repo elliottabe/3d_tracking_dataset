@@ -112,3 +112,67 @@ def test_link_frameset_robust_to_order_swap_and_missing_cam():
     # camera 5's single ann is assigned to exactly one fly (the nearest-reproj one)
     assigned_cam5 = [fid for fid in linked if 5 in linked[fid]]
     assert len(assigned_cam5) == 1
+
+
+def test_link_frameset_returns_empty_when_residual_exceeds_gate():
+    rng = np.random.default_rng(3)
+    cam_mats = _rig(7)
+    K = 8
+    # Pure noise: each camera's two anns are independent random pixel coords,
+    # so there is no true shared 3-D point and reprojection residual is huge.
+    anns_by_cam = {}
+    for c in range(7):
+        f0 = {"id": c * 10 + 0,
+              "keypoints": np.concatenate(
+                  [rng.uniform(-500, 500, size=(K, 2)), np.full((K, 1), 2.0)], axis=1
+              ).reshape(-1).tolist()}
+        f1 = {"id": c * 10 + 1,
+              "keypoints": np.concatenate(
+                  [rng.uniform(-500, 500, size=(K, 2)), np.full((K, 1), 2.0)], axis=1
+              ).reshape(-1).tolist()}
+        anns_by_cam[c] = [f0, f1]
+    linked = link_frameset(anns_by_cam, cam_mats, n_flies=2)
+    assert linked == {0: {}, 1: {}}
+
+
+def test_link_frameset_degenerate_full_camera_does_not_crash():
+    rng = np.random.default_rng(4)
+    cam_mats = _rig(7)
+    fly0, fly1 = _make_two_flies(rng, cam_mats)
+    obs0, obs1 = _project_fly(cam_mats, fly0), _project_fly(cam_mats, fly1)
+    order = [0, 1, 0, 1, 0, 1, 0]
+    anns = _anns_from_obs(obs0, obs1, order)
+    # Camera 3 is "full" (has n_flies anns) but every keypoint is invisible
+    # (v=0), so no permutation at that camera triangulates -> best_perm stays
+    # None. Must not raise, and the camera must simply be dropped.
+    for ann in anns[3]:
+        kp = np.asarray(ann["keypoints"], float).reshape(-1, 3)
+        kp[:, 2] = 0.0
+        ann["keypoints"] = kp.reshape(-1).tolist()
+
+    linked = link_frameset(anns, cam_mats, n_flies=2)
+
+    def true_slot(ann_id):
+        return ann_id % 10
+    slots_fly = {fid: {true_slot(a) for cam, a in linked[fid].items() if cam != 3}
+                 for fid in linked}
+    assert all(len(s) == 1 for s in slots_fly.values())
+    assert slots_fly[0] != slots_fly[1]
+    # the degenerate camera is absent from both flies' maps
+    assert 3 not in linked[0] and 3 not in linked[1]
+    # the remaining good cameras are still resolved
+    assert set(linked[0]) == set(range(7)) - {3}
+    assert set(linked[1]) == set(range(7)) - {3}
+
+
+def test_link_frameset_returns_empty_when_no_full_camera():
+    rng = np.random.default_rng(5)
+    cam_mats = _rig(7)
+    fly0, fly1 = _make_two_flies(rng, cam_mats)
+    obs0, obs1 = _project_fly(cam_mats, fly0), _project_fly(cam_mats, fly1)
+    anns = _anns_from_obs(obs0, obs1, [0] * 7)
+    # every camera has only 1 ann (< n_flies=2) -> no full camera at all
+    for c in anns:
+        anns[c] = [anns[c][0]]
+    linked = link_frameset(anns, cam_mats, n_flies=2)
+    assert linked == {0: {}, 1: {}}
