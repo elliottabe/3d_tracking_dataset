@@ -40,3 +40,16 @@ def reconstruct_affine(K2: np.ndarray, R: np.ndarray, t: np.ndarray) -> np.ndarr
     P[:2, 3] = np.asarray(t, np.float64)
     P[2, 3] = 1.0
     return P
+
+
+def project_affine(P: np.ndarray, X: np.ndarray) -> np.ndarray:
+    """Affine projection uv = P[:2,:3] @ X + P[:2,3] (no perspective divide)."""
+    P = np.asarray(P, np.float64); X = np.asarray(X, np.float64)
+    return X @ P[:2, :3].T + P[:2, 3]
+
+
+def project_from_params(K2, R_mat, t, X):
+    """JAX-friendly affine projection from (K2 (2,2), R_mat (3,3), t (2,), X (...,3))."""
+    import jax.numpy as jnp
+    M = K2 @ R_mat[:2, :]                      # (2,3)
+    return X @ M.T + t                         # (...,2)

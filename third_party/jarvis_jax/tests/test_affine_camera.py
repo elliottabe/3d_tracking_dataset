@@ -25,3 +25,29 @@ def test_factor_K2_upper_triangular_positive_diag():
     K2, R, t = factor_affine(P_REAL)
     assert abs(K2[1, 0]) < 1e-12, "K2 not upper triangular"
     assert K2[0, 0] > 0 and K2[1, 1] > 0, "K2 diagonal not positive"
+
+
+def test_project_affine_matches_reprojection_tool(tmp_path):
+    import cv2
+    from jarvis_jax.geometry.reprojection_tool import ReprojectionTool
+    from jarvis_jax.cse.affine_camera import project_affine
+    # Write P_REAL as a one-camera calib dir and compare projections.
+    d = tmp_path / "calib"; d.mkdir()
+    fs = cv2.FileStorage(str(d / "Cam0001.yaml"), cv2.FILE_STORAGE_WRITE)
+    fs.write("projectionMatrix", P_REAL); fs.release()
+    rt = ReprojectionTool(str(d))
+    X = np.array([1.5, -0.7, 12.0])
+    uv_tool = rt.reproject_point(X)[0]            # (2,)
+    uv_aff = project_affine(P_REAL, X)            # (2,)
+    assert np.allclose(uv_tool, uv_aff, atol=1e-9), f"{uv_tool} vs {uv_aff}"
+
+
+def test_project_from_params_matches_project_affine():
+    import jax.numpy as jnp
+    from jarvis_jax.cse.affine_camera import factor_affine, project_affine, project_from_params
+    K2, R, t = factor_affine(P_REAL)
+    X = np.array([[1.5, -0.7, 12.0], [0.2, 0.3, 9.0]])
+    uv_np = project_affine(P_REAL, X)                                   # (2,2)
+    uv_jx = np.asarray(project_from_params(jnp.asarray(K2), jnp.asarray(R),
+                                           jnp.asarray(t), jnp.asarray(X)))
+    assert np.allclose(uv_np, uv_jx, atol=1e-6), f"{uv_np} vs {uv_jx}"
