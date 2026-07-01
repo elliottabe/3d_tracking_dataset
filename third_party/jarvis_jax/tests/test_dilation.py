@@ -51,3 +51,17 @@ def test_binary_stays_binary_float_stays_float():
     out = dilate_mask_jax(m, 3)
     assert out.dtype == m.dtype
     assert set(np.unique(np.asarray(out)).tolist()) <= {0.0, 1.0}
+
+
+def test_bool_and_int_masks_supported():
+    # SAM3 masks are stored bool; -inf is not representable in bool/int, so the
+    # impl must dilate in float and cast back, preserving the input dtype.
+    from jarvis_jax.models.dilation import dilate_mask_jax
+    mb = jnp.zeros((5, 5), dtype=bool).at[2, 2].set(True)
+    ob = dilate_mask_jax(mb, 3)
+    assert ob.dtype == jnp.bool_
+    assert np.all(np.asarray(ob)[1:4, 1:4]) and np.asarray(ob).sum() == 9
+    mi = jnp.zeros((5, 5), dtype=jnp.int32).at[2, 2].set(1)
+    oi = dilate_mask_jax(mi, 3)
+    assert oi.dtype == jnp.int32
+    assert np.asarray(oi).sum() == 9

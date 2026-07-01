@@ -18,12 +18,19 @@ def dilate_mask_jax(mask, k):
 
     mask: (H,W) | (B,H,W) | (B,H,W,C). Returns the SAME shape/dtype. k is a static
     Python int; k <= 1 (or 0) returns `mask` unchanged (identity). Padding='SAME'
-    (window centered for odd k, matching PyTorch padding=k//2).
+    (window centered for odd k, matching PyTorch padding=k//2). Accepts bool/int
+    masks (e.g. the bool SAM3 mask) as well as float: non-float input is dilated in
+    float32 and cast back, so `-inf` as the max-reduce identity is always valid.
     """
     k = int(k)
     if k <= 1:
         return mask
     x = jnp.asarray(mask)
+    orig_dtype = x.dtype
+    # -inf (the max-reduce identity) is only representable in float; dilate a
+    # bool/int mask in float32 then cast back to preserve the input dtype.
+    if not jnp.issubdtype(orig_dtype, jnp.floating):
+        x = x.astype(jnp.float32)
     win = (k, k)
     strides = (1, 1)
     # reduce_window needs a window entry per axis; pad the spatial window with 1s
@@ -38,4 +45,4 @@ def dilate_mask_jax(mask, k):
         raise ValueError(f"dilate_mask_jax expects 2/3/4-D mask, got shape {x.shape}")
     neg_inf = jnp.array(-jnp.inf, dtype=x.dtype)
     out = jax.lax.reduce_window(x, neg_inf, jax.lax.max, wd, ws, pad)
-    return out
+    return out.astype(orig_dtype)
