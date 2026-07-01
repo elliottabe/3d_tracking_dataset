@@ -14,8 +14,12 @@ imported. Cameras are telecentric (affine): projection has no perspective divide
 from __future__ import annotations
 
 import itertools
+import json
+import os
 
 import numpy as np
+
+from jarvis_jax.geometry.reprojection_tool import ReprojectionTool
 
 
 def _dlt_affine(cam_mats, cam_ids, pts2d) -> np.ndarray:
@@ -176,4 +180,57 @@ def link_frameset(anns_by_cam, cam_mats, *, n_flies=2, ref_cam=None,
     out = {}
     for fly in range(n_flies):
         out[fly] = {cam: int(anns_by_cam[cam][li]["id"]) for cam, li in assign[fly].items()}
+    return out
+
+
+def link_recording(coco_path, recording, calib_dir, *, split="val", n_flies=2,
+                   residual_gate_px=40.0):
+    """Per-frameset cross-camera identity map for a recording. See Interfaces.
+
+    Returns {fs_key: {fly_id: {cam_idx: ann_id}}}. Camera indices are
+    ReprojectionTool indices (sorted-lexicographic Cam*.yaml order); the camera
+    a coco image belongs to is parsed from its file_name (``<split>/<cam>/...``).
+    """
+    coco = json.load(open(coco_path))
+    id2file = {im["id"]: im["file_name"] for im in coco["images"]}
+    anns_by_img = {}
+    for a in coco["annotations"]:
+        anns_by_img.setdefault(a["image_id"], []).append(a)
+
+    rt = ReprojectionTool(calib_dir)
+    cam_names = list(rt.cameras.keys())
+    cam_mats = np.stack([c.cameraMatrix for c in rt._camera_list], 0)  # (n_cam,3,4)
+
+    def _cam_index(image_id):
+        fn = id2file.get(int(image_id), "")
+        cam = fn.split("/")[1] if "/" in fn else ""
+        return cam_names.index(cam) if cam in cam_names else None
+
+    out = {}
+    for fs_key, fs in coco["framesets"].items():
+        if fs.get("datasetName") != recording:
+            continue
+        anns_by_cam = {}
+        for iid in fs["frames"]:
+            ci = _cam_index(iid)
+            if ci is None:
+                continue
+            fa = anns_by_img.get(int(iid), [])
+            if fa:
+                anns_by_cam[ci] = fa
+        if not anns_by_cam:
+            out[fs_key] = {fid: {} for fid in range(n_flies)}
+            continue
+        full = [c for c in anns_by_cam if len(anns_by_cam[c]) >= n_flies]
+        if full:
+            out[fs_key] = link_frameset(
+                anns_by_cam, cam_mats, n_flies=n_flies,
+                residual_gate_px=residual_gate_px,
+            )
+        else:
+            # 1-fly frameset: assign every single ann to fly0.
+            mapping = {fid: {} for fid in range(n_flies)}
+            for cam, fa in anns_by_cam.items():
+                mapping[0][cam] = int(fa[0]["id"])
+            out[fs_key] = mapping
     return out

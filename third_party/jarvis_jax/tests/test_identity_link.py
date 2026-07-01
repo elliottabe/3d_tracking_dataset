@@ -1,7 +1,15 @@
+import os
+
 import numpy as np
 import pytest
 from jarvis_jax.cse.affine_camera import factor_affine, reconstruct_affine, project_affine
 from jarvis_jax.cse.identity_link import score_assignment, _dlt_affine, link_frameset
+from jarvis_jax.cse.identity_link import link_recording
+
+ROOT = "/gscratch/portia/eabe/data/Johnson_lab/red_data/red_data_unified_V3"
+REC = "2026_04_07_11_33_33"
+CALIB = f"{ROOT}/calib_params/{REC}"
+COCO = f"{ROOT}/annotations/instances_val.json"
 
 # A real telecentric DLT (from the rig) + 6 rotated copies -> 7 affine cameras
 # with angular diversity, so affine triangulation is well-conditioned.
@@ -176,3 +184,60 @@ def test_link_frameset_returns_empty_when_no_full_camera():
         anns[c] = [anns[c][0]]
     linked = link_frameset(anns, cam_mats, n_flies=2)
     assert linked == {0: {}, 1: {}}
+
+
+@pytest.mark.skipif(not os.path.exists(COCO), reason="courtship coco not present")
+def test_link_recording_two_fly_framesets_reproject_cleanly():
+    m = link_recording(COCO, REC, CALIB, split="val", n_flies=2)
+    assert len(m) > 0, "no framesets found for the recording"
+
+    # Most framesets should resolve BOTH flies. NOTE on threshold: the brief's
+    # ">= 50" assumed 181 "two-ann frames" (per-camera image count) meant 181
+    # two-fly FRAMESETS, but this recording's instances_val.json only contains
+    # 31 framesets total for REC (the 181 figure is per-camera frames across
+    # those framesets, ~7 cams x ~26 framesets). Measured on real data: 30/31
+    # framesets (97%) resolve both flies fully in all 7 cameras; the single
+    # excluded frameset genuinely has only one fly annotated in every camera
+    # (1-fly frameset, handled by the graceful-degrade branch). Since 50 two-fly
+    # framesets is mathematically impossible out of 31 total, the count gate is
+    # lowered to the actual achievable ceiling with margin.
+    two_fly = [k for k, v in m.items() if len(v.get(0, {})) >= 2 and len(v.get(1, {})) >= 2]
+    assert len(two_fly) >= 28, f"only {len(two_fly)} two-fly framesets linked"
+
+    # NON-VACUOUS: each linked fly's chosen anns must triangulate + reproject
+    # to a small residual (the linker's own objective) and the two flies must
+    # pick DISJOINT anns per camera (no identity collapse).
+    import json
+    import numpy as np
+    from jarvis_jax.geometry.reprojection_tool import ReprojectionTool
+    from jarvis_jax.cse.identity_link import score_assignment, _ann_kp
+    coco = json.load(open(COCO))
+    id2ann = {}
+    for a in coco["annotations"]:
+        id2ann.setdefault(a["image_id"], []).append(a)
+    ann_by_id = {a["id"]: a for a in coco["annotations"]}
+    id2file = {im["id"]: im["file_name"] for im in coco["images"]}
+    rt = ReprojectionTool(CALIB)
+    cam_names = list(rt.cameras.keys())
+    cam_mats = np.stack([c.cameraMatrix for c in rt._camera_list], 0)  # (n_cam,3,4)
+
+    resid_all, disjoint_ok = [], 0
+    for fs_key in two_fly[:30]:
+        v = m[fs_key]
+        # disjoint per-camera anns between fly0 and fly1
+        shared = set(v[0].items()) & set(v[1].items())
+        if not shared:
+            disjoint_ok += 1
+        for fly in (0, 1):
+            n_cam = len(cam_names)
+            K = _ann_kp(next(iter(ann_by_id.values()))).shape[0]
+            obs = np.zeros((n_cam, K, 3))
+            for cam, aid in v[fly].items():
+                obs[cam] = _ann_kp(ann_by_id[aid])
+            r = score_assignment(obs, list(v[fly]), cam_mats)
+            if np.isfinite(r):
+                resid_all.append(r)
+    assert disjoint_ok >= 25, "flies share anns in too many framesets (identity collapse)"
+    assert np.mean(resid_all) < 15.0, (
+        f"post-link mean reprojection residual {np.mean(resid_all):.2f}px too high"
+    )
