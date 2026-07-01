@@ -9,17 +9,31 @@ import numpy as np
 from jarvis_jax.cse.affine_camera import project_affine
 
 
-def wing_side_vertices(mesh_npz):
+def wing_side_vertices(mesh_npz, exclude_seg_ids=None):
+    """Fps-subset left/right wing tip+prox vertex positions (indices into
+    ``z["fps_300"]``, i.e. 0..299).
+
+    ``exclude_seg_ids`` (Phase 4 geom-exclusion, e.g. a headless/amputee
+    recording's ``mask["excluded_seg_ids"]``) drops fps points belonging to
+    those mesh segments BEFORE the thorax-centroid mean and the tip/prox
+    argmax/argmin, so an excluded part's vertex can never be selected as a
+    wing tip/prox or skew the thorax centroid. Wings are never an off-part in
+    Phase 4, so in practice this is a defensive no-op on the wing selection
+    itself; default ``None`` reproduces the original (unfiltered) behavior
+    exactly.
+    """
     z = np.load(mesh_npz, allow_pickle=True)
     fps = z["fps_300"] if "fps_300" in z.files else z[f"fps_{len(z['vertex_segment'])}"]
     seg = z["vertex_segment"][fps]; C = z["vertices"][fps]
     id2n = {int(s): (n.decode() if isinstance(n, bytes) else n)
             for s, n in zip(z["seg_ids"], z["seg_names"])}
     names = [id2n[int(s)].lower() for s in seg]
-    thorax_c = C[[("thorax" in n) for n in names]].mean(0)
+    excl = set(exclude_seg_ids or [])
+    keep_mask = np.array([int(s) not in excl for s in seg])
+    thorax_c = C[np.array([("thorax" in n) for n in names]) & keep_mask].mean(0)
     out = {}
     for side in ("left", "right"):
-        si = np.where([("wing" in n and side in n) for n in names])[0]
+        si = np.where(np.array([("wing" in n and side in n) for n in names]) & keep_mask)[0]
         d = np.linalg.norm(C[si] - thorax_c, axis=1)
         out[side] = {"tip": int(si[d.argmax()]), "prox": int(si[d.argmin()])}
     return out

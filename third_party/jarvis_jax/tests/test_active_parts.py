@@ -146,6 +146,39 @@ def test_clamp_locked_qpos_pins_to_rest():
     assert not np.shares_memory(q2, q)                    # returns a copy
 
 
+@pytest.mark.skipif(not _HAVE_MODEL, reason="V1 model / mesh not present")
+def test_excluded_fps_indices_match_seg_ids():
+    from jarvis_jax.cse.active_parts import build_active_mask, excluded_fps_indices, derive_active_parts
+    off = derive_active_parts(HEADLESS_47)["off"]        # ["head"]
+    mask = build_active_mask(HEADLESS_47, XML, MESH, off)
+    fps_ex = excluded_fps_indices(mask, MESH)
+    z = np.load(MESH, allow_pickle=True)
+    fps = z["fps_300"]
+    seg = z["vertex_segment"]
+    # every excluded fps position maps to a full-vertex whose seg is head (2..8).
+    assert len(fps_ex) > 0
+    assert np.isin(seg[fps[fps_ex]], [2, 3, 4, 5, 6, 7, 8]).all()
+    # and no NON-excluded fps position is a head vertex.
+    keep = np.setdiff1d(np.arange(len(fps)), fps_ex)
+    assert not np.isin(seg[fps[keep]], [2, 3, 4, 5, 6, 7, 8]).any()
+
+
+@pytest.mark.skipif(not _HAVE_MODEL, reason="V1 model / mesh not present")
+def test_wing_side_vertices_ignores_excluded_segs():
+    from jarvis_jax.cse.silhouette_landmarks import wing_side_vertices
+    base = wing_side_vertices(MESH)
+    # excluding a LEG's segs must not change the WING tip/prox selection
+    # (wings and that leg are disjoint) -> defensive no-op for wings.
+    excl = wing_side_vertices(MESH, exclude_seg_ids=list(range(28, 36)))  # T1R
+    assert base == excl
+    # the excluded-vertex fps positions are never returned as a wing tip/prox.
+    z = np.load(MESH, allow_pickle=True)
+    seg = z["vertex_segment"]; fps = z["fps_300"]
+    for side in ("left", "right"):
+        for k in ("tip", "prox"):
+            assert seg[fps[excl[side][k]]] not in list(range(28, 36))
+
+
 def test_apply_active_mask_to_inputs_gates_weights_and_dofs():
     from jarvis_jax.cse.active_parts import apply_active_mask_to_inputs
     inp = {"kps_to_opt": np.ones(6, np.float32), "qs_to_opt": np.ones(4, bool),

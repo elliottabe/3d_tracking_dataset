@@ -163,6 +163,18 @@ def build_active_mask(kp_names, model_xml, mesh_npz, off_parts):
     }
 
 
+def excluded_fps_indices(mask, mesh_npz):
+    """fps_300-relative positions whose full-vertex segment is in the mask's
+    excluded_seg_ids (the fps subset the silhouette landmark path indexes)."""
+    z = np.load(mesh_npz, allow_pickle=True)
+    fps = z["fps_300"] if "fps_300" in z.files else z[f"fps_{len(z['vertex_segment'])}"]
+    seg = z["vertex_segment"]
+    excl = set(mask["excluded_seg_ids"])
+    if not excl:
+        return np.zeros(0, dtype=np.int64)
+    return np.where(np.isin(seg[fps], list(excl)))[0].astype(np.int64)
+
+
 def clamp_locked_qpos(qpos, mask):
     """Post-solve clamp: pin every locked joint's qpos back to rest (removes the
     phantom LM-variable drift). Returns a copy; no-op when nothing is locked."""

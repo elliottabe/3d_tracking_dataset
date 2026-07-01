@@ -362,7 +362,7 @@ def _triangulate_kp_mm(rt, ik_kpnames, coco_kpnames, cam2img, id2ann_multi, ann_
     return kp_mm, valid
 
 
-def _wing_fk_indices(mesh_npz: str) -> np.ndarray:
+def _wing_fk_indices(mesh_npz: str, exclude_seg_ids=None) -> np.ndarray:
     """Full-vertex-array indices [L-prox, L-tip, R-prox, R-tip] for FK repose.
 
     ``silhouette_landmarks.wing_side_vertices`` returns indices into the
@@ -381,12 +381,16 @@ def _wing_fk_indices(mesh_npz: str) -> np.ndarray:
     intended wing-membrane vertices. This helper does the fps_300[idx]
     conversion needed to bridge ``wing_side_vertices``' fps-relative output
     into ``make_fk_repose``'s full-vertex-array index space.
+
+    ``exclude_seg_ids`` (Phase 4 geom-exclusion) is forwarded into
+    ``wing_side_vertices`` so an off-part's vertices can never be selected as
+    a wing tip/prox; default None reproduces the original behavior exactly.
     """
     from jarvis_jax.cse.silhouette_landmarks import wing_side_vertices
 
     z = np.load(mesh_npz, allow_pickle=True)
     fps = z["fps_300"] if "fps_300" in z.files else z[f"fps_{len(z['vertex_segment'])}"]
-    sides = wing_side_vertices(mesh_npz)
+    sides = wing_side_vertices(mesh_npz, exclude_seg_ids=exclude_seg_ids)
     return np.array([
         fps[sides["left"]["prox"]], fps[sides["left"]["tip"]],
         fps[sides["right"]["prox"]], fps[sides["right"]["tip"]],
@@ -540,6 +544,7 @@ def extract_tips_for_frames(
     *,
     corridor: float = 12.0,
     ann_id_by_image: dict | None = None,
+    active_parts: list | dict | None = None,
 ) -> list:
     """Per-frame SAM-silhouette wing-tip triangulation, returned in MODEL frame.
 
@@ -582,6 +587,17 @@ def extract_tips_for_frames(
             per-identity selection), for solving a SPECIFIC fly on a
             multi-fly image. Default None selects the first ann per image
             (backward-compatible single-fly behavior).
+        active_parts: Phase 4 headless/amputation support (geom-exclusion in
+            the silhouette path). If a ``dict``, treated as an already-built
+            mask (``active_parts.build_active_mask`` output) and its
+            ``excluded_seg_ids`` is forwarded into ``_wing_fk_indices`` (so
+            an off-part's mesh vertices can never be selected as a wing
+            tip/prox). If a ``list[str]``, treated as the explicit off-part
+            list and a mask is built via ``active_parts.build_active_mask``.
+            Default None -> no exclusion -> behavior unchanged. Since the
+            silhouette landmark here is the WING tip and wings are never an
+            off-part in Phase 4, this is defensive (matters for Phase 6's
+            dense silhouette).
 
     Returns:
         list of length T; each entry is a dict {"left": (X_model(3,), ncam)
@@ -612,7 +628,16 @@ def extract_tips_for_frames(
     anat = load_anatomy(model_xml, mesh_npz)
     fk = make_fk_repose(anat)
 
-    fk_idx = _wing_fk_indices(mesh_npz)  # [L-prox, L-tip, R-prox, R-tip], full-vertex-array indices
+    # Phase 4: resolve active_parts -> excluded_seg_ids (None/[] -> no exclusion).
+    if isinstance(active_parts, dict):
+        exclude_seg_ids = active_parts.get("excluded_seg_ids")
+    elif active_parts:
+        from jarvis_jax.cse.active_parts import build_active_mask
+        exclude_seg_ids = build_active_mask(kp_names, model_xml, mesh_npz, list(active_parts))["excluded_seg_ids"]
+    else:
+        exclude_seg_ids = None
+
+    fk_idx = _wing_fk_indices(mesh_npz, exclude_seg_ids=exclude_seg_ids)  # [L-prox, L-tip, R-prox, R-tip], full-vertex-array indices
 
     kp_names = list(kp_names)
 
@@ -810,7 +835,7 @@ def run_single_fly(
         tips_list = extract_tips_for_frames(
             root, split, recording, fs_imgids, calib_dir, model_xml, mesh_npz,
             q_init, marker_sites, inputs["kp_names"], corridor=corridor,
-            ann_id_by_image=ann_id_by_image,
+            ann_id_by_image=ann_id_by_image, active_parts=active_parts,
         )
         n_frames_with_tips = sum(
             1 for f in tips_list if f.get("left") is not None or f.get("right") is not None
@@ -1210,7 +1235,7 @@ def run_ablation(
     tips_list = extract_tips_for_frames(
         root, split, recording, fs_imgids, calib_dir, model_xml, mesh_npz,
         q_init, marker_sites, kp_names, corridor=corridor,
-        ann_id_by_image=ann_id_by_image,
+        ann_id_by_image=ann_id_by_image, active_parts=active_mask,
     )
     n_frames_with_tips = sum(
         1 for f in tips_list if f.get("left") is not None or f.get("right") is not None
