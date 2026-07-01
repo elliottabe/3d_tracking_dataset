@@ -48,6 +48,7 @@ def test_ann_id_by_image_for_fly_flattens_map():
 _HAVE = all(os.path.exists(p) for p in (COCO, XML, MESH, ANATOMY, STAC_CFG))
 
 
+@pytest.mark.gpu
 @pytest.mark.skipif(not _HAVE, reason="courtship coco / model / mesh / stac config not present")
 def test_run_multifly_ik_both_flies_reproject_cleanly(tmp_path):
     """GPU real run on a small frame slice: BOTH flies produce an ik_h5 and a
@@ -81,6 +82,7 @@ def test_run_multifly_ik_both_flies_reproject_cleanly(tmp_path):
     assert np.linalg.norm(q0[:n] - q1[:n]) > 1e-3, "fly0/fly1 qpos identical (collapse)"
 
 
+@pytest.mark.gpu
 @pytest.mark.skipif(not _HAVE, reason="courtship coco / model / mesh / stac config not present")
 def test_run_multifly_ablation_recovers_second_fly_wing(tmp_path):
     """GPU real run: withhold fly1's wing keypoints; the silhouette condition (c)

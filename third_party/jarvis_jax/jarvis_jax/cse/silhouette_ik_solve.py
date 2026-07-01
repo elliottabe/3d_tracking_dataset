@@ -296,20 +296,32 @@ def _cam2img_for_frame(fs_imgids_row, id2file, cam_names) -> dict:
 def _ann_for_image(id2ann_multi, image_id, ann_id_by_image=None):
     """Select one COCO annotation for an image.
 
-    id2ann_multi maps image_id -> list of all anns for that image. If
-    ann_id_by_image (per-fly image_id -> chosen ann id) is given and has this
-    image, return the ann whose id matches; otherwise return the first ann
-    (backward-compatible single-ann behavior). None if the image has no anns.
+    id2ann_multi maps image_id -> list of all anns for that image. None if
+    the image has no anns.
+
+    If ann_id_by_image is None, returns the first ann for the image
+    (backward-compatible single-fly behavior — lenient).
+
+    If ann_id_by_image is given (per-fly image_id -> chosen ann id), the
+    selection is STRICT: the image must be present in the map and its
+    chosen ann id must be found among this image's anns, or this returns
+    None. This avoids silently falling back to some OTHER fly's annotation
+    (e.g. the wrong fly on a 2-fly image) when the map is missing an entry
+    or references a stale ann id.
     """
     anns = id2ann_multi.get(int(image_id))
     if not anns:
         return None
-    if ann_id_by_image is not None and int(image_id) in ann_id_by_image:
-        want = int(ann_id_by_image[int(image_id)])
-        for a in anns:
-            if int(a["id"]) == want:
-                return a
-    return anns[0]
+    if ann_id_by_image is None:
+        return anns[0]
+    want = ann_id_by_image.get(int(image_id))
+    if want is None:
+        return None
+    want = int(want)
+    for a in anns:
+        if int(a["id"]) == want:
+            return a
+    return None
 
 
 def _triangulate_kp_mm(rt, ik_kpnames, coco_kpnames, cam2img, id2ann_multi, ann_id_by_image=None):

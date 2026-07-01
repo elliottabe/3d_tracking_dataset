@@ -436,9 +436,13 @@ def test_ann_for_image_selects_by_ann_id_by_image():
     assert b["id"] == 5
     # missing image -> None
     assert _ann_for_image(id2ann_multi, 999, {100: 6}) is None
-    # image not in map -> falls back to first ann
+    # image not in a non-None map -> STRICT skip (None), not the other fly's ann
     c = _ann_for_image(id2ann_multi, 100, {200: 6})
-    assert c["id"] == 5
+    assert c is None
+    # image present but requested ann id absent from that image's anns (stale
+    # id) -> STRICT skip (None), not a silent fallback to the wrong fly's ann
+    d = _ann_for_image(id2ann_multi, 100, {100: 999})
+    assert d is None
 
 
 def test_triangulate_kp_mm_uses_selected_ann():

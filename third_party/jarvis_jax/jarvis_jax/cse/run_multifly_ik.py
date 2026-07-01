@@ -25,12 +25,16 @@ is the proven-working config for this pipeline.
 Primary path: a per-fly STAC solve via ``jarvis_jax.cse.run_stac_bout.run``,
 which fits per-fly offsets + q_init from that fly's own triangulated bout.
 Escape hatch (``stac_fallback=True``): if per-fly STAC fails, reuse the
-existing (male) fly's fitted offsets/marker_sites ik h5 as the fixed V1
-anatomy source and seed ``solve_ik`` with a per-fly q_init derived from the
-per-fly bout (``build_solver_inputs`` against that shared ik h5, then
-overwrite ``kp_data`` with the per-fly bout's triangulated keypoints, same
-50-kp order/scale). The fallback keeps anatomy fixed (V1) and only re-solves
-pose per fly. Primary path is tried FIRST; fallback only on genuine failure.
+existing (male) fly's fitted anatomy/qpos/marker_sites ik h5 verbatim as a
+seed, replacing only ``kp_data`` with the per-fly bout's triangulated
+keypoints (same 50-kp order/scale). This does NOT itself re-solve pose --
+it writes an ik h5 whose ``qpos``/``marker_sites`` are still the shared
+(male) fly's solved values, paired with THIS fly's own keypoints. The
+actual per-fly pose re-solve happens downstream, inside ``run_single_fly``
+(called by ``run_multifly_ik``/``run_multifly_ablation`` after
+``_prepare_fly_ik`` returns), via its own ``build_solver_inputs``/
+``solve_ik`` call on this ik h5. Primary path is tried FIRST; fallback only
+on genuine failure.
 """
 from __future__ import annotations
 
@@ -95,16 +99,21 @@ def ann_id_by_image_for_fly(identity_map, coco_path, recording, fly_id):
 
 
 def _run_stac_fallback(bout_h5, fallback_ik_h5, out_h5):
-    """Escape hatch: reuse the shared (male) fly's fitted anatomy ik_h5.
+    """Escape hatch: reuse the shared (male) fly's fitted anatomy ik_h5 as a seed.
 
-    Keeps ``offsets``/``marker_sites``/``names_qpos`` fixed (from
-    ``fallback_ik_h5``) and re-solves pose against THIS fly's own
-    triangulated bout keypoints, seeding q_init from the shared solve.
-    Writes a new h5 at ``out_h5`` with the same io_dict_to_hdf5 layout that
-    ``silhouette_ik_solve.build_solver_inputs``/``run_single_fly`` expect
-    (``qpos``, ``kp_data``, ``offsets``, ``kp_names``, ``names_qpos``,
-    ``marker_sites``, ``config``), so downstream code cannot tell the
-    difference between a real per-fly STAC solve and this fallback.
+    Copies ``offsets``/``qpos``/``marker_sites``/``names_qpos`` VERBATIM
+    from ``fallback_ik_h5`` (the shared/male solve) and replaces only
+    ``kp_data`` with THIS fly's own triangulated bout keypoints. This
+    function does NOT re-solve pose itself -- it does not call
+    ``build_solver_inputs`` or ``solve_ik``; ``qpos``/``marker_sites`` here
+    are still the shared fly's solved values, now paired with a different
+    fly's keypoints. Writes a new h5 at ``out_h5`` with the same
+    io_dict_to_hdf5 layout that ``silhouette_ik_solve.build_solver_inputs``/
+    ``run_single_fly`` expect (``qpos``, ``kp_data``, ``offsets``,
+    ``kp_names``, ``names_qpos``, ``marker_sites``, ``config``). The actual
+    per-fly pose re-solve happens downstream, inside ``run_single_fly``,
+    which loads this h5 via ``build_solver_inputs`` and calls ``solve_ik``
+    to fit qpos to the (now per-fly) ``kp_data``.
     """
     import stac_mjx.io_dict_to_hdf5 as ioh5
     from stac_mjx import io as stac_io
@@ -149,7 +158,11 @@ def _prepare_fly_ik(
     not duplicated. Primary path: real per-fly STAC solve via
     ``run_stac_bout.run``. If ``stac_fallback=True`` OR the primary solve
     raises, falls back to the fixed-anatomy escape hatch (see module
-    docstring / ``_run_stac_fallback``).
+    docstring / ``_run_stac_fallback``), which seeds the returned ik_h5 with
+    the shared (male) fly's anatomy/qpos/marker_sites and this fly's own
+    ``kp_data`` -- it does NOT itself re-solve pose. Either way, the
+    per-fly pose re-solve happens downstream when the caller feeds the
+    returned ``ik_h5`` into ``run_single_fly``.
 
     Returns:
         (bout_h5: str, ik_h5: str, solve_path: "stac" | "fallback").
@@ -291,6 +304,7 @@ def run_multifly_ablation(
     wing_weight=0.5,
     smooth_weight=0.1,
     corridor=12.0,
+    residual_gate_px=40.0,
     stac_overrides=DEFAULT_STAC_OVERRIDES,
     stac_fallback=False,
     fallback_ik_h5=DEFAULT_FALLBACK_IK_H5,
@@ -320,7 +334,10 @@ def run_multifly_ablation(
     """
     if coco_path is None:
         coco_path = os.path.join(root, "annotations", f"instances_{split}.json")
-    identity_map = link_recording(coco_path, recording, calib_dir, split=split, n_flies=2)
+    identity_map = link_recording(
+        coco_path, recording, calib_dir, split=split, n_flies=2,
+        residual_gate_px=residual_gate_px,
+    )
     os.makedirs(out_dir, exist_ok=True)
 
     other_fly_id = 1 - ablate_fly_id
