@@ -13,7 +13,9 @@ STAC_CFG=/gscratch/portia/eabe/Research/MyRepos/3d_tracking_dataset/stac-mjx/con
 HN=/gscratch/portia/eabe/Research/MyRepos/3d_tracking_dataset/third_party/JARVIS-HybridNet
 WORK="$COND/cse_work"; mkdir -p "$WORK"
 
-source ~/.bashrc; micromamba activate 3d_tracking
+# `set -u` breaks sourcing ~/.bashrc (/etc/bashrc uses the unbound BASHRCSOURCED)
+# and conda/micromamba activation touches unbound vars -- disable -u around it.
+set +u; source ~/.bashrc; micromamba activate 3d_tracking; set -u
 
 # --- Stage A: SAM3 masks (LD_PRELOAD + cu13 LD_LIBRARY_PATH) ---
 # NOTE: the SAM3 weights were deleted from ~/.cache/huggingface. Redirect
