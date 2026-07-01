@@ -317,13 +317,61 @@ def test_withhold_wing_kp_nans_only_stac_indices_6_7_8_9():
     kp_data = rng.normal(size=(T, n_kp, 3))
     assert _STAC_WING_KP_IDX == {"left": (6, 7), "right": (8, 9)}
 
-    kp2 = _withhold_wing_kp(kp_data)
+    from jarvis_jax.cse.active_parts import CANONICAL_KP_NAMES
+    kp2 = _withhold_wing_kp(kp_data, CANONICAL_KP_NAMES)
     wing_idx = [6, 7, 8, 9]
     assert np.isnan(kp2[:, wing_idx, :]).all()
     other_idx = [i for i in range(n_kp) if i not in wing_idx]
     np.testing.assert_allclose(kp2[:, other_idx, :], kp_data[:, other_idx, :])
     # original array must not be mutated in place.
     assert not np.isnan(kp_data).any()
+
+
+# ---------------------------------------------------------------------------
+# Phase 4 / Task 4: name-based wing indices (reduced-schema safe).
+# ---------------------------------------------------------------------------
+
+
+def test_stac_wing_idx_name_based_full_and_shifted():
+    from jarvis_jax.cse.silhouette_ik_solve import _stac_wing_idx
+    # full STAC order: WingL_V12=6, WingL_V13=7, WingR_V12=8, WingR_V13=9.
+    from jarvis_jax.cse.active_parts import CANONICAL_KP_NAMES
+    idx = _stac_wing_idx(CANONICAL_KP_NAMES)
+    assert idx == {"left": (6, 7), "right": (8, 9)}
+    # headless-like: drop Antenna_Base/EyeL/EyeR -> wings shift to 3,4,5,6.
+    hl = [n for n in CANONICAL_KP_NAMES if n not in ("Antenna_Base", "EyeL", "EyeR")]
+    idxh = _stac_wing_idx(hl)
+    assert idxh == {"left": (3, 4), "right": (5, 6)}
+
+
+def test_withhold_wing_kp_name_based_shifted_order():
+    import numpy as np
+    from jarvis_jax.cse.silhouette_ik_solve import _withhold_wing_kp
+    from jarvis_jax.cse.active_parts import CANONICAL_KP_NAMES
+    hl = [n for n in CANONICAL_KP_NAMES if n not in ("Antenna_Base", "EyeL", "EyeR")]
+    kp = np.ones((3, len(hl), 3))
+    out = _withhold_wing_kp(kp, hl)
+    for j in (3, 4, 5, 6):
+        assert np.isnan(out[:, j, :]).all()       # wings withheld at shifted idx
+    kept = [j for j in range(len(hl)) if j not in (3, 4, 5, 6)]
+    assert np.isfinite(out[:, kept, :]).all()
+
+
+def test_augment_wing_markers_writes_shifted_indices_under_headless_order():
+    """Regression: the coco-slot bridge must fill the SHIFTED STAC wing indices
+    (3,4,5,6) under a headless-like kp order, not the full-schema 6,7,8,9."""
+    import numpy as np
+    from jarvis_jax.cse.silhouette_ik_solve import _augment_wing_markers_stac_order
+    from jarvis_jax.cse.active_parts import CANONICAL_KP_NAMES
+    hl = [n for n in CANONICAL_KP_NAMES if n not in ("Antenna_Base", "EyeL", "EyeR")]
+    T = 2
+    kp = np.full((T, len(hl), 3), np.nan)         # all missing -> only_missing fills
+    w = np.ones(len(hl) * 3)
+    tips = [{"left": (np.array([1.0, 2.0, 3.0]), 3), "right": (np.array([4.0, 5.0, 6.0]), 3)}
+            for _ in range(T)]
+    kp2, w2 = _augment_wing_markers_stac_order(kp, w, tips, hl, wing_weight=0.5, only_missing=True)
+    assert np.allclose(kp2[:, 3, :], [1, 2, 3]) and np.allclose(kp2[:, 4, :], [1, 2, 3])  # left
+    assert np.allclose(kp2[:, 5, :], [4, 5, 6]) and np.allclose(kp2[:, 6, :], [4, 5, 6])  # right
 
 
 @pytest.mark.skipif(not os.path.exists(IK), reason="STAC ik h5 not present")
@@ -394,7 +442,7 @@ def test_run_ablation_wiring(tmp_path):
     assert np.isfinite(kp_data_ref[:, [6, 7, 8, 9], :]).all(), (
         "reference (a) must solve on the full, non-withheld GT wing keypoints"
     )
-    kp_data_withheld = _withhold_wing_kp(kp_data_ref)
+    kp_data_withheld = _withhold_wing_kp(kp_data_ref, inputs["kp_names"])
     assert np.isnan(kp_data_withheld[:, [6, 7, 8, 9], :]).all(), (
         "baseline (b) / silhouette (c) must withhold (NaN) the STAC wing "
         "keypoint indices 6,7,8,9 before solving"
@@ -495,3 +543,37 @@ def test_triangulate_kp_mm_uses_selected_ann():
     assert np.linalg.norm(kp0[0] - X_fly0) < 1e-3
     assert np.linalg.norm(kp1[0] - X_fly1) < 1e-3
     assert np.linalg.norm(kp0[0] - kp1[0]) > 1.0    # fly0 != fly1
+
+
+# ---------------------------------------------------------------------------
+# Phase 4 / Task 4: SIMULATED no-phantom deterministic dev gate (GPU).
+# ---------------------------------------------------------------------------
+
+NORM_IK = "/gscratch/portia/eabe/data/Johnson_lab/cse_work/2026_03_18_15_31_22/Fruitfly_ik_v1_cse.h5"
+
+
+@pytest.mark.skipif(not os.path.exists(NORM_IK), reason="normal recording cse not present")
+def test_simulated_no_phantom_t1r_off_on_normal_recording(tmp_path):
+    """On the NORMAL recording (full 50-kp cse), simulate T1R-off via override.
+    NO-PHANTOM ACCEPTANCE:
+      (1) solved off-leg joints (qpos 38..48) stay at rest across ALL frames;
+      (2) present-marker reproj_px is within eps of the unmasked run (the mask
+          does not perturb the rest of the fly)."""
+    from jarvis_jax.cse.silhouette_ik_solve import run_single_fly
+    common = dict(ik_h5=NORM_IK, model_xml=XML, mesh_npz=MESH, root=ROOT,
+                  split="val", use_silhouette=False, max_frames=8, n_iter=40,
+                  out_dir=str(tmp_path))
+    base = run_single_fly(RECORDING, **common)                       # unmasked
+    masked = run_single_fly(RECORDING, active_parts=["legT1R"], **common)
+
+    import numpy as np
+    q = np.load(os.path.join(str(tmp_path), f"{RECORDING}_qpos.npz"))["qpos"]
+    # (1) the RETURNED qpos has T1R (38..48) pinned to rest (0) on every frame.
+    assert np.max(np.abs(q[:, 38:49])) < 1e-6, "phantom: T1R joints drifted off rest"
+    assert masked["locked_qpos_idx"] == list(range(38, 49))
+    assert masked["off_parts"] == ["legT1R"]
+    # (2) present-marker reproj essentially unchanged vs the unmasked solve.
+    assert np.isfinite(base["reproj_px"]) and np.isfinite(masked["reproj_px"])
+    assert abs(masked["reproj_px"] - base["reproj_px"]) < 0.75, (
+        f"mask perturbed present-marker fit: base={base['reproj_px']:.3f} "
+        f"masked={masked['reproj_px']:.3f} px")

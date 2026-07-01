@@ -681,6 +681,7 @@ def run_single_fly(
     corridor: float = 12.0,
     out_dir: str,
     ann_id_by_image: dict | None = None,
+    active_parts: list | dict | None = None,
 ) -> dict:
     """End-to-end single-fly silhouette-landmark IK driver (male, one recording).
 
@@ -725,10 +726,27 @@ def run_single_fly(
             and used for the reprojection-metric ann lookup, to solve a
             SPECIFIC fly on a multi-fly image. Default None preserves the
             single-fly (first-ann-per-image) behavior.
+        active_parts: Phase 4 headless/amputation support. If a ``list[str]``,
+            treated as the explicit off-part list (see
+            ``active_parts.PART_TABLE`` for valid names). If ``None``
+            (default), the off-part set is AUTO-DERIVED from this recording's
+            ``inputs["kp_names"]`` via ``active_parts.derive_active_parts``
+            (so a full-schema recording yields ``off=[]`` and behavior is
+            byte-for-byte unchanged). If a ``dict``, treated as an
+            already-built mask (``active_parts.build_active_mask`` output).
+            When any part is off, the mask is applied to the (possibly
+            silhouette-augmented) solver inputs BEFORE ``solve_ik`` and the
+            solved qpos is clamped back to rest on the locked joints AFTER
+            solving (``active_parts.clamp_locked_qpos`` -- prevents phantom
+            residual drift on the off-part's joints).
 
     Returns:
         dict with keys:
           qpos_shape: tuple, solved qpos.shape (T, nq).
+          off_parts: list[str], the resolved off-part names (empty if no
+            mask was applied).
+          locked_qpos_idx: list[int], the qpos indices clamped to rest post
+            solve (empty if no mask was applied).
           wing_tip_err_px / wing_tip_err_mm: per-side (left/right) mean
             distance, over frames with a valid SAM-triangulated tip, between
             the FK-reposed wing-tip vertex under the SOLVED qpos (mapped
@@ -804,12 +822,32 @@ def run_single_fly(
     else:
         tips_list = None
 
+    # --- Phase 4: active-parts mask (headless / amputation) ---
+    # Applied AFTER the silhouette augmentation block above so the mask masks
+    # the augmented arrays too. Default None + full-schema recording ->
+    # derive_active_parts returns off=[] -> active_mask stays None -> the
+    # apply/clamp calls below are skipped entirely (byte-for-byte unchanged).
+    from jarvis_jax.cse.active_parts import (
+        derive_active_parts, build_active_mask, apply_active_mask_to_inputs, clamp_locked_qpos)
+    kp_names_stac = list(inputs["kp_names"])
+    if active_parts is None:
+        off_parts = derive_active_parts(kp_names_stac)["off"]
+        active_mask = build_active_mask(kp_names_stac, model_xml, mesh_npz, off_parts) if off_parts else None
+    elif isinstance(active_parts, dict):
+        active_mask = active_parts            # already-built mask
+    else:
+        active_mask = build_active_mask(kp_names_stac, model_xml, mesh_npz, list(active_parts))
+
     small = dict(inputs)
     small["q_init"] = q_init
     small["kp_data"] = kp_data
     small["kps_to_opt"] = kps_to_opt
+    if active_mask is not None:
+        small = apply_active_mask_to_inputs(small, active_mask)
 
     qpos = solve_ik(small, smooth_weight=smooth_weight, n_iter=n_iter)
+    if active_mask is not None:
+        qpos = clamp_locked_qpos(qpos, active_mask)   # post-solve clamp: no phantom
 
     os.makedirs(out_dir, exist_ok=True)
     out_path = os.path.join(out_dir, f"{recording}_qpos.npz")
@@ -864,6 +902,11 @@ def run_single_fly(
     tip_err_px = {"left": [], "right": []}
     site_idxs = inputs["site_idxs"]
     mjx_model, mjx_data = inputs["mjx_model"], inputs["mjx_data"]
+    # Phase 4: off-part markers are excluded from the reprojection metric so
+    # it reflects only the present/active markers (their kp_data was NaN'd /
+    # weight-zeroed and were never solved against).
+    off_stac = set(active_mask["off_marker_stac_idx"].tolist()) if active_mask is not None else set()
+
     for t in range(T):
         data_t = mjx_data.replace(qpos=np.asarray(qpos[t]))
         data_t = stac_utils.kinematics(mjx_model, data_t)
@@ -878,6 +921,8 @@ def run_single_fly(
         sites_mm = _model_to_mm(sites_model, s, R, tr)
 
         for j, nm in enumerate(kp_names):
+            if j in off_stac:
+                continue
             ci = name2coco.get(nm)
             if ci is None:
                 continue
@@ -924,6 +969,8 @@ def run_single_fly(
         wing_angle_stac=wing_angle_stac,
         reproj_px=reproj_px,
         n_frames_with_tips=n_frames_with_tips,
+        off_parts=(active_mask["off_parts"] if active_mask is not None else []),
+        locked_qpos_idx=(active_mask["locked_qpos_idx"].tolist() if active_mask is not None else []),
     )
 
 
@@ -942,13 +989,32 @@ def run_single_fly(
 _STAC_WING_KP_IDX = {"left": (6, 7), "right": (8, 9)}
 
 
-def _withhold_wing_kp(kp_data: np.ndarray) -> np.ndarray:
-    """Return a copy of ``kp_data`` (T, n_kp, 3, STAC order) with the four
-    distal wing marker rows (STAC idx 6,7,8,9) set to NaN for every frame,
-    so the STAC marker_cost finite-mask drops them (Task 5 condition b/c).
+def _stac_wing_idx(kp_names):
+    """STAC/bout-order indices of the distal wing markers, resolved by NAME.
+
+    Returns {"left": (WingL_V12_idx, WingL_V13_idx), "right": (WingR_V12_idx,
+    WingR_V13_idx)}. Name-based so it is correct under a reduced schema
+    (headless drops kp 3,4,5 -> wings shift from 6,7,8,9 to 3,4,5,6). The full
+    _STAC_WING_KP_IDX = {"left":(6,7),"right":(8,9)} constant is retained only as
+    the documented full-schema reference / for existing full-schema tests.
     """
+    kp_names = list(kp_names)
+    pos = {n: i for i, n in enumerate(kp_names)}
+    try:
+        return {"left": (pos["WingL_V12"], pos["WingL_V13"]),
+                "right": (pos["WingR_V12"], pos["WingR_V13"])}
+    except KeyError as e:
+        raise ValueError(f"wing marker {e} absent from kp_names (wings are never "
+                         f"an off-part in Phase 4)") from None
+
+
+def _withhold_wing_kp(kp_data: np.ndarray, kp_names) -> np.ndarray:
+    """Return a copy of kp_data (T, n_kp, 3, STAC order) with the four distal
+    wing marker rows (resolved by NAME via _stac_wing_idx) NaN'd, so the STAC
+    marker_cost finite-mask drops them. kp_names required (reduced-schema safe)."""
     kp2 = np.array(kp_data, dtype=np.float64, copy=True)
-    wing_idx = [i for ids in _STAC_WING_KP_IDX.values() for i in ids]
+    widx = _stac_wing_idx(kp_names)
+    wing_idx = [i for ids in widx.values() for i in ids]
     kp2[:, wing_idx, :] = np.nan
     return kp2
 
@@ -992,6 +1058,7 @@ def run_ablation(
     corridor: float = 12.0,
     out_dir: str,
     ann_id_by_image: dict | None = None,
+    active_parts: list | dict | None = None,
 ) -> dict:
     """Keypoint-ablation validation: does the silhouette recover a withheld wing?
 
@@ -1022,6 +1089,12 @@ def run_ablation(
             and used for the reprojection-metric ann lookup, to solve a
             SPECIFIC fly on a multi-fly image. Default None preserves the
             single-fly (first-ann-per-image) behavior.
+        active_parts: Phase 4 headless/amputation support; see
+            ``run_single_fly``'s ``active_parts`` doc (identical semantics).
+            The mask (built once) is applied to all three conditions' solver
+            inputs before solving and ``clamp_locked_qpos`` is applied to all
+            three conditions' solved qpos after solving. Kept minimal here --
+            the primary Phase-4 driver uses ``run_single_fly``.
 
     Returns:
         dict with keys:
@@ -1094,20 +1167,42 @@ def run_ablation(
     with h5py.File(bout_h5, "r") as f:
         fs_imgids = f["fs_imgids"][()][:T]
 
+    # --- Phase 4: active-parts mask (headless / amputation), built ONCE and
+    # applied identically to all three conditions. Default None + full-schema
+    # recording -> derive_active_parts returns off=[] -> active_mask stays
+    # None -> every apply/clamp call below is skipped (byte-for-byte unchanged).
+    from jarvis_jax.cse.active_parts import (
+        derive_active_parts, build_active_mask, apply_active_mask_to_inputs, clamp_locked_qpos)
+    if active_parts is None:
+        off_parts = derive_active_parts(kp_names)["off"]
+        active_mask = build_active_mask(kp_names, model_xml, mesh_npz, off_parts) if off_parts else None
+    elif isinstance(active_parts, dict):
+        active_mask = active_parts            # already-built mask
+    else:
+        active_mask = build_active_mask(kp_names, model_xml, mesh_npz, list(active_parts))
+
     # Condition (a): REFERENCE -- full GT keypoints, no silhouette.
     small_a = dict(inputs)
     small_a["q_init"] = q_init
     small_a["kp_data"] = kp_data_ref
     small_a["kps_to_opt"] = kps_to_opt_ref
+    if active_mask is not None:
+        small_a = apply_active_mask_to_inputs(small_a, active_mask)
     qpos_a = solve_ik(small_a, smooth_weight=smooth_weight, n_iter=n_iter)
+    if active_mask is not None:
+        qpos_a = clamp_locked_qpos(qpos_a, active_mask)
 
     # Condition (b): BASELINE -- wing keypoints withheld, no silhouette.
-    kp_data_withheld = _withhold_wing_kp(kp_data_ref)
+    kp_data_withheld = _withhold_wing_kp(kp_data_ref, kp_names)
     small_b = dict(inputs)
     small_b["q_init"] = q_init
     small_b["kp_data"] = kp_data_withheld
     small_b["kps_to_opt"] = kps_to_opt_ref
+    if active_mask is not None:
+        small_b = apply_active_mask_to_inputs(small_b, active_mask)
     qpos_b = solve_ik(small_b, smooth_weight=smooth_weight, n_iter=n_iter)
+    if active_mask is not None:
+        qpos_b = clamp_locked_qpos(qpos_b, active_mask)
 
     # Silhouette extraction (shared by condition (c); independent of which
     # condition's kp_data is solved -- it repose-FKs the STORED q_init and
@@ -1130,7 +1225,11 @@ def run_ablation(
     small_c["q_init"] = q_init
     small_c["kp_data"] = kp_data_c
     small_c["kps_to_opt"] = kps_to_opt_c
+    if active_mask is not None:
+        small_c = apply_active_mask_to_inputs(small_c, active_mask)
     qpos_c = solve_ik(small_c, smooth_weight=smooth_weight, n_iter=n_iter)
+    if active_mask is not None:
+        qpos_c = clamp_locked_qpos(qpos_c, active_mask)
 
     os.makedirs(out_dir, exist_ok=True)
     qpos_by_cond = {"reference": qpos_a, "baseline": qpos_b, "silhouette": qpos_c}
@@ -1151,8 +1250,12 @@ def run_ablation(
         id2ann_multi.setdefault(an["image_id"], []).append(an)
     coco_kpnames = coco["keypoint_names"]
     name2coco = {n: i for i, n in enumerate(coco_kpnames)}
-    wing_stac_idx = {_STAC_WING_KP_IDX["left"][0], _STAC_WING_KP_IDX["left"][1],
-                     _STAC_WING_KP_IDX["right"][0], _STAC_WING_KP_IDX["right"][1]}
+    _wing_idx = _stac_wing_idx(kp_names)
+    wing_stac_idx = {_wing_idx["left"][0], _wing_idx["left"][1],
+                     _wing_idx["right"][0], _wing_idx["right"][1]}
+    # Phase 4: also exclude off-part markers from the non-wing reproj metric.
+    off_stac = set(active_mask["off_marker_stac_idx"].tolist()) if active_mask is not None else set()
+    skip_stac_idx = wing_stac_idx | off_stac
 
     # Precompute, per frame, the umeyama bridge inputs (kp_mm/kok) once --
     # identical across conditions (depends only on the recording's
@@ -1192,7 +1295,7 @@ def run_ablation(
             sites_model = np.asarray(stac_utils.get_site_xpos(data_t, site_idxs))
             sites_mm = _model_to_mm(sites_model, s, R, tr)
             for j, nm in enumerate(kp_names):
-                if j in wing_stac_idx:
+                if j in skip_stac_idx:
                     continue
                 ci = name2coco.get(nm)
                 if ci is None:
@@ -1331,4 +1434,6 @@ def run_ablation(
         recovery_ratio_to_sam_mm=recovery_ratio_to_sam_mm,
         recovery_ratio_to_sam_px=recovery_ratio_to_sam_px,
         n_frames_with_tips=n_frames_with_tips,
+        off_parts=(active_mask["off_parts"] if active_mask is not None else []),
+        locked_qpos_idx=(active_mask["locked_qpos_idx"].tolist() if active_mask is not None else []),
     )
