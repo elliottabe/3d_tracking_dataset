@@ -50,6 +50,5 @@ def project_affine(P: np.ndarray, X: np.ndarray) -> np.ndarray:
 
 def project_from_params(K2, R_mat, t, X):
     """JAX-friendly affine projection from (K2 (2,2), R_mat (3,3), t (2,), X (...,3))."""
-    import jax.numpy as jnp
     M = K2 @ R_mat[:2, :]                      # (2,3)
     return X @ M.T + t                         # (...,2)

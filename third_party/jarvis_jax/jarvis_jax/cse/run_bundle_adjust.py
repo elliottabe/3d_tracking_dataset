@@ -68,7 +68,7 @@ def main():
     print(f"BA {a.recording}: err {report['err_before']:.3f} -> {report['err_after']:.3f} px "
           f"(improved={report['improved']}, n_pts={report['n_points']})")
     if a.report_out:
-        os.makedirs(os.path.dirname(a.report_out), exist_ok=True)
+        os.makedirs(os.path.dirname(a.report_out) or ".", exist_ok=True)
         json.dump(report, open(a.report_out, "w"), indent=2)
 
 

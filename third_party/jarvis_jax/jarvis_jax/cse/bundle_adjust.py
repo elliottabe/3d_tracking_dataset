@@ -7,7 +7,6 @@ minimize robust reprojection error with a soft prior to the factory cameras.
 from __future__ import annotations
 from dataclasses import dataclass
 import numpy as np
-from jarvis_jax.geometry.reprojection_tool import ReprojectionTool  # noqa: F401  (used by callers)
 
 
 @dataclass
