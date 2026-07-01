@@ -21,7 +21,7 @@ import numpy as np
 WING_MARKER_IDS = {"left": (7, 8), "right": (29, 30)}
 
 
-def augment_wing_markers(kp_data, kps_to_opt, tips, *, wing_weight=2.0, min_cams=2, only_missing=True):
+def augment_wing_markers(kp_data, kps_to_opt, tips, *, wing_weight=0.5, min_cams=2, only_missing=True):
     """Fill/override distal wing markers with the silhouette-triangulated tip.
 
     Args:
@@ -30,9 +30,11 @@ def augment_wing_markers(kp_data, kps_to_opt, tips, *, wing_weight=2.0, min_cams
         tips: length-T list of per-frame ``{"left": (xyz, ncam) or None,
             "right": ...}`` silhouette wing-tip triangulations.
         wing_weight: weight assigned to a wing marker's 3 coords once it is
-            filled by a tip. Default lowered to 2.0 (from 5.0): the tip is a
-            single point standing in for two distinct markers (V12+V13), so
-            a smaller boost avoids over-dragging the whole-body solve.
+            filled by a tip. Default lowered to 0.5 (from 2.0, Task 5
+            review): at 2.0 the tip -- a single point standing in for two
+            distinct markers (V12+V13) -- still over-drags the whole-body
+            solve, degrading non-wing reprojection ~2x (2.06->4.28px); 0.5
+            avoids that drag while keeping a positive wing recovery signal.
         min_cams: minimum camera count for a tip to be used.
         only_missing: if True (default), a wing marker is only overwritten
             when its current ``kp_data`` row for that (frame, marker) is

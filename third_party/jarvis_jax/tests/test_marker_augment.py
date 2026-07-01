@@ -79,8 +79,8 @@ def test_only_missing_fills_nan_markers():
     assert np.allclose(w2[29 * 3:29 * 3 + 3], 1.0)
 
 
-def test_default_wing_weight_is_2():
+def test_default_wing_weight_is_0p5():
     kp = np.full((1, 50, 3), np.nan); w = np.ones(150)
     tips = [{"left": (np.array([1.0, 1.0, 1.0]), 2), "right": None}]
     _, w2 = augment_wing_markers(kp, w, tips)  # default wing_weight
-    assert np.allclose(w2[7 * 3:7 * 3 + 3], 2.0)
+    assert np.allclose(w2[7 * 3:7 * 3 + 3], 0.5)

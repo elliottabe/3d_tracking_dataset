@@ -403,7 +403,7 @@ def _load_sam_mask(root, split, file_name, ann_id):
     return z["masks"][sel[0]].astype(bool) if len(sel) else None
 
 
-def _augment_wing_markers_stac_order(kp_data, kps_to_opt, tips_list, kp_names, *, wing_weight=2.0, min_cams=2, only_missing=True):
+def _augment_wing_markers_stac_order(kp_data, kps_to_opt, tips_list, kp_names, *, wing_weight=0.5, min_cams=2, only_missing=True):
     """Apply ``marker_augment.augment_wing_markers`` to STAC-ordered kp arrays.
 
     ``augment_wing_markers.WING_MARKER_IDS`` hardcodes coco ``keypoint_names``
@@ -629,7 +629,7 @@ def run_single_fly(
     split: str = "val",
     calib_dir: str | None = None,
     use_silhouette: bool = True,
-    wing_weight: float = 2.0,
+    wing_weight: float = 0.5,
     only_missing: bool = True,
     max_frames: int = 0,
     smooth_weight: float = 0.1,
@@ -660,8 +660,8 @@ def run_single_fly(
             before solving (the Phase-2 pipeline); if False, solve on the
             raw STAC kp_data only (baseline, Task 5's ablation control).
         wing_weight: Passed to ``augment_wing_markers``. Default lowered to
-            2.0 (from 5.0) to avoid over-dragging the whole-body solve when
-            a wing marker is filled.
+            0.5 (from 2.0, Task 5 review) to avoid over-dragging the
+            whole-body solve when a wing marker is filled.
         only_missing: Passed to ``augment_wing_markers`` (confidence gate).
             Default True: only fills wing markers that are missing/withheld
             (all-NaN) for that frame; a marker with real GT/tracked data is
@@ -932,7 +932,7 @@ def run_ablation(
     root: str,
     split: str = "val",
     calib_dir: str | None = None,
-    wing_weight: float = 2.0,
+    wing_weight: float = 0.5,
     max_frames: int = 0,
     smooth_weight: float = 0.1,
     n_iter: int = 50,
