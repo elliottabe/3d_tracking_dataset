@@ -25,6 +25,8 @@ def main():
     ap.add_argument("--num-joints", type=int, default=250)
     ap.add_argument("--batch", type=int, default=8)
     ap.add_argument("--sharpen", type=float, default=3.0)
+    ap.add_argument("--gate-dilate", type=int, default=0,
+                    help="inference-time dilated-mask gating kernel (0 = off; 21 = jarvis3D default)")
     ap.add_argument("--recordings", nargs="*", default=None,
                     help="optional recording filter (default: all in split)")
     a = ap.parse_args()
@@ -58,6 +60,12 @@ def main():
         # stage separately and frees it — otherwise the fused ViTPose+reproject+
         # V2VNet graph needs ~33 GiB and OOMs even at batch 1.
         hm = np.asarray(hyb.predict_heatmaps(crops))              # (b,nc,224,224,J)
+        if a.gate_dilate > 0:
+            from jarvis_jax.cse.gating import gate_heatmaps
+            mask448 = jnp.asarray(crops[..., 3]).reshape(b * nc, crops.shape[2], crops.shape[3])
+            hm = np.asarray(gate_heatmaps(
+                jnp.asarray(hm).reshape(b * nc, 224, 224, J), mask448, a.gate_dilate)
+            ).reshape(b, nc, 224, 224, J)
         p2 = heatmaps_to_keypoints(jnp.asarray(hm.reshape(b * nc, 224, 224, J)), in_size=448)
         P2.append(np.asarray(p2).reshape(b, nc, J, 2))
         # 3-D: pad 224->226, reproject (stage), then v2vnet+soft-argmax (stage)
