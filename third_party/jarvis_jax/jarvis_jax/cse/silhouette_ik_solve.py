@@ -18,6 +18,9 @@ offsets, not the config's generic initial guess).
 """
 from __future__ import annotations
 
+import json
+import os
+
 import numpy as np
 import mujoco
 from mujoco import mjx
@@ -222,3 +225,555 @@ def solve_ik(
         q_reg_weights=inputs["q_reg_weights"],
     )
     return np.asarray(qposes)
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 / Task 4: single-fly driver wiring the silhouette wing-tip extractor
+# (Task 1) + marker augmentation (Task 2) into the STAC solver (Task 3, above).
+# ---------------------------------------------------------------------------
+
+_DEFAULT_REFINED_CALIB_DIR = (
+    "/gscratch/portia/eabe/data/Johnson_lab/cse_work/calib_refined/2026_03_18_15_31_22"
+)
+_DEFAULT_FACTORY_CALIB_DIR = (
+    "/gscratch/portia/eabe/data/Johnson_lab/red_data/red_data_unified_V3/"
+    "calib_params/2026_03_18_15_31_22"
+)
+
+
+def _umeyama(src: np.ndarray, dst: np.ndarray):
+    """Similarity transform (s, R, t) minimizing ||s*R@src + t - dst||^2.
+
+    Exactly mirrors the ``umeyama`` helper in ``silhouette_render_demo.py`` /
+    ``silhouette_fit.py``: dst = s * (R @ src.T).T + t.
+    """
+    src = np.asarray(src, dtype=np.float64)
+    dst = np.asarray(dst, dtype=np.float64)
+    mu_s, mu_d = src.mean(0), dst.mean(0)
+    Sc, Dc = src - mu_s, dst - mu_d
+    cov = Dc.T @ Sc / len(src)
+    U, D, Vt = np.linalg.svd(cov)
+    S = np.eye(3)
+    if np.linalg.det(U) * np.linalg.det(Vt) < 0:
+        S[2, 2] = -1
+    R = U @ S @ Vt
+    s = np.trace(np.diag(D) @ S) / ((Sc ** 2).sum() / len(src))
+    t = mu_d - s * R @ mu_s
+    return s, R, t
+
+
+def _model_to_mm(pts_model: np.ndarray, s: float, R: np.ndarray, t: np.ndarray) -> np.ndarray:
+    """Map (K,3) model-frame points -> mm frame under similarity (s, R, t)."""
+    pts_model = np.asarray(pts_model, dtype=np.float64)
+    return s * (R @ pts_model.T).T + t
+
+
+def _mm_to_model(pts_mm: np.ndarray, s: float, R: np.ndarray, t: np.ndarray) -> np.ndarray:
+    """Inverse of ``_model_to_mm``: map (K,3) mm-frame points -> model frame."""
+    pts_mm = np.asarray(pts_mm, dtype=np.float64)
+    return ((pts_mm - t) @ R) / s
+
+
+def _cam2img_for_frame(fs_imgids_row, id2file, cam_names) -> dict:
+    """Map ReprojectionTool camera index -> coco image_id for one bout frame.
+
+    Matches by camera name parsed from the image file path (mirrors
+    ``silhouette_render_demo.py`` / ``demo_wingtip_triangulation.py``), rather
+    than assuming positional alignment between ``fs_imgids`` columns and
+    ``cam_names`` order (true for this dataset layout, but matching by name
+    is the pattern used everywhere else in this module's reference files and
+    is robust to either convention).
+    """
+    cam2img = {}
+    for iid in fs_imgids_row:
+        fn = id2file.get(int(iid), "")
+        cam = fn.split("/")[1] if "/" in fn else ""
+        if cam in cam_names:
+            cam2img[cam_names.index(cam)] = int(iid)
+    return cam2img
+
+
+def _triangulate_kp_mm(rt, ik_kpnames, coco_kpnames, cam2img, id2ann):
+    """Triangulate the STAC ik h5's named keypoints into the calib mm frame.
+
+    For each ``ik_kpnames`` entry with a same-named coco keypoint, gathers
+    the 2-D annotated (ground-truth) locations across cameras (>=2 visible)
+    and DLT-triangulates via ``rt.reconstruct_point``. Returns (kp_mm (n,3),
+    valid (n,) bool) — mirrors the ``kp_mm``/``kok`` construction in
+    ``silhouette_render_demo.py``.
+    """
+    name2coco = {n: i for i, n in enumerate(coco_kpnames)}
+    n = len(ik_kpnames)
+    kp_mm = np.zeros((n, 3))
+    valid = np.zeros(n, dtype=bool)
+    for j, nm in enumerate(ik_kpnames):
+        ci = name2coco.get(nm)
+        if ci is None:
+            continue
+        obs = np.zeros((rt.num_cameras, 2))
+        cams = []
+        for c, iid in cam2img.items():
+            ann = id2ann.get(iid)
+            if ann is None:
+                continue
+            kp = np.asarray(ann["keypoints"], dtype=float).reshape(-1, 3)
+            if kp[ci, 2] > 0:
+                obs[c] = kp[ci, :2]
+                cams.append(c)
+        if len(cams) >= 2:
+            kp_mm[j] = rt.reconstruct_point(obs, cams_to_use=cams)
+            valid[j] = True
+    return kp_mm, valid
+
+
+def _wing_fk_indices(mesh_npz: str) -> np.ndarray:
+    """Full-vertex-array indices [L-prox, L-tip, R-prox, R-tip] for FK repose.
+
+    ``silhouette_landmarks.wing_side_vertices`` returns indices into the
+    ``fps_300``-subsampled point set (i.e. positions 0..299 within
+    ``z["fps_300"]``), not raw indices into the canonical mesh's full
+    ``vertices``/``vertices_local``/``vertex_geom`` arrays (length ~61666)
+    that ``silhouette_ik.make_fk_repose``'s ``indices`` argument expects
+    (mirrors ``vgeom_all[indices]`` in ``silhouette_ik.make_fk_repose``,
+    where ``vgeom_all`` is the FULL per-vertex geom array — see its
+    docstring/usage in ``silhouette_render_demo.py``, which always indexes
+    the full array, never the fps subset). Passing the fps-relative indices
+    straight into ``fk_repose`` silently selects the WRONG vertices (verified:
+    for this mesh it selects two ``thorax_collision`` vertices for both wing
+    sides, whose FK-reposed distance is ~constant regardless of wing pose,
+    since thorax doesn't move when the wing joints rotate) instead of the
+    intended wing-membrane vertices. This helper does the fps_300[idx]
+    conversion needed to bridge ``wing_side_vertices``' fps-relative output
+    into ``make_fk_repose``'s full-vertex-array index space.
+    """
+    from jarvis_jax.cse.silhouette_landmarks import wing_side_vertices
+
+    z = np.load(mesh_npz, allow_pickle=True)
+    fps = z["fps_300"] if "fps_300" in z.files else z[f"fps_{len(z['vertex_segment'])}"]
+    sides = wing_side_vertices(mesh_npz)
+    return np.array([
+        fps[sides["left"]["prox"]], fps[sides["left"]["tip"]],
+        fps[sides["right"]["prox"]], fps[sides["right"]["tip"]],
+    ], dtype=np.int32)
+
+
+def _load_sam_mask(root, split, file_name, ann_id):
+    """Load the SAM mask matching ``ann_id`` for one camera image.
+
+    Mirrors ``load_mask`` in ``demo_wingtip_triangulation.py`` /
+    ``reproj_validate.py`` / ``silhouette_render_demo.py``: prefer a mask
+    with ``ann_ids==ann_id & matched``, else fall back to any mask with
+    ``ann_ids==ann_id``.
+    """
+    p = os.path.join(root, "sam3_masks", split, os.path.splitext(file_name)[0] + ".npz")
+    if not os.path.exists(p):
+        return None
+    z = np.load(p, allow_pickle=True)
+    if z["masks"].shape[0] == 0:
+        return None
+    sel = np.where((z["ann_ids"] == ann_id) & z["matched"])[0]
+    if not len(sel):
+        sel = np.where(z["ann_ids"] == ann_id)[0]
+    return z["masks"][sel[0]].astype(bool) if len(sel) else None
+
+
+def _augment_wing_markers_stac_order(kp_data, kps_to_opt, tips_list, kp_names, *, wing_weight=5.0, min_cams=2):
+    """Apply ``marker_augment.augment_wing_markers`` to STAC-ordered kp arrays.
+
+    ``augment_wing_markers.WING_MARKER_IDS`` hardcodes coco ``keypoint_names``
+    ordering (WingL_V12=7, WingL_V13=8, WingR_V12=29, WingR_V13=30 — this is
+    the coco order, e.g. ``instances_val.json["keypoint_names"]``). The STAC
+    ik h5's ``kp_data``/``kp_names`` (from ``build_solver_inputs``) use a
+    *different* permutation of the same 50 names (WingL_V12=6, WingL_V13=7,
+    WingR_V12=8, WingR_V13=9 for this fly model) — calling
+    ``augment_wing_markers`` directly on STAC-ordered arrays would silently
+    overwrite the wrong keypoints (verified: index 7 in STAC order is
+    WingL_V13, index 29 is a T2L leg marker, not a wing marker at all).
+
+    Bridges this by permuting ``kp_data``/``kps_to_opt`` from STAC order into
+    coco order (by keypoint name), calling ``augment_wing_markers`` unchanged,
+    then permuting the result back to STAC order.
+    """
+    from jarvis_jax.cse.marker_augment import augment_wing_markers, WING_MARKER_IDS
+
+    kp_names = list(kp_names)
+    n_kp = len(kp_names)
+    # coco order must be at least as long as needed to hold every referenced
+    # index (WING_MARKER_IDS' max coco index) and be a valid permutation
+    # target: build it as "STAC name order sorted into coco slot order" using
+    # the same coco keypoint_names list the indices were defined against.
+    coco_kpnames = _COCO_KEYPOINT_NAMES
+    name2coco = {n: i for i, n in enumerate(coco_kpnames)}
+    missing = [n for n in kp_names if n not in name2coco]
+    if missing:
+        raise ValueError(f"kp_names not found in coco keypoint_names (needed for the "
+                          f"WING_MARKER_IDS coco-order bridge): {missing}")
+    # stac_idx_of_coco_slot[c] = the STAC-order index of the keypoint that
+    # sits at coco slot c (only slots referenced by WING_MARKER_IDS matter).
+    stac_idx_of_coco_slot = {name2coco[nm]: j for j, nm in enumerate(kp_names)}
+    needed_slots = sorted({i for ids in WING_MARKER_IDS.values() for i in ids})
+    for c in needed_slots:
+        if c not in stac_idx_of_coco_slot:
+            raise ValueError(f"coco wing-marker slot {c} ({coco_kpnames[c]}) has no "
+                              f"matching STAC keypoint name")
+
+    # Build a coco-ordered view: coco_kp[c] = kp_data[:, stac_idx_of_coco_slot[c]]
+    # for the slots we care about; untouched slots are irrelevant (only wing
+    # slots get written by augment_wing_markers) so we only need a big enough
+    # coco-shaped array and can leave non-wing slots as zeros/placeholder.
+    n_coco_slots = max(needed_slots) + 1
+    T = kp_data.shape[0]
+    coco_kp = np.zeros((T, n_coco_slots, 3), dtype=kp_data.dtype)
+    coco_w = np.zeros(n_coco_slots * 3, dtype=kps_to_opt.dtype)
+    for c in needed_slots:
+        j = stac_idx_of_coco_slot[c]
+        coco_kp[:, c, :] = kp_data[:, j, :]
+        coco_w[c * 3:c * 3 + 3] = kps_to_opt[j * 3:j * 3 + 3]
+
+    coco_kp2, coco_w2 = augment_wing_markers(
+        coco_kp, coco_w, tips_list, wing_weight=wing_weight, min_cams=min_cams,
+    )
+
+    kp_data2 = np.array(kp_data, dtype=np.float64, copy=True)
+    kps_to_opt2 = np.array(kps_to_opt, dtype=np.float64, copy=True)
+    for c in needed_slots:
+        j = stac_idx_of_coco_slot[c]
+        kp_data2[:, j, :] = coco_kp2[:, c, :]
+        kps_to_opt2[j * 3:j * 3 + 3] = coco_w2[c * 3:c * 3 + 3]
+    return kp_data2, kps_to_opt2
+
+
+# coco ``keypoint_names`` order that ``marker_augment.WING_MARKER_IDS`` is
+# defined against (verified against
+# red_data_unified_V3/annotations/instances_val.json). Kept as a fixed
+# constant (rather than re-reading the coco json here) since
+# WING_MARKER_IDS itself is a fixed constant in marker_augment.py -- both
+# describe the same fixed coco keypoint schema, independent of any one
+# recording's annotation file.
+_COCO_KEYPOINT_NAMES = [
+    "Antenna_Base", "EyeL", "EyeR", "Scutellum", "Abd_A4", "Abd_tip",
+    "WingL_base", "WingL_V12", "WingL_V13",
+    "T1L_ThxCx", "T1L_Tro", "T1L_FeTi", "T1L_TiTa", "T1L_TaT1", "T1L_TaT3", "T1L_TaTip",
+    "T2L_Tro", "T2L_FeTi", "T2L_TiTa", "T2L_TaT1", "T2L_TaT3", "T2L_TaTip",
+    "T3L_Tro", "T3L_FeTi", "T3L_TiTa", "T3L_TaT1", "T3L_TaT3", "T3L_TaTip",
+    "WingR_base", "WingR_V12", "WingR_V13",
+    "T1R_ThxCx", "T1R_Tro", "T1R_FeTi", "T1R_TiTa", "T1R_TaT1", "T1R_TaT3", "T1R_TaTip",
+    "T2R_Tro", "T2R_FeTi", "T2R_TiTa", "T2R_TaT1", "T2R_TaT3", "T2R_TaTip",
+    "T3R_Tro", "T3R_FeTi", "T3R_TiTa", "T3R_TaT1", "T3R_TaT3", "T3R_TaTip",
+]
+
+
+def extract_tips_for_frames(
+    root: str,
+    split: str,
+    recording: str,
+    fs_imgids: np.ndarray,
+    calib_dir: str,
+    model_xml: str,
+    mesh_npz: str,
+    q_init: np.ndarray,
+    marker_sites: np.ndarray,
+    kp_names,
+    *,
+    corridor: float = 12.0,
+) -> list:
+    """Per-frame SAM-silhouette wing-tip triangulation, returned in MODEL frame.
+
+    Bridges the STAC MODEL frame (``q_init``/``marker_sites``/``kp_data``) and
+    the calibrated mm/world frame (``ReprojectionTool``) exactly as
+    ``silhouette_render_demo.py`` does:
+
+      1. Repose the canonical wing tip/prox fps vertices under each frame's
+         STAC qpos via ``silhouette_ik.make_fk_repose`` -> MODEL-frame prox/tip.
+      2. Triangulate the recording's 50 coco keypoints for that frame into mm
+         with the (possibly refined) calibration, then fit a similarity
+         ``(s, R, t)`` from ``marker_sites[frame]`` -> ``kp_mm`` via
+         ``_umeyama`` (matched by keypoint name, >=2-camera visible only).
+         Map MODEL-frame prox/tip -> mm with this transform to get
+         ``prox3d``/``predtip3d`` for ``triangulate_wing_tips``.
+      3. ``triangulate_wing_tips`` returns the SAM wing tip in mm; map it back
+         mm->MODEL with the inverse transform before appending to the
+         returned ``tips_list``, so it lands in the same frame as ``kp_data``
+         (consumed directly by ``marker_augment.augment_wing_markers``).
+
+    Args:
+        root: Dataset root (contains ``annotations/``, ``sam3_masks/``,
+            ``calib_params/``).
+        split: Dataset split (e.g. "val").
+        recording: Recording name (e.g. "2026_03_18_15_31_22"); the coco-
+            annotated fly on this recording (exactly one annotation per
+            image here) is treated as the male.
+        fs_imgids: (T, n_cam) bout-h5 array of coco image_ids per frame/camera.
+        calib_dir: Calibration directory (refined or factory) for
+            ``ReprojectionTool``.
+        model_xml: Fly MJCF path, for the FK-repose anatomy.
+        mesh_npz: Canonical mesh npz (wing tip/prox fps vertices + FK repose).
+        q_init: (T, nq) STAC qpos trajectory (same T/order as ``fs_imgids``).
+        marker_sites: (T, n_kp, 3) STAC-fitted MODEL-frame marker site
+            positions (from the ik h5), used as the umeyama source per frame.
+        kp_names: length-n_kp list of STAC keypoint names (same order as
+            ``marker_sites``'s middle axis).
+        corridor: Passed through to ``triangulate_wing_tips``.
+
+    Returns:
+        list of length T; each entry is a dict {"left": (X_model(3,), ncam)
+        or None, "right": ...} in the MODEL frame, directly consumable by
+        ``marker_augment.augment_wing_markers``.
+    """
+    import jax.numpy as jnp
+    from jarvis_jax.geometry.reprojection_tool import ReprojectionTool
+    from jarvis_jax.cse.silhouette_ik import load_anatomy, make_fk_repose
+    from jarvis_jax.cse.silhouette_landmarks import triangulate_wing_tips
+
+    T = int(q_init.shape[0])
+    assert fs_imgids.shape[0] == T, (
+        f"fs_imgids has {fs_imgids.shape[0]} rows but q_init has {T} frames"
+    )
+
+    coco = json.load(open(os.path.join(root, "annotations", f"instances_{split}.json")))
+    id2file = {im["id"]: im["file_name"] for im in coco["images"]}
+    id2ann = {an["image_id"]: an for an in coco["annotations"]}
+    coco_kpnames = coco["keypoint_names"]
+
+    rt = ReprojectionTool(calib_dir)
+    cam_names = list(rt.cameras.keys())
+    cam_mats = [c.cameraMatrix for c in rt._camera_list]  # (3,4) per camera, DLT order
+
+    anat = load_anatomy(model_xml, mesh_npz)
+    fk = make_fk_repose(anat)
+
+    fk_idx = _wing_fk_indices(mesh_npz)  # [L-prox, L-tip, R-prox, R-tip], full-vertex-array indices
+
+    kp_names = list(kp_names)
+
+    tips_list = []
+    for t in range(T):
+        q_t = np.asarray(q_init[t], dtype=np.float32)
+        wing_verts = np.asarray(fk(jnp.asarray(q_t), indices=fk_idx))  # (4,3) MODEL frame
+        prox_model = {"left": wing_verts[0], "right": wing_verts[2]}
+        tip_model = {"left": wing_verts[1], "right": wing_verts[3]}
+
+        cam2img = _cam2img_for_frame(fs_imgids[t], id2file, cam_names)
+        kp_mm, kok = _triangulate_kp_mm(rt, kp_names, coco_kpnames, cam2img, id2ann)
+
+        if kok.sum() < 3:
+            # Not enough triangulated markers this frame to fit a reliable
+            # similarity transform -> skip silhouette extraction for it.
+            tips_list.append({"left": None, "right": None})
+            continue
+
+        s, R, tr = _umeyama(marker_sites[t][kok], kp_mm[kok])
+
+        prox3d_mm = {side: _model_to_mm(prox_model[side][None], s, R, tr)[0] for side in ("left", "right")}
+        tip3d_mm = {side: _model_to_mm(tip_model[side][None], s, R, tr)[0] for side in ("left", "right")}
+
+        # per-camera masks for the male (coco-annotated) fly, in rt camera order.
+        masks = [None] * rt.num_cameras
+        for c, iid in cam2img.items():
+            ann = id2ann.get(iid)
+            if ann is None:
+                continue
+            fn = id2file[iid]
+            masks[c] = _load_sam_mask(root, split, fn, ann["id"])
+
+        sam_tips_mm = triangulate_wing_tips(masks, cam_mats, prox3d_mm, tip3d_mm, corridor=corridor)
+
+        frame_entry = {}
+        for side in ("left", "right"):
+            entry = sam_tips_mm.get(side)
+            if entry is None:
+                frame_entry[side] = None
+                continue
+            X_mm, ncam = entry
+            X_model = _mm_to_model(X_mm[None], s, R, tr)[0]
+            frame_entry[side] = (X_model, ncam)
+        tips_list.append(frame_entry)
+
+    return tips_list
+
+
+def run_single_fly(
+    recording: str,
+    *,
+    ik_h5: str,
+    model_xml: str,
+    mesh_npz: str,
+    root: str,
+    split: str = "val",
+    calib_dir: str | None = None,
+    use_silhouette: bool = True,
+    wing_weight: float = 5.0,
+    max_frames: int = 0,
+    smooth_weight: float = 0.1,
+    n_iter: int = 50,
+    corridor: float = 12.0,
+    out_dir: str,
+) -> dict:
+    """End-to-end single-fly silhouette-landmark IK driver (male, one recording).
+
+    Pipeline: ``build_solver_inputs`` -> (optionally) extract SAM wing-tips
+    per frame + ``augment_wing_markers`` to raise their weight in
+    ``kps_to_opt`` -> ``solve_ik`` -> write qpos ``.npz`` + report dict.
+
+    Args:
+        recording: Recording name; used to find the bout h5
+            (``{cse_work}/{recording}_bout.h5``, derived from ``ik_h5``'s
+            directory) and the factory calib fallback.
+        ik_h5: STAC ik-output h5 for this recording (see
+            ``build_solver_inputs``).
+        model_xml: Fly MJCF path.
+        mesh_npz: Canonical mesh npz (FK repose + wing fps vertices).
+        root: Dataset root (coco annotations + sam3_masks + calib_params).
+        split: Dataset split the recording's frames were annotated under.
+        calib_dir: Calibration directory. Defaults to the Phase-1 refined
+            calibration dir if present, else the factory calibration under
+            ``root/calib_params/{recording}``.
+        use_silhouette: If True, augment wing markers from SAM silhouettes
+            before solving (the Phase-2 pipeline); if False, solve on the
+            raw STAC kp_data only (baseline, Task 5's ablation control).
+        wing_weight: Passed to ``augment_wing_markers``.
+        max_frames: If >0, only process/solve the first ``max_frames`` frames
+            (for fast smoke tests / dev iteration).
+        smooth_weight: Passed to ``solve_ik``.
+        n_iter: Passed to ``solve_ik``.
+        corridor: Passed to ``extract_tips_for_frames``/``triangulate_wing_tips``.
+        out_dir: Directory to write ``{recording}_qpos.npz`` into.
+
+    Returns:
+        dict with keys:
+          qpos_shape: tuple, solved qpos.shape (T, nq).
+          wing_len_pred: mean over frames/sides of |tip-prox| under the
+            SOLVED qpos (reposed via FK), in MODEL-frame units.
+          wing_len_stac: same, under the stored ik-h5 (STAC) q_init.
+          reproj_px: mean reprojection error (px) of the 50 kp sites (under
+            solved qpos, mapped MODEL->mm via the per-frame umeyama bridge)
+            against the refined-calib DLT triangulation of the annotated
+            keypoints.
+          n_frames_with_tips: number of frames where >=1 wing side had a
+            valid (>=min_cams) SAM-triangulated tip used in the augmentation
+            (0 if use_silhouette=False).
+    """
+    import jax.numpy as jnp
+    import h5py
+    from jarvis_jax.cse.silhouette_ik import load_anatomy, make_fk_repose
+    from jarvis_jax.geometry.reprojection_tool import ReprojectionTool
+    import stac_mjx.io_dict_to_hdf5 as ioh5
+
+    if calib_dir is None:
+        calib_dir = (
+            _DEFAULT_REFINED_CALIB_DIR
+            if os.path.exists(_DEFAULT_REFINED_CALIB_DIR)
+            else _DEFAULT_FACTORY_CALIB_DIR
+        )
+
+    inputs = build_solver_inputs(ik_h5, model_xml)
+    T_full = inputs["q_init"].shape[0]
+    T = T_full if max_frames <= 0 else min(max_frames, T_full)
+
+    q_init = inputs["q_init"][:T]
+    kp_data = inputs["kp_data"][:T]
+    kps_to_opt = inputs["kps_to_opt"]
+
+    # marker_sites (STAC-fitted MODEL-frame per-keypoint marker positions),
+    # needed as the umeyama bridge source; comes from the ik h5 directly
+    # (not part of build_solver_inputs's returned dict).
+    ik_raw = ioh5.load(ik_h5)
+    marker_sites = np.asarray(ik_raw["marker_sites"])[:T]
+
+    # The bout h5 lives one level up from the ik h5's directory, e.g.:
+    #   cse_work/<recording>/Fruitfly_ik_v1_cse.h5
+    #   cse_work/<recording>_bout.h5
+    bout_h5 = os.path.join(os.path.dirname(os.path.dirname(ik_h5)), f"{recording}_bout.h5")
+    with h5py.File(bout_h5, "r") as f:
+        fs_imgids = f["fs_imgids"][()][:T]
+
+    n_frames_with_tips = 0
+    if use_silhouette:
+        tips_list = extract_tips_for_frames(
+            root, split, recording, fs_imgids, calib_dir, model_xml, mesh_npz,
+            q_init, marker_sites, inputs["kp_names"], corridor=corridor,
+        )
+        n_frames_with_tips = sum(
+            1 for f in tips_list if f.get("left") is not None or f.get("right") is not None
+        )
+        kp_data, kps_to_opt = _augment_wing_markers_stac_order(
+            kp_data, kps_to_opt, tips_list, inputs["kp_names"], wing_weight=wing_weight,
+        )
+
+    small = dict(inputs)
+    small["q_init"] = q_init
+    small["kp_data"] = kp_data
+    small["kps_to_opt"] = kps_to_opt
+
+    qpos = solve_ik(small, smooth_weight=smooth_weight, n_iter=n_iter)
+
+    os.makedirs(out_dir, exist_ok=True)
+    out_path = os.path.join(out_dir, f"{recording}_qpos.npz")
+    np.savez(out_path, qpos=qpos)
+
+    # --- report metrics ---
+    anat = load_anatomy(model_xml, mesh_npz)
+    fk = make_fk_repose(anat)
+    fk_idx = _wing_fk_indices(mesh_npz)  # [L-prox, L-tip, R-prox, R-tip], full-vertex-array indices
+
+    def _wing_lengths(qtraj):
+        lens = []
+        for t in range(qtraj.shape[0]):
+            v = np.asarray(fk(jnp.asarray(qtraj[t].astype(np.float32)), indices=fk_idx))
+            lens.append(np.linalg.norm(v[1] - v[0]))  # left tip - left prox
+            lens.append(np.linalg.norm(v[3] - v[2]))  # right tip - right prox
+        return float(np.mean(lens)) if lens else float("nan")
+
+    wing_len_pred = _wing_lengths(qpos)
+    wing_len_stac = _wing_lengths(np.asarray(inputs["q_init"][:T]))
+
+    # reprojection error: solved qpos site positions (MODEL) -> mm (per-frame
+    # umeyama bridge against refined-calib triangulated coco keypoints) ->
+    # rt.reproject_point -> compare to the annotated 2-D keypoints (px).
+    rt = ReprojectionTool(calib_dir)
+    cam_names = list(rt.cameras.keys())
+    coco = json.load(open(os.path.join(root, "annotations", f"instances_{split}.json")))
+    id2file = {im["id"]: im["file_name"] for im in coco["images"]}
+    id2ann = {an["image_id"]: an for an in coco["annotations"]}
+    coco_kpnames = coco["keypoint_names"]
+    kp_names = list(inputs["kp_names"])
+    name2coco = {n: i for i, n in enumerate(coco_kpnames)}
+
+    reproj_errs = []
+    site_idxs = inputs["site_idxs"]
+    mjx_model, mjx_data = inputs["mjx_model"], inputs["mjx_data"]
+    for t in range(T):
+        data_t = mjx_data.replace(qpos=np.asarray(qpos[t]))
+        data_t = stac_utils.kinematics(mjx_model, data_t)
+        data_t = stac_utils.com_pos(mjx_model, data_t)
+        sites_model = np.asarray(stac_utils.get_site_xpos(data_t, site_idxs))  # (n_kp,3)
+
+        cam2img = _cam2img_for_frame(fs_imgids[t], id2file, cam_names)
+        kp_mm, kok = _triangulate_kp_mm(rt, kp_names, coco_kpnames, cam2img, id2ann)
+        if kok.sum() < 3:
+            continue
+        s, R, tr = _umeyama(marker_sites[t][kok], kp_mm[kok])
+        sites_mm = _model_to_mm(sites_model, s, R, tr)
+
+        for j, nm in enumerate(kp_names):
+            ci = name2coco.get(nm)
+            if ci is None:
+                continue
+            uv_pred_all = rt.reproject_point(sites_mm[j])  # (n_cam, 2)
+            for c, iid in cam2img.items():
+                ann = id2ann.get(iid)
+                if ann is None:
+                    continue
+                kp2d = np.asarray(ann["keypoints"], dtype=float).reshape(-1, 3)
+                if kp2d[ci, 2] > 0:
+                    reproj_errs.append(float(np.linalg.norm(uv_pred_all[c] - kp2d[ci, :2])))
+
+    reproj_px = float(np.mean(reproj_errs)) if reproj_errs else float("nan")
+
+    return dict(
+        qpos_shape=tuple(qpos.shape),
+        wing_len_pred=wing_len_pred,
+        wing_len_stac=wing_len_stac,
+        reproj_px=reproj_px,
+        n_frames_with_tips=n_frames_with_tips,
+    )
