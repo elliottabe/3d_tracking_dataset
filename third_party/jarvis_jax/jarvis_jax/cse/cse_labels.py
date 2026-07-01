@@ -100,10 +100,23 @@ def triangulate_recording(coco, rec, rt, kp_order, id2img, id2ann, by_rec):
     vis    (n_fs, K)    bool
     fs_keys list[str]
     fs_imgids list[list[int]]     per-frameset camera image ids (len num_cam)
+    kp_present list[str]          model kp_order intersected with the recording's
+                                  present names (len K; == kp_order when full-schema)
     """
     src_names = coco["keypoint_names"]
-    reorder = _reorder_index(src_names, kp_order)  # dst(model) -> src(V3)
-    K = len(kp_order)
+    src_set = set(src_names)
+    # Reduced-schema (amputation/headless): the recording's coco keypoint_names
+    # OMITS the missing part's names. Intersect the model order with the present
+    # names BEFORE building the reorder so _reorder_index never looks up an
+    # absent name (KeyError). Mirrors stac_mjx.keypoint_prune.prune_model_to_
+    # available's present/dropped pattern; a no-op when every model kp is present.
+    kp_present = [n for n in kp_order if n in src_set]
+    dropped = [n for n in kp_order if n not in src_set]
+    if dropped:
+        print(f"  [build_bout] {len(kp_present)}/{len(kp_order)} model keypoints present; "
+              f"dropped absent from recording ({len(dropped)}): {dropped}")
+    reorder = _reorder_index(src_names, kp_present)  # dst(present model) -> src
+    K = len(kp_present)
     nc = rt.num_cameras
 
     kp3d, vis, fs_keys, fs_imgids = [], [], [], []
@@ -124,7 +137,7 @@ def triangulate_recording(coco, rec, rt, kp_order, id2img, id2ann, by_rec):
                 vmask[j] = True
         kp3d.append(p3d); vis.append(vmask)
         fs_keys.append(fs_key); fs_imgids.append(list(ids))
-    return np.asarray(kp3d), np.asarray(vis), fs_keys, fs_imgids
+    return np.asarray(kp3d), np.asarray(vis), fs_keys, fs_imgids, kp_present
 
 
 # --------------------------------------------------------------------------- #
@@ -137,13 +150,13 @@ def build_bout(coco_path, calib_root, rec, anatomy_yaml, model_xml, out_h5):
     id2img, id2ann, by_rec = _index_coco(coco)
     kp_order = model_kp_order(anatomy_yaml)
     rt = ReprojectionTool(os.path.join(calib_root, rec))
-    kp3d, vis, fs_keys, fs_imgids = triangulate_recording(
+    kp3d, vis, fs_keys, fs_imgids, kp_present = triangulate_recording(
         coco, rec, rt, kp_order, id2img, id2ann, by_rec)
     if len(kp3d) == 0:
         raise RuntimeError(f"no complete framesets for {rec}")
 
     model = mujoco.MjModel.from_xml_path(model_xml)
-    rest = model_rest_keypoints(model, kp_order)
+    rest = model_rest_keypoints(model, kp_present)       # intersected order
     # one scale for the recording from the per-frameset median keypoint cloud
     med = np.nanmedian(np.where(vis[..., None], kp3d, np.nan), axis=0)  # (K,3)
     s = umeyama_scale(med, rest, np.all(np.isfinite(med), 1))
@@ -153,7 +166,7 @@ def build_bout(coco_path, calib_root, rec, anatomy_yaml, model_xml, out_h5):
     os.makedirs(os.path.dirname(out_h5), exist_ok=True)
     with h5py.File(out_h5, "w") as f:
         f.create_dataset("keypoints", data=kp_scaled)
-        f.create_dataset("kp_names", data=np.array(kp_order, dtype="S20"))
+        f.create_dataset("kp_names", data=np.array(kp_present, dtype="S20"))
         f.create_dataset("vis", data=vis)
         f.attrs["scale"] = s
         f.attrs["recording"] = rec
