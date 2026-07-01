@@ -73,6 +73,15 @@ def ann_id_by_image_for_fly(identity_map, coco_path, recording, fly_id):
         dict[int, int]: {image_id: ann_id} for this fly, across every
         frameset/camera in identity_map. This is the ``ann_id_by_image``
         Task 4's ``run_single_fly``/``extract_tips_for_frames`` consume.
+
+    Coverage invariant (relied upon downstream): this map covers a SUPERSET of
+    the images that end up in this fly's bout ``fs_imgids`` — ``build_fly_bout``
+    keeps only framesets where the fly has >=2 assigned cameras, and every kept
+    (camera) image_id is present here by construction. ``_ann_for_image`` falls
+    back to the FIRST annotation when an image is absent from this map, so a
+    caller that fed ``run_single_fly`` a ``fs_imgids`` referencing an image NOT
+    in this fly's map would silently select the other fly's annotation there.
+    Keep the bout and this map built from the SAME ``identity_map``/``fly_id``.
     """
     coco = json.load(open(coco_path))
     ann_img = {a["id"]: a["image_id"] for a in coco["annotations"]}
