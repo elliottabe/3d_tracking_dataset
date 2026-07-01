@@ -30,3 +30,46 @@ def test_dataprep_artifacts_exist(cond, rec, n_kp):
     assert np.asarray(d["qpos"]).shape[1] == 93
     ik_names = [x.decode() if isinstance(x, bytes) else x for x in d["kp_names"]]
     assert len(ik_names) == n_kp, f"ik_h5 has {len(ik_names)} kp_names, expected {n_kp}"
+
+
+XML = "/gscratch/portia/eabe/Research/MyRepos/fruitfly_body_models/fruitfly_v1/fruitfly_v1_free.xml"
+MESH = "/gscratch/portia/eabe/Research/MyRepos/fruitfly_body_models/fruitfly_cse/fly_v1_collision_canonical_wings.npz"
+
+
+def _ik_ready(cond, rec):
+    return os.path.exists(f"{cond}/cse_work/{rec}/Fruitfly_ik_v1_cse.h5")
+
+
+@pytest.mark.parametrize("cond,rec,expect_off,locked", [
+    (AMP, AMP_REC, ["legT1R"], list(range(38, 49))),
+    (HL, HL_REC, ["head"], []),
+])
+@pytest.mark.skipif(not (os.path.exists(XML) and os.path.exists(MESH)),
+                    reason="model / mesh not present")
+def test_run_active_parts_ik_per_frame(cond, rec, expect_off, locked, tmp_path):
+    """PER-FRAME validation (framesets are sparse -- no smoothness reliance):
+      - off-parts auto-derived from the coco schema;
+      - present-marker reproj_px below threshold (7-view triangulation per frame);
+      - off-part joints pinned to rest across ALL frames (no phantom);
+      - the missing part is not hallucinated (locked qpos == rest)."""
+    if not _ik_ready(cond, rec):
+        pytest.skip(f"run T6 dataprep for {os.path.basename(cond)} first")
+    from jarvis_jax.cse.run_active_parts_ik import run_active_parts_ik
+    out = run_active_parts_ik(
+        rec, cond_root=cond, model_xml=XML, mesh_npz=MESH, split=SPLIT,
+        use_silhouette=True, max_frames=0, n_iter=50, out_dir=str(tmp_path))
+    assert out["off_parts"] == expect_off
+    rep = out["report"]
+    assert rep["qpos_shape"][1] == 93
+    assert rep["off_parts"] == expect_off
+    assert rep["locked_qpos_idx"] == locked
+    # present-marker reprojection is clean (per-frame, over 7 views). Honest
+    # threshold: general_model is a fresh recording w/ factory calib (no Phase-1
+    # BA here) -> allow up to 15 px; tighten if BA is later applied.
+    assert np.isfinite(rep["reproj_px"]) and rep["reproj_px"] < 15.0, \
+        f"present-marker reproj_px={rep['reproj_px']:.2f} too high"
+    # no phantom: the RETURNED qpos has every locked joint pinned to rest.
+    q = np.load(os.path.join(str(tmp_path), f"{rec}_qpos.npz"))["qpos"]
+    if locked:
+        assert np.max(np.abs(q[:, locked[0]:locked[-1] + 1])) < 1e-6, \
+            "phantom: locked joints drifted off rest in the returned qpos"
