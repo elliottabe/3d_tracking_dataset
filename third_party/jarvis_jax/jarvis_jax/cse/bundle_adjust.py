@@ -190,3 +190,15 @@ def solve_bundle_adjust(obs: Observations, cam_mats, *, refine="pose",
         K2 = np.array([[kv[0], kv[1]], [0.0, kv[2]]])
         out.append(reconstruct_affine(K2, R, tt))
     return out
+
+
+def refine_calibration(obs: Observations, cam_mats, *, improve_tol=0.99, **kw):
+    """Run BA; revert to factory cameras unless mean reproj error improves."""
+    err_before = mean_reproj_error(obs, cam_mats, initial_points(obs, cam_mats))
+    refined = solve_bundle_adjust(obs, cam_mats, **kw)
+    err_after = mean_reproj_error(obs, refined, initial_points(obs, refined))
+    improved = err_after < improve_tol * err_before
+    report = dict(err_before=err_before, err_after=err_after, improved=bool(improved),
+                  n_points=int(obs.n_points), n_obs=int(len(obs.uv)),
+                  refine=kw.get("refine", "pose"))
+    return (refined if improved else [np.asarray(P) for P in cam_mats]), report

@@ -54,3 +54,20 @@ def test_solve_recovers_perturbed_cameras():
     err_after = mean_reproj_error(obs, refined, initial_points(obs, refined))
     assert err_before > 1.0, f"expected a real perturbation, got {err_before}"
     assert err_after < 0.2 * err_before, f"BA did not reduce error: {err_before} -> {err_after}"
+
+
+def test_refine_reverts_when_no_improvement():
+    from jarvis_jax.cse.bundle_adjust import refine_calibration
+    # Perfect data + perfect cameras: BA cannot improve -> must return factory cams.
+    cams = _two_cam_rig()
+    rng = np.random.default_rng(2)
+    pts = rng.uniform([-3, -3, 8], [3, 3, 14], size=(30, 3))
+    kp2d = np.zeros((1, 2, 30, 3))
+    for c, P in enumerate(cams):
+        kp2d[0, c, :, :2] = project_affine(P, pts); kp2d[0, c, :, 2] = 1.0
+    obs = assemble_observations(kp2d, min_cams=2)
+    refined, report = refine_calibration(obs, cams, refine="pose")
+    assert report["err_before"] < 1e-4
+    assert not report["improved"]
+    for a, b in zip(refined, cams):
+        assert np.allclose(a, b), "should revert to factory cameras"
