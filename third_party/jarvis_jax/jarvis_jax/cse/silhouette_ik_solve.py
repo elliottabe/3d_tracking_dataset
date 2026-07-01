@@ -872,3 +872,401 @@ def run_single_fly(
         reproj_px=reproj_px,
         n_frames_with_tips=n_frames_with_tips,
     )
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 / Task 5: keypoint-ablation validation (the silhouette-value gate).
+# ---------------------------------------------------------------------------
+
+# STAC-order kp_names indices of the distal wing markers (WingL_V12, WingL_V13,
+# WingR_V12, WingR_V13) for this fly model -- verified in
+# test_stac_order_bridge_writes_stac_indices_6_7_8_9_not_29 / the module
+# docstring on _augment_wing_markers_stac_order. NOT the coco-order indices
+# marker_augment.WING_MARKER_IDS uses (7, 8, 29, 30) -- kp_data here is in
+# STAC order (build_solver_inputs's kp_names), so it must be withheld at
+# these STAC indices for the STAC marker_cost finite-mask to actually drop
+# them.
+_STAC_WING_KP_IDX = {"left": (6, 7), "right": (8, 9)}
+
+
+def _withhold_wing_kp(kp_data: np.ndarray) -> np.ndarray:
+    """Return a copy of ``kp_data`` (T, n_kp, 3, STAC order) with the four
+    distal wing marker rows (STAC idx 6,7,8,9) set to NaN for every frame,
+    so the STAC marker_cost finite-mask drops them (Task 5 condition b/c).
+    """
+    kp2 = np.array(kp_data, dtype=np.float64, copy=True)
+    wing_idx = [i for ids in _STAC_WING_KP_IDX.values() for i in ids]
+    kp2[:, wing_idx, :] = np.nan
+    return kp2
+
+
+def _wing_tip_solved_mm(qpos, t, fk, fk_idx, marker_sites_t, kok_t, kp_mm_t):
+    """FK-repose the wing-tip vertices under ``qpos[t]`` and map MODEL->mm.
+
+    Shared helper for run_ablation's per-condition/per-frame tip evaluation:
+    fits the same per-frame umeyama bridge (marker_sites -> triangulated
+    kp_mm, both indexed by ``kok_t``) that ``run_single_fly``/
+    ``extract_tips_for_frames`` use, then maps the FK-reposed left/right
+    wing-tip vertices under the SOLVED qpos from MODEL into mm.
+
+    Returns:
+        dict {"left": (3,) mm or None, "right": ...}, or None if the frame's
+        umeyama fit is not well-determined (``kok_t.sum() < 3``).
+    """
+    import jax.numpy as jnp
+
+    if kok_t.sum() < 3:
+        return None
+    s, R, tr = _umeyama(marker_sites_t[kok_t], kp_mm_t[kok_t])
+    wing_verts = np.asarray(fk(jnp.asarray(np.asarray(qpos[t]).astype(np.float32)), indices=fk_idx))
+    tip_model = {"left": wing_verts[1], "right": wing_verts[3]}
+    return {side: _model_to_mm(tip_model[side][None], s, R, tr)[0] for side in ("left", "right")}
+
+
+def run_ablation(
+    recording: str,
+    *,
+    ik_h5: str,
+    model_xml: str,
+    mesh_npz: str,
+    root: str,
+    split: str = "val",
+    calib_dir: str | None = None,
+    wing_weight: float = 2.0,
+    max_frames: int = 0,
+    smooth_weight: float = 0.1,
+    n_iter: int = 50,
+    corridor: float = 12.0,
+    out_dir: str,
+) -> dict:
+    """Keypoint-ablation validation: does the silhouette recover a withheld wing?
+
+    For the SAME frames, solves the IK three ways:
+
+      (a) REFERENCE -- full GT keypoints, no silhouette. The "truth" the
+          wing should match; also the source of the stored ik-h5 fit.
+      (b) BASELINE -- wing keypoints WITHHELD (STAC kp_data idx 6,7,8,9 set
+          to NaN for every frame, dropping them from marker_cost's finite
+          mask), NO silhouette. The wing is unconstrained by any keypoint
+          target and is expected to collapse/drift toward whatever the
+          smoothness/regularization terms leave it at.
+      (c) SILHOUETTE -- same wing keypoints withheld, but silhouette
+          augmentation is ON: ``extract_tips_for_frames`` + confidence-gated
+          ``augment_wing_markers(only_missing=True)`` fill those NaN wing
+          rows with the SAM-triangulated tips before solving. Expected to
+          recover the wing back toward (a).
+
+    Args:
+        recording, ik_h5, model_xml, mesh_npz, root, split, calib_dir,
+            wing_weight, max_frames, smooth_weight, n_iter, corridor: see
+            ``run_single_fly`` (identical semantics; this reuses the same
+            input assembly / silhouette extraction / solve pieces).
+        out_dir: directory to write each condition's ``{recording}_{cond}_
+            qpos.npz`` into (cond in {"reference", "baseline", "silhouette"}).
+
+    Returns:
+        dict with keys:
+          conditions: {"reference": {...}, "baseline": {...}, "silhouette":
+            {...}} -- per-condition dict with keys ``wing_tip_err_mm``,
+            ``wing_tip_err_px`` (dict {"left","right"}: mean distance
+            between the FK-reposed SOLVED wing tip (under THIS condition's
+            qpos) and that frame's SAM-triangulated tip, mm/px -- computed
+            for all three conditions, regardless of whether that condition's
+            solve actually used the SAM tip as a target, so "reference" and
+            "baseline" show how far an unaugmented fit lands from the
+            silhouette's wing extent; NaN where no valid tip/umeyama fit
+            exists for that frame), ``dist_to_ref_mm``/``dist_to_ref_px``
+            (dict {"left","right"}: mean 3-D/pixel distance between this
+            condition's SOLVED wing tip and the REFERENCE (a) SOLVED wing
+            tip for the same frame -- NaN for "reference" itself),
+            ``reproj_px`` (mean reprojection error, px, of the NON-wing kp
+            sites only -- sanity check that body/legs don't degrade), and
+            ``qpos_shape``.
+          recovery_ratio_mm / recovery_ratio_px: dict {"left","right"} =
+            (dist_b_to_ref - dist_c_to_ref) / dist_b_to_ref, in mm and px
+            respectively. >0 means the silhouette moved the withheld-wing
+            fit back toward the REFERENCE (a) solve; ~1 means full recovery
+            toward reference; <=0 means no/negative recovery toward it.
+          recovery_ratio_to_sam_mm / recovery_ratio_to_sam_px: dict
+            {"left","right"} = (wing_tip_err_b - wing_tip_err_c) /
+            wing_tip_err_b -- the same recovery-ratio formula but measured
+            against the SAM-triangulated tip directly (the silhouette's own
+            ground truth for wing extent) rather than against the
+            keypoint-only reference solve. NOTE: the reference (a) solve is
+            itself keypoint-limited, not ground truth -- if the GT wing
+            keypoints (V12/V13) are systematically offset from the true
+            silhouette extent (e.g. annotation convention placing V13
+            proximal to the visible membrane edge), *_to_ref and
+            *_to_sam can disagree in sign: recovering the wing toward the
+            silhouette's true extent (positive *_to_sam) can simultaneously
+            move it away from the keypoint-only reference (negative
+            *_to_ref). Both are reported so this can be diagnosed rather
+            than hidden.
+          n_frames_with_tips: number of frames with >=1 valid SAM-
+            triangulated wing tip (shared across b/c -- extraction does not
+            depend on which condition's kp_data is solved).
+    """
+    import jax.numpy as jnp
+    import h5py
+    from jarvis_jax.cse.silhouette_ik import load_anatomy, make_fk_repose
+    from jarvis_jax.geometry.reprojection_tool import ReprojectionTool
+    import stac_mjx.io_dict_to_hdf5 as ioh5
+
+    if calib_dir is None:
+        calib_dir = (
+            _DEFAULT_REFINED_CALIB_DIR
+            if os.path.exists(_DEFAULT_REFINED_CALIB_DIR)
+            else _DEFAULT_FACTORY_CALIB_DIR
+        )
+
+    inputs = build_solver_inputs(ik_h5, model_xml)
+    T_full = inputs["q_init"].shape[0]
+    T = T_full if max_frames <= 0 else min(max_frames, T_full)
+
+    q_init = inputs["q_init"][:T]
+    kp_data_ref = inputs["kp_data"][:T]
+    kps_to_opt_ref = inputs["kps_to_opt"]
+    kp_names = list(inputs["kp_names"])
+
+    ik_raw = ioh5.load(ik_h5)
+    marker_sites = np.asarray(ik_raw["marker_sites"])[:T]
+
+    bout_h5 = os.path.join(os.path.dirname(os.path.dirname(ik_h5)), f"{recording}_bout.h5")
+    with h5py.File(bout_h5, "r") as f:
+        fs_imgids = f["fs_imgids"][()][:T]
+
+    # Condition (a): REFERENCE -- full GT keypoints, no silhouette.
+    small_a = dict(inputs)
+    small_a["q_init"] = q_init
+    small_a["kp_data"] = kp_data_ref
+    small_a["kps_to_opt"] = kps_to_opt_ref
+    qpos_a = solve_ik(small_a, smooth_weight=smooth_weight, n_iter=n_iter)
+
+    # Condition (b): BASELINE -- wing keypoints withheld, no silhouette.
+    kp_data_withheld = _withhold_wing_kp(kp_data_ref)
+    small_b = dict(inputs)
+    small_b["q_init"] = q_init
+    small_b["kp_data"] = kp_data_withheld
+    small_b["kps_to_opt"] = kps_to_opt_ref
+    qpos_b = solve_ik(small_b, smooth_weight=smooth_weight, n_iter=n_iter)
+
+    # Silhouette extraction (shared by condition (c); independent of which
+    # condition's kp_data is solved -- it repose-FKs the STORED q_init and
+    # triangulates from the recording's coco annotations/SAM masks).
+    tips_list = extract_tips_for_frames(
+        root, split, recording, fs_imgids, calib_dir, model_xml, mesh_npz,
+        q_init, marker_sites, kp_names, corridor=corridor,
+    )
+    n_frames_with_tips = sum(
+        1 for f in tips_list if f.get("left") is not None or f.get("right") is not None
+    )
+
+    # Condition (c): SILHOUETTE -- wing keypoints withheld + augmentation ON.
+    kp_data_c, kps_to_opt_c = _augment_wing_markers_stac_order(
+        kp_data_withheld, kps_to_opt_ref, tips_list, kp_names,
+        wing_weight=wing_weight, only_missing=True,
+    )
+    small_c = dict(inputs)
+    small_c["q_init"] = q_init
+    small_c["kp_data"] = kp_data_c
+    small_c["kps_to_opt"] = kps_to_opt_c
+    qpos_c = solve_ik(small_c, smooth_weight=smooth_weight, n_iter=n_iter)
+
+    os.makedirs(out_dir, exist_ok=True)
+    qpos_by_cond = {"reference": qpos_a, "baseline": qpos_b, "silhouette": qpos_c}
+    for cond, qp in qpos_by_cond.items():
+        np.savez(os.path.join(out_dir, f"{recording}_{cond}_qpos.npz"), qpos=qp)
+
+    # --- shared per-frame machinery for tip/reproj metrics ---
+    anat = load_anatomy(model_xml, mesh_npz)
+    fk = make_fk_repose(anat)
+    fk_idx = _wing_fk_indices(mesh_npz)
+
+    rt = ReprojectionTool(calib_dir)
+    cam_names = list(rt.cameras.keys())
+    coco = json.load(open(os.path.join(root, "annotations", f"instances_{split}.json")))
+    id2file = {im["id"]: im["file_name"] for im in coco["images"]}
+    id2ann = {an["image_id"]: an for an in coco["annotations"]}
+    coco_kpnames = coco["keypoint_names"]
+    name2coco = {n: i for i, n in enumerate(coco_kpnames)}
+    wing_stac_idx = {_STAC_WING_KP_IDX["left"][0], _STAC_WING_KP_IDX["left"][1],
+                     _STAC_WING_KP_IDX["right"][0], _STAC_WING_KP_IDX["right"][1]}
+
+    # Precompute, per frame, the umeyama bridge inputs (kp_mm/kok) once --
+    # identical across conditions (depends only on the recording's
+    # annotations/calibration + the stored marker_sites, not on qpos).
+    frame_bridge = []  # list of (cam2img, kp_mm, kok) or None if under-determined
+    for t in range(T):
+        cam2img = _cam2img_for_frame(fs_imgids[t], id2file, cam_names)
+        kp_mm, kok = _triangulate_kp_mm(rt, kp_names, coco_kpnames, cam2img, id2ann)
+        frame_bridge.append((cam2img, kp_mm, kok) if kok.sum() >= 3 else None)
+
+    def _solved_wing_tips_mm(qpos):
+        """Per-frame {"left": mm(3,) or None, "right": ...} under this qpos."""
+        out = []
+        for t in range(T):
+            fb = frame_bridge[t]
+            if fb is None:
+                out.append(None)
+                continue
+            _cam2img, kp_mm, kok = fb
+            out.append(_wing_tip_solved_mm(qpos, t, fk, fk_idx, marker_sites[t], kok, kp_mm))
+        return out
+
+    def _non_wing_reproj_px(qpos):
+        """Mean reprojection error (px) of the NON-wing kp sites only."""
+        site_idxs = inputs["site_idxs"]
+        mjx_model, mjx_data = inputs["mjx_model"], inputs["mjx_data"]
+        errs = []
+        for t in range(T):
+            fb = frame_bridge[t]
+            if fb is None:
+                continue
+            cam2img, kp_mm, kok = fb
+            s, R, tr = _umeyama(marker_sites[t][kok], kp_mm[kok])
+            data_t = mjx_data.replace(qpos=np.asarray(qpos[t]))
+            data_t = stac_utils.kinematics(mjx_model, data_t)
+            data_t = stac_utils.com_pos(mjx_model, data_t)
+            sites_model = np.asarray(stac_utils.get_site_xpos(data_t, site_idxs))
+            sites_mm = _model_to_mm(sites_model, s, R, tr)
+            for j, nm in enumerate(kp_names):
+                if j in wing_stac_idx:
+                    continue
+                ci = name2coco.get(nm)
+                if ci is None:
+                    continue
+                uv_pred_all = rt.reproject_point(sites_mm[j])
+                for c, iid in cam2img.items():
+                    ann = id2ann.get(iid)
+                    if ann is None:
+                        continue
+                    kp2d = np.asarray(ann["keypoints"], dtype=float).reshape(-1, 3)
+                    if kp2d[ci, 2] > 0:
+                        errs.append(float(np.linalg.norm(uv_pred_all[c] - kp2d[ci, :2])))
+        return float(np.mean(errs)) if errs else float("nan")
+
+    tips_a = _solved_wing_tips_mm(qpos_a)
+    tips_b = _solved_wing_tips_mm(qpos_b)
+    tips_c = _solved_wing_tips_mm(qpos_c)
+
+    def _tip_err_to_sam(tips_solved):
+        """Mean mm/px distance between the solved wing tip and this frame's
+        SAM-triangulated tip (tips_list), per side."""
+        err_mm = {"left": [], "right": []}
+        err_px = {"left": [], "right": []}
+        for t in range(T):
+            solved = tips_solved[t]
+            if solved is None:
+                continue
+            frame_tips = tips_list[t]
+            fb = frame_bridge[t]
+            cam2img = fb[0] if fb is not None else {}
+            for side in ("left", "right"):
+                entry = frame_tips.get(side)
+                if entry is None:
+                    continue
+                sam_tip_model, _ncam = entry
+                _cam2img_fb, kp_mm, kok = fb
+                s, R, tr = _umeyama(marker_sites[t][kok], kp_mm[kok])
+                sam_tip_mm = _model_to_mm(np.asarray(sam_tip_model)[None], s, R, tr)[0]
+                err_mm[side].append(float(np.linalg.norm(solved[side] - sam_tip_mm)))
+                uv_pred = rt.reproject_point(solved[side])
+                uv_sam = rt.reproject_point(sam_tip_mm)
+                for c in cam2img:
+                    err_px[side].append(float(np.linalg.norm(uv_pred[c] - uv_sam[c])))
+        return (
+            {s: (float(np.mean(v)) if v else float("nan")) for s, v in err_mm.items()},
+            {s: (float(np.mean(v)) if v else float("nan")) for s, v in err_px.items()},
+        )
+
+    def _dist_to_ref(tips_solved):
+        """Mean mm/px distance between the solved wing tip and the REFERENCE
+        (a) solved wing tip for the same frame, per side."""
+        dist_mm = {"left": [], "right": []}
+        dist_px = {"left": [], "right": []}
+        for t in range(T):
+            solved = tips_solved[t]
+            ref = tips_a[t]
+            if solved is None or ref is None:
+                continue
+            fb = frame_bridge[t]
+            cam2img = fb[0] if fb is not None else {}
+            for side in ("left", "right"):
+                dist_mm[side].append(float(np.linalg.norm(solved[side] - ref[side])))
+                uv_pred = rt.reproject_point(solved[side])
+                uv_ref = rt.reproject_point(ref[side])
+                for c in cam2img:
+                    dist_px[side].append(float(np.linalg.norm(uv_pred[c] - uv_ref[c])))
+        return (
+            {s: (float(np.mean(v)) if v else float("nan")) for s, v in dist_mm.items()},
+            {s: (float(np.mean(v)) if v else float("nan")) for s, v in dist_px.items()},
+        )
+
+    wing_tip_err_mm_a, wing_tip_err_px_a = _tip_err_to_sam(tips_a)
+    wing_tip_err_mm_b, wing_tip_err_px_b = _tip_err_to_sam(tips_b)
+    wing_tip_err_mm_c, wing_tip_err_px_c = _tip_err_to_sam(tips_c)
+
+    nan_sides = {"left": float("nan"), "right": float("nan")}
+    dist_to_ref_mm_a, dist_to_ref_px_a = nan_sides, nan_sides
+    dist_to_ref_mm_b, dist_to_ref_px_b = _dist_to_ref(tips_b)
+    dist_to_ref_mm_c, dist_to_ref_px_c = _dist_to_ref(tips_c)
+
+    conditions = {
+        "reference": dict(
+            qpos_shape=tuple(qpos_a.shape),
+            wing_tip_err_mm=wing_tip_err_mm_a,
+            wing_tip_err_px=wing_tip_err_px_a,
+            dist_to_ref_mm=dist_to_ref_mm_a,
+            dist_to_ref_px=dist_to_ref_px_a,
+            reproj_px=_non_wing_reproj_px(qpos_a),
+        ),
+        "baseline": dict(
+            qpos_shape=tuple(qpos_b.shape),
+            wing_tip_err_mm=wing_tip_err_mm_b,
+            wing_tip_err_px=wing_tip_err_px_b,
+            dist_to_ref_mm=dist_to_ref_mm_b,
+            dist_to_ref_px=dist_to_ref_px_b,
+            reproj_px=_non_wing_reproj_px(qpos_b),
+        ),
+        "silhouette": dict(
+            qpos_shape=tuple(qpos_c.shape),
+            wing_tip_err_mm=wing_tip_err_mm_c,
+            wing_tip_err_px=wing_tip_err_px_c,
+            dist_to_ref_mm=dist_to_ref_mm_c,
+            dist_to_ref_px=dist_to_ref_px_c,
+            reproj_px=_non_wing_reproj_px(qpos_c),
+        ),
+    }
+
+    def _recovery_ratio(err_b, err_c):
+        out = {}
+        for side in ("left", "right"):
+            eb, ec = err_b[side], err_c[side]
+            if not (np.isfinite(eb) and np.isfinite(ec)) or eb == 0:
+                out[side] = float("nan")
+            else:
+                out[side] = float((eb - ec) / eb)
+        return out
+
+    # Two recovery-ratio views (both requested; they can disagree in sign --
+    # see the "reference is keypoint-limited, not ground truth" note below):
+    #   *_to_ref: (dist_b_to_ref - dist_c_to_ref) / dist_b_to_ref -- did the
+    #     silhouette move the withheld-wing fit back toward the REFERENCE (a)
+    #     solve's wing tip?
+    #   *_to_sam: (wing_tip_err_b - wing_tip_err_c) / wing_tip_err_b -- did
+    #     the silhouette move the withheld-wing fit closer to the actual
+    #     SAM-triangulated tip (the silhouette's own ground truth for wing
+    #     extent, independent of any keypoint-based reference)?
+    recovery_ratio_mm = _recovery_ratio(dist_to_ref_mm_b, dist_to_ref_mm_c)
+    recovery_ratio_px = _recovery_ratio(dist_to_ref_px_b, dist_to_ref_px_c)
+    recovery_ratio_to_sam_mm = _recovery_ratio(wing_tip_err_mm_b, wing_tip_err_mm_c)
+    recovery_ratio_to_sam_px = _recovery_ratio(wing_tip_err_px_b, wing_tip_err_px_c)
+
+    return dict(
+        conditions=conditions,
+        recovery_ratio_mm=recovery_ratio_mm,
+        recovery_ratio_px=recovery_ratio_px,
+        recovery_ratio_to_sam_mm=recovery_ratio_to_sam_mm,
+        recovery_ratio_to_sam_px=recovery_ratio_to_sam_px,
+        n_frames_with_tips=n_frames_with_tips,
+    )

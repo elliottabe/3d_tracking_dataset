@@ -1,8 +1,8 @@
 import os, numpy as np, pytest, mujoco
 from jarvis_jax.cse.silhouette_ik_solve import (
-    build_solver_inputs, solve_ik, run_single_fly, _model_to_mm, _mm_to_model,
+    build_solver_inputs, solve_ik, run_single_fly, run_ablation, _model_to_mm, _mm_to_model,
     _wing_fk_indices, _wing_joint_qpos_indices, _augment_wing_markers_stac_order,
-    _COCO_KEYPOINT_NAMES,
+    _COCO_KEYPOINT_NAMES, _STAC_WING_KP_IDX, _withhold_wing_kp,
 )
 from stac_mjx import utils as stac_utils
 
@@ -304,3 +304,117 @@ def test_stac_order_bridge_writes_stac_indices_6_7_8_9_not_29():
     # STAC idx 29 (a leg marker, T2L_TaT1) must be untouched.
     assert np.allclose(kp_data2[0, 29], [42.0, 43.0, 44.0])
     assert np.allclose(kps_to_opt2[29 * 3:29 * 3 + 3], 1.0)
+
+
+def test_withhold_wing_kp_nans_only_stac_indices_6_7_8_9():
+    """_withhold_wing_kp must NaN exactly the STAC wing indices (6,7,8,9) and
+    leave every other marker's kp_data untouched (regression guard: run_ablation
+    condition (b)/(c) rely on this to correctly drop the wing from marker_cost's
+    finite mask without corrupting any other keypoint).
+    """
+    rng = np.random.default_rng(0)
+    T, n_kp = 5, 50
+    kp_data = rng.normal(size=(T, n_kp, 3))
+    assert _STAC_WING_KP_IDX == {"left": (6, 7), "right": (8, 9)}
+
+    kp2 = _withhold_wing_kp(kp_data)
+    wing_idx = [6, 7, 8, 9]
+    assert np.isnan(kp2[:, wing_idx, :]).all()
+    other_idx = [i for i in range(n_kp) if i not in wing_idx]
+    np.testing.assert_allclose(kp2[:, other_idx, :], kp_data[:, other_idx, :])
+    # original array must not be mutated in place.
+    assert not np.isnan(kp_data).any()
+
+
+@pytest.mark.skipif(not os.path.exists(IK), reason="STAC ik h5 not present")
+def test_run_ablation_wiring(tmp_path):
+    """Driver-wiring smoke test on a 4-frame slice: run_ablation must return
+    the three conditions (reference/baseline/silhouette) with the documented
+    per-condition keys, a finite recovery_ratio per side, and condition (b)
+    (baseline) must have withheld (NaN) wing keypoints going into its solve
+    while condition (a) (reference) does not.
+
+    This is a wiring/finite gate only -- the scientific magnitude (does the
+    silhouette actually recover the wing) comes from the real GPU run, not
+    from this fast smoke test.
+    """
+    report = run_ablation(
+        RECORDING,
+        ik_h5=IK,
+        model_xml=XML,
+        mesh_npz=MESH,
+        root=ROOT,
+        split="val",
+        max_frames=4,
+        n_iter=20,
+        out_dir=str(tmp_path),
+    )
+
+    assert set(report) >= {
+        "conditions", "recovery_ratio_mm", "recovery_ratio_px",
+        "recovery_ratio_to_sam_mm", "recovery_ratio_to_sam_px", "n_frames_with_tips",
+    }
+    assert set(report["conditions"]) == {"reference", "baseline", "silhouette"}
+
+    for cond in ("reference", "baseline", "silhouette"):
+        c = report["conditions"][cond]
+        assert set(c) >= {
+            "qpos_shape", "wing_tip_err_mm", "wing_tip_err_px",
+            "dist_to_ref_mm", "dist_to_ref_px", "reproj_px",
+        }
+        assert c["qpos_shape"] == (4, 93)
+        assert set(c["wing_tip_err_mm"]) == {"left", "right"}
+        assert set(c["dist_to_ref_mm"]) == {"left", "right"}
+        # non-wing reproj_px must be finite (body/legs must not blow up / be dropped).
+        assert np.isfinite(c["reproj_px"])
+        out_path = os.path.join(str(tmp_path), f"{RECORDING}_{cond}_qpos.npz")
+        assert os.path.exists(out_path)
+
+    # reference (a) has no NaN'd distance-to-itself; baseline/silhouette
+    # (b)/(c) dist_to_ref is measured against (a) and must be finite when
+    # any frame had a valid tip/umeyama fit.
+    if report["n_frames_with_tips"] > 0:
+        for side in ("left", "right"):
+            assert np.isfinite(report["recovery_ratio_mm"][side]) or np.isnan(
+                report["recovery_ratio_mm"][side]
+            )  # always one or the other (never inf/nan-from-exception)
+    for side in ("left", "right"):
+        val_mm = report["recovery_ratio_mm"][side]
+        val_px = report["recovery_ratio_px"][side]
+        val_sam_mm = report["recovery_ratio_to_sam_mm"][side]
+        val_sam_px = report["recovery_ratio_to_sam_px"][side]
+        assert isinstance(val_mm, float) and isinstance(val_px, float)
+        assert isinstance(val_sam_mm, float) and isinstance(val_sam_px, float)
+
+    # Condition (b)/(c) inputs must actually withhold the wing keypoints;
+    # condition (a) must not. Re-derive the same solver inputs to check the
+    # kp_data each condition's solve actually saw.
+    inputs = build_solver_inputs(IK, XML)
+    kp_data_ref = inputs["kp_data"][:4]
+    assert np.isfinite(kp_data_ref[:, [6, 7, 8, 9], :]).all(), (
+        "reference (a) must solve on the full, non-withheld GT wing keypoints"
+    )
+    kp_data_withheld = _withhold_wing_kp(kp_data_ref)
+    assert np.isnan(kp_data_withheld[:, [6, 7, 8, 9], :]).all(), (
+        "baseline (b) / silhouette (c) must withhold (NaN) the STAC wing "
+        "keypoint indices 6,7,8,9 before solving"
+    )
+
+    # At least one recovery_ratio value should be finite (not both NaN) for
+    # this recording/slice to be a meaningful wiring check -- if this ever
+    # fails it means no frame produced a usable SAM tip on this slice, which
+    # is a data/wiring problem worth surfacing rather than silently passing.
+    finite_any = any(
+        np.isfinite(report["recovery_ratio_mm"][s]) for s in ("left", "right")
+    )
+    assert finite_any, (
+        "no finite recovery_ratio_mm on either side -- no frame in this "
+        "4-frame slice produced a usable SAM-triangulated wing tip"
+    )
+    finite_any_sam = any(
+        np.isfinite(report["recovery_ratio_to_sam_mm"][s]) for s in ("left", "right")
+    )
+    assert finite_any_sam, (
+        "no finite recovery_ratio_to_sam_mm on either side -- no frame in "
+        "this 4-frame slice produced a usable SAM-triangulated wing tip"
+    )
