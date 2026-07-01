@@ -30,3 +30,27 @@ def test_assemble_and_triangulate_recovers_points():
     assert obs.n_points == 5 and obs.n_cams == 2 and obs.uv.shape[0] == 10
     X0 = initial_points(obs, cams)
     assert np.allclose(X0, pts, atol=1e-6), f"triangulation off:\n{X0}\nvs\n{pts}"
+
+
+def test_solve_recovers_perturbed_cameras():
+    from jarvis_jax.cse.bundle_adjust import solve_bundle_adjust, mean_reproj_error, initial_points
+    true_cams = _two_cam_rig()
+    rng = np.random.default_rng(1)
+    pts = rng.uniform([-3, -3, 8], [3, 3, 14], size=(40, 3))
+    F, C, K = 1, 2, 40
+    kp2d = np.zeros((F, C, K, 3))
+    for c, P in enumerate(true_cams):
+        kp2d[0, c, :, :2] = project_affine(P, pts); kp2d[0, c, :, 2] = 1.0
+    obs = assemble_observations(kp2d, min_cams=2)
+
+    # Perturb camera 1's orientation by ~3 degrees -> reprojection error appears.
+    K2, R, t = factor_affine(true_cams[1])
+    th = np.deg2rad(3.0)
+    Rz = np.array([[np.cos(th), -np.sin(th), 0], [np.sin(th), np.cos(th), 0], [0, 0, 1]])
+    init_cams = [true_cams[0], reconstruct_affine(K2, Rz @ R, t)]
+
+    err_before = mean_reproj_error(obs, init_cams, initial_points(obs, init_cams))
+    refined = solve_bundle_adjust(obs, init_cams, refine="pose", n_iter=120)
+    err_after = mean_reproj_error(obs, refined, initial_points(obs, refined))
+    assert err_before > 1.0, f"expected a real perturbation, got {err_before}"
+    assert err_after < 0.2 * err_before, f"BA did not reduce error: {err_before} -> {err_after}"
