@@ -418,3 +418,76 @@ def test_run_ablation_wiring(tmp_path):
         "no finite recovery_ratio_to_sam_mm on either side -- no frame in "
         "this 4-frame slice produced a usable SAM-triangulated wing tip"
     )
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 / Task 4: per-identity ann selection (multi-animal threading).
+# ---------------------------------------------------------------------------
+
+
+def test_ann_for_image_selects_by_ann_id_by_image():
+    from jarvis_jax.cse.silhouette_ik_solve import _ann_for_image
+    id2ann_multi = {100: [{"id": 5, "keypoints": [1]}, {"id": 6, "keypoints": [2]}]}
+    # explicit selection picks the chosen ann
+    a = _ann_for_image(id2ann_multi, 100, {100: 6})
+    assert a["id"] == 6
+    # None -> first-ann (backward compatible)
+    b = _ann_for_image(id2ann_multi, 100, None)
+    assert b["id"] == 5
+    # missing image -> None
+    assert _ann_for_image(id2ann_multi, 999, {100: 6}) is None
+    # image not in map -> falls back to first ann
+    c = _ann_for_image(id2ann_multi, 100, {200: 6})
+    assert c["id"] == 5
+
+
+def test_triangulate_kp_mm_uses_selected_ann():
+    """With two distinct anns per image, _triangulate_kp_mm must triangulate the
+    ann chosen by ann_id_by_image, not the first one -- so fly0 and fly1 yield
+    different 3-D keypoints (regression guard for identity threading)."""
+    import numpy as np
+    from jarvis_jax.cse.silhouette_ik_solve import _triangulate_kp_mm
+    from jarvis_jax.cse.affine_camera import factor_affine, reconstruct_affine, project_affine
+
+    class _FakeRT:
+        def __init__(self, cam_mats):
+            self.num_cameras = len(cam_mats)
+            self._cm = cam_mats
+        def reconstruct_point(self, obs, cams_to_use=None):
+            cams = cams_to_use or list(range(self.num_cameras))
+            A = np.zeros((2 * len(cams), 4))
+            for i, c in enumerate(cams):
+                P = self._cm[c]; uv = obs[c]
+                A[2 * i:2 * i + 2] = uv.reshape(2, 1) * P[2].reshape(1, 4) - P[0:2]
+            _, _, Vh = np.linalg.svd(A)
+            return (Vh[-1] / Vh[-1][3])[:3]
+
+    P0 = np.array([[8.1, 0, 0, -2.8], [0, -8.0, 0, 462.0], [0, 0, 0, 1.0]])
+    K2, R, t = factor_affine(P0)
+    th = np.deg2rad(20.0); Ry = np.array([[np.cos(th), 0, np.sin(th)], [0, 1, 0], [-np.sin(th), 0, np.cos(th)]])
+    cam_mats = [P0, reconstruct_affine(K2, Ry @ R, t)]
+    rt = _FakeRT(cam_mats)
+
+    X_fly0 = np.array([118.0, 33.0, 12.0]); X_fly1 = np.array([124.0, 33.0, 12.0])
+    kpnames = ["Scutellum"]; coco_kpnames = ["Scutellum"]
+    cam2img = {0: 10, 1: 11}
+
+    def _ann(aid, X):
+        kp = np.zeros(3)
+        return {"id": aid, "keypoints": None, "_X": X}
+
+    # build two anns per image with the keypoint projected from each fly's X
+    id2ann_multi = {}
+    for c, iid in cam2img.items():
+        a0 = {"id": iid * 10, "keypoints": list(project_affine(cam_mats[c], X_fly0)) + [2.0]}
+        a1 = {"id": iid * 10 + 1, "keypoints": list(project_affine(cam_mats[c], X_fly1)) + [2.0]}
+        id2ann_multi[iid] = [a0, a1]
+
+    sel0 = {iid: iid * 10 for iid in cam2img.values()}       # fly0 anns
+    sel1 = {iid: iid * 10 + 1 for iid in cam2img.values()}   # fly1 anns
+    kp0, v0 = _triangulate_kp_mm(rt, kpnames, coco_kpnames, cam2img, id2ann_multi, sel0)
+    kp1, v1 = _triangulate_kp_mm(rt, kpnames, coco_kpnames, cam2img, id2ann_multi, sel1)
+    assert v0[0] and v1[0]
+    assert np.linalg.norm(kp0[0] - X_fly0) < 1e-3
+    assert np.linalg.norm(kp1[0] - X_fly1) < 1e-3
+    assert np.linalg.norm(kp0[0] - kp1[0]) > 1.0    # fly0 != fly1

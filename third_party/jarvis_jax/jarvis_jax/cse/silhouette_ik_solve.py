@@ -293,7 +293,26 @@ def _cam2img_for_frame(fs_imgids_row, id2file, cam_names) -> dict:
     return cam2img
 
 
-def _triangulate_kp_mm(rt, ik_kpnames, coco_kpnames, cam2img, id2ann):
+def _ann_for_image(id2ann_multi, image_id, ann_id_by_image=None):
+    """Select one COCO annotation for an image.
+
+    id2ann_multi maps image_id -> list of all anns for that image. If
+    ann_id_by_image (per-fly image_id -> chosen ann id) is given and has this
+    image, return the ann whose id matches; otherwise return the first ann
+    (backward-compatible single-ann behavior). None if the image has no anns.
+    """
+    anns = id2ann_multi.get(int(image_id))
+    if not anns:
+        return None
+    if ann_id_by_image is not None and int(image_id) in ann_id_by_image:
+        want = int(ann_id_by_image[int(image_id)])
+        for a in anns:
+            if int(a["id"]) == want:
+                return a
+    return anns[0]
+
+
+def _triangulate_kp_mm(rt, ik_kpnames, coco_kpnames, cam2img, id2ann_multi, ann_id_by_image=None):
     """Triangulate the STAC ik h5's named keypoints into the calib mm frame.
 
     For each ``ik_kpnames`` entry with a same-named coco keypoint, gathers
@@ -301,6 +320,11 @@ def _triangulate_kp_mm(rt, ik_kpnames, coco_kpnames, cam2img, id2ann):
     and DLT-triangulates via ``rt.reconstruct_point``. Returns (kp_mm (n,3),
     valid (n,) bool) — mirrors the ``kp_mm``/``kok`` construction in
     ``silhouette_render_demo.py``.
+
+    ``id2ann_multi`` is image_id -> list[ann]; the ann used per camera is
+    chosen by ``_ann_for_image(..., ann_id_by_image)`` (Phase 3 / Task 4:
+    per-identity selection on multi-fly images). ``ann_id_by_image=None``
+    (default) preserves the original first-ann-per-image behavior.
     """
     name2coco = {n: i for i, n in enumerate(coco_kpnames)}
     n = len(ik_kpnames)
@@ -313,7 +337,7 @@ def _triangulate_kp_mm(rt, ik_kpnames, coco_kpnames, cam2img, id2ann):
         obs = np.zeros((rt.num_cameras, 2))
         cams = []
         for c, iid in cam2img.items():
-            ann = id2ann.get(iid)
+            ann = _ann_for_image(id2ann_multi, iid, ann_id_by_image)
             if ann is None:
                 continue
             kp = np.asarray(ann["keypoints"], dtype=float).reshape(-1, 3)
@@ -503,6 +527,7 @@ def extract_tips_for_frames(
     kp_names,
     *,
     corridor: float = 12.0,
+    ann_id_by_image: dict | None = None,
 ) -> list:
     """Per-frame SAM-silhouette wing-tip triangulation, returned in MODEL frame.
 
@@ -541,6 +566,10 @@ def extract_tips_for_frames(
         kp_names: length-n_kp list of STAC keypoint names (same order as
             ``marker_sites``'s middle axis).
         corridor: Passed through to ``triangulate_wing_tips``.
+        ann_id_by_image: Optional image_id -> chosen ann id (Phase 3 / Task 4
+            per-identity selection), for solving a SPECIFIC fly on a
+            multi-fly image. Default None selects the first ann per image
+            (backward-compatible single-fly behavior).
 
     Returns:
         list of length T; each entry is a dict {"left": (X_model(3,), ncam)
@@ -559,7 +588,9 @@ def extract_tips_for_frames(
 
     coco = json.load(open(os.path.join(root, "annotations", f"instances_{split}.json")))
     id2file = {im["id"]: im["file_name"] for im in coco["images"]}
-    id2ann = {an["image_id"]: an for an in coco["annotations"]}
+    id2ann_multi = {}
+    for an in coco["annotations"]:
+        id2ann_multi.setdefault(an["image_id"], []).append(an)
     coco_kpnames = coco["keypoint_names"]
 
     rt = ReprojectionTool(calib_dir)
@@ -581,7 +612,7 @@ def extract_tips_for_frames(
         tip_model = {"left": wing_verts[1], "right": wing_verts[3]}
 
         cam2img = _cam2img_for_frame(fs_imgids[t], id2file, cam_names)
-        kp_mm, kok = _triangulate_kp_mm(rt, kp_names, coco_kpnames, cam2img, id2ann)
+        kp_mm, kok = _triangulate_kp_mm(rt, kp_names, coco_kpnames, cam2img, id2ann_multi, ann_id_by_image)
 
         if kok.sum() < 3:
             # Not enough triangulated markers this frame to fit a reliable
@@ -594,10 +625,11 @@ def extract_tips_for_frames(
         prox3d_mm = {side: _model_to_mm(prox_model[side][None], s, R, tr)[0] for side in ("left", "right")}
         tip3d_mm = {side: _model_to_mm(tip_model[side][None], s, R, tr)[0] for side in ("left", "right")}
 
-        # per-camera masks for the male (coco-annotated) fly, in rt camera order.
+        # per-camera masks for the selected fly (this identity's ann on each
+        # image), in rt camera order.
         masks = [None] * rt.num_cameras
         for c, iid in cam2img.items():
-            ann = id2ann.get(iid)
+            ann = _ann_for_image(id2ann_multi, iid, ann_id_by_image)
             if ann is None:
                 continue
             fn = id2file[iid]
@@ -636,6 +668,7 @@ def run_single_fly(
     n_iter: int = 50,
     corridor: float = 12.0,
     out_dir: str,
+    ann_id_by_image: dict | None = None,
 ) -> dict:
     """End-to-end single-fly silhouette-landmark IK driver (male, one recording).
 
@@ -675,6 +708,11 @@ def run_single_fly(
         n_iter: Passed to ``solve_ik``.
         corridor: Passed to ``extract_tips_for_frames``/``triangulate_wing_tips``.
         out_dir: Directory to write ``{recording}_qpos.npz`` into.
+        ann_id_by_image: Optional image_id -> chosen ann id (Phase 3 / Task 4
+            per-identity selection), forwarded to ``extract_tips_for_frames``
+            and used for the reprojection-metric ann lookup, to solve a
+            SPECIFIC fly on a multi-fly image. Default None preserves the
+            single-fly (first-ann-per-image) behavior.
 
     Returns:
         dict with keys:
@@ -742,6 +780,7 @@ def run_single_fly(
         tips_list = extract_tips_for_frames(
             root, split, recording, fs_imgids, calib_dir, model_xml, mesh_npz,
             q_init, marker_sites, inputs["kp_names"], corridor=corridor,
+            ann_id_by_image=ann_id_by_image,
         )
         n_frames_with_tips = sum(
             1 for f in tips_list if f.get("left") is not None or f.get("right") is not None
@@ -797,7 +836,9 @@ def run_single_fly(
     cam_names = list(rt.cameras.keys())
     coco = json.load(open(os.path.join(root, "annotations", f"instances_{split}.json")))
     id2file = {im["id"]: im["file_name"] for im in coco["images"]}
-    id2ann = {an["image_id"]: an for an in coco["annotations"]}
+    id2ann_multi = {}
+    for an in coco["annotations"]:
+        id2ann_multi.setdefault(an["image_id"], []).append(an)
     coco_kpnames = coco["keypoint_names"]
     kp_names = list(inputs["kp_names"])
     name2coco = {n: i for i, n in enumerate(coco_kpnames)}
@@ -818,7 +859,7 @@ def run_single_fly(
         sites_model = np.asarray(stac_utils.get_site_xpos(data_t, site_idxs))  # (n_kp,3)
 
         cam2img = _cam2img_for_frame(fs_imgids[t], id2file, cam_names)
-        kp_mm, kok = _triangulate_kp_mm(rt, kp_names, coco_kpnames, cam2img, id2ann)
+        kp_mm, kok = _triangulate_kp_mm(rt, kp_names, coco_kpnames, cam2img, id2ann_multi, ann_id_by_image)
         if kok.sum() < 3:
             continue
         s, R, tr = _umeyama(marker_sites[t][kok], kp_mm[kok])
@@ -830,7 +871,7 @@ def run_single_fly(
                 continue
             uv_pred_all = rt.reproject_point(sites_mm[j])  # (n_cam, 2)
             for c, iid in cam2img.items():
-                ann = id2ann.get(iid)
+                ann = _ann_for_image(id2ann_multi, iid, ann_id_by_image)
                 if ann is None:
                     continue
                 kp2d = np.asarray(ann["keypoints"], dtype=float).reshape(-1, 3)
@@ -938,6 +979,7 @@ def run_ablation(
     n_iter: int = 50,
     corridor: float = 12.0,
     out_dir: str,
+    ann_id_by_image: dict | None = None,
 ) -> dict:
     """Keypoint-ablation validation: does the silhouette recover a withheld wing?
 
@@ -963,6 +1005,11 @@ def run_ablation(
             input assembly / silhouette extraction / solve pieces).
         out_dir: directory to write each condition's ``{recording}_{cond}_
             qpos.npz`` into (cond in {"reference", "baseline", "silhouette"}).
+        ann_id_by_image: Optional image_id -> chosen ann id (Phase 3 / Task 4
+            per-identity selection), forwarded to ``extract_tips_for_frames``
+            and used for the reprojection-metric ann lookup, to solve a
+            SPECIFIC fly on a multi-fly image. Default None preserves the
+            single-fly (first-ann-per-image) behavior.
 
     Returns:
         dict with keys:
@@ -1056,6 +1103,7 @@ def run_ablation(
     tips_list = extract_tips_for_frames(
         root, split, recording, fs_imgids, calib_dir, model_xml, mesh_npz,
         q_init, marker_sites, kp_names, corridor=corridor,
+        ann_id_by_image=ann_id_by_image,
     )
     n_frames_with_tips = sum(
         1 for f in tips_list if f.get("left") is not None or f.get("right") is not None
@@ -1086,7 +1134,9 @@ def run_ablation(
     cam_names = list(rt.cameras.keys())
     coco = json.load(open(os.path.join(root, "annotations", f"instances_{split}.json")))
     id2file = {im["id"]: im["file_name"] for im in coco["images"]}
-    id2ann = {an["image_id"]: an for an in coco["annotations"]}
+    id2ann_multi = {}
+    for an in coco["annotations"]:
+        id2ann_multi.setdefault(an["image_id"], []).append(an)
     coco_kpnames = coco["keypoint_names"]
     name2coco = {n: i for i, n in enumerate(coco_kpnames)}
     wing_stac_idx = {_STAC_WING_KP_IDX["left"][0], _STAC_WING_KP_IDX["left"][1],
@@ -1098,7 +1148,7 @@ def run_ablation(
     frame_bridge = []  # list of (cam2img, kp_mm, kok) or None if under-determined
     for t in range(T):
         cam2img = _cam2img_for_frame(fs_imgids[t], id2file, cam_names)
-        kp_mm, kok = _triangulate_kp_mm(rt, kp_names, coco_kpnames, cam2img, id2ann)
+        kp_mm, kok = _triangulate_kp_mm(rt, kp_names, coco_kpnames, cam2img, id2ann_multi, ann_id_by_image)
         frame_bridge.append((cam2img, kp_mm, kok) if kok.sum() >= 3 else None)
 
     def _solved_wing_tips_mm(qpos):
@@ -1137,7 +1187,7 @@ def run_ablation(
                     continue
                 uv_pred_all = rt.reproject_point(sites_mm[j])
                 for c, iid in cam2img.items():
-                    ann = id2ann.get(iid)
+                    ann = _ann_for_image(id2ann_multi, iid, ann_id_by_image)
                     if ann is None:
                         continue
                     kp2d = np.asarray(ann["keypoints"], dtype=float).reshape(-1, 3)
