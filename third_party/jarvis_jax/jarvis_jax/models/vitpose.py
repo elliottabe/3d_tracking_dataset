@@ -10,9 +10,13 @@ class ViTPose(nnx.Module):
     Takes (B, 448, 448, 4) RGB-D images and produces (B, 224, 224, 50) heatmaps.
     """
 
-    def __init__(self, cfg: ViTPoseConfig, *, rngs: nnx.Rngs):
+    def __init__(self, cfg: ViTPoseConfig, *, backbone=None, rngs: nnx.Rngs):
         self.cfg = cfg
-        self.backbone = ViT(cfg, rngs=rngs)
+        if backbone is None:
+            self.backbone = ViT(cfg, rngs=rngs)             # backward-compatible default
+        else:
+            from jarvis_jax.models.backbone import build_backbone
+            self.backbone = build_backbone(backbone, cfg, rngs=rngs)
         self.decoder = ClassicDecoder(cfg.embed_dim, cfg.num_keypoints, rngs=rngs)
 
     def __call__(self, x, *, use_running_average: bool = False):
