@@ -28,9 +28,10 @@ Throughout this plan, `<REPO>` = `/gscratch/portia/eabe/Research/MyRepos/3d_trac
 
 ## File Structure
 
-- **Create** `<REPO>/gen_session1_manifest.sh` — builds the `recording → bouts_csv` manifest, validating each recording has `calibration/` + `.mp4`s.
+- **Create** `<REPO>/gen_session1_manifest.sh` — builds the `recording → bouts_csv` manifest, validating each recording has `calibration/` + `.mp4`s, and writes normalized bout CSVs (see the post-smoke-test fix note under Task 1).
 - **Create** `<REPO>/submit_session1_array.sh` — the SLURM array submitter; reads the manifest, supports `DRY_RUN`, submits `--array=1-N%K`.
 - **Generated** `<REPO>/session1_manifest.tsv` — 10-line TSV artifact (committed for reproducibility / to document the exact mapping used).
+- **Generated** `<REPO>/session1_bouts_normalized/<rec>/courtship_bouts_unified_summary.csv` — per-recording bout CSVs with `fly_id` normalized to the shard session tag (committed; the manifest's column 2 points here).
 
 Both scripts are co-located with the existing `submit_courtship_repredict.sh`, which they are modeled on.
 
@@ -45,6 +46,19 @@ Both scripts are co-located with the existing `submit_courtship_repredict.sh`, w
 **Interfaces:**
 - Consumes: env vars `BROOT` (default Session1 bouts root), `VID` (default Session1 video root); positional arg `$1` = output path (default `session1_manifest.tsv`).
 - Produces: a TSV file, one line per recording: `<recording_dir>\t<bouts_csv>`, sorted by recording name. Exits non-zero if any mapped recording dir lacks `calibration/` or `.mp4`s.
+
+> **UPDATE (post-smoke-test fix):** the script below writes the RAW bouts CSV
+> path in column 2. That produced a `No bouts` abort because the CSV's `fly_id`
+> (`Session1_bouts_04172026/<rec>`) does not equal the session tag the shard
+> script derives from the video folder (`Session1/<rec>`). The committed script
+> was revised to also write a normalized CSV per recording under
+> `<REPO>/session1_bouts_normalized/<rec>/courtship_bouts_unified_summary.csv`
+> (with `fly_id` rewritten to the derived tag via
+> `awk -F, -v OFS=, -v tag="$tag" 'NR==1{print;next}{$1=tag;print}'`, where
+> `tag="$(basename "$(dirname "$recdir")")/$(basename "$recdir")"`), and column 2
+> points at that normalized CSV. See the design doc's "`fly_id` normalization"
+> note. The block below is the original transcription; the committed file is the
+> source of truth.
 
 - [ ] **Step 1: Write the script**
 
