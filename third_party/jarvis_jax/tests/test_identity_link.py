@@ -1,0 +1,114 @@
+import numpy as np
+import pytest
+from jarvis_jax.cse.affine_camera import factor_affine, reconstruct_affine, project_affine
+from jarvis_jax.cse.identity_link import score_assignment, _dlt_affine, link_frameset
+
+# A real telecentric DLT (from the rig) + 6 rotated copies -> 7 affine cameras
+# with angular diversity, so affine triangulation is well-conditioned.
+P_REAL = np.array([[8.1001, 0.0074869, -0.031773, -2.828],
+                   [0.0093308, -8.0788, -0.17912, 462.78],
+                   [0, 0, 0, 1.0]])
+
+
+def _rig(n_cam=7):
+    K2, R, t = factor_affine(P_REAL)
+    cams = [P_REAL]
+    for k in range(1, n_cam):
+        th = np.deg2rad(15.0 * k)
+        Ry = np.array([[np.cos(th), 0, np.sin(th)], [0, 1, 0], [-np.sin(th), 0, np.cos(th)]])
+        cams.append(reconstruct_affine(K2, Ry @ R, t))
+    return np.stack(cams, 0)  # (n_cam, 3, 4)
+
+
+def _project_fly(cam_mats, kp3d):
+    """kp3d (K,3) -> per-camera (n_cam, K, 3) [u, v, v=2] (all visible)."""
+    n_cam, K = cam_mats.shape[0], kp3d.shape[0]
+    out = np.zeros((n_cam, K, 3))
+    for c in range(n_cam):
+        for j in range(K):
+            out[c, j, :2] = project_affine(cam_mats[c], kp3d[j])
+            out[c, j, 2] = 2.0
+    return out
+
+
+def _make_two_flies(rng, cam_mats, K=8, sep=6.0):
+    base = np.array([120.0, 30.0, 11.0])  # inside P_REAL's field of view
+    fly0 = base + rng.normal(scale=1.5, size=(K, 3))
+    fly1 = base + np.array([sep, 0.0, 0.0]) + rng.normal(scale=1.5, size=(K, 3))
+    return fly0, fly1
+
+
+def test_dlt_affine_recovers_known_point():
+    cam_mats = _rig(7)
+    X = np.array([118.0, 33.0, 12.5])
+    pts = np.zeros((7, 2))
+    for c in range(7):
+        pts[c] = project_affine(cam_mats[c], X)
+    Xhat = _dlt_affine(cam_mats, list(range(7)), pts)
+    assert np.linalg.norm(Xhat - X) < 1e-4
+
+
+def test_score_assignment_low_for_true_and_high_for_swapped():
+    rng = np.random.default_rng(0)
+    cam_mats = _rig(7)
+    fly0, fly1 = _make_two_flies(rng, cam_mats)
+    obs0 = _project_fly(cam_mats, fly0)
+    obs1 = _project_fly(cam_mats, fly1)
+    cams = list(range(7))
+    # consistent single-fly observations -> ~0 residual (subpixel)
+    good = score_assignment(obs0, cams, cam_mats)
+    assert good < 1.0
+    # mix cam 3 with the OTHER fly's detection -> a large residual
+    bad = obs0.copy()
+    bad[3] = obs1[3]
+    assert score_assignment(bad, cams, cam_mats) > 5.0 * max(good, 1e-3)
+
+
+def _anns_from_obs(obs0, obs1, order_per_cam):
+    """Build anns_by_cam with per-camera ann ordering controlled by order_per_cam[c]
+    (0 -> [fly0, fly1], 1 -> [fly1, fly0]). ann_id encodes (cam*10 + slot)."""
+    anns_by_cam = {}
+    for c in range(obs0.shape[0]):
+        f0 = {"id": c * 10 + 0, "keypoints": obs0[c].reshape(-1).tolist()}
+        f1 = {"id": c * 10 + 1, "keypoints": obs1[c].reshape(-1).tolist()}
+        anns_by_cam[c] = [f0, f1] if order_per_cam[c] == 0 else [f1, f0]
+    return anns_by_cam
+
+
+def test_link_frameset_recovers_grouping_under_shuffle():
+    rng = np.random.default_rng(1)
+    cam_mats = _rig(7)
+    fly0, fly1 = _make_two_flies(rng, cam_mats)
+    obs0, obs1 = _project_fly(cam_mats, fly0), _project_fly(cam_mats, fly1)
+    # shuffle each camera's ann order arbitrarily
+    order = [0, 1, 1, 0, 1, 0, 1]
+    anns = _anns_from_obs(obs0, obs1, order)
+    linked = link_frameset(anns, cam_mats, n_flies=2)
+    # each fly's chosen ann per cam must all carry the SAME true-fly slot
+    def true_slot(ann_id):
+        return ann_id % 10  # 0 -> obs0(fly0), 1 -> obs1(fly1)
+    slots_fly = {fid: {true_slot(a) for a in linked[fid].values()} for fid in linked}
+    assert all(len(s) == 1 for s in slots_fly.values())          # internally consistent
+    assert slots_fly[0] != slots_fly[1]                          # the two flies differ
+    assert set(linked[0]) == set(range(7)) and set(linked[1]) == set(range(7))
+
+
+def test_link_frameset_robust_to_order_swap_and_missing_cam():
+    rng = np.random.default_rng(2)
+    cam_mats = _rig(7)
+    fly0, fly1 = _make_two_flies(rng, cam_mats)
+    obs0, obs1 = _project_fly(cam_mats, fly0), _project_fly(cam_mats, fly1)
+    order = [0, 1, 0, 1, 0, 1, 0]
+    anns = _anns_from_obs(obs0, obs1, order)
+    # camera 5 sees only ONE fly (drop its second ann)
+    anns[5] = [anns[5][0]]
+    linked = link_frameset(anns, cam_mats, n_flies=2)
+
+    def true_slot(ann_id):
+        return ann_id % 10
+    slots_fly = {fid: {true_slot(a) for a in linked[fid].values()} for fid in linked}
+    assert all(len(s) == 1 for s in slots_fly.values())
+    assert slots_fly[0] != slots_fly[1]
+    # camera 5's single ann is assigned to exactly one fly (the nearest-reproj one)
+    assigned_cam5 = [fid for fid in linked if 5 in linked[fid]]
+    assert len(assigned_cam5) == 1
