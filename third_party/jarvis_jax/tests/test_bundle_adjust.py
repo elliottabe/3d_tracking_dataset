@@ -71,3 +71,31 @@ def test_refine_reverts_when_no_improvement():
     assert not report["improved"]
     for a, b in zip(refined, cams):
         assert np.allclose(a, b), "should revert to factory cameras"
+
+
+def test_load_kp2d_orders_cameras_like_reprojection_tool(tmp_path):
+    import json, cv2
+    from jarvis_jax.cse.run_bundle_adjust import load_kp2d_from_coco
+    root = tmp_path; rec = "RECX"
+    (root / "annotations").mkdir(parents=True)
+    (root / "calib_params" / rec).mkdir(parents=True)
+    for nm in ("Cam0002", "Cam0001"):                   # intentionally unsorted on disk
+        fs = cv2.FileStorage(str(root / "calib_params" / rec / f"{nm}.yaml"), cv2.FILE_STORAGE_WRITE)
+        fs.write("projectionMatrix", P_REAL); fs.release()
+    # 2 cameras of the same frame; each annotation carries 2 keypoints (x,y,vis).
+    images = [
+        {"id": 1, "file_name": f"{rec}/Cam0001/F0.jpg"},
+        {"id": 2, "file_name": f"{rec}/Cam0002/F0.jpg"},
+    ]
+    anns = [
+        {"image_id": 1, "keypoints": [10, 20, 2, 30, 40, 2]},
+        {"image_id": 2, "keypoints": [11, 21, 2, 31, 41, 2]},
+    ]
+    coco = {"keypoint_names": ["a", "b"], "images": images, "annotations": anns,
+            "framesets": {f"{rec}/F0": {"datasetName": rec, "frames": [1, 2]}}}
+    (root / "annotations" / "instances_val.json").write_text(json.dumps(coco))
+    kp2d, cam_names = load_kp2d_from_coco(str(root), "val", rec)
+    assert cam_names == ["Cam0001", "Cam0002"]          # ReprojectionTool sorted order
+    assert kp2d.shape == (1, 2, 2, 3)
+    assert list(kp2d[0, 0, 0, :2]) == [10, 20]          # cam0 = Cam0001
+    assert list(kp2d[0, 1, 0, :2]) == [11, 21]          # cam1 = Cam0002
