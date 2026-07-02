@@ -30,7 +30,7 @@ def _huber_sqrt(d, delta):
     Huber loss on the raw distance d.
     """
     quad = d
-    lin = jnp.sqrt(jnp.clip(2.0 * delta * jnp.abs(d) - delta ** 2, a_min=0.0))
+    lin = jnp.sqrt(jnp.clip(2.0 * delta * jnp.abs(d) - delta ** 2, min=0.0))
     return jnp.where(jnp.abs(d) <= delta, quad, lin)
 
 
