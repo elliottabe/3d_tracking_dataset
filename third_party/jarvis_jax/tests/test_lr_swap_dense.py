@@ -58,6 +58,58 @@ def test_left_wing_vertex_maps_to_a_right_wing_vertex():
 
 
 @pytest.mark.skipif(not _HAVE_MESH, reason="canonical mesh not present")
+def test_no_lateral_dense_vertex_self_maps():
+    """Final-review regression test (Critical finding).
+
+    _dense_vertex_swap used to leave ~26/300 dense verts self-mapped even
+    though they were LATERAL (off-midline, |Y| >= midline_tol) vertices. Since
+    flip_batch unconditionally mirrors x for every channel, a self-mapped
+    lateral vertex's flip-augmented target lands on the WRONG side of the
+    midline every time flip fires (~50% of batches) -- this is the root cause
+    of the 3x keypoint MPJPE regression. Only TRUE MIDLINE verts (|Y| <
+    midline_tol) may self-map; every lateral vertex must have a genuine mirror
+    partner.
+
+    This test FAILS on the pre-fix code: the old `_dense_vertex_swap` gated
+    pairing on mutual-NN-within-tol AND same-segment-consistency, which left
+    26 lateral fps_300 vertices (in abdomen/leg/thorax segments, |Y| up to
+    ~0.087) unpaired and therefore self-mapped, well above midline_tol=0.02.
+    Deliberately calls `build_dense_lr_swap` WITHOUT the new `midline_tol`
+    kwarg (using the module's `_MIRROR_AXIS` and a locally-hardcoded
+    midline_tol=0.02 for the assertion only) so this test exercises the actual
+    pairing logic rather than merely the new keyword argument's presence.
+    """
+    from jarvis_jax.cse.dense_lr_swap import build_dense_lr_swap, _MIRROR_AXIS
+
+    midline_tol = 0.02
+    swap = build_dense_lr_swap(MESH, "fps_300", BASE_50)
+
+    z = np.load(MESH, allow_pickle=True)
+    fps = z["fps_300"]
+    V = z["vertices"][fps]
+
+    dense = swap[50:] - 50                       # dense-local swap targets
+    self_mapped = np.where(dense == np.arange(len(dense)))[0]
+    assert len(self_mapped) > 0, "expected some true midline verts to self-map"
+
+    lateral_self_mapped = self_mapped[np.abs(V[self_mapped, _MIRROR_AXIS]) >= midline_tol]
+    assert len(lateral_self_mapped) == 0, (
+        f"{len(lateral_self_mapped)} LATERAL dense vertex/vertices self-map "
+        f"(|Y| >= {midline_tol}): {lateral_self_mapped.tolist()} -- these would "
+        "land on the wrong side of the midline under flip augmentation"
+    )
+
+    # every self-mapped vertex is a genuine midline vertex.
+    assert np.all(np.abs(V[self_mapped, _MIRROR_AXIS]) < midline_tol)
+
+    # sanity: still an involution, and first-50 unchanged (don't let the fix
+    # regress the existing contract).
+    assert np.array_equal(swap[swap], np.arange(len(swap)))
+    from jarvis_jax.data.augment import build_lr_swap
+    assert np.array_equal(swap[:50], build_lr_swap(BASE_50))
+
+
+@pytest.mark.skipif(not _HAVE_MESH, reason="canonical mesh not present")
 def test_flipping_a_synthetic_example_swaps_L_and_R():
     """End-to-end: apply the dense swap the way flip_batch does (kp[:, swap]) and
     confirm a synthetic labeled example with distinct L/R coords swaps correctly."""
