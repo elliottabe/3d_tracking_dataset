@@ -304,6 +304,15 @@ class SilhouetteJaxlsBatchSolver:
         # SE3 path tangent_dim = 6 (root) + n_hinges per frame (matches _solve_se3).
         tangent_dim = 6 + n_hinges
         linear_solver = self._pick_linear_solver(T, tangent_dim)
+        # MEMORY: dense_cholesky forms an (all-Var-tangent)^2 normal-equations
+        # matrix. The fixed SilVar packs n_cam*(8+2*n_pts) dims/frame (~1848 at
+        # n_cam=7,n_pts=128) -> total tangent balloons and dense_cholesky OOMs
+        # (~T*2000 squared). The auto threshold above only counts the OPTIMIZED
+        # tangent (6+n_hinges) and misses this. When the silhouette factor is
+        # active, use the matrix-free conjugate_gradient solver (no dense normal
+        # equations). weight=0 / no-silhouette path is unchanged (invariant).
+        if use_sil and self.linear_solver == "auto":
+            linear_solver = "conjugate_gradient"
 
         sol = analyzed.solve(
             verbose=False,
