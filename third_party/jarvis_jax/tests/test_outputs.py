@@ -16,6 +16,29 @@ def test_mesh_subset_indices_full_and_named():
     assert full[0] == 0 and full[-1] == 61665
 
 
+def test_mesh_subset_indices_wing_union_and_dedup():
+    """fps_500+wing unions the body subset with the wing FPS set and dedups.
+
+    fps_500 alone lands only ~4/500 verts on the thin wing membranes, so wings
+    are invisible in overlays without the wing set; the '+' union fixes that.
+    """
+    from jarvis_jax.cse import outputs
+    fake_anat = {"fps": {500: np.array([0, 5, 10, 27000], np.int64),
+                         "wing": np.array([27000, 27406, 61138], np.int64)},
+                 "vlocal": np.zeros((61666, 3), np.float32)}
+    idx = outputs.mesh_subset_indices(fake_anat, subset="fps_500+wing")
+    assert idx.dtype == np.int32
+    # union of {0,5,10,27000} and {27000,27406,61138}, 27000 de-duplicated
+    assert set(idx.tolist()) == {0, 5, 10, 27000, 27406, 61138}
+    assert len(idx) == 6
+    # the wing-only token resolves the wing set
+    w = outputs.mesh_subset_indices(fake_anat, subset="wing")
+    assert set(w.tolist()) == {27000, 27406, 61138}
+    # a bad token raises
+    with pytest.raises(ValueError):
+        outputs.mesh_subset_indices(fake_anat, subset="bogus")
+
+
 def test_write_outputs_h5_roundtrip(tmp_path):
     from jarvis_jax.cse import outputs
     import stac_mjx.io_dict_to_hdf5 as ioh5

@@ -28,8 +28,8 @@ def load_anatomy(model_xml, mesh_npz):
         vlocal=np.asarray(z["vertices_local"], np.float32),
         vgeom=np.asarray(z["vertex_geom"], np.int32),
         faces=np.asarray(z["faces"], np.int32),
-        fps={int(k.split("_")[1]): z[k] for k in z.files
-             if k.startswith("fps_") and k.split("_")[1].isdigit()},
+        fps={(int(k[4:]) if k[4:].isdigit() else k[4:]): z[k]
+             for k in z.files if k.startswith("fps_")},  # int keys + "wing"
         seg_names=z["seg_names"], seg_ids=z["seg_ids"], vertex_segment=z["vertex_segment"],
         nq=int(m.nq), qpos0=np.asarray(m.qpos0, np.float32),
     )

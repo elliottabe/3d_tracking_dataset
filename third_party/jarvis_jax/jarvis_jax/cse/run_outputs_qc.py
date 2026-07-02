@@ -106,7 +106,7 @@ def gather_qc_frame_inputs(recording, *, root, split, calib_dir, fs_imgids, T,
 
 def run_outputs_qc(recording, *, ik_h5, model_xml, mesh_npz, root, split="val",
                    qpos_npz=None, calib_dir=None, cse_work_dir, out_dir,
-                   mesh_subset="fps_500", max_frames=0, make_video=False,
+                   mesh_subset="fps_500+wing", max_frames=0, make_video=False,
                    video_fps=30, ann_id_by_image=None):
     """Deploy entrypoint: outputs h5 + QC json (+ optional per-cam mp4s)."""
     import h5py
@@ -208,7 +208,7 @@ def main():
     ap.add_argument("--calib-dir", default=None)
     ap.add_argument("--cse-work-dir", required=True)
     ap.add_argument("--out-dir", required=True)
-    ap.add_argument("--mesh-subset", default="fps_500")
+    ap.add_argument("--mesh-subset", default="fps_500+wing")
     ap.add_argument("--max-frames", type=int, default=0)
     ap.add_argument("--make-video", action="store_true")
     ap.add_argument("--video-fps", type=int, default=30)

@@ -20,21 +20,38 @@ from jarvis_jax.cse.silhouette_ik import load_anatomy, make_fk_repose
 
 
 def mesh_subset_indices(anat, subset="fps_500"):
-    """Full-vertex-array indices for a named fps subset (or all verts).
+    """Full-vertex-array indices for a mesh vertex subset (or all verts).
 
-    subset="full" -> np.arange(nverts). subset="fps_<N>" -> anat["fps"][N]
-    (the FK-repose `indices` argument indexes the FULL vertex array, so the
-    fps arrays -- which already hold full-array indices -- are used directly).
+    subset is a '+'-joined set of tokens, unioned + de-duplicated:
+      * "full"        -> np.arange(nverts) (all verts).
+      * "fps_<N>"     -> anat["fps"][N] (a farthest-point body subset).
+      * "wing"/"fps_wing" -> anat["fps"]["wing"] (the wing-membrane FPS set).
+    e.g. "fps_500+wing" = the 500-vert body subset UNION the 100 wing verts
+    (fps_500 alone lands only ~4/500 verts on the thin wing membranes, so the
+    wings are invisible in overlays/outputs without the wing set). The FK-repose
+    `indices` argument indexes the FULL vertex array, so the fps arrays -- which
+    already hold full-array indices -- are used directly.
     """
-    if subset == "full":
-        nverts = len(anat["vlocal"])
-        return np.arange(nverts, dtype=np.int32)
-    if not subset.startswith("fps_"):
-        raise ValueError(f"subset must be 'full' or 'fps_<N>', got {subset!r}")
-    n = int(subset.split("_")[1])
-    if n not in anat["fps"]:
-        raise ValueError(f"fps subset {n} not in anatomy (have {sorted(anat['fps'])})")
-    return np.asarray(anat["fps"][n], dtype=np.int32)
+    nverts = len(anat["vlocal"])
+    parts = []
+    for tok in str(subset).split("+"):
+        tok = tok.strip()
+        if tok == "full":
+            parts.append(np.arange(nverts, dtype=np.int64))
+        elif tok in ("wing", "fps_wing"):
+            if "wing" not in anat["fps"]:
+                raise ValueError("anatomy has no fps_wing subset")
+            parts.append(np.asarray(anat["fps"]["wing"], np.int64))
+        elif tok.startswith("fps_") and tok[4:].isdigit():
+            n = int(tok[4:])
+            if n not in anat["fps"]:
+                have = sorted(k for k in anat["fps"] if isinstance(k, int))
+                raise ValueError(f"fps subset {n} not in anatomy (have {have} + 'wing')")
+            parts.append(np.asarray(anat["fps"][n], np.int64))
+        else:
+            raise ValueError(
+                f"bad subset token {tok!r}; use 'full' / 'fps_<N>' / 'wing', '+'-joined")
+    return np.unique(np.concatenate(parts)).astype(np.int32)
 
 
 def fk_mesh_world_mm(fk_repose, qpos, vert_idx, bridges):
