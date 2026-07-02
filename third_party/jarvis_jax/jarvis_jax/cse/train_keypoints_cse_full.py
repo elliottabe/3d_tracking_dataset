@@ -4,9 +4,13 @@ Mirrors scripts/train_keypoints.run_training (mesh / replicate / prefetch /
 checkpoint-resume) with three changes for CSE:
   * CSEImageDataset (250 joints = 50 kp + M vertex 2D labels),
   * model warm-started from the trained v3 50-kp checkpoint (warm_start_from_v3),
-  * augmentation with flip disabled (flip_p=0) + identity L/R swap, since the
+  * augmentation: flip is OFF by default (identity L/R swap), since the
     stratified vertex subset isn't guaranteed closed under mirroring (affine +
-    cutout + photometric still applied).
+    cutout + photometric still applied). Pass --flip-p>0 to enable flip using
+    the dense (50+M) L/R involution from build_dense_lr_swap (Phase 5).
+
+Phase 5 also adds optional mask gating: --mask-weight>0 turns on a dilated-mask
+(--mask-dilate px) containment loss penalizing off-fly heatmap mass.
 
 ckpt-g2 is preemptible -> fixed --ckpt-dir + restore_latest gives auto-resume.
 """
@@ -46,6 +50,15 @@ def main():
     ap.add_argument("--save-every", type=int, default=500)
     ap.add_argument("--log-every", type=int, default=50)
     ap.add_argument("--eval-every", type=int, default=500)
+    ap.add_argument("--mask-weight", type=float, default=0.0,
+                    help="dilated-mask containment loss weight (>0 turns gating ON)")
+    ap.add_argument("--mask-dilate", type=int, default=11,
+                    help="containment-loss mask dilation kernel (px); used only when mask-weight>0")
+    ap.add_argument("--flip-p", type=float, default=0.0,
+                    help="horizontal-flip prob; >0 enables flip aug using the dense L/R swap")
+    ap.add_argument("--base-names",
+                    default="/gscratch/portia/eabe/Research/MyRepos/3d_tracking_dataset/stac-mjx/configs/anatomy/v1.yaml",
+                    help="anatomy yaml providing the 50 base keypoint names (for the flip swap)")
     ap.add_argument("--val-recording", default="2026_03_18_15_31_22")
     # Wing fine-tune: render densely-packed wing vertices with a tighter Gaussian
     # (so neighbouring peaks stay resolvable, fixing the inboard tip compression)
@@ -79,7 +92,8 @@ def main():
 
     cfg = ViTPoseConfig(num_keypoints=a.num_joints)
     tcfg = TrainConfig(lr=a.lr, total_steps=a.steps, batch_size=a.batch,
-                       backbone_lr_mult=a.backbone_lr_mult)
+                       backbone_lr_mult=a.backbone_lr_mult,
+                       mask_weight=a.mask_weight, mask_dilate=a.mask_dilate)
 
     model = build(a.mae, cfg) if os.path.exists(a.mae) else ViTPose(cfg, rngs=nnx.Rngs(0))
     model = warm_start_from_v3(model, a.v3_ckpt,
@@ -92,9 +106,19 @@ def main():
     if start:
         print(f"resuming from checkpoint at step {start}")
 
-    # aug: flip OFF (vertex subset not mirror-closed); identity swap satisfies the API
-    aug = AugParams(enabled=True, flip_p=0.0)
-    lr_swap = np.arange(a.num_joints, dtype=np.int32)
+    # aug: flip ON iff --flip-p>0, using the dense (50+M) L/R involution.
+    if a.flip_p > 0.0:
+        from jarvis_jax.cse.dense_lr_swap import build_dense_lr_swap
+        from jarvis_jax.cse.cse_labels import model_kp_order  # 50 canonical STAC names
+        base_names = model_kp_order(a.base_names)
+        M = a.num_joints - 50
+        lr_swap = build_dense_lr_swap(a.mesh_npz, f"fps_{M}", base_names)
+        aug = AugParams(enabled=True, flip_p=a.flip_p)
+        print(f"[cse-train] flip ON (p={a.flip_p}) with dense L/R swap "
+              f"({int((lr_swap != np.arange(len(lr_swap))).sum())}/{len(lr_swap)} channels swapped)")
+    else:
+        aug = AugParams(enabled=True, flip_p=0.0)
+        lr_swap = np.arange(a.num_joints, dtype=np.int32)
 
     # Per-channel target sigma + loss weight: tighten/emphasise the thin densely-
     # sampled structures (wings, legs) whose verts merge into one blob at sigma 7.
@@ -121,7 +145,8 @@ def main():
               f"{int(leg_joint.sum())} leg ch @ sigma {a.leg_sigma} w {a.leg_weight} | "
               f"{int(a.num_joints - wing_joint.sum() - leg_joint.sum())} body/kp ch @ sigma 7.0 w 1.0")
     step = make_train_step(tcfg.mask_weight, aug, lr_swap, heatmap_size=cfg.heatmap_size,
-                           sigma=jnp.asarray(sigma), joint_weight=jnp.asarray(jweight))
+                           sigma=jnp.asarray(sigma), joint_weight=jnp.asarray(jweight),
+                           mask_dilate=tcfg.mask_dilate)
 
     mesh = data_parallel_mesh()
     gdef_m, st_m = nnx.split(model); model = nnx.merge(gdef_m, replicate(st_m, mesh))
