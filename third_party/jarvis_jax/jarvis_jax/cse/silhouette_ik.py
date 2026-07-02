@@ -59,7 +59,7 @@ def _selftest(model_xml, mesh_npz):
     from jarvis_jax.cse.mesh_assets import load_canonical, repose_vertices
     anat = load_anatomy(model_xml, mesh_npz)
     print(f"loaded anatomy: nq={anat['nq']} nverts={len(anat['vlocal'])} "
-          f"nfaces={len(anat['faces'])} fps={sorted(anat['fps'])}")
+          f"nfaces={len(anat['faces'])} fps={sorted(anat['fps'], key=str)}")
     fk = make_fk_repose(anat)
     rng = np.random.default_rng(0)
     mesh = load_canonical(mesh_npz)

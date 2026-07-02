@@ -112,7 +112,6 @@ def run_outputs_qc(recording, *, ik_h5, model_xml, mesh_npz, root, split="val",
     import h5py
     import stac_mjx.io_dict_to_hdf5 as ioh5
     from jarvis_jax.geometry.reprojection_tool import ReprojectionTool
-    from jarvis_jax.cse.silhouette_ik import load_anatomy, make_fk_repose
     from jarvis_jax.cse import outputs as outmod
     from jarvis_jax.cse import qc as qcmod
     from jarvis_jax.cse.silhouette_ik_solve import build_solver_inputs
