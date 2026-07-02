@@ -85,6 +85,7 @@ def run_polish(
     import h5py
     import jax.numpy as jnp
     import stac_mjx.io_dict_to_hdf5 as ioh5
+    import stac_mjx.utils as stac_utils
     from jarvis_jax.geometry.reprojection_tool import ReprojectionTool
     from jarvis_jax.cse.silhouette_ik import load_anatomy, make_fk_repose
     from jarvis_jax.cse.silhouette_ik_solve import (
@@ -157,19 +158,36 @@ def run_polish(
     name2coco = {n: i for i, n in enumerate(coco_kpnames)}
 
     def _metrics(qtraj):
+        # NOTE: marker sites used for the reproj + marker-residual metrics are
+        # FK'd fresh from this qtraj's SOLVED qpos per frame (kinematics ->
+        # com_pos -> get_site_xpos), NOT read from the frozen STAC
+        # `marker_sites` array. Reading the frozen array here would make
+        # reproj/marker-residual identical before vs. after the silhouette
+        # solve (since they'd never depend on qtraj), turning the honest
+        # regression gates into tautologies. Only the umeyama model->mm bridge
+        # scale/rotation/translation is fit per-frame; it is fit from these
+        # same solved sites (vs. triangulated kp) so it stays consistent with
+        # the trajectory actually being evaluated.
+        mjx_model = small["mjx_model"]
+        mjx_data_template = small["mjx_data"]
+        site_idxs = small["site_idxs"]
         ious, soft_ious, reprojs, mresids = [], [], [], []
         for t in range(T):
             cam2img = _cam2img_for_frame(fs_imgids[t], id2file, cam_names)
             kp_mm, kok = _triangulate_kp_mm(rt, kp_names, coco_kpnames, cam2img, id2ann_multi)
             if kok.sum() < 3:
                 continue
-            s, R, tr = _umeyama(marker_sites[t][kok], kp_mm[kok])
+            data_t = mjx_data_template.replace(qpos=jnp.asarray(qtraj[t]))
+            data_t = stac_utils.kinematics(mjx_model, data_t)
+            data_t = stac_utils.com_pos(mjx_model, data_t)
+            sites_model = np.asarray(stac_utils.get_site_xpos(data_t, site_idxs))  # (n_kp, 3), MODEL frame
+            s, R, tr = _umeyama(sites_model[kok], kp_mm[kok])
             verts_model = np.asarray(fk(jnp.asarray(qtraj[t].astype(np.float32)), 1.0, vert_indices))
             verts_mm = _model_to_mm(verts_model, s, R, tr)
             # 3-D marker residual (FK sites vs triangulated kp) -- proxy: distance
             # of triangulated markers to their FK positions (kok subset).
             mresids.append(float(np.mean(np.linalg.norm(
-                _model_to_mm(marker_sites[t][kok], s, R, tr) - kp_mm[kok], axis=1))))
+                _model_to_mm(sites_model[kok], s, R, tr) - kp_mm[kok], axis=1))))
             for c, iid in cam2img.items():
                 ann = _ann_for_image(id2ann_multi, iid, None)
                 if ann is None:
@@ -181,7 +199,9 @@ def run_polish(
                 mask = np.asarray(mask)
                 uv = np.stack([rt.reproject_point(verts_mm[k])[c] for k in range(0, len(verts_mm))], 0)
                 ious.append(iou_of_projected_verts(uv, mask.shape, mask))
-                # baseline-comparable soft-IoU (eval-only; not an objective term)
+                # baseline-comparable soft-IoU (eval-only; not an objective term).
+                # Uses rt.reproject_point (perspective divide) -- the same
+                # reporting convention run_single_fly uses, not an affine map.
                 soft_ious.append(soft_iou_of_verts(uv, mask))
             # reprojection of the 50 kp sites
             for j, nm in enumerate(kp_names):
@@ -194,7 +214,7 @@ def run_polish(
                         continue
                     kp2d = np.asarray(ann["keypoints"], float).reshape(-1, 3)
                     if kp2d[ci, 2] > 0:
-                        uv_pred = rt.reproject_point(_model_to_mm(marker_sites[t][j][None], s, R, tr)[0])[c]
+                        uv_pred = rt.reproject_point(_model_to_mm(sites_model[j][None], s, R, tr)[0])[c]
                         reprojs.append(float(np.linalg.norm(uv_pred - kp2d[ci, :2])))
         return (float(np.mean(ious)) if ious else float("nan"),
                 float(np.mean(soft_ious)) if soft_ious else float("nan"),
