@@ -14,12 +14,18 @@
 #SBATCH --exclude=g[3107,3115,3109]
 #SBATCH --mail-type=END,FAIL,REQUEUE
 #SBATCH --mail-user=eabe@uw.edu
-#SBATCH -o /gscratch/portia/eabe/data/Johnson_lab/jax_vitpose_runs/cse_vit350_gated/slurm-%j.out
+#SBATCH -o /gscratch/portia/eabe/data/Johnson_lab/jax_vitpose_runs/cse_vit350_gated_noflip/slurm-%j.out
 #
 # Phase-5 GATED fine-tune: warm-start cse_vit350_wings/final (350 = 50 kp + 300 verts)
-# and continue training with the dilated-mask containment loss ON (mask-weight>0,
-# mask-dilate=11) AND flip augmentation ON (dense (50+M) L/R swap). ckpt-g2 is
-# preemptible -> FIXED --ckpt-dir + --requeue => auto-resume.
+# and continue training with the dilated-mask containment loss ON (mask-weight 0.1,
+# mask-dilate 11). ckpt-g2 is preemptible -> FIXED --ckpt-dir + --requeue => auto-resume.
+#
+# ABLATION FINDING (validated config below): containment gating cuts off-fly heatmap
+# mass 15x (0.293 -> 0.020) at ~zero accuracy cost -- BUT ONLY WITH FLIP OFF. The dense
+# (50+M) L/R flip augmentation regressed kp MPJPE 3x (8.7 -> 25-30px) at BOTH mask-weight
+# 0.1 and 0.02; the flip-OFF control recovered kp to 9.6px while keeping the 15x off-fly
+# win. So --flip-p 0.0 here (the shipping config). Re-enable flip only after debugging the
+# dense L/R swap (imperfect/self-mapped dense vertex pairs are the suspected corruption).
 set -x
 source ~/.bashrc
 micromamba activate 3d_tracking
@@ -32,7 +38,7 @@ WORK=/gscratch/portia/eabe/data/Johnson_lab/cse_work
 RUNS=/gscratch/portia/eabe/data/Johnson_lab/jax_vitpose_runs
 ROOT=/gscratch/portia/eabe/data/Johnson_lab/red_data/red_data_unified_V3
 MESH=/gscratch/portia/eabe/Research/MyRepos/fruitfly_body_models/fruitfly_cse/fly_v1_collision_canonical_wings.npz
-RUN=$RUNS/cse_vit350_gated
+RUN=$RUNS/cse_vit350_gated_noflip
 mkdir -p "$RUN"
 
 cd "$PKG"
@@ -43,7 +49,7 @@ python -u -m jarvis_jax.cse.train_keypoints_cse_full \
     --aux-val   "$WORK/cse_labels_val_M300.npz" \
     --v3-ckpt "$RUNS/cse_vit350_wings/final" --warmstart-joints 350 \
     --mesh-npz "$MESH" \
-    --mask-weight 0.1 --mask-dilate 11 --flip-p 0.5 \
+    --mask-weight 0.1 --mask-dilate 11 --flip-p 0.0 \
     --out "$RUN/final" --ckpt-dir "$RUN/ckpt" \
     --num-joints 350 --steps 6000 --batch 24 --lr 5e-4 --backbone-lr-mult 0.1 \
     --save-every 500 --log-every 50 --eval-every 1000
