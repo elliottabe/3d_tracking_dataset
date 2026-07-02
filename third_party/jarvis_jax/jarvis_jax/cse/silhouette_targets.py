@@ -78,3 +78,37 @@ def build_silhouette_targets(
     sil_data = np.stack(rows, axis=0).astype(np.float32)
     meta = dict(n_cam=n_cam, n_pts=n_points, cam_names=cam_names)
     return sil_data, meta
+
+
+def silhouette_fk_indices(mesh_npz, subset: str = "fps_300", exclude_seg_ids=None):
+    """FULL-vertex-array indices for the silhouette factor's projected subset.
+
+    INDEX-SPACE HAZARD (Phase-4 carry-forward, mirrors
+    silhouette_ik_solve._wing_fk_indices): the mesh npz's ``fps_*`` arrays hold
+    indices INTO the full ``vertices``/``vertex_geom`` arrays (values 0..61665),
+    so they are ALREADY full-array space and can be passed straight to
+    ``silhouette_ik.make_fk_repose(indices=...)``. In contrast,
+    ``silhouette_landmarks.wing_side_vertices`` /
+    ``active_parts.excluded_fps_indices`` return indices INTO the fps subset
+    (0..299) -- those MUST be bridged via ``fps[idx]`` before FK, or they
+    silently select the wrong vertices (verified thorax-vertex bug in
+    _wing_fk_indices' docstring). This helper only ever returns full-array
+    indices, and applies ``exclude_seg_ids`` in full-array space.
+
+    Args:
+        mesh_npz: canonical mesh npz path.
+        subset: which fps subset to use ("fps_300" default).
+        exclude_seg_ids: optional list of segment ids to drop (full-array
+            filtering via ``vertex_segment``), for Phase-4 active-parts.
+
+    Returns:
+        np.ndarray (M,) int32 full-vertex-array indices.
+    """
+    z = np.load(mesh_npz, allow_pickle=True)
+    fps = np.asarray(z[subset], dtype=np.int64)   # full-array indices already
+    if exclude_seg_ids:
+        seg = np.asarray(z["vertex_segment"])     # (61666,) full-array
+        excl = set(int(s) for s in exclude_seg_ids)
+        keep = np.array([int(seg[i]) not in excl for i in fps])
+        fps = fps[keep]
+    return fps.astype(np.int32)
