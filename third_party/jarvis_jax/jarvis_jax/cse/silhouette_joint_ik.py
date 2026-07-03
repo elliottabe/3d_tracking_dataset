@@ -6,10 +6,13 @@ PLUS a differentiable silhouette boundary-Chamfer cost, over the SAME SE3Var +
 JointVar. stac_core_jaxls.py is left byte-identical (Phases 1-4 invariant); a
 test proves silhouette_weight=0 reproduces JaxlsBatchSolver's output.
 
-The silhouette cost factory closes over per-frame constants (cam matrices,
-boundary points, per-point confidence) and selects the active frame via a
-tiny per-frame FrameVar (int index), rather than packing per-frame data into
-a jaxls Var (the retired SilVar/pack_sil_value/unpack_sil_value scheme).
+Two additive silhouette cost factories share the same pattern: each closes
+over per-frame constants (cam matrices, plus coverage boundary points/confidence
+or containment SDF crops/confidence) and selects the active frame via a tiny
+per-frame FrameVar (int index), rather than packing per-frame data into a
+jaxls Var. `make_silhouette_cost` is the coverage (SAM-boundary Chamfer) term;
+`make_containment_cost` is the mesh->mask containment (SDF relu) term; both are
+gated independently in `solve_trajectory` by their own weight/data kwargs.
 """
 from __future__ import annotations
 import jax
@@ -20,6 +23,7 @@ import jaxlie
 from stac_mjx import utils
 
 from jarvis_jax.cse.silhouette_chamfer import chamfer_residual
+from jarvis_jax.cse.silhouette_containment import containment_residual
 
 # Number of free-joint DOFs in MuJoCo (3 translation + 4 quaternion), matching
 # stac_core_jaxls._FREE_JOINT_NDOF.
@@ -72,17 +76,69 @@ def make_silhouette_cost(
     return silhouette_cost
 
 
+def make_containment_cost(
+    SE3Var, JointVar, FrameVar, *,
+    fk_repose, vert_indices, cam_Ms, cam_ts, sdf_all, grid_scale_all,
+    grid_offset_all, present_all, conf_v, sil_qs_mask, margin: float,
+    containment_weight: float, qs_to_opt, template_qpos, scale: float = 1.0,
+):
+    """Containment cost: appendage verts outside the mask -> relu(SDF) penalty.
+
+    Per-frame SDF crops + transforms are closed over as constants and selected
+    by the integer FrameVar; cameras iterated with jax.lax.scan (FK once/frame).
+    Gradient restricted to appendage DOFs via where(sil_qs_mask, full_q, stop_grad).
+    """
+    vert_indices = jnp.asarray(vert_indices)
+    template_qpos = jnp.asarray(template_qpos)
+    qs_to_opt = jnp.asarray(qs_to_opt); sil_qs_mask = jnp.asarray(sil_qs_mask)
+    cam_Ms = jnp.asarray(cam_Ms); cam_ts = jnp.asarray(cam_ts)
+    sdf_all = jnp.asarray(sdf_all); grid_scale_all = jnp.asarray(grid_scale_all)
+    grid_offset_all = jnp.asarray(grid_offset_all)
+    present_all = jnp.asarray(present_all); conf_v = jnp.asarray(conf_v)
+
+    @jaxls.Cost.factory
+    def containment_cost(var_values, root_var: SE3Var, joint_var: JointVar,
+                         frame_var: FrameVar) -> jnp.ndarray:
+        T_root = var_values[root_var]; joints = var_values[joint_var]
+        t = jax.lax.stop_gradient(var_values[frame_var])[0].astype(jnp.int32)
+        xyz = T_root.translation(); wxyz = T_root.rotation().wxyz
+        q = jnp.concatenate([xyz, wxyz, joints])
+        full_q = jnp.where(qs_to_opt, q, template_qpos)
+        sil_q = jnp.where(sil_qs_mask, full_q, jax.lax.stop_gradient(full_q))
+        verts3d = fk_repose(sil_q, scale, vert_indices)     # (M,3)
+
+        sdf_t = sdf_all[t]; gs_t = grid_scale_all[t]
+        go_t = grid_offset_all[t]; pr_t = present_all[t]
+
+        def scan_body(carry, cam):
+            M, tt, sdf, gs, go, present = cam
+            proj = verts3d @ M.T + tt                        # (M,2)
+            r = containment_residual(proj, sdf, gs, go, conf_v,
+                                     margin=margin, present=present)
+            return carry, r                                  # (M,)
+        _, res = jax.lax.scan(scan_body, None,
+                              (cam_Ms, cam_ts, sdf_t, gs_t, go_t, pr_t))
+        return (res * containment_weight).reshape(-1)        # (C*M,)
+
+    return containment_cost
+
+
 class SilhouetteJaxlsBatchSolver:
     """Joint 2D+3D IK solver: 3-D marker cost (verbatim from
-    stac_core_jaxls._build_se3) + smoothness/limit/reg + an additive
-    silhouette boundary-Chamfer cost, over the SAME SE3Var + JointVar.
+    stac_core_jaxls._build_se3) + smoothness/limit/reg + additive
+    silhouette coverage (boundary-Chamfer) and/or containment (SDF-relu)
+    costs, over the SAME SE3Var + JointVar.
 
-    With silhouette_weight=0 (or sil_data=None) the silhouette cost is NOT
-    added and the solve reproduces JaxlsBatchSolver's output (to atol=1e-5):
-    the marker/reg/limit/smoothness cost formulas, the [root, joint, kp]
-    variable ordering, the SE3-from-normalized-quat initial values, and the
-    solve config (auto linear solver, TrustRegionConfig(lambda_initial),
-    TerminationConfig(max_iterations)) all match _solve_se3 exactly.
+    `silhouette_weight` and `containment_weight` independently gate their
+    respective additive costs (each also requires its data kwarg -
+    `boundary_all` / `sdf_all` - to be non-None); there is no `sil_data`
+    kwarg. With both weights 0 (the default), neither cost nor the shared
+    FrameVar is added, and the solve reproduces JaxlsBatchSolver's output
+    (to atol=1e-5): the marker/reg/limit/smoothness cost formulas, the
+    [root, joint, kp] variable ordering, the SE3-from-normalized-quat
+    initial values, and the solve config (auto linear solver,
+    TrustRegionConfig(lambda_initial), TerminationConfig(max_iterations))
+    all match _solve_se3 exactly.
     """
 
     # Threshold below which dense_cholesky is faster than conjugate_gradient
@@ -210,9 +266,16 @@ class SilhouetteJaxlsBatchSolver:
                 qs_to_opt=qs_to_opt, template_qpos=mjx_data_template.qpos, scale=1.0)
             costs.append(cov_cost(root_all, joint_all, frame_all))
 
-        # containment cost is appended in Task 6 (guarded by use_cont)
-        _ = (cont_vert_indices, sdf_all, grid_scale_all, grid_offset_all,
-             present_all, conf_v, containment_weight, margin, use_cont)
+        if use_cont:
+            cont_cost = make_containment_cost(
+                SE3Var, JointVar, FrameVar,
+                fk_repose=fk_repose, vert_indices=cont_vert_indices,
+                cam_Ms=cam_Ms, cam_ts=cam_ts, sdf_all=sdf_all,
+                grid_scale_all=grid_scale_all, grid_offset_all=grid_offset_all,
+                present_all=present_all, conf_v=conf_v, sil_qs_mask=sil_qs_mask,
+                margin=margin, containment_weight=containment_weight,
+                qs_to_opt=qs_to_opt, template_qpos=mjx_data_template.qpos, scale=1.0)
+            costs.append(cont_cost(root_all, joint_all, frame_all))
 
         analyzed = jaxls.LeastSquaresProblem(costs=costs, variables=variables).analyze()
 
@@ -233,6 +296,14 @@ class SilhouetteJaxlsBatchSolver:
 
         tangent_dim = 6 + n_hinges
         linear_solver = self._pick_linear_solver(T, tangent_dim)
+        # Both silhouette costs now close their per-frame data (boundary/SDF
+        # crops, confidences) over as constants and add only a 1-dim FrameVar
+        # per frame - the OPTIMIZED tangent the threshold above counts
+        # (6+n_hinges) already reflects the true problem size. Forcing
+        # conjugate_gradient here is therefore conservative (avoids relying on
+        # the _DENSE_THRESHOLD heuristic while the silhouette factors are
+        # active) rather than required to prevent an OOM, as it was under the
+        # retired SilVar packing (which put O(n_cam*n_pts) into the Var itself).
         if use_sil and self.linear_solver == "auto":
             linear_solver = "conjugate_gradient"
 
