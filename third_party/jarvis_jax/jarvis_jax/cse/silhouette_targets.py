@@ -1,9 +1,11 @@
-"""Assemble per-(frame,camera) silhouette targets for the Phase-6 IK.
+"""Assemble per-(frame,camera) silhouette targets for the silhouette IK.
 
-For each bout frame + camera, loads the SAM mask for the selected fly, samples
-n_points uniform boundary points, and packs them with the camera's affine DLT
-matrix into the flat SilVar layout the sibling solver threads. Cameras with no
-mask this frame get NaN boundary blocks (the Chamfer residual is NaN-safe).
+For each bout frame + camera, loads the SAM mask for the selected fly, erodes it
+by `erode_px` (strips the reflection/shadow halo), samples n_points uniform
+boundary points, and returns them as an UNPACKED dict (boundary/conf_p/present +
+per-camera affine matrices) that the solver selects per frame via a FrameVar.
+Cameras with no mask this frame get NaN boundary blocks + present=False (the
+Chamfer residual is NaN-safe).
 """
 from __future__ import annotations
 import json

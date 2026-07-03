@@ -174,6 +174,7 @@ def run_polish(
     bridge_s = np.ones((T,), np.float32)
     bridge_R = np.broadcast_to(np.eye(3, dtype=np.float32), (T, 3, 3)).copy()
     bridge_t = np.zeros((T, 3), np.float32)
+    frame_ok = np.zeros(T, bool)          # frames with a valid (>=3 kp) bridge
     for t in range(T):
         cam2img = _cam2img_for_frame(fs_imgids[t], id2file, cam_names)
         kp_mm, kok = _triangulate_kp_mm(rt, kp_names, coco_kpnames, cam2img, id2ann_multi)
@@ -185,8 +186,17 @@ def run_polish(
         sites0 = np.asarray(stac_utils.get_site_xpos(d0, inputs["site_idxs"]))
         s, R, tr = _umeyama(sites0[kok], kp_mm[kok])
         bridge_s[t] = s; bridge_R[t] = R; bridge_t[t] = tr
+        frame_ok[t] = True
     bridge_s = jnp.asarray(bridge_s); bridge_R = jnp.asarray(bridge_R)
     bridge_t = jnp.asarray(bridge_t)
+
+    # Gate the silhouette OFF on frames without a valid bridge (<3 triangulated
+    # kp -> identity bridge): projecting model-frame verts through mm cameras
+    # there would inject spurious residuals (esp. on OOD females). Zero their
+    # containment present + coverage conf so only keypoint/reg/smoothness act.
+    present_g = np.asarray(sdf["present"]).copy(); present_g[~frame_ok] = False
+    conf_p_g = np.asarray(tg["conf_p"]).copy(); conf_p_g[~frame_ok] = 0.0
+    present_g = jnp.asarray(present_g); conf_p_g = jnp.asarray(conf_p_g)
 
     solver = SilhouetteJaxlsBatchSolver(
         n_iter=n_iter, smooth_weight=smooth_weight, beta=beta, huber_delta=huber_delta)
@@ -199,9 +209,9 @@ def run_polish(
             q_reg_weights=inputs["q_reg_weights"], fk_repose=fk,
             cov_vert_indices=cov_idx, cont_vert_indices=cont_idx,
             cam_Ms=cam_Ms, cam_ts=cam_ts, boundary_all=jnp.asarray(tg["boundary"]),
-            conf_p_all=jnp.asarray(tg["conf_p"]), sil_qs_mask=sil_qs, silhouette_weight=sw,
+            conf_p_all=conf_p_g, sil_qs_mask=sil_qs, silhouette_weight=sw,
             sdf_all=jnp.asarray(sdf["sdf"]), grid_scale_all=jnp.asarray(sdf["grid_scale"]),
-            grid_offset_all=jnp.asarray(sdf["grid_offset"]), present_all=jnp.asarray(sdf["present"]),
+            grid_offset_all=jnp.asarray(sdf["grid_offset"]), present_all=present_g,
             conf_v=conf_v, containment_weight=cw, margin=margin,
             bridge_s_all=bridge_s, bridge_R_all=bridge_R, bridge_t_all=bridge_t))
 
