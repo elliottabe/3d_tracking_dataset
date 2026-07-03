@@ -1,0 +1,15 @@
+defaults:
+  - _self_
+  - paths: hyak
+  - anatomy: v1
+  - stac: courtship
+  - recording: session0
+  - detector: vitpose_v3
+  - silhouette: default
+  - outputs: default
+  - slurm: ckpt_g2
+
+model: ${anatomy.model}
+bout_ids: ''      # '' = all; else comma-separated
+max_frames: 0     # 0 = all frames per bout
+seed: 0

@@ -1,0 +1,16 @@
+# @package silhouette
+mesh_npz: ${paths.body_model_dir}/fruitfly_cse/fly_v1_visual_canonical_wings.npz
+xml: ${paths.body_model_dir}/fruitfly_v1/fruitfly_v1_free.xml
+silhouette_weight: 0.3
+containment_weight: 0.3
+erode_px: 8
+n_points: 128
+sdf_hw: [128, 128]
+bbox_margin: 0.4
+margin: 0.0
+mesh_subset: fps_300
+appendage_include: [wing, leg, abdomen]
+smooth_weight: 0.1
+n_iter: 50
+beta: 8.0
+huber_delta: 0.0

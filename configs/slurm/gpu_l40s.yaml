@@ -1,0 +1,10 @@
+# @package slurm
+partition: gpu-l40s
+account: portia
+gpus_per_task: 1
+cpus: 8
+mem: 48
+time: '8:00:00'
+requeue: false
+conda_env: 3d_tracking
+mail_user: ${oc.env:USER,eabe}@uw.edu

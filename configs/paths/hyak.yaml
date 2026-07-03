@@ -1,4 +1,4 @@
-user: eabe
+user: ${oc.env:USER,eabe}
 
 # set the directory where the output files get saved
 cwd_dir:  /gscratch/portia/${paths.user}/Research/MyRepos/3d_tracking_dataset/
@@ -11,3 +11,8 @@ data_dir: /gscratch/portia/${paths.user}/data/Johnson_lab/${dataset.name}/${vers
 
 body_model_dir: /gscratch/portia/${paths.user}/Research/MyRepos/fruitfly_body_models/
 project_dir: /gscratch/portia/${paths.user}/Research/MyRepos/
+
+# courtship pipeline path keys (Task 1)
+data_dir_johnson: /gscratch/portia/${paths.user}/data/Johnson_lab
+out_root: ${paths.data_dir_johnson}/courtship
+vit_runs_root: ${paths.data_dir_johnson}/jax_vitpose_runs

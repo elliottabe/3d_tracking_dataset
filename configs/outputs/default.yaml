@@ -1,0 +1,10 @@
+# @package outputs
+# NOTE: no ${now:...} here — that's a Hydra *runtime* resolver that does not
+# resolve under a plain hydra.compose() (only under @hydra.main app runs).
+# The date stamp is applied by the driver/CLI at run time (Tasks 11/12 pass
+# outputs.out=... explicitly), so this composes cleanly under compose() too.
+out: ${paths.out_root}/${recording.name}_bouts
+overlay: true
+overlay_fps: 30
+mesh_subset: fps_500+wing        # for output h5 verts
+decimated_faces: 5000            # decimated mesh for overlay raster

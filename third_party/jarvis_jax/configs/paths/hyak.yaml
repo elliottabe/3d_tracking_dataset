@@ -1,4 +1,4 @@
-user: eabe
+user: ${oc.env:USER,eabe}
 data_root:      /gscratch/portia/${paths.user}/data/Johnson_lab/red_data/red_data_unified_V3
 cache_dir:      /gscratch/portia/${paths.user}/data/Johnson_lab/jax_repro_cache/v3
 runs_root:           /gscratch/portia/${paths.user}/data/Johnson_lab/jax_cached3d_runs
