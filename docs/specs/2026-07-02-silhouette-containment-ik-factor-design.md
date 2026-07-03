@@ -68,9 +68,17 @@ Containment bounds the mesh from spilling **outside** the (raw) mask; coverage p
 
 ### 4.1 Factor-specific DOF mask
 
-A boolean `sil_qs_mask` (shape matching the existing q-assembly) selecting **wing + leg + abdomen** hinge DOFs, closed over the silhouette cost factory. Inside the residual: `full_q = where(sil_qs_mask, q, template_qpos)` **before FK**, so the silhouette gradient reaches only appendage DOFs. The keypoint term's shared `qs_to_opt` is untouched → keypoints keep steering root/head/thorax.
+A boolean `sil_qs_mask` (nq,) selecting **wing + leg + abdomen** hinge DOFs, closed over the silhouette cost factory. Inside the residual, the mesh must be FK'd at the **true current pose**, but the silhouette gradient must only reach appendage DOFs. So the assembly is:
 
-`sil_qs_mask` is built by joint-name matching against the model (`wing`, `coxa|femur|tibia|tarsus|leg`, `abdomen|abd`) mapped to their qpos DOF indices, aligned to the same q layout the existing factor uses. Root (free joint) is excluded.
+```
+full_q = where(qs_to_opt, q, template_qpos)              # true optimized pose (same as marker_cost)
+sil_q  = where(sil_qs_mask, full_q, stop_gradient(full_q))  # use current pose, gradient only to appendage DOFs
+verts3d = fk_repose(sil_q, scale, vert_indices)
+```
+
+`where(..., stop_gradient(full_q))` — **not** `template_qpos` — is essential: freezing to the template would place the mesh at the wrong global position. The keypoint term's shared `qs_to_opt` is untouched → keypoints keep steering the root.
+
+`sil_qs_mask` is built by joint-name matching against the model — `wing`, legs `coxa|femur|tibia|tarsus|claw`, abdomen `abdomen` (NOT a bare `abd`, which also matches the leg `coxa_abduct` joints) — mapped to their `jnt_qposadr` indices. The free (root) joint is excluded. Note: in the V1 model **all 86 non-root hinge DOFs are wing/leg/abdomen** (there are no head/thorax joints), so the default mask is "all hinges, root excluded"; the name-matching helper keeps it configurable (e.g. wings+abdomen only).
 
 ### 4.2 Confidence plumbing
 
