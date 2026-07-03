@@ -228,7 +228,11 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
     #    first does the work; every later bout/fly reuses the artifact.
     #    decimate_mesh_npz writes with a plain np.savez (not atomic_save_npz),
     #    so wrap it in a tmp-then-replace ourselves to keep the same
-    #    crash-safety guarantee as every other artifact in this driver. --
+    #    crash-safety guarantee as every other artifact in this driver.
+    #    NOTE: the decimated mesh has no skinning (rest-pose, model units) and
+    #    is NOT used by the overlay below (see Stage E overlays comment) --
+    #    kept only as a cheap, harmless precompute in case something else
+    #    wants a lightweight rest-pose mesh later. --
     if not stage_done(decimated_mesh_path):
         _tmp_mesh = decimated_mesh_path + ".tmp.npz"
         decimate_mesh_npz(cfg.silhouette.mesh_npz, _tmp_mesh,
@@ -327,14 +331,17 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
                  kp2d_by_frame=kp2d_by_frame, vis_by_frame=vis_by_frame,
                  masks_by_frame=masks_by_frame, out_json=qc_json_path)
 
-    # -- overlays: rigidly transform the DECIMATED mesh via each frame's
-    #    STAC->mm bridge (no re-articulation -- mesh_decimate.py is explicit
-    #    that the decimated copy is raster-only, never kinematics/outputs) +
-    #    the triangulated kp3d, project into each camera; skip cameras whose
-    #    video already exists --
+    # -- overlays: project the per-frame ARTICULATED mesh into each camera,
+    #    plus the triangulated kp3d; skip cameras whose video already exists.
+    #    mesh_mm comes from outputs.h5 (Stage E's build_fly_outputs): it is
+    #    the FK'd `mesh_subset` in world mm, per frame -- i.e. the actual
+    #    silhouette-refined qpos posed through the skeleton, NOT the rest-pose
+    #    (T-pose) decimated mesh. The decimated mesh has no skinning, so
+    #    rigidly bridging it (the old approach) could only ever show a
+    #    canonical T-pose fly, never the articulated fit.
     if cfg.outputs.overlay:
-        with np.load(decimated_mesh_path) as dmesh:
-            dverts = np.asarray(dmesh["vertices"], np.float32)   # (Nd,3) rest-pose, model units
+        d_out = ioh5.load(outputs_h5_path)
+        mesh_mm_all = np.asarray(d_out["mesh_mm"])   # (T,Kmesh,3) FK'd world-mm mesh subset
         overlay_dir = os.path.join(bout_dir, "overlays")
         start = bout_start_frame(cfg, bout_idx)
         for ci, cam in enumerate(cameras):
@@ -343,14 +350,12 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
                 continue
             mesh2d_by_frame, kp2d_by_frame_overlay = [], []
             for t in range(T):
-                br = bridges[t]
-                if br is None:
+                mesh_t = mesh_mm_all[t]
+                mesh_ok = np.isfinite(mesh_t).all(-1)
+                if not mesh_ok.any():
                     mesh2d_by_frame.append(np.zeros((0, 2)))
-                    kp2d_by_frame_overlay.append(np.zeros((0, 2)))
-                    continue
-                s, R, tr = br
-                mesh_mm_t = s * (np.asarray(R) @ dverts.T).T + np.asarray(tr)
-                mesh2d_by_frame.append(project_points(cam_mats[ci], mesh_mm_t))
+                else:
+                    mesh2d_by_frame.append(project_points(cam_mats[ci], mesh_t[mesh_ok]))
                 kp_t = kp3d[t]
                 kp_ok = np.isfinite(kp_t).all(-1)
                 kp2d_by_frame_overlay.append(project_points(cam_mats[ci], kp_t[kp_ok]))

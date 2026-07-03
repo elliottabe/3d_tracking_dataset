@@ -13,3 +13,27 @@ model: ${anatomy.model}
 bout_ids: ''      # '' = all; else comma-separated
 max_frames: 0     # 0 = all frames per bout
 seed: 0
+
+# Minimal inline keys so `paths.data_dir` (and other groups' `${dataset.name}`/
+# `${version}` interpolations, e.g. stac/default.yaml's save_path) resolve.
+# Deliberately NOT a `- dataset: courtship` defaults entry: that group pulls in
+# its own `/stac` and `/preprocessing` defaults, which would conflict with the
+# explicit `- stac: courtship` selection above.
+dataset:
+  name: courtship
+  version: v1
+version: ${dataset.version}
+# paths.save_dir = ${multirun_save_dir:${paths.base_dir},${run_id}} (utils/path_utils.py
+# custom resolver); run_id has no default outside configs/config.yaml, which this
+# pipeline does not inherit from, so it must be defined here too.
+run_id: 'analysis'
+
+# stac/default.yaml's `data_path` interpolates `${preprocessing.input_filename}`,
+# but courtship_pipeline has no `preprocessing` group (bouts are loaded directly
+# from recording.predictions_dir, not via cfg.stac.data_path/io.load_mocap).
+# stac_mjx.run_stac -> io.save_data_to_h5 still does a full-config resolve+save,
+# so this key must exist even though its value is never read. Not wired to a
+# `preprocessing:` defaults group for the same cascade-avoidance reason as
+# `dataset` above.
+preprocessing:
+  input_filename: 'preprocessed_bout_${anatomy.name}_${dataset.name}.h5'

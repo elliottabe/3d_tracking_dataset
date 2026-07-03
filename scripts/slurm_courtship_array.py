@@ -79,6 +79,14 @@ def missing_sam3_masks(predictions_dir: str, idxs: list[int]) -> list[int]:
 # Pure sbatch-script builders (unit-tested; no SLURM/filesystem access)
 # ---------------------------------------------------------------------------
 
+def _array_spec(idxs: list[int]) -> str:
+    """SLURM `--array=` value for a set of (possibly 1-based, non-contiguous)
+    bout indices, e.g. [1, 2, 3, 7] -> "1,2,3,7". A comma-joined list (rather
+    than a `lo-hi` range) is correct for BOTH contiguous and gappy bout id
+    sets, and guarantees `$SLURM_ARRAY_TASK_ID` is always a real bout id."""
+    return ",".join(str(i) for i in idxs)
+
+
 def build_sam3_array_script(
     *,
     job_name: str,
@@ -90,14 +98,17 @@ def build_sam3_array_script(
     time_limit: str,
     requeue: bool,
     conda_env: str,
-    n_bouts: int,
+    idxs: list[int],
     session_dir: str,
     masks_out: str,
     dependency: str = "",
 ) -> str:
     """Stage-0 SAM3 mask+identity array (PyTorch env, cu13 CUDA libs).
 
-    One array task per bout (0..n_bouts-1); `sam3.reuse_masks=true` skips
+    One array task per real bout id in `idxs` (bouts are 1-based and may be
+    non-contiguous, e.g. no bout_00000 -- see `bout_indices`); `$SLURM_ARRAY_
+    TASK_ID` is set to that bout id directly, so `sam3.bout_ids=$SLURM_ARRAY_
+    TASK_ID` always names a bout that exists. `sam3.reuse_masks=true` skips
     bouts whose sam3_masks.npz already exists, so this is cheap to resubmit
     and safe even when only a handful of bouts are actually missing masks.
     """
@@ -113,7 +124,7 @@ def build_sam3_array_script(
 #SBATCH --cpus-per-task={cpus}
 #SBATCH --gpus={gpus}
 #SBATCH --mem={mem}G
-#SBATCH --array=0-{n_bouts - 1}
+#SBATCH --array={_array_spec(idxs)}
 #SBATCH --open-mode=append
 #SBATCH -o {masks_out}/slurm-sam3-%A_%a.out
 {dependency_line}
@@ -141,6 +152,7 @@ def build_precompute_script(
     time_limit: str,
     requeue: bool,
     conda_env: str,
+    bout_id: int,
     run_dir: str,
     config_name: str,
     overrides: str,
@@ -148,11 +160,13 @@ def build_precompute_script(
 ) -> str:
     """Single (non-array) job: fit-once STAC offsets + decimated mesh.
 
-    Runs run_courtship_bout.py restricted to bout 0 (both flies). Stages A-E
-    are stage-checkpointed (jarvis_jax.cse.courtship_resume), so this both
-    seeds offsets.h5/decimated_mesh.npz (which every array task reads
-    read-only) AND fully finishes bout 0 -- the JAX array's task 0 then finds
-    it already DONE and skips instantly.
+    Runs run_courtship_bout.py restricted to `bout_id` (both flies) -- a real
+    discovered bout id, since bouts are 1-based and non-contiguous (there is
+    no bout_00000). Stages A-E are stage-checkpointed (jarvis_jax.cse.
+    courtship_resume), so this both seeds offsets.h5/decimated_mesh.npz
+    (which every array task reads read-only) AND fully finishes that bout --
+    the JAX array's task for `bout_id` then finds it already DONE and skips
+    instantly.
     """
     requeue_line = "#SBATCH --requeue" if requeue else ""
     dependency_line = f"#SBATCH --dependency={dependency}" if dependency else ""
@@ -177,7 +191,7 @@ unset LD_LIBRARY_PATH                       # let JAX use its bundled CUDA wheel
 export XLA_PYTHON_CLIENT_MEM_FRACTION=0.9
 echo "Node: $SLURMD_NODENAME  job: $SLURM_JOB_ID"
 cd {PROJECT_DIR}
-python -u scripts/run_courtship_bout.py --config-name={config_name} ++bout_ids=0{overrides}
+python -u scripts/run_courtship_bout.py --config-name={config_name} ++bout_ids={bout_id}{overrides}
 """
 
 
@@ -192,7 +206,7 @@ def build_jax_array_script(
     time_limit: str,
     requeue: bool,
     conda_env: str,
-    n_bouts: int,
+    idxs: list[int],
     run_dir: str,
     config_name: str,
     overrides: str,
@@ -200,7 +214,9 @@ def build_jax_array_script(
 ) -> str:
     """JAX array over bouts: run_courtship_bout.py +bout_ids=$SLURM_ARRAY_TASK_ID.
 
-    One array task per bout (0..n_bouts-1); every stage inside is
+    One array task per real bout id in `idxs` (1-based, possibly
+    non-contiguous -- see `bout_indices`/`_array_spec`), so `$SLURM_ARRAY_
+    TASK_ID` is always a bout id that actually exists; every stage inside is
     checkpointed, so --requeue on a preemptible partition resumes cleanly.
     """
     requeue_line = "#SBATCH --requeue" if requeue else ""
@@ -215,7 +231,7 @@ def build_jax_array_script(
 #SBATCH --cpus-per-task={cpus}
 #SBATCH --gpus={gpus}
 #SBATCH --mem={mem}G
-#SBATCH --array=0-{n_bouts - 1}
+#SBATCH --array={_array_spec(idxs)}
 #SBATCH --open-mode=append
 #SBATCH -o {run_dir}/slurm-jax-%A_%a.out
 {dependency_line}
@@ -357,8 +373,9 @@ def main():
     if n_bouts == 0:
         if args.dry_run:
             print(f"Warning: no bout_* dirs found under {predictions_dir}; "
-                  f"using n_bouts=1 for the dry-run script demo.")
-            n_bouts, missing = 1, [0]
+                  f"using idxs=[1] for the dry-run script demo.")
+            idxs, missing = [1], [1]
+            n_bouts = len(idxs)
         else:
             print(f"Error: no bout_* dirs found under {predictions_dir}", file=sys.stderr)
             sys.exit(1)
@@ -396,7 +413,7 @@ def main():
             job_name=sam3_job, partition=sl.partition, account=sl.account,
             cpus=sl.cpus, mem=sl.mem, gpus=gpus, time_limit=sl.time,
             requeue=requeue, conda_env=sl.conda_env,
-            n_bouts=n_bouts, session_dir=session_dir, masks_out=predictions_dir)
+            idxs=idxs, session_dir=session_dir, masks_out=predictions_dir)
         _run("sam3", sam3_script, None)
         sam3_dep = f"afterok:{submitted['sam3']}"
     else:
@@ -407,7 +424,7 @@ def main():
     precompute_script = build_precompute_script(
         job_name=precompute_job, partition=sl.partition, account=sl.account,
         cpus=sl.cpus, mem=sl.mem, gpus=gpus, time_limit=sl.time,
-        requeue=requeue, conda_env=sl.conda_env, run_dir=run_root,
+        requeue=requeue, conda_env=sl.conda_env, bout_id=idxs[0], run_dir=run_root,
         config_name=args.config_name, overrides=overrides_str,
         dependency=sam3_dep or "")
     _run("precompute", precompute_script, sam3_dep)
@@ -418,7 +435,7 @@ def main():
     jax_script = build_jax_array_script(
         job_name=jax_job, partition=sl.partition, account=sl.account,
         cpus=sl.cpus, mem=sl.mem, gpus=gpus, time_limit=sl.time,
-        requeue=requeue, conda_env=sl.conda_env, n_bouts=n_bouts,
+        requeue=requeue, conda_env=sl.conda_env, idxs=idxs,
         run_dir=run_root, config_name=args.config_name, overrides=overrides_str,
         dependency=jax_dep)
     _run("jax_array", jax_script, jax_dep)
