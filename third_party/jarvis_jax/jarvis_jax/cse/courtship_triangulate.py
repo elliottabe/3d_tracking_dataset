@@ -11,7 +11,12 @@ from jarvis_jax.geometry.center3d import triangulate_dlt_batched
 
 
 def triangulate_keypoints(kp2d, conf, cam_mats, *, conf_thresh: float = 0.3):
-    """kp2d (T,C,K,2), conf (T,C,K), cam_mats (C,4,3) -> (kp3d (T,K,3), conf3d (T,K))."""
+    """kp2d (T,C,K,2), conf (T,C,K), cam_mats (C,4,3) -> (kp3d (T,K,3), conf3d (T,K)).
+
+    NOTE: kp2d must be FINITE even where conf < conf_thresh (invalid views are zeroed by
+    validity masking inside triangulate_dlt_batched; a NaN/Inf pixel would poison that
+    point's SVD via 0*NaN).
+    """
     kp2d = np.asarray(kp2d, np.float32); conf = np.asarray(conf, np.float32)
     cam_mats = np.asarray(cam_mats, np.float32)
     T, C, K, _ = kp2d.shape
