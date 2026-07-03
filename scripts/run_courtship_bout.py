@@ -150,7 +150,7 @@ def high_confidence_sample(kp3d, max_frames=None):
     finite_counts = np.isfinite(kp3d).all(axis=-1).sum(axis=-1)   # (T,)
     idx = np.where(finite_counts == K)[0]
     if idx.size == 0:
-        idx = np.sort(np.argsort(-finite_counts))
+        idx = np.argsort(-finite_counts)
     if max_frames:
         idx = idx[:max_frames]
     return idx
@@ -265,12 +265,16 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
     if not stage_done(offsets_path):
         sample_idx = high_confidence_sample(kp3d)
         fit_offsets_once(cfg, kp3d[sample_idx], kp_names,
-                         offsets_path=offsets_path, save_path=run_root)
+                         offsets_path="offsets.h5.tmp", save_path=run_root)
+        os.replace(os.path.join(run_root, "offsets.h5.tmp"),
+                  os.path.join(run_root, "offsets.h5"))
 
     # -- Stage C: STAC ik_only ----------------------------------------------------
     if not stage_done(stac_h5_path):
         ik_only_bout(cfg, kp3d, kp_names, offsets_path=offsets_path,
-                    out_h5="stac_ik.h5", save_path=bout_dir)
+                    out_h5="stac_ik.tmp.h5", save_path=bout_dir)
+        os.replace(os.path.join(bout_dir, "stac_ik.tmp.h5"),
+                  os.path.join(bout_dir, "stac_ik.h5"))
 
     # RESOLUTIONS #3: the STAC ik and the SAM masks must cover the exact same
     # bout frame range. On resume, a stale stac_ik.h5 left from a different
