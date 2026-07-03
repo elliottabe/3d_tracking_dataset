@@ -13,6 +13,7 @@ def _cfg():
 def test_fit_offsets_once_sets_skip_ik(monkeypatch, tmp_path):
     seen = {}
     def fake_run_stac(cfg, kp_flat, kp_names, base_path=None, save_path=None):
+        _ = save_path / cfg.stac.fit_offsets_path  # simulate real run_stac's Path use; crashes if save_path is a str
         seen.update(skip_ik=int(cfg.stac.skip_ik_only), skip_fit=int(cfg.stac.skip_fit_offsets),
                     shape=kp_flat.shape); return (str(tmp_path / "off.h5"), None)
     monkeypatch.setattr(cst.stac_mjx, "run_stac", fake_run_stac)
@@ -24,6 +25,7 @@ def test_fit_offsets_once_sets_skip_ik(monkeypatch, tmp_path):
 def test_ik_only_bout_reuses_offsets(monkeypatch, tmp_path):
     seen = {}
     def fake_run_stac(cfg, kp_flat, kp_names, base_path=None, save_path=None):
+        _ = save_path / cfg.stac.ik_only_path  # simulate real run_stac's Path use; crashes if save_path is a str
         seen.update(skip_ik=int(cfg.stac.skip_ik_only), skip_fit=int(cfg.stac.skip_fit_offsets),
                     nfpc=int(cfg.stac.n_frames_per_clip), ik=cfg.stac.ik_only_path)
         return (str(tmp_path / "off.h5"), str(tmp_path / "ik.h5"))

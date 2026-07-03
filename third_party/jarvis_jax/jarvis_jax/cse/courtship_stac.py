@@ -6,6 +6,8 @@ is the schema build_solver_inputs consumes (qpos, kp_data, offsets, kp_names,
 names_qpos, config).
 """
 from __future__ import annotations
+import os
+from pathlib import Path
 import numpy as np
 import stac_mjx
 
@@ -18,6 +20,7 @@ def _flat_scaled(kp3d, scale):
 
 def fit_offsets_once(cfg, kp3d_sample, kp_names, *, offsets_path, save_path):
     """Fit marker offsets on a sample (skip ik). Writes <save_path>/<offsets_path>."""
+    save_path = Path(save_path)
     cfg.stac.fit_offsets_path = offsets_path
     cfg.stac.skip_fit_offsets = False
     cfg.stac.skip_ik_only = 1
@@ -26,12 +29,12 @@ def fit_offsets_once(cfg, kp3d_sample, kp_names, *, offsets_path, save_path):
     cfg.stac.n_frames_per_clip = T
     kp_flat = _flat_scaled(kp3d_sample, cfg.model["MOCAP_SCALE_FACTOR"])
     stac_mjx.run_stac(cfg, kp_flat, list(kp_names), save_path=save_path)
-    import os
     return os.path.join(str(save_path), offsets_path)
 
 
 def ik_only_bout(cfg, kp3d, kp_names, *, offsets_path, out_h5, save_path):
     """ik_only for one bout reusing fitted offsets. Writes <save_path>/<out_h5>."""
+    save_path = Path(save_path)
     cfg.stac.fit_offsets_path = offsets_path      # run_stac reloads offsets from here
     cfg.stac.ik_only_path = out_h5
     cfg.stac.skip_fit_offsets = 1
@@ -39,5 +42,4 @@ def ik_only_bout(cfg, kp3d, kp_names, *, offsets_path, out_h5, save_path):
     cfg.stac.n_frames_per_clip = int(kp3d.shape[0])
     kp_flat = _flat_scaled(kp3d, cfg.model["MOCAP_SCALE_FACTOR"])
     stac_mjx.run_stac(cfg, kp_flat, list(kp_names), save_path=save_path)
-    import os
     return os.path.join(str(save_path), out_h5)
