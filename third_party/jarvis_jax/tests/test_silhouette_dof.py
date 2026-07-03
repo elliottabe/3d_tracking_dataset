@@ -52,3 +52,17 @@ def test_appendage_vertices_are_subset_of_fps_and_appendage_only():
     segname = {int(s): str(n) for s, n in zip(segids, z["seg_names"])}
     rex = re.compile("|".join(APPENDAGE_PATTERNS.values()))
     assert all(rex.search(segname[int(seg[i])].lower()) for i in idx)  # all appendage segs
+
+
+@skip_xml
+def test_empty_include_selects_nothing_dofs():
+    import mujoco
+    m = mujoco.MjModel.from_xml_path(XML)
+    mask = build_appendage_dof_mask(m, include=())
+    assert int(mask.sum()) == 0
+
+
+@skip_mesh
+def test_empty_include_selects_nothing_verts():
+    idx = appendage_vertex_indices(MESH, subset="fps_300", include=())
+    assert len(idx) == 0

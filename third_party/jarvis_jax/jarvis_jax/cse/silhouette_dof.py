@@ -20,6 +20,8 @@ APPENDAGE_PATTERNS = {
 
 
 def _pattern(include):
+    if not include:
+        return re.compile(r"(?!)")        # never matches -> empty selection
     return re.compile("|".join(APPENDAGE_PATTERNS[k] for k in include))
 
 
