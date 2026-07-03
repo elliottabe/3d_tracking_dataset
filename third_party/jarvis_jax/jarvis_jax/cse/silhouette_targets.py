@@ -9,13 +9,13 @@ from __future__ import annotations
 import json
 import os
 import numpy as np
+from scipy import ndimage
 
 from jarvis_jax.geometry.reprojection_tool import ReprojectionTool
 from jarvis_jax.cse.silhouette_boundary import sample_boundary_points
 from jarvis_jax.cse.silhouette_ik_solve import (
     _cam2img_for_frame, _ann_for_image, _load_sam_mask,
 )
-from jarvis_jax.cse.silhouette_joint_ik import SIL_PER_CAM, pack_sil_value
 
 
 def _load_coco_index(root, split):
@@ -31,36 +31,33 @@ def _load_coco_index(root, split):
 
 def build_silhouette_targets(
     root, split, fs_imgids, calib_dir, *,
-    n_points: int = 128, ann_id_by_image=None, seed: int = 0,
+    n_points: int = 128, erode_px: int = 8, ann_id_by_image=None, seed: int = 0,
 ):
-    """Build (sil_data, meta) for the silhouette IK.
+    """Per-(frame,camera) eroded-mask boundary points + confidence, unpacked.
 
-    Args:
-        root, split: dataset root + split (coco annotations + sam3_masks).
-        fs_imgids: (T, n_cam) array (or list of per-frame {cam_idx:image_id}
-            dicts) of coco image_ids per frame/camera.
-        calib_dir: (refined) calibration dir for ReprojectionTool.
-        n_points: boundary points sampled per camera per frame.
-        ann_id_by_image: optional image_id->chosen ann id (multi-fly identity).
-        seed: boundary-sampling seed (deterministic).
+    Eroding by `erode_px` strips the SAM shadow/reflection halo so the coverage
+    Chamfer pulls the mesh to the TRUE fly boundary, not the inflated ring.
+    Absent camera -> boundary NaN, conf_p 0, present False.
 
-    Returns:
-        sil_data: (T, num_cameras*SIL_PER_CAM(n_points)) float32.
-        meta: dict(n_cam, n_pts, cam_names).
+    Returns dict(boundary (T,C,n_points,2) f32, conf_p (T,C,n_points) f32,
+    present (T,C) bool, cam_Ms (C,2,3) f32, cam_ts (C,2) f32, cam_names, n_pts).
     """
     rt = ReprojectionTool(calib_dir)
     cam_names = list(rt.cameras.keys())
     n_cam = rt.num_cameras
-    cam_mats = [rt._camera_list[c].cameraMatrix for c in range(n_cam)]
+    cam_Ms = np.stack([rt._camera_list[c].cameraMatrix[:2, :3] for c in range(n_cam)]).astype(np.float32)
+    cam_ts = np.stack([rt._camera_list[c].cameraMatrix[:2, 3] for c in range(n_cam)]).astype(np.float32)
 
     id2file, id2ann_multi, _ = _load_coco_index(root, split)
-
     fs_list = list(fs_imgids)
     T = len(fs_list)
-    rows = []
+    boundary = np.full((T, n_cam, n_points, 2), np.nan, np.float32)
+    conf_p = np.zeros((T, n_cam, n_points), np.float32)
+    present = np.zeros((T, n_cam), bool)
+
+    struct = ndimage.generate_binary_structure(2, 1)
     for t in range(T):
         cam2img = _cam2img_for_frame(fs_list[t], id2file, cam_names)
-        boundary = np.full((n_cam, n_points, 2), np.nan, dtype=np.float64)
         for c in range(n_cam):
             iid = cam2img.get(c)
             if iid is None:
@@ -68,16 +65,22 @@ def build_silhouette_targets(
             ann = _ann_for_image(id2ann_multi, iid, ann_id_by_image)
             if ann is None:
                 continue
-            fn = id2file.get(int(iid), "")
-            mask = _load_sam_mask(root, split, fn, ann["id"])
+            mask = _load_sam_mask(root, split, id2file.get(int(iid), ""), ann["id"])
             if mask is None:
                 continue
-            boundary[c] = sample_boundary_points(np.asarray(mask), n_points, seed=seed)
-        rows.append(pack_sil_value(cam_mats, boundary))
+            mask = np.asarray(mask).astype(bool)
+            if erode_px > 0:
+                eroded = ndimage.binary_erosion(mask, structure=struct, iterations=erode_px,
+                                                border_value=0)
+                if eroded.any():
+                    mask = eroded
+            bpts = sample_boundary_points(mask, n_points, seed=seed)
+            boundary[t, c] = bpts
+            conf_p[t, c] = np.where(np.isfinite(bpts).all(axis=-1), 1.0, 0.0)
+            present[t, c] = bool(np.isfinite(bpts).any())
 
-    sil_data = np.stack(rows, axis=0).astype(np.float32)
-    meta = dict(n_cam=n_cam, n_pts=n_points, cam_names=cam_names)
-    return sil_data, meta
+    return dict(boundary=boundary, conf_p=conf_p, present=present,
+                cam_Ms=cam_Ms, cam_ts=cam_ts, cam_names=cam_names, n_pts=n_points)
 
 
 def silhouette_fk_indices(mesh_npz, subset: str = "fps_300", exclude_seg_ids=None):
