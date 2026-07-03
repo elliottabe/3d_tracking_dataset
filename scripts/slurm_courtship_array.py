@@ -177,7 +177,7 @@ unset LD_LIBRARY_PATH                       # let JAX use its bundled CUDA wheel
 export XLA_PYTHON_CLIENT_MEM_FRACTION=0.9
 echo "Node: $SLURMD_NODENAME  job: $SLURM_JOB_ID"
 cd {PROJECT_DIR}
-python -u scripts/run_courtship_bout.py --config-name={config_name} +bout_ids=0{overrides}
+python -u scripts/run_courtship_bout.py --config-name={config_name} ++bout_ids=0{overrides}
 """
 
 
@@ -227,7 +227,7 @@ unset LD_LIBRARY_PATH                       # let JAX use its bundled CUDA wheel
 export XLA_PYTHON_CLIENT_MEM_FRACTION=0.9
 echo "Node: $SLURMD_NODENAME  job: $SLURM_JOB_ID  task: $SLURM_ARRAY_TASK_ID"
 cd {PROJECT_DIR}
-python -u scripts/run_courtship_bout.py --config-name={config_name} +bout_ids=${{SLURM_ARRAY_TASK_ID}}{overrides}
+python -u scripts/run_courtship_bout.py --config-name={config_name} ++bout_ids=${{SLURM_ARRAY_TASK_ID}}{overrides}
 """
 
 
@@ -245,8 +245,30 @@ def build_aggregate_script(
     dependency: str = "",
 ) -> str:
     """Cheap CPU-only job: merge every bout/fly qc.json into a session
-    dashboard (jarvis_jax.cse.courtship_qc.aggregate_session_qc)."""
+    dashboard (jarvis_jax.cse.courtship_qc.aggregate_session_qc).
+
+    The aggregation logic is written to <run_dir>/aggregate_qc.py via a
+    quote-delimited heredoc (`<<'PYEOF'`, so bash performs zero variable/
+    quote expansion on the body) and then run as a plain `python <file>` --
+    NOT an inline `python -c "..."`. An inline double-quoted `-c "..."` is
+    unsafe here because the aggregation source itself needs double-quoted
+    dict keys (e.g. summ["n_bouts_flies"]); bash would strip those `"` before
+    python ever saw them, turning it into the bareword `summ[n_bouts_flies]`
+    -> NameError. All path substitutions (out_root, PKG_DIR) are baked in
+    up front via repr() from the outer f-string, so the emitted python has
+    no runtime string formatting of its own to trip over.
+    """
     dependency_line = f"#SBATCH --dependency={dependency}" if dependency else ""
+    agg_py = (
+        "import glob, sys\n"
+        f"sys.path.insert(0, {str(PKG_DIR)!r})\n"
+        "from jarvis_jax.cse.courtship_qc import aggregate_session_qc\n"
+        f"paths = sorted(glob.glob({out_root!r} + '/bouts/bout_*/fly*/qc.json'))\n"
+        f"summ = aggregate_session_qc(paths, {out_root!r} + '/qc/session_qc.json',\n"
+        f"                            plot_dir={out_root!r} + '/qc/dashboard')\n"
+        "print('[aggregate]', summ[\"n_bouts_flies\"], 'bout/fly qc files ->', "
+        f"{out_root!r} + '/qc/session_qc.json')\n"
+    )
     return f"""#!/bin/bash
 #SBATCH --job-name={job_name}
 #SBATCH --partition={partition}
@@ -263,15 +285,10 @@ set -x
 source ~/.bashrc
 micromamba activate {conda_env}
 cd {PROJECT_DIR}
-python -u -c "
-import glob, sys
-sys.path.insert(0, {str(PKG_DIR)!r})
-from jarvis_jax.cse.courtship_qc import aggregate_session_qc
-paths = sorted(glob.glob({out_root!r} + '/bouts/bout_*/fly*/qc.json'))
-summ = aggregate_session_qc(paths, {out_root!r} + '/qc/session_qc.json',
-                            plot_dir={out_root!r} + '/qc/dashboard')
-print(f'[aggregate] {{summ["n_bouts_flies"]}} bout/fly qc files -> {out_root}/qc/session_qc.json')
-"
+mkdir -p {run_dir}
+cat > {run_dir}/aggregate_qc.py <<'PYEOF'
+{agg_py}PYEOF
+python -u {run_dir}/aggregate_qc.py
 """
 
 

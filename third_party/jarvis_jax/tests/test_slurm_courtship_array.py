@@ -16,6 +16,10 @@ def test_build_array_script_has_requeue_and_bout_id():
                                  config_name="courtship_pipeline", overrides="")
     assert "--array=0-29" in s and "--requeue" in s
     assert "+bout_ids=${SLURM_ARRAY_TASK_ID}" in s
+    assert "++bout_ids=${SLURM_ARRAY_TASK_ID}" in s   # force-override: courtship_pipeline.yaml
+                                                        # already defines bout_ids, so a plain
+                                                        # `+bout_ids=` would raise Hydra's
+                                                        # ConfigCompositionException
     assert "unset LD_LIBRARY_PATH" in s        # JAX env
 
 
