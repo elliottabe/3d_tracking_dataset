@@ -111,6 +111,35 @@ helpers. Vmapped over the bout's frames.
 - **Final aggregation job:** merge per-bout QC JSON → session dashboard (cheap,
   CPU).
 
+### Resumability & preemption safety (ckpt partitions)
+
+The pipeline will run mostly on **preemptible ckpt partitions** (ckpt-g2), so
+every job must be idempotent and resume correctly after a preempt+requeue.
+Mechanisms:
+
+- **`--requeue` + fixed per-bout output dir.** Each array task writes to a
+  deterministic `out/bout_<idx:05d>/fly<f>/` baked from the bout index (NOT from
+  `$SLURM_JOB_ID`/date), so a requeued task lands in the same dir and continues.
+- **Stage-artifact checkpoints within a bout.** Each stage writes its output and,
+  on (re)start, the bout driver **skips stages whose artifact already exists** and
+  resumes at the first missing one: A→`kp2d.npz`, B→`kp3d.npz`, C→`stac_ik.h5`
+  (STAC already checkpoints), D→`qpos_refined.npz`, E→`outputs.h5` + `qc.json` +
+  per-camera `*_reproj.mp4`. So a preempted bout redoes at most the *current*
+  stage, not the whole bout.
+- **Atomic writes.** Every artifact is written to `*.tmp` then `os.replace`d into
+  place, so a job killed mid-write never leaves a half-file that looks complete
+  (orbax already does tmp+rename; our npz/json/mp4 follow the same pattern). A
+  per-bout `DONE` marker (written last) lets the array skip fully-finished bouts on
+  resubmit.
+- **Idempotent stages + reuse-if-present everywhere.** Re-running a stage
+  overwrites its own artifact cleanly; Stage 0 (`reuse_masks`) and STAC
+  (`ik_only` path) already skip completed work. Overlay videos (Stage E) skip
+  per-camera files that already exist.
+- **Partition-agnostic.** The orchestrator takes a `--slurm` group: `ckpt_g2`
+  (preemptible, `requeue=true` — the default given ckpt usage) or `gpu_l40s`
+  (non-preemptible). Resumability makes ckpt safe; a resubmit of the whole array
+  is a no-op for done bouts and a resume for interrupted ones.
+
 ## 5. Occlusion / confidence handling
 
 Triangulation has no learned prior, so weak/occluded keypoints are handled by:
@@ -130,7 +159,8 @@ decimated-mesh builder helper (one-time, e.g. `build_decimated_mesh.py` or a
 function in an existing mesh module).
 
 **New drivers** (`scripts/`): `run_courtship_bout.py` (single bout, both flies —
-the de-risk + the array-job body) and `slurm_courtship_array.py` (submits, in
+the de-risk + the array-job body; writes per-stage artifacts atomically and
+skips stages whose artifact exists, so it resumes correctly after preemption) and `slurm_courtship_array.py` (submits, in
 order: an optional **Stage-0 SAM3 job/array** for recordings lacking masks; the
 offset-fit + decimated-mesh precompute; the SLURM array over bouts; the QC
 aggregation job) on gpu-l40s. The orchestrator checks for existing masks and only
@@ -166,6 +196,10 @@ Session video + calibration + bouts CSV
 - `test_courtship_triangulate.py` — known multi-view geometry triangulates to the right 3-D point; <2 views → NaN; confidence aggregation.
 - `test_courtship_predict_2d.py` — crop→heatmap-peak→full-frame-px mapping on a synthetic heatmap; conf = peak value.
 - `test_courtship_qc.py` — per-bout metric aggregation → dashboard JSON schema.
+- `test_courtship_resume.py` — the bout driver's stage-skip logic: given a bout
+  dir with some stage artifacts present, it resumes at the first missing stage and
+  does not recompute completed ones; a half-written (`.tmp`, no `DONE`) artifact is
+  treated as incomplete and redone; atomic write leaves no partial file on abort.
 - Frozen-file guard (`stac_core_jaxls.py` byte-identical) stays green.
 - **De-risk gate (GPU, coordinator-run):** full pipeline on `bout_00001` both flies; assert outputs written + silhouette IoU ≥ keypoint-only IoU; eyeball an overlay.
 
@@ -180,6 +214,7 @@ recording path but only run/validated here); real-time / streaming.
 - Frozen `stac-mjx/stac_mjx/stac_core_jaxls.py` (byte-identical test).
 - New code under `cse/` + `scripts/`, tests under `tests/`.
 - Affine/telecentric projection; masks via `unpackbits` full-frame.
-- Env: `micromamba activate 3d_tracking`, `unset LD_LIBRARY_PATH`; heavy runs sbatch on **gpu-l40s** (non-preemptible); unit tests CPU-only.
+- Env: `micromamba activate 3d_tracking`; JAX stages `unset LD_LIBRARY_PATH`, Stage 0 sets the cu13 `LD_LIBRARY_PATH` + `LD_PRELOAD`; unit tests CPU-only.
+- Heavy runs sbatch, partition-selectable: **ckpt-g2** (preemptible — the default; safe via the resumability mechanisms in §4) or **gpu-l40s** (non-preemptible). All array tasks submit with `--requeue` and resume from stage artifacts.
 - Do not commit checkpoints/data/masks/outputs/videos; commit by explicit path.
 - JAX-first + memory-efficient (no large materialized pairwise tensors).
