@@ -1,11 +1,15 @@
-"""Phase 6 validation driver: joint 2D+3D silhouette-Chamfer refinement on the
-MALE recording 2026_03_18_15_31_22, warm-started from the STAC fit.
+"""Validation driver: coverage (boundary-Chamfer) + containment (SDF-relu)
+silhouette refinement on the MALE recording 2026_03_18_15_31_22, warm-started
+from the STAC fit.
 
-Reports silhouette IoU before/after, multi-view reprojection before/after, and
-the 3-D marker residual delta. HONEST success criterion: IoU improves (up to the
-~0.76 collision-mesh cap), reprojection does NOT regress, 3-D markers not
-materially worse. A neutral/small result is acceptable and must be reported
-truthfully (the collision-mesh silhouette IoU cap is a known ceiling).
+Reports the filled-triangle silhouette IoU before/after (primary success
+measure; the "overlay methodology" -- rasterize the projected mesh faces and
+IoU vs the SAM mask, not a point splat), plus two do-no-harm guards: multi-view
+keypoint reprojection RMSE and MPJPE vs the STAC-init pose. HONEST success
+criterion: IoU improves and neither guard materially worsens. `iou_of_projected_verts`
+and `soft_iou_of_verts` are retained (point-splat / soft-IoU report helpers from
+the prior Chamfer-only driver) for their existing unit-test coverage; `run_polish`
+itself now reports via `filled_tri_iou` only.
 
 Coordinator-run on GPU (the heavy solve is NOT a pytest). A tiny CPU smoke lives
 in tests/test_run_silhouette_polish.py.
@@ -32,6 +36,23 @@ def iou_of_projected_verts(verts2d, mask_shape, ref_mask) -> float:
     ref = np.asarray(ref_mask, dtype=bool)
     inter = np.logical_and(pred, ref).sum()
     union = np.logical_or(pred, ref).sum()
+    return float(inter / union) if union > 0 else 0.0
+
+
+def filled_tri_iou(verts2d, faces, mask_shape, ref_mask) -> float:
+    """Filled-triangle silhouette hard-IoU: rasterize the projected mesh faces
+    (cv2.fillPoly) and IoU vs ref_mask. The overlay methodology (a true filled
+    silhouette, not a point splat)."""
+    import cv2
+    H, W = mask_shape
+    sil = np.zeros((H, W), np.uint8)
+    v = np.asarray(verts2d)
+    tris = v[np.asarray(faces)].astype(np.int32)     # (F,3,2)
+    cv2.fillPoly(sil, tris, 1)
+    sil = sil > 0
+    ref = np.asarray(ref_mask, bool)
+    inter = np.logical_and(sil, ref).sum()
+    union = np.logical_or(sil, ref).sum()
     return float(inter / union) if union > 0 else 0.0
 
 
@@ -81,10 +102,12 @@ def run_polish(
     recording, *, ik_h5, model_xml, mesh_npz, root, split="val", calib_dir=None,
     n_points=128, silhouette_weight=0.3, beta=8.0, huber_delta=0.0,
     max_frames=0, smooth_weight=0.1, n_iter=50, out_dir,
+    erode_px=8, sdf_hw=(128, 128), bbox_margin=0.4, margin=0.0,
+    containment_weight=0.3, mesh_subset="fps_300",
+    appendage_include=("wing", "leg", "abdomen"),
 ):
     import h5py
     import jax.numpy as jnp
-    import stac_mjx.io_dict_to_hdf5 as ioh5
     import stac_mjx.utils as stac_utils
     from jarvis_jax.geometry.reprojection_tool import ReprojectionTool
     from jarvis_jax.cse.silhouette_ik import load_anatomy, make_fk_repose
@@ -96,6 +119,8 @@ def run_polish(
     from jarvis_jax.cse.silhouette_targets import (
         build_silhouette_targets, silhouette_fk_indices,
     )
+    from jarvis_jax.cse.silhouette_sdf import build_sdf_stack
+    from jarvis_jax.cse.silhouette_dof import build_appendage_dof_mask, appendage_vertex_indices
     from jarvis_jax.cse.silhouette_joint_ik import SilhouetteJaxlsBatchSolver
 
     if calib_dir is None:
@@ -109,43 +134,44 @@ def run_polish(
     q_init = inputs["q_init"][:T]
     kp_data = inputs["kp_data"][:T]
 
-    ik_raw = ioh5.load(ik_h5)
-    marker_sites = np.asarray(ik_raw["marker_sites"])[:T]
-
     bout_h5 = os.path.join(os.path.dirname(os.path.dirname(ik_h5)), f"{recording}_bout.h5")
     with h5py.File(bout_h5, "r") as f:
         fs_imgids = f["fs_imgids"][()][:T]
 
-    # --- assemble silhouette targets ---
-    sil_data, meta = build_silhouette_targets(
-        root, split, fs_imgids, calib_dir, n_points=n_points,
-    )
+    tg = build_silhouette_targets(root, split, fs_imgids, calib_dir,
+                                  n_points=n_points, erode_px=erode_px)
+    sdf = build_sdf_stack(root, split, fs_imgids, calib_dir,
+                          out_hw=sdf_hw, bbox_margin=bbox_margin)
+
     anat = load_anatomy(model_xml, mesh_npz)
     fk = make_fk_repose(anat)
-    vert_indices = silhouette_fk_indices(mesh_npz, subset="fps_300")
+    faces = np.asarray(anat["faces"])
+    full_idx = np.arange(len(anat["vlocal"]), dtype=np.int32)
+    cov_idx = silhouette_fk_indices(mesh_npz, subset=mesh_subset)
+    cont_idx = appendage_vertex_indices(mesh_npz, subset=mesh_subset, include=appendage_include)
+    sil_qs = build_appendage_dof_mask(anat["m"], include=appendage_include)
+    conf_v = jnp.ones((len(cont_idx),))
 
-    small = dict(inputs)
-    small["q_init"] = q_init
-    small["kp_data"] = kp_data
-
+    cam_Ms = jnp.asarray(tg["cam_Ms"]); cam_ts = jnp.asarray(tg["cam_ts"])
     solver = SilhouetteJaxlsBatchSolver(
         n_iter=n_iter, smooth_weight=smooth_weight, beta=beta, huber_delta=huber_delta)
 
-    def _solve(weight, sd):
+    def _solve(sw, cw):
         return np.asarray(solver.solve_trajectory(
-            q_init=small["q_init"], mjx_model=small["mjx_model"],
-            mjx_data_template=small["mjx_data"], kp_data=small["kp_data"],
-            qs_to_opt=small["qs_to_opt"], kps_to_opt=small["kps_to_opt"],
-            lb=small["lb"], ub=small["ub"], site_idxs=small["site_idxs"],
-            q_reg_weights=small["q_reg_weights"],
-            fk_repose=fk, vert_indices=vert_indices, sil_data=sd,
-            n_pts=n_points, silhouette_weight=weight,
-        ))
+            q_init=q_init, mjx_model=inputs["mjx_model"], mjx_data_template=inputs["mjx_data"],
+            kp_data=kp_data, qs_to_opt=inputs["qs_to_opt"], kps_to_opt=inputs["kps_to_opt"],
+            lb=inputs["lb"], ub=inputs["ub"], site_idxs=inputs["site_idxs"],
+            q_reg_weights=inputs["q_reg_weights"], fk_repose=fk,
+            cov_vert_indices=cov_idx, cont_vert_indices=cont_idx,
+            cam_Ms=cam_Ms, cam_ts=cam_ts, boundary_all=jnp.asarray(tg["boundary"]),
+            conf_p_all=jnp.asarray(tg["conf_p"]), sil_qs_mask=sil_qs, silhouette_weight=sw,
+            sdf_all=jnp.asarray(sdf["sdf"]), grid_scale_all=jnp.asarray(sdf["grid_scale"]),
+            grid_offset_all=jnp.asarray(sdf["grid_offset"]), present_all=jnp.asarray(sdf["present"]),
+            conf_v=conf_v, containment_weight=cw, margin=margin))
 
-    q_before = _solve(0.0, None)                       # 3-D only (baseline)
-    q_after = _solve(silhouette_weight, sil_data)      # joint 2D+3D
+    q_before = _solve(0.0, 0.0)                          # keypoint-only baseline
+    q_after = _solve(silhouette_weight, containment_weight)
 
-    # --- metrics (IoU + reproj + marker residual), before vs after ---
     rt = ReprojectionTool(calib_dir)
     cam_names = list(rt.cameras.keys())
     coco = json.load(open(os.path.join(root, "annotations", f"instances_{split}.json")))
@@ -158,20 +184,9 @@ def run_polish(
     name2coco = {n: i for i, n in enumerate(coco_kpnames)}
 
     def _metrics(qtraj):
-        # NOTE: marker sites used for the reproj + marker-residual metrics are
-        # FK'd fresh from this qtraj's SOLVED qpos per frame (kinematics ->
-        # com_pos -> get_site_xpos), NOT read from the frozen STAC
-        # `marker_sites` array. Reading the frozen array here would make
-        # reproj/marker-residual identical before vs. after the silhouette
-        # solve (since they'd never depend on qtraj), turning the honest
-        # regression gates into tautologies. Only the umeyama model->mm bridge
-        # scale/rotation/translation is fit per-frame; it is fit from these
-        # same solved sites (vs. triangulated kp) so it stays consistent with
-        # the trajectory actually being evaluated.
-        mjx_model = small["mjx_model"]
-        mjx_data_template = small["mjx_data"]
-        site_idxs = small["site_idxs"]
-        ious, soft_ious, reprojs, mresids = [], [], [], []
+        mjx_model = inputs["mjx_model"]; mjx_data_template = inputs["mjx_data"]
+        site_idxs = inputs["site_idxs"]
+        ious, reprojs, mpjpes = [], [], []
         for t in range(T):
             cam2img = _cam2img_for_frame(fs_imgids[t], id2file, cam_names)
             kp_mm, kok = _triangulate_kp_mm(rt, kp_names, coco_kpnames, cam2img, id2ann_multi)
@@ -180,30 +195,28 @@ def run_polish(
             data_t = mjx_data_template.replace(qpos=jnp.asarray(qtraj[t]))
             data_t = stac_utils.kinematics(mjx_model, data_t)
             data_t = stac_utils.com_pos(mjx_model, data_t)
-            sites_model = np.asarray(stac_utils.get_site_xpos(data_t, site_idxs))  # (n_kp, 3), MODEL frame
+            sites_model = np.asarray(stac_utils.get_site_xpos(data_t, site_idxs))
             s, R, tr = _umeyama(sites_model[kok], kp_mm[kok])
-            verts_model = np.asarray(fk(jnp.asarray(qtraj[t].astype(np.float32)), 1.0, vert_indices))
+            # MPJPE vs STAC init pose (both FK'd sites -> mm via same bridge)
+            data_s = mjx_data_template.replace(qpos=jnp.asarray(q_init[t]))
+            data_s = stac_utils.kinematics(mjx_model, data_s)
+            data_s = stac_utils.com_pos(mjx_model, data_s)
+            sites_stac = np.asarray(stac_utils.get_site_xpos(data_s, site_idxs))
+            mpjpes.append(float(np.mean(np.linalg.norm(
+                _model_to_mm(sites_model, s, R, tr) - _model_to_mm(sites_stac, s, R, tr), axis=1))))
+            # filled-tri IoU on the FULL mesh (overlay methodology), affine projection
+            verts_model = np.asarray(fk(jnp.asarray(qtraj[t].astype(np.float32)), 1.0, full_idx))
             verts_mm = _model_to_mm(verts_model, s, R, tr)
-            # 3-D marker residual (FK sites vs triangulated kp) -- proxy: distance
-            # of triangulated markers to their FK positions (kok subset).
-            mresids.append(float(np.mean(np.linalg.norm(
-                _model_to_mm(sites_model[kok], s, R, tr) - kp_mm[kok], axis=1))))
             for c, iid in cam2img.items():
                 ann = _ann_for_image(id2ann_multi, iid, None)
                 if ann is None:
                     continue
-                fn = id2file[iid]
-                mask = _load_sam_mask(root, split, fn, ann["id"])
+                mask = _load_sam_mask(root, split, id2file[iid], ann["id"])
                 if mask is None:
                     continue
                 mask = np.asarray(mask)
-                uv = np.stack([rt.reproject_point(verts_mm[k])[c] for k in range(0, len(verts_mm))], 0)
-                ious.append(iou_of_projected_verts(uv, mask.shape, mask))
-                # baseline-comparable soft-IoU (eval-only; not an objective term).
-                # Uses rt.reproject_point (perspective divide) -- the same
-                # reporting convention run_single_fly uses, not an affine map.
-                soft_ious.append(soft_iou_of_verts(uv, mask))
-            # reprojection of the 50 kp sites
+                uv = verts_mm @ np.asarray(tg["cam_Ms"])[c].T + np.asarray(tg["cam_ts"])[c]
+                ious.append(filled_tri_iou(uv, faces, mask.shape, mask))
             for j, nm in enumerate(kp_names):
                 ci = name2coco.get(nm)
                 if ci is None:
@@ -214,27 +227,22 @@ def run_polish(
                         continue
                     kp2d = np.asarray(ann["keypoints"], float).reshape(-1, 3)
                     if kp2d[ci, 2] > 0:
-                        uv_pred = rt.reproject_point(_model_to_mm(sites_model[j][None], s, R, tr)[0])[c]
-                        reprojs.append(float(np.linalg.norm(uv_pred - kp2d[ci, :2])))
+                        uvp = _model_to_mm(sites_model[j][None], s, R, tr)[0]
+                        uvp = uvp @ np.asarray(tg["cam_Ms"])[c].T + np.asarray(tg["cam_ts"])[c]
+                        reprojs.append(float(np.linalg.norm(uvp - kp2d[ci, :2])))
         return (float(np.mean(ious)) if ious else float("nan"),
-                float(np.mean(soft_ious)) if soft_ious else float("nan"),
-                float(np.mean(reprojs)) if reprojs else float("nan"),
-                float(np.mean(mresids)) if mresids else float("nan"))
+                float(np.sqrt(np.mean(np.square(reprojs)))) if reprojs else float("nan"),
+                float(np.mean(mpjpes)) if mpjpes else float("nan"))
 
-    iou_b, soft_b, reproj_b, mres_b = _metrics(q_before)
-    iou_a, soft_a, reproj_a, mres_a = _metrics(q_after)
+    iou_b, reproj_b, mpjpe_b = _metrics(q_before)
+    iou_a, reproj_a, mpjpe_a = _metrics(q_after)
 
     os.makedirs(out_dir, exist_ok=True)
     np.savez(os.path.join(out_dir, f"{recording}_polish_qpos.npz"),
              q_before=q_before, q_after=q_after)
-
-    return dict(
-        iou_before=iou_b, iou_after=iou_a,
-        soft_iou_before=soft_b, soft_iou_after=soft_a,
-        reproj_px_before=reproj_b, reproj_px_after=reproj_a,
-        marker_resid_before=mres_b, marker_resid_after=mres_a,
-        n_frames=T,
-    )
+    return dict(iou_before=iou_b, iou_after=iou_a,
+                reproj_px_before=reproj_b, reproj_px_after=reproj_a,
+                mpjpe_stac_before=mpjpe_b, mpjpe_stac_after=mpjpe_a, n_frames=T)
 
 
 def main():
@@ -254,24 +262,29 @@ def main():
     ap.add_argument("--smooth-weight", type=float, default=0.1)
     ap.add_argument("--n-iter", type=int, default=50)
     ap.add_argument("--out-dir", required=True)
+    ap.add_argument("--containment-weight", type=float, default=0.3)
+    ap.add_argument("--erode-px", type=int, default=8)
+    ap.add_argument("--margin", type=float, default=0.0)
+    ap.add_argument("--sdf-hw", type=int, default=128)
     a = ap.parse_args()
     rep = run_polish(
         a.recording, ik_h5=a.ik_h5, model_xml=a.xml, mesh_npz=a.mesh, root=a.root,
         split=a.split, calib_dir=a.calib_dir, n_points=a.n_points,
         silhouette_weight=a.silhouette_weight, beta=a.beta, huber_delta=a.huber_delta,
         max_frames=a.max_frames, smooth_weight=a.smooth_weight, n_iter=a.n_iter,
-        out_dir=a.out_dir,
+        out_dir=a.out_dir, containment_weight=a.containment_weight,
+        erode_px=a.erode_px, margin=a.margin, sdf_hw=(a.sdf_hw, a.sdf_hw),
     )
     print("PHASE6 POLISH REPORT")
     for k, v in rep.items():
         print(f"  {k}: {v}")
-    print(f"  soft-IoU delta: {rep['soft_iou_after'] - rep['soft_iou_before']:+.4f} "
-          f"(baseline-comparable; cap ~0.76; neutral/small is acceptable and reported truthfully)")
-    print(f"  hard-IoU delta: {rep['iou_after'] - rep['iou_before']:+.4f} (point-splat proxy)")
-    print(f"  reproj delta (px): {rep['reproj_px_after'] - rep['reproj_px_before']:+.4f} "
-          f"(must NOT regress)")
-    print(f"  marker-resid delta (mm): {rep['marker_resid_after'] - rep['marker_resid_before']:+.4f} "
-          f"(3-D markers must not be materially worse)")
+    print(f"  IoU delta (filled-tri, primary): {rep['iou_after'] - rep['iou_before']:+.4f} "
+          f"(higher is better)")
+    print(f"  reproj RMSE delta (px, do-no-harm): {rep['reproj_px_after'] - rep['reproj_px_before']:+.4f} "
+          f"(must NOT materially worsen)")
+    print(f"  MPJPE-vs-STAC delta (mm, do-no-harm): "
+          f"{rep['mpjpe_stac_after'] - rep['mpjpe_stac_before']:+.4f} "
+          f"(must NOT materially worsen)")
 
 
 if __name__ == "__main__":

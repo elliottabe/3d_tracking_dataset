@@ -44,6 +44,20 @@ def test_soft_iou_of_verts_higher_when_verts_fill_mask():
     assert soft_iou_of_verts(inside, np.zeros((30, 30), dtype=bool), sigma=1.3) == 0.0
 
 
+def test_filled_tri_iou_perfect_and_partial():
+    # a single triangle covering a known region vs a matching mask
+    verts = np.array([[10, 10], [40, 10], [10, 40]], float)
+    faces = np.array([[0, 1, 2]])
+    import cv2
+    from jarvis_jax.cse.run_silhouette_polish import filled_tri_iou
+    ref = np.zeros((50, 50), np.uint8)
+    cv2.fillPoly(ref, [verts.astype(np.int32)], 1)
+    ref = ref.astype(bool)
+    assert filled_tri_iou(verts, faces, ref.shape, ref) > 0.99
+    empty = np.zeros((50, 50), bool)
+    assert filled_tri_iou(verts, faces, empty.shape, empty) == 0.0
+
+
 def test_run_polish_is_importable_and_has_cli():
     import jarvis_jax.cse.run_silhouette_polish as m
     assert hasattr(m, "run_polish")
@@ -67,8 +81,8 @@ def test_run_polish_report_keys_smoke(tmp_path):
         split="val", n_points=32, silhouette_weight=0.3, max_frames=2, n_iter=10,
         out_dir=str(tmp_path),
     )
-    for k in ("iou_before", "iou_after", "soft_iou_before", "soft_iou_after",
+    for k in ("iou_before", "iou_after",
               "reproj_px_before", "reproj_px_after",
-              "marker_resid_before", "marker_resid_after", "n_frames"):
+              "mpjpe_stac_before", "mpjpe_stac_after", "n_frames"):
         assert k in rep
     assert rep["n_frames"] == 2
