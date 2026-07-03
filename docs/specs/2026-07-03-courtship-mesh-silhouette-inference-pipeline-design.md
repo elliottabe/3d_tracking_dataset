@@ -28,10 +28,23 @@ is a clean full-session run. **De-risk before the full run:** the pipeline must
 first run correctly on `bout_00001` (both flies) with the silhouette-refined fit
 improving multi-view IoU over the keypoint-only fit.
 
-## 3. Architecture — five staged, batched components
+## 3. Architecture — Stage 0 (masks) + five batched JAX stages
 
-Each stage compiles once and batches across cameras/frames. Data flows per
+Each JAX stage compiles once and batches across cameras/frames. Data flows per
 (bout, fly). Affine/telecentric projection throughout (`uv = X @ M.T + t`).
+Stage 0 is a PyTorch prerequisite (different CUDA env), run only when masks are
+absent.
+
+### Stage 0 — SAM3 mask generation (new recordings; PyTorch) — reuse `scripts/sam3_masks.py`
+For a recording without masks, generate per-bout `sam3_masks.npz` (bit-packed
+full-frame per fly×cam×frame) via the existing `sam3_masks.py` / `sam3_driver.py`
+(SAM3.1, `sam3_text=insect`, `num_animals=2`). **Skip-if-present is built in**
+(`reuse_masks=true`) → Session0's existing masks are reused, new recordings
+generate. Bout-restricted via the bouts CSV. **Separate CUDA env** (SAM3 is
+PyTorch): `LD_PRELOAD=$CONDA_PREFIX/lib/libstdc++.so.6` +
+`LD_LIBRARY_PATH=$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cu13/lib`,
+`sam3_compile=false` — so Stage 0 is its OWN job(s), never in a JAX process.
+For Session0 this stage is a no-op (masks exist).
 
 ### Stage A — ViTPose 2-D inference (`courtship_predict_2d.py`)
 For each camera, crop the fly using the SAM mask/centroid (reuse the crop logic in
@@ -80,6 +93,14 @@ helpers. Vmapped over the bout's frames.
   wall-clock ≈ one bout's (compile + process) time, not the sum. Array **chunk
   size** (bouts-per-job) is tunable: 1/GPU by default (max parallelism); raise it
   if per-job compile overhead dominates (amortizes compile across a group).
+- **Stage 0 (SAM3) parallelism** (new recordings only): PRIMARY = a SLURM array
+  (1 GPU/bout, `bout_ids=$SLURM_ARRAY_TASK_ID`) — same shape as the JAX array, so
+  all bouts generate masks concurrently across the cluster (the built-in
+  `sam3.gpus=[...]` fan-out only parallelizes within one node, so it's the
+  single-node fallback). `lowmem=true` bounds GPU memory on long bouts;
+  `reuse_masks=true` skips existing. The two arrays chain by **SLURM dependency**
+  (`--dependency=afterok:<sam3_array>`): masks array → precompute → JAX array →
+  aggregation. Stage 0 self-skips entirely when all masks already exist (Session0).
 - **Shared precompute (once, before the array):** STAC `fit_offsets` (global) →
   offsets file; the decimated mesh. All array jobs read these read-only.
 - **Within a job:** compile-once + big batches (one jitted ViTPose step over
@@ -109,19 +130,25 @@ decimated-mesh builder helper (one-time, e.g. `build_decimated_mesh.py` or a
 function in an existing mesh module).
 
 **New drivers** (`scripts/`): `run_courtship_bout.py` (single bout, both flies —
-the de-risk + the array-job body) and `slurm_courtship_array.py` (submits the
-offset-fit precompute + the SLURM array over bouts + the aggregation job) on
-gpu-l40s.
+the de-risk + the array-job body) and `slurm_courtship_array.py` (submits, in
+order: an optional **Stage-0 SAM3 job/array** for recordings lacking masks; the
+offset-fit + decimated-mesh precompute; the SLURM array over bouts; the QC
+aggregation job) on gpu-l40s. The orchestrator checks for existing masks and only
+schedules Stage 0 when absent (Session0 → skipped). Stage 0 runs in the PyTorch
+CUDA env; Stages A–E in the JAX env.
 
-**Reused unchanged:** ViTPose model/load + crop logic, `triangulate_dlt_batched`,
-`stac_mjx.run_stac` (bucketed `ik_only`), `SilhouetteJaxlsBatchSolver` (+ bridge
-fix), `outputs.py`, `qc.py`, `reproj_video.py`, `build_solver_inputs`,
+**Reused unchanged:** `scripts/sam3_masks.py` + `sam3_driver.py` (Stage 0),
+ViTPose model/load + crop logic, `triangulate_dlt_batched`, `stac_mjx.run_stac`
+(bucketed `ik_only`), `SilhouetteJaxlsBatchSolver` (+ bridge fix), `outputs.py`,
+`qc.py`, `reproj_video.py`, `build_solver_inputs`,
 `build_silhouette_targets`/`build_sdf_stack` helpers.
 
 ## 7. Data flow
 
 ```
-Session0 video + sam3 masks (packed) + calibration
+Session video + calibration + bouts CSV
+  ├─ [Stage 0, PyTorch, only if masks absent] SAM3 -> per-bout sam3_masks.npz
+  │     (reuse_masks skips existing; SLURM array 1 GPU/bout or multi-GPU fan-out)
   ├─ [once] STAC fit_offsets (global sample) -> offsets.h5 ; decimated_mesh.npz
   └─ [SLURM array, 1 GPU/bout] for bout b:
        for fly f in {0,1}:
