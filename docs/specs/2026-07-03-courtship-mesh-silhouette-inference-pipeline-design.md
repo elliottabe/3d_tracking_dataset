@@ -159,7 +159,12 @@ bout; `sex_swaps` recorded in metadata but kinematics is sex-agnostic.
 decimated-mesh builder helper (one-time, e.g. `build_decimated_mesh.py` or a
 function in an existing mesh module).
 
-**New drivers** (`scripts/`): `run_courtship_bout.py` (single bout, both flies —
+**New config tree** (repo root `3d_tracking_dataset/configs/`): the Hydra groups in
+§6a (paths/recording/detector/stac/silhouette/outputs/slurm) — the pipeline's
+single source of truth, path-generalized. Also generalize
+`third_party/jarvis_jax/configs/paths/hyak.yaml` to env-interpolation.
+
+**New drivers** (`scripts/`, Hydra apps rooted at repo `configs/`): `run_courtship_bout.py` (single bout, both flies —
 the de-risk + the array-job body; writes per-stage artifacts atomically and
 skips stages whose artifact exists, so it resumes correctly after preemption) and `slurm_courtship_array.py` (submits, in
 order: an optional **Stage-0 SAM3 job/array** for recordings lacking masks; the
@@ -173,6 +178,51 @@ ViTPose model/load + crop logic, `triangulate_dlt_batched`, `stac_mjx.run_stac`
 (bucketed `ik_only`), `SilhouetteJaxlsBatchSolver` (+ bridge fix), `outputs.py`,
 `qc.py`, `reproj_video.py`, `build_solver_inputs`,
 `build_silhouette_targets`/`build_sdf_stack` helpers.
+
+## 6a. Configuration (Hydra) — repo-root `configs/`
+
+All pipeline parameters are Hydra-composed from a **new repo-root config tree at
+`3d_tracking_dataset/configs/`** (NOT the `jarvis_jax` submodule's configs — this
+keeps the submodule reusable and the pipeline config in the main repo). **No
+absolute paths in pipeline code** — everything flows from config, and paths are
+**generalized via env/var interpolation** so the pipeline runs for any
+user/cluster/recording without editing code.
+
+```
+3d_tracking_dataset/configs/
+├── courtship_pipeline.yaml     # top-level defaults list (paths, recording, detector, stac, silhouette, outputs, slurm)
+├── paths/{hyak,local}.yaml     # cluster roots — env-overridable interpolation
+├── recording/session0.yaml     # session_dir, bouts_csv, calibration, cameras, num_animals
+├── detector/vitpose_v3.yaml    # ViTPose ckpt path (from config), in_ch=4, heatmap params
+├── stac/v1.yaml                # anatomy xml, offsets path, ik_only params
+├── silhouette/default.yaml     # mesh npz, silhouette+containment weights, erode_px, appendage DOF set, conf source
+├── outputs/default.yaml        # run-root pattern, overlay params, decimated-mesh, qc
+└── slurm/{ckpt_g2,gpu_l40s}.yaml
+```
+
+**Generalized paths** (`paths/hyak.yaml`) — env-overridable with sensible
+defaults, e.g.:
+```
+user:       ${oc.env:USER}
+data_root:  ${oc.env:JOHNSON_DATA,/gscratch/portia/${paths.user}/data/Johnson_lab}
+fly_models: ${oc.env:FLY_MODELS,/gscratch/portia/${paths.user}/Research/MyRepos/fruitfly_body_models}
+out_root:   ${paths.data_root}/courtship
+```
+The run root (§7a) = `${outputs.out}` defaulting to
+`${paths.out_root}/${recording.session}_bouts_${now:%m%d%Y}`. Overriding a run is
+just Hydra: `recording=sessionX paths.data_root=/other outputs.out=/somewhere`.
+
+**Reused jarvis_jax stages** (STAC via `run_stac`, SAM3 via `sam3_masks`) currently
+read the submodule's own `configs/paths/hyak.yaml` (hardcoded). The pipeline passes
+its generalized paths to those invocations as **Hydra overrides**
+(`paths.data_root=…`, `sam3.session_dir=…`, etc.), so the whole pipeline is
+path-generalizable without editing the submodule; additionally,
+`third_party/jarvis_jax/configs/paths/hyak.yaml` is updated to the same
+env-interpolation pattern for consistency (a targeted generalization of the
+existing hardcoded file).
+
+The drivers (`run_courtship_bout.py`, `slurm_courtship_array.py`) are Hydra apps
+with `config_path` = the repo-root `configs/`.
 
 ## 7. Data flow
 
@@ -233,6 +283,9 @@ defaulting to `courtship/<session>_bouts_<date>`.
   dir with some stage artifacts present, it resumes at the first missing stage and
   does not recompute completed ones; a half-written (`.tmp`, no `DONE`) artifact is
   treated as incomplete and redone; atomic write leaves no partial file on abort.
+- `test_courtship_config.py` — the repo-root Hydra config composes; paths resolve
+  from env overrides + defaults (no hardcoded absolute in the pipeline code path);
+  the run-root pattern expands as expected.
 - Frozen-file guard (`stac_core_jaxls.py` byte-identical) stays green.
 - **De-risk gate (GPU, coordinator-run):** full pipeline on `bout_00001` both flies; assert outputs written + silhouette IoU ≥ keypoint-only IoU; eyeball an overlay.
 
@@ -251,3 +304,7 @@ recording path but only run/validated here); real-time / streaming.
 - Heavy runs sbatch, partition-selectable: **ckpt-g2** (preemptible — the default; safe via the resumability mechanisms in §4) or **gpu-l40s** (non-preemptible). All array tasks submit with `--requeue` and resume from stage artifacts.
 - Do not commit checkpoints/data/masks/outputs/videos; commit by explicit path.
 - JAX-first + memory-efficient (no large materialized pairwise tensors).
+- **Config-driven, no hardcoded paths:** all params via the repo-root Hydra tree
+  (§6a); every path is config/env-interpolated with sensible defaults so the
+  pipeline generalizes across users/clusters/recordings; the reused jarvis_jax
+  `paths/hyak.yaml` is generalized to the same env-interpolation pattern.
