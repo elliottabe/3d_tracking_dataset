@@ -25,8 +25,9 @@ def test_stac_core_jaxls_is_byte_identical():
 
 @pytest.mark.skipif(not os.path.exists(IK), reason="STAC ik h5 not present")
 def test_no_silhouette_matches_jaxls_batch_solver():
-    """SilhouetteJaxlsBatchSolver with silhouette_weight=0 (no sil_data) must
-    reproduce JaxlsBatchSolver's trajectory to tight tolerance."""
+    """SilhouetteJaxlsBatchSolver with no silhouette/containment kwargs (all
+    defaults) must reproduce JaxlsBatchSolver's trajectory to tight tolerance;
+    no coverage cost and no FrameVar should be added."""
     from jarvis_jax.cse.silhouette_ik_solve import build_solver_inputs
     from stac_mjx.stac_core_jaxls import JaxlsBatchSolver
     from jarvis_jax.cse.silhouette_joint_ik import SilhouetteJaxlsBatchSolver
@@ -46,9 +47,7 @@ def test_no_silhouette_matches_jaxls_batch_solver():
     )
     q_ref = np.asarray(JaxlsBatchSolver(n_iter=30, smooth_weight=0.1).solve_trajectory(**common))
     q_sib = np.asarray(
-        SilhouetteJaxlsBatchSolver(n_iter=30, smooth_weight=0.1).solve_trajectory(
-            **common, silhouette_weight=0.0, sil_data=None,
-        )
+        SilhouetteJaxlsBatchSolver(n_iter=30, smooth_weight=0.1).solve_trajectory(**common)
     )
     assert q_sib.shape == q_ref.shape
     np.testing.assert_allclose(q_sib, q_ref, atol=1e-5)
@@ -56,44 +55,56 @@ def test_no_silhouette_matches_jaxls_batch_solver():
 
 @pytest.mark.skipif(not os.path.exists(IK), reason="STAC ik h5 not present")
 def test_silhouette_weight_moves_qpos_toward_boundary():
-    """A silhouette target pulling a wing vertex outward, with weight>0, must
-    change qpos relative to the weight=0 solve (the joint factor is live)."""
+    """A coverage target far outside the projected mesh, with weight>0, must
+    change qpos relative to the weight=0 solve (the coverage factor is live)."""
     from jarvis_jax.cse.silhouette_ik_solve import build_solver_inputs
     from jarvis_jax.cse.silhouette_ik import load_anatomy, make_fk_repose
-    from jarvis_jax.cse.silhouette_joint_ik import (
-        SilhouetteJaxlsBatchSolver, pack_sil_value, SIL_PER_CAM,
-    )
+    from jarvis_jax.cse.silhouette_dof import build_appendage_dof_mask
+    from jarvis_jax.cse.silhouette_targets import silhouette_fk_indices
+    from jarvis_jax.cse.silhouette_joint_ik import SilhouetteJaxlsBatchSolver
+    import mujoco
 
     inp = build_solver_inputs(IK, XML)
     sl = slice(0, 4)
     anat = load_anatomy(XML, MESH)
     fk = make_fk_repose(anat)
-    vert_indices = np.asarray(anat["fps"][300], dtype=np.int32)
-    n_pts, n_cam = 12, 2
-    T = 4
+    vidx = silhouette_fk_indices(MESH, subset="fps_300")
+    m = mujoco.MjModel.from_xml_path(XML)
+    sil_qs = build_appendage_dof_mask(m)
 
-    # affine cams; boundary points placed FAR outside the projected mesh so the
-    # Chamfer residual is large and pulls qpos. (Values are arbitrary but fixed.)
-    P0 = np.array([[8.0, 0, 0, -2.0], [0, -8.0, 0, 460.0], [0, 0, 0, 1.0]])
-    P1 = np.array([[0, 8.0, 0, -2.0], [0, 0, -8.0, 460.0], [0, 0, 0, 1.0]])
-    boundary = np.full((n_cam, n_pts, 2), 500.0)  # far away -> big pull
-    sil_row = pack_sil_value([P0, P1], boundary)
-    sil_data = np.tile(sil_row[None], (T, 1))
+    q_init = inp["q_init"][sl]
+    mjx_model = inp["mjx_model"]
+    mjx_data = inp["mjx_data"]
+    kp_data = inp["kp_data"][sl]
+    qs_to_opt = inp["qs_to_opt"]
+    kps_to_opt = inp["kps_to_opt"]
+    lb = inp["lb"]; ub = inp["ub"]
+    site_idxs = inp["site_idxs"]
+    q_reg_weights = inp["q_reg_weights"]
 
-    common = dict(
-        q_init=inp["q_init"][sl], mjx_model=inp["mjx_model"],
-        mjx_data_template=inp["mjx_data"], kp_data=inp["kp_data"][sl],
-        qs_to_opt=inp["qs_to_opt"], kps_to_opt=inp["kps_to_opt"],
-        lb=inp["lb"], ub=inp["ub"], site_idxs=inp["site_idxs"],
-        q_reg_weights=inp["q_reg_weights"],
-    )
+    n_cam = 2
+    cam_Ms = jnp.tile(jnp.eye(2, 3)[None], (n_cam, 1, 1))
+    cam_ts = jnp.zeros((n_cam, 2))
+
     solver = SilhouetteJaxlsBatchSolver(n_iter=25, smooth_weight=0.0, beta=8.0)
-    q0 = np.asarray(solver.solve_trajectory(**common, silhouette_weight=0.0, sil_data=None))
-    q1 = np.asarray(solver.solve_trajectory(
-        **common, silhouette_weight=0.5, sil_data=sil_data,
-        fk_repose=fk, vert_indices=vert_indices, n_pts=n_pts,
+    q0 = np.asarray(solver.solve_trajectory(
+        q_init=q_init, mjx_model=mjx_model, mjx_data_template=mjx_data,
+        kp_data=kp_data, qs_to_opt=qs_to_opt, kps_to_opt=kps_to_opt, lb=lb, ub=ub,
+        site_idxs=site_idxs, q_reg_weights=q_reg_weights,
     ))
-    assert q1.shape == q0.shape
-    assert np.isfinite(q1).all()
-    # the silhouette term must have moved the solution
-    assert np.linalg.norm(q1 - q0) > 1e-4
+
+    # far-away boundary target so the coverage term must move qpos
+    T = q_init.shape[0]
+    n_cam, n_pts = cam_Ms.shape[0], 8
+    boundary_all = jnp.full((T, n_cam, n_pts, 2), 1e4)         # unreachable -> nonzero grad
+    conf_p_all = jnp.ones((T, n_cam, n_pts))
+    q_w = solver.solve_trajectory(
+        q_init=q_init, mjx_model=mjx_model, mjx_data_template=mjx_data,
+        kp_data=kp_data, qs_to_opt=qs_to_opt, kps_to_opt=kps_to_opt, lb=lb, ub=ub,
+        site_idxs=site_idxs, q_reg_weights=q_reg_weights,
+        fk_repose=fk, cov_vert_indices=vidx, cam_Ms=cam_Ms, cam_ts=cam_ts,
+        boundary_all=boundary_all, conf_p_all=conf_p_all, sil_qs_mask=sil_qs,
+        silhouette_weight=0.3)
+    assert q_w.shape == q0.shape
+    assert np.isfinite(np.asarray(q_w)).all()
+    assert float(jnp.linalg.norm(q_w - q0)) > 1e-4
