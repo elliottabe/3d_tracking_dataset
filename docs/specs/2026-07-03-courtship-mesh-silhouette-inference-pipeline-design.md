@@ -118,8 +118,9 @@ every job must be idempotent and resume correctly after a preempt+requeue.
 Mechanisms:
 
 - **`--requeue` + fixed per-bout output dir.** Each array task writes to a
-  deterministic `out/bout_<idx:05d>/fly<f>/` baked from the bout index (NOT from
-  `$SLURM_JOB_ID`/date), so a requeued task lands in the same dir and continues.
+  deterministic `<run_root>/bouts/bout_<idx:05d>/fly<f>/` baked from the bout index
+  (NOT from `$SLURM_JOB_ID`/date), so a requeued task lands in the same dir and
+  continues. (Layout in §7a.)
 - **Stage-artifact checkpoints within a bout.** Each stage writes its output and,
   on (re)start, the bout driver **skips stages whose artifact already exists** and
   resumes at the first missing one: A→`kp2d.npz`, B→`kp3d.npz`, C→`stac_ik.h5`
@@ -189,6 +190,38 @@ Session video + calibration + bouts CSV
          E outputs.h5 + qc.json + overlay mp4s (decimated mesh)
   └─ [aggregate] merge qc.json -> session dashboard (plots + json)
 ```
+
+## 7a. Output directory layout
+
+A single **date-stamped run root** per pipeline run (matches the existing
+`courtship/Session<N>_bouts_<MMDDYYYY>` convention), self-contained and separate
+from the raw video dir:
+
+```
+<data>/courtship/Session0_bouts_<MMDDYYYY>/     # run root (default; --out overridable)
+├── run_manifest.json          # provenance: recording, ViTPose ckpt, git sha, params, per-bout/stage status
+├── offsets.h5                 # shared STAC offset-fit (Stage C precompute, once)
+├── decimated_mesh.npz         # shared decimated mesh (overlay raster, once)
+├── sam3_masks/bout_<NNNNN>/sam3_masks.npz    # Stage 0 output (only if generated; else reuse recording's)
+├── bouts/bout_<NNNNN>/
+│   ├── DONE                    # per-bout completion marker (written last, atomically)
+│   ├── fly0/
+│   │   ├── kp2d.npz  kp3d.npz  stac_ik.h5  qpos_refined.npz   # resumable stage A–D artifacts
+│   │   ├── outputs.h5          # Stage E: qpos, kp3d_mm, mesh_mm (subset), joint angles
+│   │   └── qc.json             # Stage E: per-fly QC
+│   ├── fly1/ …
+│   └── overlays/Cam*_reproj.mp4   # per-camera overlay videos (skip-if-exists)
+├── qc/session_qc.json + dashboard/*.png       # aggregated session QC + plots
+└── logs/slurm-*.out
+```
+
+Rationale: the date-stamped root keeps each run reproducible and self-contained;
+`bouts/bout_<NNNNN>/fly<f>/` IS the resumability structure (stage artifacts +
+`DONE`); shared precompute (`offsets.h5`, `decimated_mesh.npz`) lives at the root,
+read-only for every array task; `sam3_masks/` is populated only when Stage 0 runs
+(Session0 points at the recording's existing masks, no copy); `qc/` + `logs/`
+isolate session-level artifacts. The run root is a driver parameter (`--out`),
+defaulting to `courtship/<session>_bouts_<date>`.
 
 ## 8. Testing (CPU: `cd third_party/jarvis_jax && JAX_PLATFORMS=cpu OMP_NUM_THREADS=4 python -m pytest tests/<file>`)
 
