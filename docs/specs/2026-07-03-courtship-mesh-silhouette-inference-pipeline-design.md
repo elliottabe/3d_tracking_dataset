@@ -159,10 +159,11 @@ bout; `sex_swaps` recorded in metadata but kinematics is sex-agnostic.
 decimated-mesh builder helper (one-time, e.g. `build_decimated_mesh.py` or a
 function in an existing mesh module).
 
-**New config tree** (repo root `3d_tracking_dataset/configs/`): the Hydra groups in
-§6a (paths/recording/detector/stac/silhouette/outputs/slurm) — the pipeline's
-single source of truth, path-generalized. Also generalize
-`third_party/jarvis_jax/configs/paths/hyak.yaml` to env-interpolation.
+**Config (extend existing repo-root `configs/`, §6a):** add `courtship_pipeline.yaml`
++ `recording/`, `detector/`, `silhouette/`, `outputs/`, `slurm/` groups; reuse the
+existing `paths/`, `stac/`, `anatomy/`; generalize `paths/hyak.yaml`
+(`user → ${oc.env:USER,eabe}`). Also generalize the submodule's
+`third_party/jarvis_jax/configs/paths/hyak.yaml` the same way.
 
 **New drivers** (`scripts/`, Hydra apps rooted at repo `configs/`): `run_courtship_bout.py` (single bout, both flies —
 the de-risk + the array-job body; writes per-stage artifacts atomically and
@@ -179,38 +180,36 @@ ViTPose model/load + crop logic, `triangulate_dlt_batched`, `stac_mjx.run_stac`
 `qc.py`, `reproj_video.py`, `build_solver_inputs`,
 `build_silhouette_targets`/`build_sdf_stack` helpers.
 
-## 6a. Configuration (Hydra) — repo-root `configs/`
+## 6a. Configuration (Hydra) — EXTEND the existing repo-root `configs/`
 
-All pipeline parameters are Hydra-composed from a **new repo-root config tree at
-`3d_tracking_dataset/configs/`** (NOT the `jarvis_jax` submodule's configs — this
-keeps the submodule reusable and the pipeline config in the main repo). **No
-absolute paths in pipeline code** — everything flows from config, and paths are
-**generalized via env/var interpolation** so the pipeline runs for any
-user/cluster/recording without editing code.
+The repo already has a Hydra tree at `3d_tracking_dataset/configs/` (`config.yaml`
+with `anatomy`/`dataset`/`paths`/`stac` groups; multiple `paths/` machine profiles).
+The pipeline **extends this existing tree** (it does NOT add configs to the
+`jarvis_jax` submodule — the submodule stays reusable). **No absolute paths in
+pipeline code**; paths are **generalized via env interpolation**.
 
+**Add** these groups + a top-level pipeline config:
 ```
-3d_tracking_dataset/configs/
-├── courtship_pipeline.yaml     # top-level defaults list (paths, recording, detector, stac, silhouette, outputs, slurm)
-├── paths/{hyak,local}.yaml     # cluster roots — env-overridable interpolation
-├── recording/session0.yaml     # session_dir, bouts_csv, calibration, cameras, num_animals
-├── detector/vitpose_v3.yaml    # ViTPose ckpt path (from config), in_ch=4, heatmap params
-├── stac/v1.yaml                # anatomy xml, offsets path, ik_only params
-├── silhouette/default.yaml     # mesh npz, silhouette+containment weights, erode_px, appendage DOF set, conf source
-├── outputs/default.yaml        # run-root pattern, overlay params, decimated-mesh, qc
-└── slurm/{ckpt_g2,gpu_l40s}.yaml
+configs/
+├── courtship_pipeline.yaml     # NEW top-level defaults list: paths, recording, detector, silhouette, outputs, slurm, + reuse anatomy/stac
+├── recording/session0.yaml     # NEW: session_dir, bouts_csv, calibration, cameras, num_animals
+├── detector/vitpose_v3.yaml    # NEW: ViTPose ckpt path (from config), in_ch=4, heatmap params
+├── silhouette/default.yaml     # NEW: mesh npz, silhouette+containment weights, erode_px, appendage DOF set, conf source
+├── outputs/default.yaml        # NEW: run-root pattern, overlay params, decimated-mesh, qc
+├── slurm/{ckpt_g2,gpu_l40s}.yaml   # NEW: partition groups
+└── (reuse existing) paths/, stac/, anatomy/
 ```
 
-**Generalized paths** (`paths/hyak.yaml`) — env-overridable with sensible
-defaults, e.g.:
+**Generalize the existing `paths/hyak.yaml`**: it currently hardcodes `user: eabe`
+then interpolates the rest. Change the hardcoded root(s) to **env-overridable**:
 ```
-user:       ${oc.env:USER}
-data_root:  ${oc.env:JOHNSON_DATA,/gscratch/portia/${paths.user}/data/Johnson_lab}
-fly_models: ${oc.env:FLY_MODELS,/gscratch/portia/${paths.user}/Research/MyRepos/fruitfly_body_models}
-out_root:   ${paths.data_root}/courtship
+user: ${oc.env:USER,eabe}
+# existing interpolated paths (base_dir/data_dir/body_model_dir/...) then resolve per-user
 ```
-The run root (§7a) = `${outputs.out}` defaulting to
+Add pipeline path keys as needed (`out_root: ${paths.data_dir}/../courtship` or an
+explicit `johnson_root`). The run root (§7a) = `${outputs.out}` defaulting to
 `${paths.out_root}/${recording.session}_bouts_${now:%m%d%Y}`. Overriding a run is
-just Hydra: `recording=sessionX paths.data_root=/other outputs.out=/somewhere`.
+just Hydra: `recording=sessionX paths=workstation outputs.out=/somewhere`.
 
 **Reused jarvis_jax stages** (STAC via `run_stac`, SAM3 via `sam3_masks`) currently
 read the submodule's own `configs/paths/hyak.yaml` (hardcoded). The pipeline passes
