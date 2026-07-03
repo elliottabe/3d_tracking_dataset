@@ -84,7 +84,8 @@ def run_training(root, *, out_dir, mae_npz=DEFAULT_MAE_NPZ, tcfg=None,
         os.path.join(root, "annotations", "instances_train.json")))["keypoint_names"]
     lr_swap = build_lr_swap(names)
     aug = aug_params if aug_params is not None else AugParams()
-    step = make_train_step(tcfg.mask_weight, aug, lr_swap, heatmap_size=cfg.heatmap_size)
+    step = make_train_step(tcfg.mask_weight, aug, lr_swap, heatmap_size=cfg.heatmap_size,
+                           mask_dilate=tcfg.mask_dilate)
     base_key = jax.random.PRNGKey(tcfg.seed)
     mesh = data_parallel_mesh()
 

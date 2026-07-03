@@ -5,6 +5,7 @@ warmup_steps: 100
 total_steps: 30000
 batch_size: 32
 mask_weight: 0.0
+mask_dilate: 0        # px dilation of the SAM mask before the containment penalty (edge slack for thin legs/wings outside the mask)
 backbone_lr_mult: 0.1
 seed: 0
 # loop / launcher args:
