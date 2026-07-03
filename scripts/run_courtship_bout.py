@@ -221,6 +221,9 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
     offsets_path = os.path.join(run_root, "offsets.h5")
     decimated_mesh_path = os.path.join(run_root, "decimated_mesh.npz")
 
+    os.makedirs(run_root, exist_ok=True)
+    os.makedirs(bout_dir, exist_ok=True)
+
     # -- one-time, run-root-level precompute: whichever bout/fly gets here
     #    first does the work; every later bout/fly reuses the artifact.
     #    decimate_mesh_npz writes with a plain np.savez (not atomic_save_npz),
