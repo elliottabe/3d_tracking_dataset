@@ -30,11 +30,17 @@ from jarvis_jax.cse.silhouette_containment import containment_residual
 _FREE_JOINT_NDOF = 7
 
 
+def _identity_bridges(T):
+    """(s,R,t) per-frame identity model->mm bridges: s=1, R=I, t=0."""
+    return (jnp.ones((T,)), jnp.broadcast_to(jnp.eye(3), (T, 3, 3)), jnp.zeros((T, 3)))
+
+
 def make_silhouette_cost(
     SE3Var, JointVar, FrameVar, *,
     fk_repose, vert_indices, cam_Ms, cam_ts, boundary_all, conf_p_all,
     sil_qs_mask, beta: float, huber_delta: float, silhouette_weight: float,
-    qs_to_opt, template_qpos, scale: float = 1.0, chunk_size: int = 32,
+    qs_to_opt, template_qpos, bridge_s_all=None, bridge_R_all=None,
+    bridge_t_all=None, scale: float = 1.0, chunk_size: int = 32,
 ):
     """Coverage cost: SAM(eroded)-boundary -> nearest projected mesh vertex.
 
@@ -42,6 +48,13 @@ def make_silhouette_cost(
     constants and selected by the integer FrameVar; cameras are iterated with
     jax.lax.scan (FK once per frame, no (C,N,M) tensor). The silhouette gradient
     is restricted to appendage DOFs via where(sil_qs_mask, full_q, stop_grad).
+
+    CRITICAL: fk_repose returns MODEL-frame verts, but the affine cameras map
+    mm-world -> px. The per-frame model->mm bridge (s,R,t) (from
+    build_model_to_mm_bridges, same Umeyama fit run_polish/_metrics use) is
+    applied BEFORE projection: verts_mm = s*(verts3d @ R.T) + t. Without it the
+    mesh projects to garbage px and the fit is destroyed. Defaults to identity
+    only for synthetic-camera unit tests; real callers MUST pass bridges.
     """
     vert_indices = jnp.asarray(vert_indices)
     template_qpos = jnp.asarray(template_qpos)
@@ -49,6 +62,10 @@ def make_silhouette_cost(
     sil_qs_mask = jnp.asarray(sil_qs_mask)
     cam_Ms = jnp.asarray(cam_Ms); cam_ts = jnp.asarray(cam_ts)
     boundary_all = jnp.asarray(boundary_all); conf_p_all = jnp.asarray(conf_p_all)
+    if bridge_s_all is None:
+        bridge_s_all, bridge_R_all, bridge_t_all = _identity_bridges(boundary_all.shape[0])
+    bridge_s_all = jnp.asarray(bridge_s_all); bridge_R_all = jnp.asarray(bridge_R_all)
+    bridge_t_all = jnp.asarray(bridge_t_all)
 
     @jaxls.Cost.factory
     def silhouette_cost(var_values, root_var: SE3Var, joint_var: JointVar,
@@ -61,12 +78,13 @@ def make_silhouette_cost(
         full_q = jnp.where(qs_to_opt, q, template_qpos)
         sil_q = jnp.where(sil_qs_mask, full_q, jax.lax.stop_gradient(full_q))
         verts3d = fk_repose(sil_q, scale, vert_indices)     # (M,3) FK once per frame
+        verts_mm = bridge_s_all[t] * (verts3d @ bridge_R_all[t].T) + bridge_t_all[t]
 
         tgt_all = boundary_all[t]; conf_all = conf_p_all[t]   # (C,n_pts,2),(C,n_pts)
 
         def scan_body(carry, cam):
             M, tt, tgt, cf = cam
-            proj = verts3d @ M.T + tt
+            proj = verts_mm @ M.T + tt
             r = chamfer_residual(tgt, proj, beta=beta, huber_delta=huber_delta,
                                  chunk_size=chunk_size)      # (n_pts,)
             return carry, r * cf
@@ -80,13 +98,19 @@ def make_containment_cost(
     SE3Var, JointVar, FrameVar, *,
     fk_repose, vert_indices, cam_Ms, cam_ts, sdf_all, grid_scale_all,
     grid_offset_all, present_all, conf_v, sil_qs_mask, margin: float,
-    containment_weight: float, qs_to_opt, template_qpos, scale: float = 1.0,
+    containment_weight: float, qs_to_opt, template_qpos,
+    bridge_s_all=None, bridge_R_all=None, bridge_t_all=None, scale: float = 1.0,
 ):
     """Containment cost: appendage verts outside the mask -> relu(SDF) penalty.
 
     Per-frame SDF crops + transforms are closed over as constants and selected
     by the integer FrameVar; cameras iterated with jax.lax.scan (FK once/frame).
     Gradient restricted to appendage DOFs via where(sil_qs_mask, full_q, stop_grad).
+
+    CRITICAL: verts are FK'd in MODEL frame, then mapped to mm via the per-frame
+    model->mm bridge (s,R,t) BEFORE the affine (mm->px) projection:
+    verts_mm = s*(verts3d @ R.T) + t. Identity default is for synthetic-camera
+    unit tests only; real callers MUST pass bridges (see make_silhouette_cost).
     """
     vert_indices = jnp.asarray(vert_indices)
     template_qpos = jnp.asarray(template_qpos)
@@ -95,6 +119,10 @@ def make_containment_cost(
     sdf_all = jnp.asarray(sdf_all); grid_scale_all = jnp.asarray(grid_scale_all)
     grid_offset_all = jnp.asarray(grid_offset_all)
     present_all = jnp.asarray(present_all); conf_v = jnp.asarray(conf_v)
+    if bridge_s_all is None:
+        bridge_s_all, bridge_R_all, bridge_t_all = _identity_bridges(sdf_all.shape[0])
+    bridge_s_all = jnp.asarray(bridge_s_all); bridge_R_all = jnp.asarray(bridge_R_all)
+    bridge_t_all = jnp.asarray(bridge_t_all)
 
     @jaxls.Cost.factory
     def containment_cost(var_values, root_var: SE3Var, joint_var: JointVar,
@@ -105,14 +133,15 @@ def make_containment_cost(
         q = jnp.concatenate([xyz, wxyz, joints])
         full_q = jnp.where(qs_to_opt, q, template_qpos)
         sil_q = jnp.where(sil_qs_mask, full_q, jax.lax.stop_gradient(full_q))
-        verts3d = fk_repose(sil_q, scale, vert_indices)     # (M,3)
+        verts3d = fk_repose(sil_q, scale, vert_indices)     # (M,3) model frame
+        verts_mm = bridge_s_all[t] * (verts3d @ bridge_R_all[t].T) + bridge_t_all[t]
 
         sdf_t = sdf_all[t]; gs_t = grid_scale_all[t]
         go_t = grid_offset_all[t]; pr_t = present_all[t]
 
         def scan_body(carry, cam):
             M, tt, sdf, gs, go, present = cam
-            proj = verts3d @ M.T + tt                        # (M,2)
+            proj = verts_mm @ M.T + tt                       # (M,2)
             r = containment_residual(proj, sdf, gs, go, conf_v,
                                      margin=margin, present=present)
             return carry, r                                  # (M,)
@@ -169,6 +198,7 @@ class SilhouetteJaxlsBatchSolver:
         sil_qs_mask=None, silhouette_weight=0.0,
         sdf_all=None, grid_scale_all=None, grid_offset_all=None, present_all=None,
         conf_v=None, containment_weight=0.0, margin=0.0,
+        bridge_s_all=None, bridge_R_all=None, bridge_t_all=None,
     ):
         if kp_data.ndim == 3:
             kp_data = kp_data.reshape(kp_data.shape[0], -1)
@@ -188,6 +218,11 @@ class SilhouetteJaxlsBatchSolver:
         use_sil = use_cov or use_cont
         if sil_qs_mask is None:
             sil_qs_mask = jnp.ones((nq,), bool)
+        # per-frame model->mm bridge (fixed); identity if not supplied (unit tests
+        # with synthetic cameras). Real fits MUST pass bridges or the mesh projects
+        # in model frame through mm cameras and the fit is destroyed.
+        if use_sil and bridge_s_all is None:
+            bridge_s_all, bridge_R_all, bridge_t_all = _identity_bridges(T)
 
         dummy_joints = jnp.zeros((n_hinges,))
         dummy_kp = jnp.zeros((n_kp_dim,))
@@ -263,7 +298,9 @@ class SilhouetteJaxlsBatchSolver:
                 cam_Ms=cam_Ms, cam_ts=cam_ts, boundary_all=boundary_all,
                 conf_p_all=conf_p_all, sil_qs_mask=sil_qs_mask, beta=self.beta,
                 huber_delta=self.huber_delta, silhouette_weight=silhouette_weight,
-                qs_to_opt=qs_to_opt, template_qpos=mjx_data_template.qpos, scale=1.0)
+                qs_to_opt=qs_to_opt, template_qpos=mjx_data_template.qpos,
+                bridge_s_all=bridge_s_all, bridge_R_all=bridge_R_all,
+                bridge_t_all=bridge_t_all, scale=1.0)
             costs.append(cov_cost(root_all, joint_all, frame_all))
 
         if use_cont:
@@ -274,7 +311,9 @@ class SilhouetteJaxlsBatchSolver:
                 grid_scale_all=grid_scale_all, grid_offset_all=grid_offset_all,
                 present_all=present_all, conf_v=conf_v, sil_qs_mask=sil_qs_mask,
                 margin=margin, containment_weight=containment_weight,
-                qs_to_opt=qs_to_opt, template_qpos=mjx_data_template.qpos, scale=1.0)
+                qs_to_opt=qs_to_opt, template_qpos=mjx_data_template.qpos,
+                bridge_s_all=bridge_s_all, bridge_R_all=bridge_R_all,
+                bridge_t_all=bridge_t_all, scale=1.0)
             costs.append(cont_cost(root_all, joint_all, frame_all))
 
         analyzed = jaxls.LeastSquaresProblem(costs=costs, variables=variables).analyze()

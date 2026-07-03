@@ -153,6 +153,41 @@ def run_polish(
     conf_v = jnp.ones((len(cont_idx),))
 
     cam_Ms = jnp.asarray(tg["cam_Ms"]); cam_ts = jnp.asarray(tg["cam_ts"])
+
+    # calibration + coco maps (reused for the bridge precompute AND the metrics)
+    rt = ReprojectionTool(calib_dir)
+    cam_names = list(rt.cameras.keys())
+    coco = json.load(open(os.path.join(root, "annotations", f"instances_{split}.json")))
+    id2file = {im["id"]: im["file_name"] for im in coco["images"]}
+    id2ann_multi = {}
+    for an in coco["annotations"]:
+        id2ann_multi.setdefault(an["image_id"], []).append(an)
+    coco_kpnames = coco["keypoint_names"]
+    kp_names = list(inputs["kp_names"])
+    name2coco = {n: i for i, n in enumerate(coco_kpnames)}
+
+    # FIXED per-frame model->mm bridges from the STAC init pose (same Umeyama the
+    # metrics use). The in-solver silhouette/containment costs FK verts in MODEL
+    # frame; these bridges map them to mm BEFORE the affine (mm->px) projection --
+    # without them the mesh projects in model units through mm cameras and the fit
+    # is destroyed. Frames with <3 triangulated kp keep an identity bridge.
+    bridge_s = np.ones((T,), np.float32)
+    bridge_R = np.broadcast_to(np.eye(3, dtype=np.float32), (T, 3, 3)).copy()
+    bridge_t = np.zeros((T, 3), np.float32)
+    for t in range(T):
+        cam2img = _cam2img_for_frame(fs_imgids[t], id2file, cam_names)
+        kp_mm, kok = _triangulate_kp_mm(rt, kp_names, coco_kpnames, cam2img, id2ann_multi)
+        if kok.sum() < 3:
+            continue
+        d0 = inputs["mjx_data"].replace(qpos=jnp.asarray(q_init[t]))
+        d0 = stac_utils.kinematics(inputs["mjx_model"], d0)
+        d0 = stac_utils.com_pos(inputs["mjx_model"], d0)
+        sites0 = np.asarray(stac_utils.get_site_xpos(d0, inputs["site_idxs"]))
+        s, R, tr = _umeyama(sites0[kok], kp_mm[kok])
+        bridge_s[t] = s; bridge_R[t] = R; bridge_t[t] = tr
+    bridge_s = jnp.asarray(bridge_s); bridge_R = jnp.asarray(bridge_R)
+    bridge_t = jnp.asarray(bridge_t)
+
     solver = SilhouetteJaxlsBatchSolver(
         n_iter=n_iter, smooth_weight=smooth_weight, beta=beta, huber_delta=huber_delta)
 
@@ -167,21 +202,11 @@ def run_polish(
             conf_p_all=jnp.asarray(tg["conf_p"]), sil_qs_mask=sil_qs, silhouette_weight=sw,
             sdf_all=jnp.asarray(sdf["sdf"]), grid_scale_all=jnp.asarray(sdf["grid_scale"]),
             grid_offset_all=jnp.asarray(sdf["grid_offset"]), present_all=jnp.asarray(sdf["present"]),
-            conf_v=conf_v, containment_weight=cw, margin=margin))
+            conf_v=conf_v, containment_weight=cw, margin=margin,
+            bridge_s_all=bridge_s, bridge_R_all=bridge_R, bridge_t_all=bridge_t))
 
     q_before = _solve(0.0, 0.0)                          # keypoint-only baseline
     q_after = _solve(silhouette_weight, containment_weight)
-
-    rt = ReprojectionTool(calib_dir)
-    cam_names = list(rt.cameras.keys())
-    coco = json.load(open(os.path.join(root, "annotations", f"instances_{split}.json")))
-    id2file = {im["id"]: im["file_name"] for im in coco["images"]}
-    id2ann_multi = {}
-    for an in coco["annotations"]:
-        id2ann_multi.setdefault(an["image_id"], []).append(an)
-    coco_kpnames = coco["keypoint_names"]
-    kp_names = list(inputs["kp_names"])
-    name2coco = {n: i for i, n in enumerate(coco_kpnames)}
 
     def _metrics(qtraj):
         mjx_model = inputs["mjx_model"]; mjx_data_template = inputs["mjx_data"]
