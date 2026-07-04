@@ -1,0 +1,41 @@
+defaults:
+  - _self_
+  - paths: hyak
+  - recording: session0
+
+# Minimal inline keys so `paths.base_dir`/`paths.save_dir` (which interpolate
+# `${dataset.name}`/`${version}` and the custom `multirun_save_dir` resolver's
+# `${run_id}`) resolve, even though this config never reads them itself. Not
+# wired to a `- dataset: courtship` defaults entry for the same
+# cascade-avoidance reason as `courtship_pipeline.yaml`.
+dataset:
+  name: courtship
+  version: v1
+version: ${dataset.version}
+run_id: 'analysis'
+
+v3_ckpt: ${paths.vit_runs_root}/v3_kp_maskaware/final
+out_dir: ${paths.vit_runs_root}/v4_kp_silbootstrap/final
+real_root: ${paths.red_data_v3_root}      # real annotations mixed in
+pseudo_root: ${paths.data_dir_johnson}/courtship/pseudolabels
+# recordings whose pipeline outputs feed pseudo-labels (train-split courtship + Session0)
+label_sources: []            # list of run-root dirs with bouts/bout_*/fly*/outputs.h5
+# held-out courtship val recordings (have GT) — never pseudo-labeled
+# NOTE: MUST be quoted -- unquoted digit-underscore tokens like
+# 2026_05_27_11_56_05 parse as YAML ints (underscore digit-separators), not
+# strings, which would silently break `V3Dataset(..., recordings=...)` string
+# matching in `finetune_detector.finetune`.
+val_recordings: ["2026_05_27_11_56_05", "2026_04_07_11_33_33"]
+gate:
+  tau_iou: 0.05
+  tau_cont: 8.0
+  tau_reproj: 30.0
+  consensus_px: 25.0
+  tau_conf: 0.5
+finetune:
+  total_steps: 4000
+  eval_every: 250
+  patience: 6
+  batch_size: 8
+  pseudo_weight: 1
+  lr: 2.0e-5

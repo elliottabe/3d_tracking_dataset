@@ -16,3 +16,6 @@ project_dir: /gscratch/portia/${paths.user}/Research/MyRepos/
 data_dir_johnson: /gscratch/portia/${paths.user}/data/Johnson_lab
 out_root: ${paths.data_dir_johnson}/courtship
 vit_runs_root: ${paths.data_dir_johnson}/jax_vitpose_runs
+
+# curated real-annotation V3 dataset root (Task 7: mixed into detector finetune)
+red_data_v3_root: ${paths.data_dir_johnson}/red_data/red_data_unified_V3
