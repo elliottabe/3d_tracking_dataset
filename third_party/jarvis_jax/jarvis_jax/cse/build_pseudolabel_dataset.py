@@ -39,32 +39,51 @@ def _pad_to_at_least(arr, min_h, min_w):
 
 def write_pseudolabel_coco(out_root, records, *, split="train", crop=448):
     os.makedirs(os.path.join(out_root, "annotations"), exist_ok=True)
-    images, annotations = [], []
-    for i, r in enumerate(records):
+
+    # Group records by file_name first: two flies in the same courtship frame
+    # (fly0 + fly1 merged into one call) share a file_name and MUST land in one
+    # npz with one image id -- writing per-record would let the second record's
+    # np.savez silently clobber the first's npz (see module docstring / bug).
+    by_file = {}
+    for r in records:
         kp = np.asarray(r["keypoints"], float)
         if not (kp[:, 2] > 0).any():
             continue                                    # no visible label -> skip
-        fn = r["file_name"]
+        by_file.setdefault(r["file_name"], []).append(r)
 
-        rgb = _pad_to_at_least(np.asarray(r["rgb"], np.uint8), crop, crop)
-        mask = _pad_to_at_least(np.asarray(r["mask"], bool), crop, crop)
+    images, annotations = [], []
+    next_ann_id = 0
+    for img_id, (fn, recs) in enumerate(by_file.items()):
+        r0 = recs[0]
+        rgb = _pad_to_at_least(np.asarray(r0["rgb"], np.uint8), crop, crop)
         img_h, img_w = rgb.shape[:2]
 
         img_path = os.path.join(out_root, split, fn)
         os.makedirs(os.path.dirname(img_path), exist_ok=True)
         cv2.imwrite(img_path, cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR))
 
+        masks, ann_ids = [], []
+        for r in recs:
+            kp = np.asarray(r["keypoints"], float)
+            mask = _pad_to_at_least(np.asarray(r["mask"], bool), crop, crop)
+            ann_id = next_ann_id
+            next_ann_id += 1
+            masks.append(mask)
+            ann_ids.append(ann_id)
+            annotations.append({"id": ann_id, "image_id": img_id, "category_id": 1,
+                                "bbox": [float(x) for x in r["bbox"]],
+                                "keypoints": kp.reshape(-1).tolist()})
+
         npz_path = os.path.join(out_root, "sam3_masks", split,
                                 os.path.splitext(fn)[0] + ".npz")
         os.makedirs(os.path.dirname(npz_path), exist_ok=True)
-        np.savez(npz_path, masks=mask[None],
-                 ann_ids=np.array([i], int), matched=np.array([True], bool))
+        np.savez(npz_path, masks=np.stack(masks, axis=0),
+                 ann_ids=np.array(ann_ids, int),
+                 matched=np.ones(len(ann_ids), bool))
 
-        images.append({"id": i, "file_name": fn,
+        images.append({"id": img_id, "file_name": fn,
                        "width": int(img_w), "height": int(img_h)})
-        annotations.append({"id": i, "image_id": i, "category_id": 1,
-                            "bbox": [float(x) for x in r["bbox"]],
-                            "keypoints": kp.reshape(-1).tolist()})
+
     coco = {"images": images, "annotations": annotations,
             "categories": [{"id": 1, "name": "fly"}]}
     ann_path = os.path.join(out_root, "annotations", f"instances_{split}.json")
