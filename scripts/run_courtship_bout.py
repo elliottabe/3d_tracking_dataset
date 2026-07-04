@@ -24,6 +24,7 @@ os.environ.setdefault("MUJOCO_GL", "egl")
 os.environ.setdefault("PYOPENGL_PLATFORM", "egl")
 
 import glob
+import json
 import re
 
 import numpy as np
@@ -31,10 +32,11 @@ import hydra
 from omegaconf import DictConfig
 
 from jarvis_jax.cse.courtship_resume import (
-    atomic_save_npz, stage_done, mark_done, bout_complete)
+    atomic_save_npz, atomic_save_json, stage_done, mark_done, bout_complete)
 from jarvis_jax.cse.courtship_bout_masks import load_bout_masks
 from jarvis_jax.cse.courtship_predict_2d import load_detector, predict_bout_2d
 from jarvis_jax.cse.courtship_triangulate import triangulate_keypoints
+from jarvis_jax.cse.courtship_scale import compute_trunk_scale
 from jarvis_jax.cse.courtship_stac import fit_offsets_once, ik_only_bout
 from jarvis_jax.cse.courtship_polish import polish_bout
 from jarvis_jax.cse.outputs import build_fly_outputs
@@ -267,19 +269,38 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
 
     kp_names = list(cfg.model.KP_NAMES)
 
+    # -- scale.json: trunk Procrustes body-size scale, computed ONCE (shared
+    #    across all bouts/flies, since body size is constant per fly) from
+    #    whichever bout/fly gets there first -- see jarvis_jax.cse.courtship_scale.
+    #    Without this, raw triangulated keypoints are ~78x the MuJoCo model's
+    #    rest-pose scale, which stalls the STAC jaxls LM-batch solve.
+    scale_path = os.path.join(run_root, "scale.json")
+    if not stage_done(scale_path):
+        _scale = compute_trunk_scale(
+            kp3d, kp_names, cfg.silhouette.xml,
+            trunk_names=list(cfg.scaling.trunk_keypoints),
+            estimator=cfg.scaling.estimator,
+            robust_stat=cfg.scaling.robust_stat,
+            robust=cfg.scaling.robust)
+        atomic_save_json(scale_path, {"scale": float(_scale),
+                                      "trunk_keypoints": list(cfg.scaling.trunk_keypoints),
+                                      "estimator": str(cfg.scaling.estimator)})
+    with open(scale_path) as _f:
+        scale = float(json.load(_f)["scale"])
+
     # -- offsets.h5: fit ONCE (shared across all bouts/flies) on a
     #    high-confidence kp3d sample from whichever bout gets there first --
     if not stage_done(offsets_path):
         sample_idx = high_confidence_sample(kp3d)
         fit_offsets_once(cfg, kp3d[sample_idx], kp_names,
-                         offsets_path="offsets.h5.tmp", save_path=run_root)
+                         offsets_path="offsets.h5.tmp", save_path=run_root, scale=scale)
         os.replace(os.path.join(run_root, "offsets.h5.tmp"),
                   os.path.join(run_root, "offsets.h5"))
 
     # -- Stage C: STAC ik_only ----------------------------------------------------
     if not stage_done(stac_h5_path):
         ik_only_bout(cfg, kp3d, kp_names, offsets_path=offsets_path,
-                    out_h5="stac_ik.tmp.h5", save_path=bout_dir)
+                    out_h5="stac_ik.tmp.h5", save_path=bout_dir, scale=scale)
         os.replace(os.path.join(bout_dir, "stac_ik.tmp.h5"),
                   os.path.join(bout_dir, "stac_ik.h5"))
 

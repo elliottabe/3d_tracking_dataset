@@ -18,8 +18,9 @@ def _flat_scaled(kp3d, scale):
     return (np.asarray(kp3d, np.float32).reshape(T, K * 3) * float(scale))
 
 
-def fit_offsets_once(cfg, kp3d_sample, kp_names, *, offsets_path, save_path):
+def fit_offsets_once(cfg, kp3d_sample, kp_names, *, offsets_path, save_path, scale: float = 1.0):
     """Fit marker offsets on a sample (skip ik). Writes <save_path>/<offsets_path>."""
+    kp3d_sample = np.asarray(kp3d_sample) * float(scale)
     save_path = Path(save_path)
     cfg.stac.fit_offsets_path = offsets_path
     cfg.stac.skip_fit_offsets = False
@@ -32,8 +33,9 @@ def fit_offsets_once(cfg, kp3d_sample, kp_names, *, offsets_path, save_path):
     return os.path.join(str(save_path), offsets_path)
 
 
-def ik_only_bout(cfg, kp3d, kp_names, *, offsets_path, out_h5, save_path):
+def ik_only_bout(cfg, kp3d, kp_names, *, offsets_path, out_h5, save_path, scale: float = 1.0):
     """ik_only for one bout reusing fitted offsets. Writes <save_path>/<out_h5>."""
+    kp3d = np.asarray(kp3d) * float(scale)
     save_path = Path(save_path)
     cfg.stac.fit_offsets_path = offsets_path      # run_stac reloads offsets from here
     cfg.stac.ik_only_path = out_h5

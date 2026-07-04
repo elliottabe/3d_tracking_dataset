@@ -37,3 +37,16 @@ run_id: 'analysis'
 # `dataset` above.
 preprocessing:
   input_filename: 'preprocessed_bout_${anatomy.name}_${dataset.name}.h5'
+
+# Trunk-marker Procrustes body-size scale applied to keypoints before STAC (see
+# jarvis_jax.cse.courtship_scale). Without it, raw triangulated keypoints are
+# ~78x the MuJoCo model's rest-pose scale, which makes the STAC jaxls LM-batch
+# Jacobian catastrophically ill-conditioned and the solve stalls. Mirrors
+# configs/preprocessing/default.yaml's `scaling` block (trunk path); inline
+# (not a defaults-group entry) for the same cascade-avoidance reason as
+# `dataset`/`preprocessing` above.
+scaling:
+  trunk_keypoints: [Scutellum, WingL_base, WingR_base, Abd_A4, Abd_tip]
+  estimator: umeyama       # 'umeyama' | 'norm_ratio'
+  robust_stat: median      # 'median' | 'mean'
+  robust: none             # 'huber' | 'none'
