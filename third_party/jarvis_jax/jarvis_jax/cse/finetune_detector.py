@@ -37,6 +37,21 @@ def _epochs(ds, batch_size, base_seed):
         epoch += 1
 
 
+def _same_or_nested(a, b):
+    """True if ``a`` and ``b`` resolve to the same path, or one is an
+    ancestor directory of the other. Resolves symlinks (``os.path.realpath``)
+    so aliasing via a symlink is caught too, and checks nesting at a
+    path-separator boundary so e.g. ``/a/b`` is NOT considered an ancestor of
+    ``/a/bc``. Used to guard against an Orbax ``force=True`` save clobbering
+    the v3 checkpoint -- either by exact alias or because one directory lives
+    inside the other."""
+    ra, rb = os.path.realpath(a), os.path.realpath(b)
+    if ra == rb:
+        return True
+    ra_dir, rb_dir = ra + os.sep, rb + os.sep
+    return ra_dir.startswith(rb_dir) or rb_dir.startswith(ra_dir)
+
+
 def _copy_state(state):
     """Snapshot a live ``nnx`` state so later training steps can't mutate the
     saved-best checkpoint. ``nnx.split(model)[1]`` is cheap but its leaves are
@@ -49,7 +64,7 @@ def _copy_state(state):
 
 def finetune(*, v3_ckpt, real_root, pseudo_root, out_dir, val_recordings,
              tcfg=None, pseudo_weight=1, total_steps=4000, eval_every=250,
-             patience=6, batch_size=None, lr=2e-5, seed=0):
+             patience=6, batch_size=None, lr=2e-5, seed=0, log_every=50):
     """Continue-train the v3 ViTPose detector on a real+pseudo mix.
 
     Args:
@@ -74,15 +89,21 @@ def finetune(*, v3_ckpt, real_root, pseudo_root, out_dir, val_recordings,
             training stops early after `patience` non-improving evals.
         batch_size, lr, seed: shorthand for building `tcfg` when one isn't
             passed explicitly.
+        log_every: print step + latest train loss every `log_every` steps
+            (mirrors ``scripts/train_keypoints.py``'s progress logging), so a
+            multi-hour run (e.g. total_steps=4000) has stdout visibility.
 
     Returns:
         dict with "best_step", "best_female_mpjpe", "full_val_mpjpe" -- all
         computed against the checkpoint actually written to `out_dir`.
     """
-    if os.path.abspath(out_dir) == os.path.abspath(v3_ckpt):
+    if _same_or_nested(out_dir, v3_ckpt):
         raise ValueError(
-            "out_dir must not be v3_ckpt -- finetune() must never overwrite "
-            f"the source v3 checkpoint (got out_dir == v3_ckpt == {v3_ckpt!r})")
+            "out_dir must not be v3_ckpt, or a symlink alias of it, or "
+            "nested inside/around it -- finetune() must never overwrite the "
+            f"source v3 checkpoint (got out_dir={out_dir!r} "
+            f"(realpath={os.path.realpath(out_dir)!r}), "
+            f"v3_ckpt={v3_ckpt!r} (realpath={os.path.realpath(v3_ckpt)!r}))")
 
     cfg = ViTPoseConfig()
     model = load_vitpose(v3_ckpt, cfg)
@@ -110,11 +131,18 @@ def finetune(*, v3_ckpt, real_root, pseudo_root, out_dir, val_recordings,
     bad_evals = 0
     for i in range(total_steps):
         img4_u8, kp_xy, vis = next(train_stream)
-        step(model, opt, jax.random.fold_in(key, i), img4_u8, kp_xy, vis)
+        loss = float(step(model, opt, jax.random.fold_in(key, i),
+                          img4_u8, kp_xy, vis))
+
+        if (i + 1) % log_every == 0:
+            print(f"step {i+1}/{total_steps} loss {loss:.5f}", flush=True)
 
         if (i + 1) % eval_every == 0:
             fem_mpjpe = float(eval_mpjpe(model, fem_ds, tcfg.batch_size))
-            if fem_mpjpe < best["best_female_mpjpe"]:
+            is_best = fem_mpjpe < best["best_female_mpjpe"]
+            print(f"  step {i+1}/{total_steps} female MPJPE {fem_mpjpe:.3f}px"
+                  f"{' (new best)' if is_best else ''}", flush=True)
+            if is_best:
                 best["best_step"] = i + 1
                 best["best_female_mpjpe"] = fem_mpjpe
                 best_state = _copy_state(nnx.split(model)[1])

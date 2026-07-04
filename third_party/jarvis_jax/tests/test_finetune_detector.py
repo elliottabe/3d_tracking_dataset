@@ -65,24 +65,22 @@ def test_finetune_smoke(tmp_path):
     assert np.isfinite(result["best_female_mpjpe"])
     assert np.isfinite(result["full_val_mpjpe"])
     # v3_ckpt itself must never be modified by the finetune run.
-    assert os.path.exists(os.path.join(V3_CKPT))
+    assert os.path.exists(V3_CKPT)
 
 
-@run
 def test_finetune_never_writes_to_v3_ckpt(tmp_path):
-    """out_dir must be distinct from v3_ckpt; finetune must refuse to alias them."""
+    """out_dir must be distinct from v3_ckpt; finetune must refuse to alias
+    them. This only exercises the path guard at the top of `finetune()`,
+    which raises before anything is loaded -- no GPU or real checkpoint
+    needed, so it isn't gated behind `run` (the GPU/checkpoint skipif)."""
     from jarvis_jax.cse.finetune_detector import finetune
 
+    fake_v3_ckpt = str(tmp_path / "v3_ckpt_does_not_exist")
     real = str(tmp_path / "real")
     pseudo = str(tmp_path / "pseudo")
-    os.makedirs(real)
-    os.makedirs(pseudo)
-    _tiny_root(real, "train")
-    _tiny_root(real, "val")
-    _tiny_root(pseudo, "train")
 
     with pytest.raises(ValueError):
         finetune(
-            v3_ckpt=V3_CKPT, real_root=real, pseudo_root=pseudo,
-            out_dir=V3_CKPT, val_recordings=["rec"], total_steps=1,
+            v3_ckpt=fake_v3_ckpt, real_root=real, pseudo_root=pseudo,
+            out_dir=fake_v3_ckpt, val_recordings=["rec"], total_steps=1,
             eval_every=1, patience=1, batch_size=2)
