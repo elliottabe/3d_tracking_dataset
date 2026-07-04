@@ -51,6 +51,41 @@ def video_paths_for(session_dir, camera_names):
     return paths
 
 
+def append_cameras_to_npz(npz_path, cameras):
+    """Append a `cameras` (C,) name-string array to an already-written
+    sam3_masks.npz, WITHOUT reopening/recompressing the (often 50-500 MB)
+    packed mask arrays -- this is what makes every future mask file
+    self-identifying (see jarvis_jax.cse.courtship_bout_masks.load_bout_masks
+    / detect_camera_order, written to guard against the camera-axis-scramble
+    bug: the packed masks' C axis previously carried NO identifying metadata).
+
+    `np.savez`/`np.savez_compressed` just write a ZIP archive with one member
+    per array (`<name>.npy`), so a new small member can be appended directly
+    via `zipfile` in append mode -- far cheaper than reloading + re-saving
+    the whole npz just to attach camera identity.
+
+    `cameras` must be in the SAME order as the npz's C axis (i.e. the same
+    ordered camera-name list already used to read the bout's videos, e.g.
+    `list(repro_tool.cameras)`) -- this call does not reorder anything, it
+    only records the order that's already there. A no-op if the npz already
+    has a `cameras` member (e.g. re-invoked on an already-patched file).
+    """
+    import io
+    import zipfile
+
+    import numpy as np
+
+    with zipfile.ZipFile(npz_path, mode="r") as zf:
+        if "cameras.npy" in zf.namelist():
+            return
+
+    buf = io.BytesIO()
+    np.save(buf, np.asarray(list(cameras)))
+    with zipfile.ZipFile(npz_path, mode="a", allowZip64=True,
+                         compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("cameras.npy", buf.getvalue())
+
+
 def bout_stats(loaded_masks, num_animals: int) -> dict:
     """Summary stats from a LoadedBoutMasks-like object (.valid (A,C,F))."""
     import numpy as np
@@ -369,6 +404,12 @@ def run_sam3_masks(*, project, session_dir, bouts_csv, out, num_animals=2,
             with torch.autocast(device_type="cuda", enabled=False):
                 bm.assign_identities(repro_tool, num_animals=num_animals)
             pmod.save_bout_masks(bm, bout_out, num_animals)
+            # Record the C-axis camera identity (see append_cameras_to_npz)
+            # so this mask file is self-identifying and a future camera-order
+            # scramble can be caught/corrected instead of silently corrupting
+            # the pipeline. video_paths (built above from repro_tool.cameras)
+            # is the same order the packed masks' C axis is in.
+            append_cameras_to_npz(npz_path, list(repro_tool.cameras))
             lm = pmod.LoadedBoutMasks(npz_path)
 
         st = bout_stats(lm, num_animals)

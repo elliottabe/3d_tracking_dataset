@@ -33,7 +33,7 @@ from omegaconf import DictConfig
 
 from jarvis_jax.cse.courtship_resume import (
     atomic_save_npz, atomic_save_json, stage_done, mark_done, bout_complete)
-from jarvis_jax.cse.courtship_bout_masks import load_bout_masks
+from jarvis_jax.cse.courtship_bout_masks import load_bout_masks, verify_mask_camera_order
 from jarvis_jax.cse.courtship_predict_2d import load_detector, predict_bout_2d
 from jarvis_jax.cse.courtship_triangulate import triangulate_keypoints
 from jarvis_jax.cse.courtship_scale import compute_trunk_scale
@@ -85,13 +85,6 @@ def bout_start_frame(cfg, bout_idx):
         raise KeyError(
             f"bout_idx {bout_idx} not found in {cfg.recording.bouts_csv} (fly_id tag={tag})")
     return int(bouts[0]["start"])
-
-
-def load_centroids(bout_npz, fly):
-    """npz 'centroids' (A,C,T,2) -> this fly's (T,C,2) (load_bout_masks itself
-    does not surface centroids, so this is read directly from the npz)."""
-    with np.load(bout_npz) as z:
-        return np.asarray(z["centroids"], np.float32)[fly].transpose(1, 0, 2)
 
 
 def open_video_captures(session_dir, cameras):
@@ -223,7 +216,7 @@ def _backfill_qc_perframe(cfg, bout_idx: int, fly: int, bout_dir: str) -> None:
 
     predictions_dir = str(cfg.recording.predictions_dir)
     bout_npz = os.path.join(predictions_dir, f"bout_{bout_idx:05d}", "sam3_masks.npz")
-    masks_dict = load_bout_masks(bout_npz, fly)
+    masks_dict = load_bout_masks(bout_npz, fly, expected_cameras=list(cfg.recording.cameras))
     T, C = masks_dict["T"], masks_dict["C"]
 
     with np.load(kp2d_path) as z:
@@ -268,13 +261,22 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
 
     predictions_dir = str(cfg.recording.predictions_dir)
     bout_npz = os.path.join(predictions_dir, f"bout_{bout_idx:05d}", "sam3_masks.npz")
-    masks_dict = load_bout_masks(bout_npz, fly)
+    cameras = list(cfg.recording.cameras)
+    masks_dict = load_bout_masks(bout_npz, fly, expected_cameras=cameras)
     T, C = masks_dict["T"], masks_dict["C"]
 
     from jarvis_jax.geometry.reprojection_tool import ReprojectionTool
     rt = ReprojectionTool(cfg.recording.calib_dir)
     cam_mats = np.asarray(rt.camera_matrices, np.float32)  # (C,4,3); order matches recording.cameras
-    cameras = list(cfg.recording.cameras)
+
+    # Calibration-based guard (cheap, once per bout): fail LOUD if this
+    # bout's stored mask camera axis doesn't match the calibration's camera
+    # order -- the camera-order-scramble bug this check exists to catch
+    # (see jarvis_jax.cse.courtship_bout_masks.verify_mask_camera_order).
+    # Name-based reordering above (expected_cameras=) already self-corrects
+    # any FUTURE mask file that carries a `cameras` array; this geometric
+    # check additionally catches legacy files that don't.
+    verify_mask_camera_order(masks_dict["centroids"], masks_dict["valid"], rt)
 
     kp2d_path = os.path.join(bout_dir, "kp2d.npz")
     kp3d_path = os.path.join(bout_dir, "kp3d.npz")
@@ -306,7 +308,11 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
     # -- Stage A: ViTPose 2-D ---------------------------------------------------
     if not stage_done(kp2d_path):
         start = bout_start_frame(cfg, bout_idx)
-        centroids = load_centroids(bout_npz, fly)
+        # Centroids come from masks_dict (already reordered/verified above),
+        # NOT a fresh raw npz read -- they must stay in lockstep with
+        # masks_dict["masks"]'s camera axis (see verify_mask_camera_order
+        # guard above).
+        centroids = masks_dict["centroids"]
         caps = open_video_captures(cfg.recording.session_dir, cameras)
         try:
             vit = load_detector(cfg.detector.ckpt, num_keypoints=int(cfg.detector.num_keypoints))
