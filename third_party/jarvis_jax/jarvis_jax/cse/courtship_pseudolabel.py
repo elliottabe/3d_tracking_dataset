@@ -2,6 +2,8 @@
 from dataclasses import dataclass
 import numpy as np
 
+from jarvis_jax.cse.build_pseudolabel_dataset import bbox_from_mask
+
 
 @dataclass
 class GateCfg:
@@ -45,3 +47,24 @@ def gate_pseudolabels(mesh2d, det_kp2d, det_conf, qc_pf, masks_valid, *, cfg):
     xy = labels[..., :2]
     xy[~np.isfinite(xy)] = 0.0                                         # scrub NaN coords (vis already 0)
     return labels, frame_keep
+
+
+def records_for_bout(labels, masks, frames_iter, cam_names, rec_tag, start_frame):
+    """labels (T,C,K,3) [x,y,vis], masks (T,C,H,W) bool, frames_iter yields
+    (t, imgs (C,H,W,3) u8). Returns one record dict per (t,c) with >=1 visible
+    keypoint, in the format `write_pseudolabel_coco` consumes."""
+    T, C, K, _ = labels.shape
+    recs = []
+    for t, imgs in frames_iter:
+        for c in range(C):
+            if not (labels[t, c, :, 2] > 0).any():
+                continue
+            m = np.asarray(masks[t, c], bool)
+            rgb = np.asarray(imgs[c])
+            recs.append({
+                "file_name": f"{rec_tag}/{cam_names[c]}/Frame_{start_frame + t}.jpg",
+                "img_w": rgb.shape[1], "img_h": rgb.shape[0],
+                "rgb": rgb, "mask": m,
+                "keypoints": labels[t, c].astype(np.float32),
+                "bbox": bbox_from_mask(m)})
+    return recs

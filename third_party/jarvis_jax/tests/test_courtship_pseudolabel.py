@@ -36,3 +36,14 @@ def test_nan_mesh_site_is_scrubbed_and_marked_invisible():
     assert np.isfinite(labels).all()                # NaN coords scrubbed to 0.0 everywhere
     assert labels[0,0,1,2] == 0                      # NaN site -> vis 0
     assert labels[0,0,0,2] == 1                      # non-NaN agreeing site -> vis 1
+
+def test_records_for_bout_emits_only_visible():
+    from jarvis_jax.cse.courtship_pseudolabel import records_for_bout
+    T,C,K,H,W = 1,2,3,16,16
+    labels=np.zeros((T,C,K,3)); labels[0,0,:,2]=1; labels[0,0,:,:2]=5  # cam0 visible
+    masks=np.zeros((T,C,H,W),bool); masks[0,0,4:8,4:8]=True; masks[0,1,4:8,4:8]=True
+    frames=[(0, np.zeros((C,H,W,3),np.uint8))]
+    recs=records_for_bout(labels, masks, iter(frames), ["Cam0","Cam1"], "recA", 100)
+    assert len(recs)==1                                   # only cam0 had visible kps
+    assert recs[0]["file_name"]=="recA/Cam0/Frame_100.jpg"
+    assert (np.asarray(recs[0]["keypoints"])[:,2]==1).all()
