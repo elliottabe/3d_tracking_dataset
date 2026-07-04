@@ -1,7 +1,6 @@
 defaults:
   - _self_
   - paths: hyak
-  - recording: session0
 
 # Minimal inline keys so `paths.base_dir`/`paths.save_dir` (which interpolate
 # `${dataset.name}`/`${version}` and the custom `multirun_save_dir` resolver's
@@ -18,8 +17,32 @@ v3_ckpt: ${paths.vit_runs_root}/v3_kp_maskaware/final
 out_dir: ${paths.vit_runs_root}/v4_kp_silbootstrap/final
 real_root: ${paths.red_data_v3_root}      # real annotations mixed in
 pseudo_root: ${paths.data_dir_johnson}/courtship/pseudolabels
-# recordings whose pipeline outputs feed pseudo-labels (train-split courtship + Session0)
-label_sources: []            # list of run-root dirs with bouts/bout_*/fly*/outputs.h5
+# Recordings whose pipeline outputs feed pseudo-labels (train-split courtship +
+# Session0). Courtship spans MANY separate recordings (Session0: 1 recording
+# dir; Session1: ~14 recording dirs), each with its own
+# videos/calibration/predictions/bouts -- so `label_sources` is a list of
+# PER-RECORDING dicts, never a single global recording (see
+# `scripts/run_pseudolabel_finetune.resolve_label_source` for full details).
+# Per-entry schema:
+#   session_dir       (required) recording dir (has Cam*.mp4 + calibration/)
+#   run_root          (required) THIS recording's pipeline output root
+#                     (bouts/bout_*/fly*/{outputs.h5,kp2d.npz,qc_perframe.npz})
+#   predictions_dir   (optional) masks source (bout_*/sam3_masks.npz);
+#                     default = the sole Predictions_3D_* dir under
+#                     session_dir -- REQUIRED if there is more than one
+#   bouts_csv         (optional) default
+#                     session_dir/courtship_bouts_unified_summary.csv if it
+#                     exists, else REQUIRED (bout/mask conventions vary per
+#                     recording -- e.g. Session1 recordings lack this file)
+#   calib_dir         (optional) default session_dir/calibration
+#   cameras           (optional) default sorted basenames of calib_dir/Cam*.yaml
+# e.g.:
+#   - session_dir: ${paths.data_dir_johnson}/Video_recordings/courtship/Session0/2025_10_20_13_20_04
+#     run_root: ${paths.out_root}/Session0_bouts
+#   - session_dir: ${paths.data_dir_johnson}/Video_recordings/courtship/Session1/2026_04_02_11_52_43
+#     run_root: ${paths.out_root}/Session1_2026_04_02_11_52_43_bouts
+#     bouts_csv: ${paths.data_dir_johnson}/Video_recordings/courtship/Session1/2026_04_02_11_52_43/good_bouts.csv
+label_sources: []
 # held-out courtship val recordings (have GT) — never pseudo-labeled
 # NOTE: MUST be quoted -- unquoted digit-underscore tokens like
 # 2026_05_27_11_56_05 parse as YAML ints (underscore digit-separators), not
