@@ -1,6 +1,7 @@
 import os
 import sys
 
+import numpy as np
 import pytest
 from hydra import initialize_config_dir, compose
 from omegaconf import OmegaConf
@@ -9,7 +10,8 @@ CFG = "/gscratch/portia/eabe/Research/MyRepos/3d_tracking_dataset/configs"
 REPO_ROOT = os.path.dirname(CFG)
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
-from scripts.run_pseudolabel_finetune import resolve_label_source  # noqa: E402
+from scripts.run_pseudolabel_finetune import (         # noqa: E402
+    resolve_label_source, _require_label_sources, _require_nonempty_pseudo_dataset)
 
 
 def test_detector_finetune_config_resolves():
@@ -27,6 +29,39 @@ def test_detector_finetune_config_resolves():
     assert "2026_05_27_11_56_05" in d["val_recordings"]
     assert d["out_dir"].endswith("v4_kp_silbootstrap/final")
     assert d["real_root"].endswith("red_data_unified_V3")   # resolves via paths.red_data_v3_root
+    # Minor: mask_weight must be a first-class, settable knob in the
+    # `finetune:` block (surfaces TrainConfig.mask_weight / finetune()'s new
+    # mask_weight= param); default keeps current (mask loss off) behavior.
+    assert d["finetune"]["mask_weight"] == 0.0
+
+
+# ---------------------------------------------------------------------------
+# I3: empty-label_sources / empty-pseudo-set guards must not silently
+# degrade to a real-only retrain reported as success.
+# ---------------------------------------------------------------------------
+
+def test_require_label_sources_raises_when_empty():
+    with pytest.raises(ValueError, match="label_sources"):
+        _require_label_sources([])
+    # non-empty: must not raise
+    _require_label_sources([{"session_dir": "x", "run_root": "y"}])
+
+
+def test_require_nonempty_pseudo_dataset_raises_when_empty(tmp_path):
+    from jarvis_jax.cse.build_pseudolabel_dataset import PseudoLabelWriter
+
+    writer = PseudoLabelWriter(str(tmp_path), split="train")
+    with pytest.raises(ValueError, match="pseudo-label dataset"):
+        _require_nonempty_pseudo_dataset(writer)
+
+    H = W = 64
+    m = np.zeros((H, W), bool); m[10:20, 10:20] = True
+    kp = np.zeros((50, 3), float); kp[:5, 0] = 15; kp[:5, 1] = 15; kp[:5, 2] = 1
+    rec = {"file_name": "recX/Cam0/Frame_1.jpg", "img_w": W, "img_h": H,
+          "rgb": np.zeros((H, W, 3), np.uint8), "mask": m, "keypoints": kp,
+          "bbox": [10, 10, 10, 10]}
+    writer.add_records([rec])
+    _require_nonempty_pseudo_dataset(writer)   # non-empty now: must not raise
 
 
 # ---------------------------------------------------------------------------

@@ -62,3 +62,8 @@ finetune:
   batch_size: 8
   pseudo_weight: 1
   lr: 2.0e-5
+  # Mask-containment loss weight (TrainConfig.mask_weight; 0.0 = off, the
+  # historical default -- this key just makes it a first-class, settable
+  # knob here). Set to match whatever mask_weight v3_kp_maskaware itself was
+  # trained with, if continuing that regularization into v4.
+  mask_weight: 0.0

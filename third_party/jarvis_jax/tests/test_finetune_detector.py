@@ -84,3 +84,30 @@ def test_finetune_never_writes_to_v3_ckpt(tmp_path):
             v3_ckpt=fake_v3_ckpt, real_root=real, pseudo_root=pseudo,
             out_dir=fake_v3_ckpt, val_recordings=["rec"], total_steps=1,
             eval_every=1, patience=1, batch_size=2)
+
+
+def test_finetune_raises_on_empty_held_out_val(tmp_path):
+    """I4: an empty held-out val set (val_recordings matching NO real-root
+    val annotation) must raise immediately -- NOT silently let eval_mpjpe
+    degenerate to a fake 0.0 'best' score that then gets saved as the
+    finetune's result. The guard sits before `load_vitpose`/any model or GPU
+    work, so this is CPU-safe and uses a v3_ckpt path that doesn't even
+    exist -- if the guard didn't fire first, this would instead fail trying
+    to load that nonexistent checkpoint."""
+    from jarvis_jax.cse.finetune_detector import finetune
+
+    real = str(tmp_path / "real")
+    pseudo = str(tmp_path / "pseudo")
+    out = str(tmp_path / "v4")
+    os.makedirs(real)
+    os.makedirs(pseudo)
+    _tiny_root(real, "train")
+    _tiny_root(real, "val")          # file_name prefix is "rec/..."
+    _tiny_root(pseudo, "train")
+
+    with pytest.raises(AssertionError, match="held-out"):
+        finetune(
+            v3_ckpt=str(tmp_path / "v3_ckpt_does_not_exist"),
+            real_root=real, pseudo_root=pseudo, out_dir=out,
+            val_recordings=["no_such_recording"],   # matches nothing -> fem_ds empty
+            total_steps=1, eval_every=1, patience=1, batch_size=2)

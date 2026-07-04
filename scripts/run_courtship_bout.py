@@ -197,10 +197,72 @@ def atomic_write_mp4(path, write_fn):
 # Per (bout, fly) driver
 # ---------------------------------------------------------------------------
 
+def _backfill_qc_perframe(cfg, bout_idx: int, fly: int, bout_dir: str) -> None:
+    """I2: for an already-DONE bout/fly that predates Stage-E's per-frame QC
+    write, `qc_perframe.npz` is missing even though DONE + qc.json +
+    outputs.h5 + kp2d.npz all exist -- and the pseudo-label finetune driver
+    (`scripts/run_pseudolabel_finetune.py`) silently skips any fly-dir
+    lacking `qc_perframe.npz`. Rebuild it from artifacts ALREADY on disk
+    (outputs.h5's kp3d_mm/mesh_mm, kp2d.npz, SAM3 masks) -- this needs none
+    of stac_ik.h5/qpos_refined.npz/bridges, so no earlier stage is
+    recomputed. Idempotent + atomic (atomic_save_npz): no-ops if
+    qc_perframe.npz already exists, or if outputs.h5/kp2d.npz are missing
+    (nothing to backfill from -- leaves the bout as-is rather than raising,
+    since this is a best-effort backfill on an already-DONE bout)."""
+    outputs_h5_path = os.path.join(bout_dir, "outputs.h5")
+    kp2d_path = os.path.join(bout_dir, "kp2d.npz")
+    qc_perframe_path = os.path.join(bout_dir, "qc_perframe.npz")
+    if stage_done(qc_perframe_path):
+        return
+    if not (stage_done(outputs_h5_path) and stage_done(kp2d_path)):
+        return
+
+    import stac_mjx.io_dict_to_hdf5 as ioh5
+    from jarvis_jax.geometry.reprojection_tool import ReprojectionTool
+    from jarvis_jax.cse.qc_perframe import per_frame_qc
+
+    predictions_dir = str(cfg.recording.predictions_dir)
+    bout_npz = os.path.join(predictions_dir, f"bout_{bout_idx:05d}", "sam3_masks.npz")
+    masks_dict = load_bout_masks(bout_npz, fly)
+    T, C = masks_dict["T"], masks_dict["C"]
+
+    with np.load(kp2d_path) as z:
+        kp2d, conf = z["kp2d"], z["conf"]
+
+    d = ioh5.load(outputs_h5_path)
+    kp3d_mm = np.asarray(d["kp3d_mm"])                  # (T,K,3) FK'd world-mm sites
+    mesh_mm = np.asarray(d["mesh_mm"])                  # (T,Kmesh,3) FK'd world-mm mesh subset
+    valid2d = conf >= float(cfg.detector.conf_thresh)   # (T,C,K), same threshold as triangulation
+
+    kp3d_by_frame = [kp3d_mm[t] for t in range(T)]
+    mesh_by_frame = [mesh_mm[t] for t in range(T)]
+    kp2d_by_frame = [{c: kp2d[t, c] for c in range(C)} for t in range(T)]
+    vis_by_frame = [{c: valid2d[t, c] for c in range(C)} for t in range(T)]
+    masks_by_frame = [
+        {c: (masks_dict["masks"][t, c] if masks_dict["valid"][t, c] else None)
+         for c in range(C)}
+        for t in range(T)
+    ]
+
+    rt = ReprojectionTool(cfg.recording.calib_dir)
+    pf = per_frame_qc(rt, mesh_by_frame=mesh_by_frame, kp3d_by_frame=kp3d_by_frame,
+                      kp2d_by_frame=kp2d_by_frame, vis_by_frame=vis_by_frame,
+                      masks_by_frame=masks_by_frame)
+    atomic_save_npz(qc_perframe_path, **pf)
+    print(f"[courtship] bout {bout_idx} fly{fly}: backfilled qc_perframe.npz "
+          f"for already-DONE bout -> {qc_perframe_path}")
+
+
 def process_bout_fly(cfg, bout_idx: int, fly: int):
     run_root = str(cfg.outputs.out)
     bout_dir = os.path.join(run_root, "bouts", f"bout_{bout_idx:05d}", f"fly{fly}")
     if bout_complete(bout_dir):
+        # I2: bouts completed before qc_perframe.npz existed have DONE +
+        # qc.json + outputs.h5 + kp2d.npz but no qc_perframe.npz, which the
+        # pseudo-label finetune driver treats as "incomplete" and silently
+        # skips. Backfill it (cheap: no stage recomputation) before the
+        # early-return short-circuit below.
+        _backfill_qc_perframe(cfg, bout_idx, fly, bout_dir)
         print(f"[courtship] bout {bout_idx} fly{fly}: already DONE, skipping")
         return
 

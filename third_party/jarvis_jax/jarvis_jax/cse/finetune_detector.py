@@ -64,7 +64,8 @@ def _copy_state(state):
 
 def finetune(*, v3_ckpt, real_root, pseudo_root, out_dir, val_recordings,
              tcfg=None, pseudo_weight=1, total_steps=4000, eval_every=250,
-             patience=6, batch_size=None, lr=2e-5, seed=0, log_every=50):
+             patience=6, batch_size=None, lr=2e-5, mask_weight=0.0, seed=0,
+             log_every=50):
     """Continue-train the v3 ViTPose detector on a real+pseudo mix.
 
     Args:
@@ -79,9 +80,10 @@ def finetune(*, v3_ckpt, real_root, pseudo_root, out_dir, val_recordings,
             differ from ``v3_ckpt``.
         val_recordings: recording name(s) held out as the early-stopping
             signal (e.g. courtship recordings with female-fly annotations) --
-            passed to ``V3Dataset(real_root, "val", recordings=...)``.
+            passed to ``V3Dataset(real_root, "val", recordings=...)``. This
+            held-out set must be non-empty (see I4 guard below).
         tcfg: optional ``TrainConfig``; if omitted, one is built from `lr`/
-            `total_steps`/`batch_size`/`seed`.
+            `total_steps`/`batch_size`/`seed`/`mask_weight`.
         pseudo_weight: integer oversampling weight for the pseudo dataset in
             ``ConcatV3`` (the real dataset's weight is fixed at 1).
         total_steps, eval_every, patience: training-loop control. Evaluation
@@ -89,6 +91,11 @@ def finetune(*, v3_ckpt, real_root, pseudo_root, out_dir, val_recordings,
             training stops early after `patience` non-improving evals.
         batch_size, lr, seed: shorthand for building `tcfg` when one isn't
             passed explicitly.
+        mask_weight: shorthand (like `lr`/`batch_size`) for building `tcfg`
+            when one isn't passed explicitly -- weight of the mask
+            containment loss (``TrainConfig.mask_weight``, off by default);
+            ignored when `tcfg` is passed explicitly (matches the other
+            shorthand params).
         log_every: print step + latest train loss every `log_every` steps
             (mirrors ``scripts/train_keypoints.py``'s progress logging), so a
             multi-hour run (e.g. total_steps=4000) has stdout visibility.
@@ -105,17 +112,29 @@ def finetune(*, v3_ckpt, real_root, pseudo_root, out_dir, val_recordings,
             f"(realpath={os.path.realpath(out_dir)!r}), "
             f"v3_ckpt={v3_ckpt!r} (realpath={os.path.realpath(v3_ckpt)!r}))")
 
+    # I4: build the held-out eval set FIRST and fail fast if it's empty --
+    # an empty val set makes `eval_mpjpe` degenerate to a fake 0.0 "best"
+    # score (see the eval-loop guard below), which would then get saved as
+    # the "best" checkpoint. Checked before any model/GPU work so a
+    # misconfigured `val_recordings` errors immediately and cheaply.
+    fem_ds = V3Dataset(real_root, "val", recordings=list(val_recordings))
+    assert len(fem_ds) > 0, (
+        f"held-out courtship val set is empty (real_root={real_root!r}, "
+        f"val_recordings={list(val_recordings)!r}); eval_mpjpe would "
+        "degenerate to a fake 0.0 'best' score on every eval -- check "
+        "val_recordings match V3Dataset file_name prefixes under real_root.")
+
     cfg = ViTPoseConfig()
     model = load_vitpose(v3_ckpt, cfg)
 
     tcfg = tcfg or TrainConfig(lr=lr, total_steps=total_steps,
-                               batch_size=batch_size or 8, seed=seed)
+                               batch_size=batch_size or 8, seed=seed,
+                               mask_weight=mask_weight)
     opt = make_optimizer(model, tcfg)
 
     train_ds = ConcatV3(
         [V3Dataset(real_root, "train"), V3Dataset(pseudo_root, "train")],
         [1, pseudo_weight])
-    fem_ds = V3Dataset(real_root, "val", recordings=list(val_recordings))
     full_ds = V3Dataset(real_root, "val")
 
     step = make_train_step(tcfg.mask_weight, None, None,
@@ -139,9 +158,18 @@ def finetune(*, v3_ckpt, real_root, pseudo_root, out_dir, val_recordings,
 
         if (i + 1) % eval_every == 0:
             fem_mpjpe = float(eval_mpjpe(model, fem_ds, tcfg.batch_size))
-            is_best = fem_mpjpe < best["best_female_mpjpe"]
-            print(f"  step {i+1}/{total_steps} female MPJPE {fem_mpjpe:.3f}px"
-                  f"{' (new best)' if is_best else ''}", flush=True)
+            # I4: eval_mpjpe returns exactly 0.0 when its batches happen to
+            # have zero visible keypoints (count==0), which is otherwise
+            # indistinguishable from a (never-achievable) perfect score --
+            # never treat it as "new best" so a degenerate eval can't
+            # masquerade as a successful finetune.
+            degenerate = fem_mpjpe <= 0.0
+            is_best = (not degenerate) and fem_mpjpe < best["best_female_mpjpe"]
+            tag = (" (new best)" if is_best else
+                  " (degenerate eval -- 0 visible keypoints, NOT best)" if degenerate
+                  else "")
+            print(f"  step {i+1}/{total_steps} female MPJPE {fem_mpjpe:.3f}px{tag}",
+                 flush=True)
             if is_best:
                 best["best_step"] = i + 1
                 best["best_female_mpjpe"] = fem_mpjpe

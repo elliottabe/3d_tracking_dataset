@@ -11,22 +11,34 @@ across recordings.
 
 For each source, this driver resolves its own recording view (calibration
 dir, cameras, predictions dir, bouts csv), walks its `run_root`'s
-`bouts/bout_*/fly*` dirs, and for every (bout, fly) that has completed
-pipeline outputs (`outputs.h5`, `kp2d.npz`, `qc_perframe.npz` -- Task 1's
-per-frame QC), reprojects the FK'd sites using THAT recording's own
-calibration, gates them against the detector 2-D + SAM3 masks (Task 4/5's
+`bouts/bout_*` dirs, and for every (bout, fly) that has completed pipeline
+outputs (`outputs.h5`, `kp2d.npz`, `qc_perframe.npz` -- Task 1's per-frame
+QC), reprojects the FK'd sites using THAT recording's own calibration, gates
+them against the detector 2-D + SAM3 masks (Task 4/5's
 `courtship_pseudolabel`), and turns the surviving labels into V3-format COCO
 records (Task 3's `build_pseudolabel_dataset`), namespaced by
 `rec_tag = basename(session_dir)` so frames from different recordings never
-collide under the same file_name. Records from every source are accumulated
-into ONE list and written as ONE pseudo-label dataset, then mixed with the
-curated real V3 annotations to continue-train the v3 ViTPose checkpoint into
-a new v4 checkpoint (Task 6's `finetune_detector.finetune`).
+collide under the same file_name.
+
+STREAMING (C1): a full run spans hundreds of bouts x 2 flies x many
+recordings, each bout holding full-res `rgb`/`mask` arrays -- accumulating
+every bout's records in one Python list before writing would use hundreds of
+GB of RAM. Instead, records are built and flushed to disk ONE BOUT AT A TIME
+via `build_pseudolabel_dataset.PseudoLabelWriter` (both flies of a bout added
+together in one `add_records()` call, so frames they share land in one COCO
+image, exactly as a single whole-list write would), then dropped from RAM
+before the next bout. `writer.finalize()` writes the COCO json once, after
+every source has been processed, then mixed with the curated real V3
+annotations to continue-train the v3 ViTPose checkpoint into a new v4
+checkpoint (Task 6's `finetune_detector.finetune`).
 
 Incomplete (bout, fly) dirs (pipeline still running / never run) are skipped
-silently -- this driver only consumes already-finished pipeline output, it
-does not run the pipeline itself (see `scripts/slurm_courtship_array.py` for
-that, which is resumable and idempotent).
+(counted and logged, not silent) -- this driver only consumes
+already-finished pipeline output, it does not run the pipeline itself (see
+`scripts/slurm_courtship_array.py` for that, which is resumable and
+idempotent). A bout whose video frames fail to read (corrupt/short video) is
+also skipped with a warning naming the bout, rather than killing the whole
+multi-hour, multi-recording run.
 
 Usage:
     Configure `label_sources` in configs/detector_finetune.yaml (a list of
@@ -48,7 +60,7 @@ from jarvis_jax.geometry.reprojection_tool import ReprojectionTool
 from jarvis_jax.cse.courtship_bout_masks import load_bout_masks
 from jarvis_jax.cse.courtship_pseudolabel import (
     reproject_sites, gate_pseudolabels, records_for_bout, GateCfg)
-from jarvis_jax.cse.build_pseudolabel_dataset import write_pseudolabel_coco
+from jarvis_jax.cse.build_pseudolabel_dataset import PseudoLabelWriter
 from jarvis_jax.cse.finetune_detector import finetune
 from jarvis_jax.predict.sam3_driver import parse_bouts, session_tag_for
 
@@ -157,24 +169,36 @@ def _mask_npz(predictions_dir, bout_idx):
     return os.path.join(str(predictions_dir), f"bout_{bout_idx:05d}", "sam3_masks.npz")
 
 
-def _fly_dirs(run_root):
-    """Sorted `bouts/bout_*/fly*` dirs under one recording's pipeline run-root
-    that have every artifact this driver needs (`outputs.h5`, `kp2d.npz`,
-    `qc_perframe.npz`); incomplete ones (pipeline still running, or never
-    run) are skipped."""
-    for fly_dir in sorted(glob.glob(os.path.join(run_root, "bouts", "bout_*", "fly*"))):
-        out_h5 = os.path.join(fly_dir, "outputs.h5")
-        kp2d_npz = os.path.join(fly_dir, "kp2d.npz")
-        qc_pf = os.path.join(fly_dir, "qc_perframe.npz")
-        if os.path.exists(out_h5) and os.path.exists(kp2d_npz) and os.path.exists(qc_pf):
-            yield fly_dir, out_h5, kp2d_npz, qc_pf
+def _bout_dirs(run_root):
+    """Sorted `bouts/bout_*` dirs under one recording's pipeline run-root."""
+    return sorted(glob.glob(os.path.join(run_root, "bouts", "bout_*")))
+
+
+def _fly_artifacts(fly_dir):
+    """(out_h5, kp2d_npz, qc_pf) for one `fly*` dir if it has every artifact
+    this driver needs, else None (pipeline still running / never run for
+    this fly -- skipped, not fatal)."""
+    out_h5 = os.path.join(fly_dir, "outputs.h5")
+    kp2d_npz = os.path.join(fly_dir, "kp2d.npz")
+    qc_pf = os.path.join(fly_dir, "qc_perframe.npz")
+    if os.path.exists(out_h5) and os.path.exists(kp2d_npz) and os.path.exists(qc_pf):
+        return out_h5, kp2d_npz, qc_pf
+    return None
 
 
 def _records_for_fly_dir(resolved, rt, cams, gcfg, rec_tag, fly_dir, out_h5, kp2d_npz, qc_pf):
     """Build gated pseudo-label COCO records for one completed (bout, fly) dir,
     using THIS recording's own reprojection tool / cameras / masks / bouts_csv
     (`resolved`, from `resolve_label_source`) -- never a single global
-    `cfg.recording`."""
+    `cfg.recording`.
+
+    C1: if reading this bout's video frames fails (`all_cams_frames` raising
+    -- e.g. a short/corrupt video), the failure is caught HERE (around only
+    the frame-read + record-build tail), logged with the bout/fly named, and
+    an empty list is returned so one bad bout can't kill a multi-hour,
+    multi-recording run. The T-consistency guard below is NOT covered by this
+    catch (it runs before the try) -- a stale/mismatched artifact is a real
+    bug and must still fail loudly, not be silently skipped."""
     kp3d_mm = np.asarray(ioh5.load(out_h5)["kp3d_mm"])
     z = np.load(kp2d_npz)
     det, conf = z["kp2d"], z["conf"]
@@ -190,7 +214,8 @@ def _records_for_fly_dir(resolved, rt, cams, gcfg, rec_tag, fly_dir, out_h5, kp2
     # same bout frame range. A stale outputs.h5 left from a different (e.g.
     # differently-trimmed) run would silently desync gating from masks_dict --
     # fail loudly instead of gating garbage (mirrors run_courtship_bout.py's
-    # stac_ik.h5-vs-masks stale-artifact guard, lines 307-317).
+    # stac_ik.h5-vs-masks stale-artifact guard, lines 307-317). NOT caught by
+    # the frame-read try/except below.
     if masks["masks"].shape[0] != kp3d_mm.shape[0]:
         raise RuntimeError(
             f"{fly_dir}: outputs.h5 kp3d_mm T={kp3d_mm.shape[0]} != masks T="
@@ -205,38 +230,126 @@ def _records_for_fly_dir(resolved, rt, cams, gcfg, rec_tag, fly_dir, out_h5, kp2
     try:
         frames = enumerate(all_cams_frames(caps, start, kp3d_mm.shape[0]))
         return records_for_bout(labels, masks["masks"], frames, cams, rec_tag, start)
+    except RuntimeError as e:
+        print(f"[pseudolabel] WARNING: bout {bout_idx} fly{fly} ({fly_dir}): "
+              f"frame read failed ({e}); skipping this (bout, fly) and "
+              f"continuing", flush=True)
+        return []
     finally:
         for cap in caps:
             cap.release()
 
 
-def _records_for_source(src, gcfg):
-    """Resolve one label_sources entry and build every (bout, fly)'s gated
-    pseudo-label records for it, using ITS OWN calibration/cameras/masks/bouts
-    (never the single global `cfg.recording`) and a `rec_tag` derived from ITS
-    session_dir so file_names never collide across recordings."""
+def _process_source(src, gcfg, writer):
+    """Resolve one label_sources entry and STREAM its gated pseudo-label
+    records into `writer`, one bout at a time -- both flies of a bout are
+    gathered and added together in ONE `writer.add_records()` call so frames
+    they share (same camera frame, two flies) land in one COCO image with N
+    annotations, exactly as a single whole-list write would (C1). No more
+    than one bout's rgb/mask arrays are ever held in RAM at once. Uses THIS
+    source's own calibration/cameras/masks/bouts (never a single global
+    `cfg.recording`) and a `rec_tag` derived from ITS session_dir so
+    file_names never collide across recordings.
+
+    Returns a counts dict for this source (I3 visibility): bouts_scanned,
+    fly_dirs_scanned, fly_dirs_skipped_incomplete, records_written,
+    visible_keypoints."""
     resolved = resolve_label_source(src)
     rt = ReprojectionTool(resolved["calib_dir"])
     cams = resolved["cameras"]
     rec_tag = os.path.basename(os.path.normpath(resolved["session_dir"]))
 
-    records = []
-    for fly_dir, out_h5, kp2d_npz, qc_pf in _fly_dirs(resolved["run_root"]):
-        records += _records_for_fly_dir(
-            resolved, rt, cams, gcfg, rec_tag, fly_dir, out_h5, kp2d_npz, qc_pf)
-    return records
+    counts = dict(bouts_scanned=0, fly_dirs_scanned=0,
+                  fly_dirs_skipped_incomplete=0, records_written=0,
+                  visible_keypoints=0)
+    for bout_dir in _bout_dirs(resolved["run_root"]):
+        counts["bouts_scanned"] += 1
+        bout_records = []
+        for fly_dir in sorted(glob.glob(os.path.join(bout_dir, "fly*"))):
+            counts["fly_dirs_scanned"] += 1
+            artifacts = _fly_artifacts(fly_dir)
+            if artifacts is None:
+                counts["fly_dirs_skipped_incomplete"] += 1
+                continue
+            out_h5, kp2d_npz, qc_pf = artifacts
+            bout_records += _records_for_fly_dir(
+                resolved, rt, cams, gcfg, rec_tag, fly_dir, out_h5, kp2d_npz, qc_pf)
+        if bout_records:
+            counts["records_written"] += len(bout_records)
+            counts["visible_keypoints"] += sum(
+                int((np.asarray(r["keypoints"], float)[:, 2] > 0).sum())
+                for r in bout_records)
+            writer.add_records(bout_records)     # flushed to disk; dropped from RAM here
+    return counts
+
+
+def _require_label_sources(label_sources):
+    """I3: raise a clear error if `label_sources` is empty -- an empty list
+    would silently fall through to a real-only retrain that could be
+    (mis)reported as a successful v3->v4 silhouette-bootstrap."""
+    if not label_sources:
+        raise ValueError(
+            "cfg.label_sources is empty -- refusing to run a real-only "
+            "finetune that could be silently mistaken for a successful "
+            "v3->v4 silhouette-bootstrap; configure at least one "
+            "label_sources entry in configs/detector_finetune.yaml (see its "
+            "comments for the per-entry schema).")
+
+
+def _require_nonempty_pseudo_dataset(writer):
+    """I3: raise a clear error if the pseudo-label dataset `writer` produced
+    has zero images or zero annotations -- an upstream bug (e.g. every bout
+    skipped as incomplete, every frame gated out) must not silently degrade
+    this run to an effectively real-only retrain reported as success."""
+    if not writer.images or not writer.annotations:
+        raise ValueError(
+            f"pseudo-label dataset at {writer.out_root!r} split "
+            f"{writer.split!r} has {len(writer.images)} image(s) and "
+            f"{len(writer.annotations)} annotation(s) after processing all "
+            "label_sources -- refusing to finetune on an effectively empty "
+            "pseudo set (check label_sources point at completed pipeline "
+            "runs, and that gate thresholds in cfg.gate aren't excluding "
+            "everything).")
 
 
 @hydra.main(version_base=None, config_path="../configs", config_name="detector_finetune")
 def main(cfg):
     gcfg = GateCfg(**OmegaConf.to_container(cfg.gate, resolve=True))
 
-    all_records = []
-    for src in cfg.label_sources:                          # each src = a per-recording dict
-        src_dict = OmegaConf.to_container(src, resolve=True)
-        all_records += _records_for_source(src_dict, gcfg)
+    label_sources = list(cfg.label_sources)
+    _require_label_sources(label_sources)
 
-    write_pseudolabel_coco(cfg.pseudo_root, all_records, split="train")
+    # C1: stream pseudo-labels to disk per-bout via PseudoLabelWriter instead
+    # of accumulating every bout's full-res rgb/mask arrays in one giant
+    # `all_records` list (hundreds of GB across all bouts x 2 flies x every
+    # recording -> OOM on the real run).
+    writer = PseudoLabelWriter(cfg.pseudo_root, split="train")
+    totals = dict(bouts_scanned=0, fly_dirs_scanned=0,
+                  fly_dirs_skipped_incomplete=0, records_written=0,
+                  visible_keypoints=0)
+    for src in label_sources:                          # each src = a per-recording dict
+        src_dict = OmegaConf.to_container(src, resolve=True)
+        src_counts = _process_source(src_dict, gcfg, writer)
+        print(f"[pseudolabel] source {src_dict.get('session_dir')}: "
+              f"bouts_scanned={src_counts['bouts_scanned']} "
+              f"fly_dirs_scanned={src_counts['fly_dirs_scanned']} "
+              f"fly_dirs_skipped_incomplete={src_counts['fly_dirs_skipped_incomplete']} "
+              f"records_written={src_counts['records_written']} "
+              f"visible_keypoints={src_counts['visible_keypoints']}", flush=True)
+        for k in totals:
+            totals[k] += src_counts[k]
+
+    ann_path = writer.finalize()
+    print(f"[pseudolabel] TOTAL across {len(label_sources)} source(s): "
+          f"bouts_scanned={totals['bouts_scanned']} "
+          f"fly_dirs_scanned={totals['fly_dirs_scanned']} "
+          f"fly_dirs_skipped_incomplete={totals['fly_dirs_skipped_incomplete']} "
+          f"records_written={totals['records_written']} "
+          f"visible_keypoints={totals['visible_keypoints']} "
+          f"images={len(writer.images)} annotations={len(writer.annotations)} "
+          f"-> {ann_path}", flush=True)
+
+    _require_nonempty_pseudo_dataset(writer)
 
     res = finetune(v3_ckpt=cfg.v3_ckpt, real_root=cfg.real_root,
                    pseudo_root=cfg.pseudo_root, out_dir=cfg.out_dir,
