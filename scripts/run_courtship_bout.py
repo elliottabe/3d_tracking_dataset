@@ -7,7 +7,7 @@ For a bout index and each fly (``range(cfg.recording.num_animals)``), runs:
   B  DLT triangulation                                      -> kp3d.npz
   C  STAC ik_only (offsets fit once, shared across bouts)   -> stac_ik.h5
   D  silhouette-containment polish                          -> qpos_refined.npz
-  E  FK outputs.h5 + qc.json + per-camera reprojection overlay videos
+  E  FK outputs.h5 + qc.json + qc_perframe.npz + per-camera reprojection overlay videos
 
 Every artifact is written atomically (tmp -> os.replace) and every stage is
 skipped when its artifact already exists (see jarvis_jax.cse.courtship_resume),
@@ -335,7 +335,11 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
             mesh_npz=cfg.silhouette.mesh_npz, qpos=qpos_refined, bridges=bridges,
             out_path=outputs_h5_path, mesh_subset=str(cfg.outputs.mesh_subset))
 
-    if not stage_done(qc_json_path):
+    # NOTE: bout_dir already ends in f"fly{fly}" (see its construction above),
+    # matching qc_json_path -- qc_perframe_path is a sibling, NOT another
+    # nested fly{fly} segment.
+    qc_perframe_path = os.path.join(bout_dir, "qc_perframe.npz")
+    if not stage_done(qc_json_path) or not stage_done(qc_perframe_path):
         d = ioh5.load(outputs_h5_path)
         kp3d_mm = np.asarray(d["kp3d_mm"])                  # (T,K,3) FK'd world-mm sites
         mesh_mm = np.asarray(d["mesh_mm"])                  # (T,Kmesh,3) FK'd world-mm mesh subset
@@ -349,9 +353,20 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
              for c in range(C)}
             for t in range(T)
         ]
-        qc_report(rt, kp3d_by_frame=kp3d_by_frame, mesh_by_frame=mesh_by_frame,
-                 kp2d_by_frame=kp2d_by_frame, vis_by_frame=vis_by_frame,
-                 masks_by_frame=masks_by_frame, out_json=qc_json_path)
+        if not stage_done(qc_json_path):
+            qc_report(rt, kp3d_by_frame=kp3d_by_frame, mesh_by_frame=mesh_by_frame,
+                     kp2d_by_frame=kp2d_by_frame, vis_by_frame=vis_by_frame,
+                     masks_by_frame=masks_by_frame, out_json=qc_json_path)
+
+        # -- per-frame QC (Gate A inputs): soft/hard silhouette IoU, marker
+        #    reproj, n_cams, one row per frame -- next to qc.json. Reuses the
+        #    same *_by_frame locals built for qc_report above.
+        if not stage_done(qc_perframe_path):
+            from jarvis_jax.cse.qc_perframe import per_frame_qc
+            pf = per_frame_qc(rt, mesh_by_frame=mesh_by_frame, kp3d_by_frame=kp3d_by_frame,
+                              kp2d_by_frame=kp2d_by_frame, vis_by_frame=vis_by_frame,
+                              masks_by_frame=masks_by_frame)
+            atomic_save_npz(qc_perframe_path, **pf)
 
     # -- overlays: project the per-frame ARTICULATED mesh into each camera,
     #    plus the triangulated kp3d; skip cameras whose video already exists.
