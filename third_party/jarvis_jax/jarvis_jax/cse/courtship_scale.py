@@ -123,6 +123,12 @@ def compute_trunk_scale(kp3d: np.ndarray, kp_names: List[str], model_xml: str, *
     # the umeyama fallback).
     spreads = np.sqrt(((P - P.mean(axis=1, keepdims=True)) ** 2).sum(axis=(1, 2)))
     data_spread = float(np.median(spreads) if robust_stat == 'median' else np.mean(spreads))
+    # Degenerate trunk (all markers collapsed to a point) -> scale would be inf/nan,
+    # silently re-introducing the ill-conditioned STAC stall. Fail loudly instead.
+    if data_spread <= 1e-10:
+        raise ValueError(
+            f"compute_trunk_scale: degenerate trunk marker spread ({data_spread:.3e}); "
+            f"cannot compute a body-size scale")
     norm_ratio_scale = ref_spread / data_spread
 
     if estimator == 'norm_ratio':
