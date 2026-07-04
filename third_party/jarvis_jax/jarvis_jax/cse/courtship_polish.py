@@ -53,17 +53,54 @@ def courtship_targets_from_masks(masks, present, cam_affine, *, erode_px, n_poin
                 cam_Ms=np.asarray(cam_Ms, np.float32), cam_ts=np.asarray(cam_ts, np.float32))
 
 
-def polish_bout(stac_h5, cfg, kp3d_mm, kp3d_conf, masks_dict, calib_dir):
+def _mask_centroids_3d(masks, valid, cam_mats):
+    """(T,C,H,W) masks + (T,C) valid + (C,4,3) DLT cams -> (T,3) triangulated 3D
+    silhouette centroids and (T,) bool triangulable (>=2 valid-mask cams).
+
+    The SAM masks are the reliable observation for courtship (the 2D keypoints
+    are OOD/inconsistent), so the global placement of the mesh is anchored to the
+    per-frame mask centroid rather than the noisy keypoint cloud."""
+    from jarvis_jax.cse.courtship_triangulate import triangulate_keypoints
+    T, C, H, W = masks.shape
+    cen2d = np.full((T, C, 1, 2), np.nan, np.float32)
+    cconf = np.zeros((T, C, 1), np.float32)
+    for t in range(T):
+        for c in range(C):
+            if not valid[t, c] or not masks[t, c].any():
+                continue
+            cy, cx = ndimage.center_of_mass(masks[t, c])   # (row, col) = (y, x)
+            cen2d[t, c, 0] = (cx, cy)                       # (x, y) pixel
+            cconf[t, c, 0] = 1.0
+    cen3d, _ = triangulate_keypoints(cen2d, cconf, cam_mats, conf_thresh=0.5)  # (T,1,3)
+    cen3d = cen3d[:, 0, :]                                  # (T,3), NaN where <2 views
+    ok = np.isfinite(cen3d).all(-1)
+    return cen3d.astype(np.float32), ok
+
+
+def polish_bout(stac_h5, cfg, kp3d_mm, kp3d_conf, masks_dict, calib_dir, *, kp_scale=1.0):
     """Refine qpos with silhouette+containment. kp3d_mm (T,K,3), masks_dict from
     load_bout_masks (fly), calib_dir has Cam*.yaml.
+
+    kp_scale is the trunk-Procrustes body-size scale applied to the keypoints
+    before STAC (kp3d * kp_scale ~= model units), so the STAC-fitted model is at
+    model scale; the bridge maps model -> mm with a fixed s = 1/kp_scale.
+
+    Bridge (model->mm) is MASK-DRIVEN: the courtship 2D keypoints are unreliable,
+    so global placement is anchored to the reliable SAM masks --
+      s = 1/kp_scale                 (robust per-fly body size; constant)
+      t : places the FK body centroid at the triangulated 3D mask centroid
+      R : orientation from the keypoint Umeyama fit when >=3 keypoints are valid,
+          else identity (the solver's qpos root quaternion, composed with R and
+          refined by the silhouette cost, carries the rest of the orientation).
+    A frame is usable (bridge != None) when its mask centroid triangulates from
+    >=2 cameras -- no longer gated on keypoint count.
 
     Returns:
         (qpos_refined, bridges): qpos_refined is (T,nq) float array. bridges is
         a length-T list of (s, R (3,3), t (3,)) per-frame model->mm similarity
         bridges (the same bridge_s[t]/bridge_R[t]/bridge_t[t] used inside the
-        solve), or None for frames where frame_ok[t] is False (fewer than 3
-        valid triangulated keypoints) -- matching build_fly_outputs' "None
-        bridge -> NaN frame" contract.
+        solve), or None for frames where frame_ok[t] is False -- matching
+        build_fly_outputs' "None bridge -> NaN frame" contract.
     """
     from jarvis_jax.geometry.reprojection_tool import ReprojectionTool
     sil = cfg.silhouette
@@ -80,26 +117,35 @@ def polish_bout(stac_h5, cfg, kp3d_mm, kp3d_conf, masks_dict, calib_dir):
     rt = ReprojectionTool(calib_dir)
     cam_Ms = np.stack([rt._camera_list[c].cameraMatrix[:2, :3] for c in range(rt.num_cameras)])
     cam_ts = np.stack([rt._camera_list[c].cameraMatrix[:2, 3] for c in range(rt.num_cameras)])
+    cam_mats = np.asarray(rt.camera_matrices, np.float32)   # (C,4,3) for centroid triangulation
 
     tg = courtship_targets_from_masks(masks_dict["masks"], masks_dict["valid"],
                                       (cam_Ms, cam_ts), erode_px=sil.erode_px,
                                       n_points=sil.n_points, sdf_hw=tuple(sil.sdf_hw),
                                       bbox_margin=sil.bbox_margin)
 
-    # per-frame model->mm bridges from q_init sites vs triangulated kp3d_mm
-    bridge_s = np.ones((T,), np.float32)
+    # Mask-driven per-frame model->mm bridges.
+    cen3d, cen_ok = _mask_centroids_3d(masks_dict["masks"], masks_dict["valid"], cam_mats)
+    s_const = 1.0 / float(kp_scale)
+    bridge_s = np.full((T,), s_const, np.float32)
     bridge_R = np.broadcast_to(np.eye(3, dtype=np.float32), (T, 3, 3)).copy()
     bridge_t = np.zeros((T, 3), np.float32)
     frame_ok = np.zeros(T, bool)
     for t in range(T):
-        kok = np.isfinite(kp3d_mm[t]).all(-1) & (kp3d_conf[t] > 0)
-        if kok.sum() < 3:
+        if not cen_ok[t]:
             continue
         d0 = inp["mjx_data"].replace(qpos=jnp.asarray(q_init[t]))
         d0 = stac_utils.kinematics(inp["mjx_model"], d0); d0 = stac_utils.com_pos(inp["mjx_model"], d0)
         sites0 = np.asarray(stac_utils.get_site_xpos(d0, inp["site_idxs"]))
-        s, R, tr = _umeyama(sites0[kok], np.asarray(kp3d_mm[t])[kok])
-        bridge_s[t] = s; bridge_R[t] = R; bridge_t[t] = tr; frame_ok[t] = True
+        kok = np.isfinite(kp3d_mm[t]).all(-1) & (kp3d_conf[t] > 0)
+        if kok.sum() >= 3:
+            _, R, _ = _umeyama(sites0[kok], np.asarray(kp3d_mm[t])[kok])
+        else:
+            R = np.eye(3, dtype=np.float32)
+        # place the FK body centroid (mean tracking site) at the 3D mask centroid
+        model_cen = sites0.mean(axis=0)
+        tr = cen3d[t] - s_const * (R @ model_cen)
+        bridge_R[t] = R; bridge_t[t] = tr; frame_ok[t] = True
     present_g = tg["present"].copy(); present_g[~frame_ok] = False
     conf_p_g = tg["conf_p"].copy(); conf_p_g[~frame_ok] = 0.0
 
