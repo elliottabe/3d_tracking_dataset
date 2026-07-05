@@ -77,7 +77,8 @@ def _mask_centroids_3d(masks, valid, cam_mats):
     return cen3d.astype(np.float32), ok
 
 
-def polish_bout(stac_h5, cfg, kp3d_mm, kp3d_conf, masks_dict, calib_dir, *, kp_scale=1.0):
+def polish_bout(stac_h5, cfg, kp3d_mm, kp3d_conf, masks_dict, calib_dir, *, kp_scale=1.0,
+                bridge_mode="mask"):
     """Refine qpos with silhouette+containment. kp3d_mm (T,K,3), masks_dict from
     load_bout_masks (fly), calib_dir has Cam*.yaml.
 
@@ -124,28 +125,40 @@ def polish_bout(stac_h5, cfg, kp3d_mm, kp3d_conf, masks_dict, calib_dir, *, kp_s
                                       n_points=sil.n_points, sdf_hw=tuple(sil.sdf_hw),
                                       bbox_margin=sil.bbox_margin)
 
-    # Mask-driven per-frame model->mm bridges.
-    cen3d, cen_ok = _mask_centroids_3d(masks_dict["masks"], masks_dict["valid"], cam_mats)
+    # Per-frame model->mm bridges. Two modes:
+    #   'mask'     : s=1/kp_scale (const), t=triangulated SAM-mask centroid, R=keypoint-Umeyama
+    #                -- robust when the 2D keypoints are unreliable (global placement anchored to
+    #                the masks). Frame usable iff its mask centroid triangulates from >=2 cams.
+    #   'keypoint' : full per-frame Umeyama(sites0, kp3d) similarity (s,R,t) -- tightest marker
+    #                fit when the keypoints are multiview-consistent (e.g. after the camera-order
+    #                fix). Frame usable iff >=3 valid keypoints.
     s_const = 1.0 / float(kp_scale)
+    cen3d, cen_ok = (_mask_centroids_3d(masks_dict["masks"], masks_dict["valid"], cam_mats)
+                     if bridge_mode == "mask" else (None, None))
     bridge_s = np.full((T,), s_const, np.float32)
     bridge_R = np.broadcast_to(np.eye(3, dtype=np.float32), (T, 3, 3)).copy()
     bridge_t = np.zeros((T, 3), np.float32)
     frame_ok = np.zeros(T, bool)
     for t in range(T):
-        if not cen_ok[t]:
-            continue
         d0 = inp["mjx_data"].replace(qpos=jnp.asarray(q_init[t]))
         d0 = stac_utils.kinematics(inp["mjx_model"], d0); d0 = stac_utils.com_pos(inp["mjx_model"], d0)
         sites0 = np.asarray(stac_utils.get_site_xpos(d0, inp["site_idxs"]))
         kok = np.isfinite(kp3d_mm[t]).all(-1) & (kp3d_conf[t] > 0)
-        if kok.sum() >= 3:
-            _, R, _ = _umeyama(sites0[kok], np.asarray(kp3d_mm[t])[kok])
-        else:
-            R = np.eye(3, dtype=np.float32)
-        # place the FK body centroid (mean tracking site) at the 3D mask centroid
-        model_cen = sites0.mean(axis=0)
-        tr = cen3d[t] - s_const * (R @ model_cen)
-        bridge_R[t] = R; bridge_t[t] = tr; frame_ok[t] = True
+        if bridge_mode == "keypoint":
+            if kok.sum() < 3:
+                continue
+            s, R, tr = _umeyama(sites0[kok], np.asarray(kp3d_mm[t])[kok])
+            bridge_s[t] = s; bridge_R[t] = R; bridge_t[t] = tr; frame_ok[t] = True
+        else:  # 'mask'
+            if not cen_ok[t]:
+                continue
+            if kok.sum() >= 3:
+                _, R, _ = _umeyama(sites0[kok], np.asarray(kp3d_mm[t])[kok])
+            else:
+                R = np.eye(3, dtype=np.float32)
+            model_cen = sites0.mean(axis=0)           # place FK body centroid at 3D mask centroid
+            tr = cen3d[t] - s_const * (R @ model_cen)
+            bridge_R[t] = R; bridge_t[t] = tr; frame_ok[t] = True
     present_g = tg["present"].copy(); present_g[~frame_ok] = False
     conf_p_g = tg["conf_p"].copy(); conf_p_g[~frame_ok] = 0.0
 
