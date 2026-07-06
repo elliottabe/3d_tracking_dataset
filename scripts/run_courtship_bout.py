@@ -34,7 +34,8 @@ from omegaconf import DictConfig
 from jarvis_jax.cse.courtship_resume import (
     atomic_save_npz, atomic_save_json, stage_done, mark_done, bout_complete)
 from jarvis_jax.cse.courtship_bout_masks import load_bout_masks, verify_mask_camera_order
-from jarvis_jax.cse.courtship_predict_2d import load_detector, predict_bout_2d
+from jarvis_jax.cse.courtship_predict_2d import (
+    load_detector, predict_bout_2d, reorder_detector_to_model)
 from jarvis_jax.cse.courtship_triangulate import triangulate_keypoints
 from jarvis_jax.cse.courtship_scale import compute_trunk_scale
 from jarvis_jax.cse.courtship_stac import fit_offsets_once, ik_only_bout
@@ -323,6 +324,12 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
         finally:
             for cap in caps:
                 cap.release()
+        # The detector emits channels in its training (tracking/COCO) order, which
+        # is NOT the XML/model order the rest of the pipeline (triangulation, STAC,
+        # silhouette IK, QC) assumes. Reorder O -> model order here so kp2d.npz and
+        # every downstream stage are consistently in cfg.model.KP_NAMES order.
+        kp2d, conf = reorder_detector_to_model(
+            kp2d, conf, list(cfg.detector.kp_names), list(cfg.model.KP_NAMES))
         atomic_save_npz(kp2d_path, kp2d=kp2d, conf=conf)
     with np.load(kp2d_path) as z:
         kp2d, conf = z["kp2d"], z["conf"]

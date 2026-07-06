@@ -23,6 +23,47 @@ def load_detector(ckpt: str, num_keypoints: int = 50):
     return vit
 
 
+def detector_to_model_perm(detector_kp_names, model_kp_names):
+    """Permutation mapping detector output channels -> model/pipeline (XML) order.
+
+    The retrained ViTPose emits keypoints in the tracking/COCO training order
+    ``detector_kp_names`` (e.g. Antenna_Base, EyeL, EyeR, Scutellum, ...,
+    all-left-legs then all-right-legs). The rest of the pipeline (triangulation,
+    STAC, silhouette IK, QC) indexes channels by ``model_kp_names`` == the XML
+    site order (cfg.model.KP_NAMES). These orders DIFFER, so the detector output
+    must be reordered before it enters the pipeline -- otherwise every channel is
+    mapped to the wrong model site (scrambled/flipped fits).
+
+    Returns ``perm`` s.t. ``kp_model[..., k, :] = kp_detector[..., perm[k], :]``.
+    Fails loud (ValueError) if the two name sets differ -- a silent mismatch here
+    is exactly the class of bug this guards against.
+    """
+    det = list(detector_kp_names); mod = list(model_kp_names)
+    if set(det) != set(mod):
+        missing = sorted(set(mod) - set(det)); extra = sorted(set(det) - set(mod))
+        raise ValueError(
+            "detector kp_names and model KP_NAMES are not the same set of "
+            f"landmarks -- cannot reorder. in model not detector: {missing}; "
+            f"in detector not model: {extra}")
+    di = {n: i for i, n in enumerate(det)}
+    return [di[n] for n in mod]
+
+
+def reorder_detector_to_model(kp2d, conf, detector_kp_names, model_kp_names):
+    """Reorder detector output (kp2d (...,K,2), conf (...,K)) from the detector's
+    channel order into model/XML order. K==0 (empty bout) is passed through.
+    Fails loud if K disagrees with the name lists."""
+    K = kp2d.shape[-2]
+    if K == 0:
+        return kp2d, conf
+    if K != len(model_kp_names) or K != len(detector_kp_names):
+        raise ValueError(
+            f"keypoint count {K} != detector names ({len(detector_kp_names)}) / "
+            f"model names ({len(model_kp_names)})")
+    perm = detector_to_model_perm(detector_kp_names, model_kp_names)
+    return kp2d[..., perm, :], conf[..., perm]
+
+
 def peaks_and_conf(hm):
     """hm (B,Hh,Wh,K) logits -> (kp2d_crop (B,K,2) in 448px, conf (B,K) peak value)."""
     kp = heatmaps_to_keypoints(hm, in_size=448)               # (B,K,2)

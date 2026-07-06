@@ -222,6 +222,19 @@ def _records_for_fly_dir(resolved, rt, cams, gcfg, rec_tag, fly_dir, out_h5, kp2
             f"{masks['masks'].shape[0]} ({mask_npz}); stale/mismatched artifact "
             f"-- delete it and rerun this bout/fly.")
 
+    # NOTE (keypoint-order footgun -- BEFORE un-shelving the finetune path):
+    #   kp3d_mm (and, after the O->model reorder in run_courtship_bout, kp2d.npz)
+    #   are in cfg.model.KP_NAMES == XML SITE order. So mesh2d/det/labels here are
+    #   all XML-order -> gating below is internally consistent. BUT the pseudo-label
+    #   COCO written from `labels` is therefore XML-order, while the REAL red_data
+    #   COCO the detector trains on is in the detector's tracking order O (see
+    #   configs/detector/vitpose_v3.yaml kp_names). Mixing the two orders in
+    #   ConcatV3 would train the detector on contradictory channel semantics.
+    #   FIX before enabling: emit pseudo-labels in order O (apply the inverse of
+    #   courtship_predict_2d.detector_to_model_perm to `labels` here), OR rebuild
+    #   real red_data in XML order. Also: load_bout_masks above is called WITHOUT
+    #   expected_cameras/verify_mask_camera_order (unlike run_courtship_bout) --
+    #   add that guard here too when un-shelving.
     mesh2d = reproject_sites(rt, kp3d_mm)
     labels, _ = gate_pseudolabels(mesh2d, det, conf, pf, masks["valid"], cfg=gcfg)
 
