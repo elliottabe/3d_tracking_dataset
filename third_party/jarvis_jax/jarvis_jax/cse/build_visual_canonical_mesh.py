@@ -29,8 +29,18 @@ GT = mujoco.mjtGeom
 
 
 def _watertight_part(me: trimesh.Trimesh) -> trimesh.Trimesh:
-    """Close seam gaps -> watertight, preserving geometry (no voxel remesh)."""
+    """Close seam gaps -> watertight, preserving geometry (no voxel remesh).
+
+    merge_vertices() FIRST: the MuJoCo visual geoms load as unwelded triangle
+    'soups' (each triangle has its own copy of shared-edge vertices), so every
+    edge is a boundary edge and fill_holes cannot stitch the surface (it fans
+    degenerate triangles from a hub -> holey, e.g. the old wing blade had 11k
+    open edges / 380 holes). Welding coincident vertices restores the shared
+    topology, after which the part is genuinely closed (the wing blade welds to
+    a watertight 252v/500f membrane) and fill_holes only closes real gaps.
+    """
     m = me.copy()
+    m.merge_vertices()
     trimesh.repair.fill_holes(m)
     trimesh.repair.fix_normals(m)
     return m
@@ -58,11 +68,15 @@ def build(xml_path, out_dir, *, name="fly_v1_visual_canonical_wings", keyframe=0
     voff = 0
     n_watertight = 0
 
-    def _add(g, subdiv=0.0):
+    def _add(g, n_subdiv=0):
         nonlocal voff, n_watertight
         mg = _mesh_geom(model, g)
-        if subdiv > 0:                       # densify low-poly parts (wings) so their
-            mg = mg.subdivide_to_size(subdiv)  # projected triangles tile -> solid fill
+        mg.merge_vertices()                   # weld the unwelded soup -> coherent surface
+        for _ in range(int(n_subdiv)):        # densify low-poly wings so the projected
+            mg = mg.subdivide()               # verts tile -> solid silhouette fill.
+            # UNIFORM midpoint subdivide (not subdivide_to_size): it splits every edge
+            # at its shared midpoint, so the thin blade stays WATERTIGHT. subdivide_to_size
+            # splits per-triangle and re-introduces T-junctions (~4k open edges).
         me = _watertight_part(mg)
         n_watertight += int(me.is_watertight)
         R = data.geom_xmat[g].reshape(3, 3)
@@ -79,7 +93,8 @@ def build(xml_path, out_dir, *, name="fly_v1_visual_canonical_wings", keyframe=0
         _add(g)
     n_bodyleg = voff
     for g in wing_geoms:
-        _add(g, subdiv=0.006)   # subdivide the membrane blade so it fills (like collision)
+        _add(g, n_subdiv=2)     # 2x uniform subdivide: watertight blade, ~4k verts/wing,
+                                # median edge ~0.0018 (fps_wing subsamples 100 for the solve)
 
     Vw = np.concatenate(Vw).astype(np.float32)
     Vl = np.concatenate(Vl).astype(np.float32)
