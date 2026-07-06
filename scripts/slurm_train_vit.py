@@ -108,6 +108,8 @@ set -x
 source ~/.bashrc
 micromamba activate {conda_env}
 unset LD_LIBRARY_PATH                       # let JAX use its bundled CUDA wheels
+unset JAX_PLATFORMS                         # NEVER inherit JAX_PLATFORMS=cpu from the submit env
+                                            # (sbatch --export=ALL) -- that silently trains on CPU
 export XLA_PYTHON_CLIENT_MEM_FRACTION=0.9
 echo "Node: $SLURMD_NODENAME  job: $SLURM_JOB_ID"
 nvidia-smi -L
