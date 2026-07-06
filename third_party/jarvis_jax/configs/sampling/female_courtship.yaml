@@ -1,0 +1,7 @@
+# @package sampling
+# Oversample the under-represented female-courtship class (~2.2% of train) so it
+# reaches ~20% of samples. Pair with the richer aug (blur/noise/pc_color) so the
+# ~11x repeats of the 426 female-courtship anns are diversified, not memorised.
+sex: female
+behavior: courtship
+factor: 11

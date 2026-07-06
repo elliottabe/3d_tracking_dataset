@@ -152,6 +152,61 @@ def photometric_batch(key, img4_u8, brightness, contrast, gamma):
     return jnp.concatenate([rgb, img4_u8[..., 3:]], axis=-1)
 
 
+def _gauss_kernel2d(ksize, sigma):
+    ax = jnp.arange(ksize) - (ksize - 1) / 2.0
+    g = jnp.exp(-(ax ** 2) / (2.0 * sigma ** 2)); g = g / g.sum()
+    return jnp.outer(g, g)                                   # (k,k)
+
+
+def gaussian_blur_batch(key, img4_u8, blur_max, ksize=5, sigma=1.0):
+    """Per-sample variable-strength Gaussian blur on RGB (channels 0-2). A fixed
+    (ksize,sigma) blur is lerped in by a per-sample amount alpha in [0, blur_max]
+    (alpha=0 -> identity), so a single kernel gives a range of blur without a
+    per-sample variable kernel. Mask channel untouched. Robustness to motion
+    blur / defocus on fast courtship frames."""
+    if blur_max <= 0.0:
+        return img4_u8
+    B = img4_u8.shape[0]
+    rgb = img4_u8[..., :3].astype(jnp.float32)
+    k2 = _gauss_kernel2d(ksize, sigma)
+    ker = jnp.broadcast_to(k2[:, :, None, None], (ksize, ksize, 1, 3))
+    blurred = jax.lax.conv_general_dilated(
+        rgb, ker, window_strides=(1, 1), padding="SAME",
+        dimension_numbers=("NHWC", "HWIO", "NHWC"), feature_group_count=3)
+    alpha = jax.random.uniform(key, (B, 1, 1, 1), minval=0.0, maxval=blur_max)
+    out = (1.0 - alpha) * rgb + alpha * blurred
+    rgb_u8 = jnp.clip(jnp.round(out), 0, 255).astype(img4_u8.dtype)
+    return jnp.concatenate([rgb_u8, img4_u8[..., 3:]], axis=-1)
+
+
+def gaussian_noise_batch(key, img4_u8, noise_scale):
+    """Per-sample additive Gaussian sensor noise on RGB (channels 0-2). Per-sample
+    std in [0, noise_scale] (in [0,1] image units; matches JARVIS scale ~0.02).
+    Mask channel untouched."""
+    if noise_scale <= 0.0:
+        return img4_u8
+    B = img4_u8.shape[0]
+    k1, k2 = jax.random.split(key)
+    scale = jax.random.uniform(k1, (B, 1, 1, 1), minval=0.0, maxval=noise_scale)
+    rgb = img4_u8[..., :3].astype(jnp.float32) / 255.0
+    rgb = jnp.clip(rgb + jax.random.normal(k2, rgb.shape) * scale, 0.0, 1.0)
+    rgb_u8 = jnp.clip(jnp.round(rgb * 255.0), 0, 255).astype(img4_u8.dtype)
+    return jnp.concatenate([rgb_u8, img4_u8[..., 3:]], axis=-1)
+
+
+def per_channel_multiply_batch(key, img4_u8, pc_color):
+    """Per-sample per-channel colour multiply on RGB (channels 0-2): each channel
+    scaled by an independent factor in [1-pc_color, 1+pc_color] (JARVIS
+    PER_CHANNEL_MULTIPLY, [0.8,1.2] -> pc_color=0.2). Mask channel untouched."""
+    if pc_color <= 0.0:
+        return img4_u8
+    B = img4_u8.shape[0]
+    f = jax.random.uniform(key, (B, 1, 1, 3), minval=1.0 - pc_color, maxval=1.0 + pc_color)
+    rgb = img4_u8[..., :3].astype(jnp.float32) * f
+    rgb_u8 = jnp.clip(jnp.round(rgb), 0, 255).astype(img4_u8.dtype)
+    return jnp.concatenate([rgb_u8, img4_u8[..., 3:]], axis=-1)
+
+
 @dataclasses.dataclass(frozen=True)
 class AugParams:
     enabled: bool = True
@@ -165,6 +220,10 @@ class AugParams:
     brightness: float = 0.2
     contrast: float = 0.2
     gamma: float = 0.2
+    # colour/noise robustness (match JARVIS-HybridNet's blur/noise/per-channel set)
+    blur_max: float = 0.5      # max lerp toward a Gaussian-blurred copy (0 disables)
+    noise_scale: float = 0.02  # max additive-noise std in [0,1] image units (0 disables)
+    pc_color: float = 0.2      # per-channel multiply half-range (0 disables)
 
 
 def augment_batch(key, img4_u8, kp_xy, vis, params, lr_swap, heatmap_size=224):
@@ -172,7 +231,7 @@ def augment_batch(key, img4_u8, kp_xy, vis, params, lr_swap, heatmap_size=224):
     params.enabled is False. Order: affine -> flip -> cutout -> photometric."""
     if not params.enabled:
         return img4_u8, kp_xy, vis
-    kg, kf, kc, kp_ = jax.random.split(key, 4)
+    kg, kf, kc, kp_, kb, kn, kpc = jax.random.split(key, 7)
     img, kp, vis = affine_batch(
         kg, img4_u8, kp_xy, vis, rot_deg=params.rot_deg,
         scale_min=params.scale_min, scale_max=params.scale_max,
@@ -180,4 +239,7 @@ def augment_batch(key, img4_u8, kp_xy, vis, params, lr_swap, heatmap_size=224):
     img, kp, vis = flip_batch(kf, img, kp, vis, lr_swap, params.flip_p, heatmap_size)
     img = cutout_batch(kc, img, params.cutout_n, params.cutout_frac)
     img = photometric_batch(kp_, img, params.brightness, params.contrast, params.gamma)
+    img = gaussian_blur_batch(kb, img, params.blur_max)
+    img = gaussian_noise_batch(kn, img, params.noise_scale)
+    img = per_channel_multiply_batch(kpc, img, params.pc_color)
     return img, kp, vis

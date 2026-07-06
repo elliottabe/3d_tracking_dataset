@@ -38,11 +38,13 @@ from jarvis_jax.train.checkpoint import make_manager, save_step, restore_latest
 DEFAULT_MAE_NPZ = "/gscratch/portia/eabe/data/Johnson_lab/mae_vitb.npz"
 
 
-def _epochs(ds, batch_size, base_seed):
-    """Infinite stream of batches, reshuffled each epoch."""
+def _epochs(ds, batch_size, base_seed, weights=None):
+    """Infinite stream of batches, reshuffled each epoch (or weighted-resampled
+    each epoch when `weights` is given)."""
     epoch = 0
     while True:
-        yield from batches(ds, batch_size, shuffle=True, seed=base_seed + epoch)
+        yield from batches(ds, batch_size, shuffle=True, seed=base_seed + epoch,
+                           weights=weights)
         epoch += 1
 
 
@@ -50,7 +52,7 @@ def run_training(root, *, out_dir, mae_npz=DEFAULT_MAE_NPZ, tcfg=None,
                  vitpose_cfg=None, aug_params=None,
                  val_recording="2026_05_27_11_56_05",
                  log_every=50, eval_every=500, smoke=False,
-                 ckpt_dir=None, save_every=500):
+                 ckpt_dir=None, save_every=500, oversample=None):
     cfg = vitpose_cfg if vitpose_cfg is not None else ViTPoseConfig()
     tcfg = tcfg or TrainConfig()
     if smoke:
@@ -103,7 +105,21 @@ def run_training(root, *, out_dir, mae_npz=DEFAULT_MAE_NPZ, tcfg=None,
     val_ds = V3Dataset(root, "val", recordings=[val_recording])
     val_ds_all = V3Dataset(root, "val")     # full val = the truthful headline metric
 
-    host_stream = _epochs(train_ds, tcfg.batch_size, tcfg.seed)
+    # Weighted sampling: oversample the under-represented target (sex, behavior)
+    # class (e.g. female-courtship, ~2.2% of train) by `factor`. None -> uniform.
+    weights = None
+    if oversample is not None and float(oversample.get("factor", 1.0)) > 1.0:
+        weights = train_ds.sampling_weights(
+            oversample.get("sex"), oversample.get("behavior"),
+            float(oversample["factor"]))
+        n_tgt = int(sum(
+            (oversample.get("sex") in (None, s)) and
+            (oversample.get("behavior") in (None, b))
+            for s, b in zip(train_ds.sex, train_ds.behavior)))
+        print(f"weighted sampling: {n_tgt}/{len(train_ds)} anns match "
+              f"(sex={oversample.get('sex')}, behavior={oversample.get('behavior')}) "
+              f"@ {oversample['factor']}x -> ~{100*weights[weights>weights.min()].sum():.1f}% of samples")
+    host_stream = _epochs(train_ds, tcfg.batch_size, tcfg.seed, weights=weights)
     dev_stream = prefetch(host_stream, mesh, depth=2)
 
     final_loss = 0.0
@@ -143,6 +159,11 @@ def main_from_cfg(cfg):
     model_node = cfg.model.get("vitpose", cfg.model)
     vitpose_cfg = build_dataclass(ViTPoseConfig, model_node)
     aug_params = build_dataclass(AugParams, cfg.aug)
+    # Optional weighted oversampling of an under-represented (sex, behavior) class.
+    oversample = None
+    if "sampling" in cfg and cfg.sampling is not None:
+        from omegaconf import OmegaConf
+        oversample = OmegaConf.to_container(cfg.sampling, resolve=True)
     run_dir = run_dir_for(cfg)
     return run_training(
         cfg.paths.data_root,
@@ -154,6 +175,7 @@ def main_from_cfg(cfg):
         smoke=bool(cfg.train.get("smoke", False)),
         ckpt_dir=os.path.join(run_dir, "ckpt"),
         save_every=cfg.train.save_every,
+        oversample=oversample,
     )
 
 

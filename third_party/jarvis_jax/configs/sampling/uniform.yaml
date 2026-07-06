@@ -1,0 +1,5 @@
+# @package sampling
+# Uniform sampling (no oversampling). factor<=1 => weighted sampler disabled.
+sex: null
+behavior: null
+factor: 1

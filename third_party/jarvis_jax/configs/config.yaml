@@ -11,6 +11,7 @@ defaults:
   - sam3: default
   - predict_session: default
   - aug: default
+  - sampling: uniform
 
 run_id: run
 note: ''

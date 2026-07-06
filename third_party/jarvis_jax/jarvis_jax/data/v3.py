@@ -31,6 +31,8 @@ class V3Dataset:
         self.keypoints = []
         self.ann_ids = []
         self.img_wh = []
+        self.sex = []          # per-annotation "male"/"female"/"unknown" (for weighted sampling)
+        self.behavior = []     # per-annotation "general"/"courtship"/"grooming"/"unknown"
         for a in coco["annotations"]:
             fn = id2file[a["image_id"]]
             if recordings is not None and not any(
@@ -42,9 +44,24 @@ class V3Dataset:
                 np.asarray(a["keypoints"], dtype=np.float32).reshape(-1, 3))
             self.ann_ids.append(int(a["id"]))
             self.img_wh.append(id2wh[a["image_id"]])
+            self.sex.append(a.get("sex", "unknown"))
+            self.behavior.append(a.get("behavior", "unknown"))
 
     def __len__(self):
         return len(self.file_names)
+
+    def sampling_weights(self, target_sex, target_behavior, factor):
+        """Per-annotation sampling weights (sum-normalised): annotations whose
+        (sex, behavior) match the target get `factor`x the base weight of 1,
+        everything else 1. `target_sex`/`target_behavior` may be None to match
+        any value on that axis. Used to oversample the under-represented
+        female-courtship class (2.2% of train) during weighted sampling."""
+        w = np.ones(len(self), dtype=np.float64)
+        for i in range(len(self)):
+            if ((target_sex is None or self.sex[i] == target_sex) and
+                    (target_behavior is None or self.behavior[i] == target_behavior)):
+                w[i] = float(factor)
+        return w / w.sum()
 
     def _load_mask(self, file_name, ann_id, img_w, img_h):
         npz_path = os.path.join(
@@ -84,11 +101,21 @@ class V3Dataset:
         return img4, kp_xy.astype(np.float32), vis
 
 
-def batches(ds, batch_size, *, shuffle=True, seed=0, drop_last=True):
+def batches(ds, batch_size, *, shuffle=True, seed=0, drop_last=True, weights=None):
+    """Yield (imgs, kps, viss) batches over the dataset for one epoch.
+
+    weights: optional (n,) sum-normalised per-annotation sampling probabilities
+    (e.g. from ds.sampling_weights). When given, one epoch draws n indices WITH
+    REPLACEMENT from `weights` (oversampling the rare class); when None, a plain
+    uniform shuffle (each annotation once)."""
     n = len(ds)
-    idx = np.arange(n)
-    if shuffle:
-        np.random.default_rng(seed).shuffle(idx)
+    rng = np.random.default_rng(seed)
+    if weights is not None:
+        idx = rng.choice(n, size=n, replace=True, p=weights)
+    elif shuffle:
+        idx = np.arange(n); rng.shuffle(idx)
+    else:
+        idx = np.arange(n)
     stop = (n // batch_size) * batch_size if drop_last else n
     for s in range(0, stop, batch_size):
         sel = idx[s:s + batch_size]

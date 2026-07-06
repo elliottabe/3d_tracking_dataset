@@ -146,3 +146,45 @@ def test_aug_config_composes():
     with initialize_config_dir(version_base=None, config_dir=CONFIG_DIR):
         cfg = compose(config_name="config", overrides=["paths=hyak", "aug=default"])
     assert cfg.aug.enabled is True and cfg.aug.rot_deg == 30 and cfg.aug.flip_p == 0.5
+    # new colour/noise robustness params present
+    assert cfg.aug.blur_max == 0.5 and cfg.aug.noise_scale == 0.02 and cfg.aug.pc_color == 0.2
+
+
+# --- new colour/noise augmentations (blur / gaussian-noise / per-channel colour) ---
+from jarvis_jax.data.augment import (
+    gaussian_blur_batch, gaussian_noise_batch, per_channel_multiply_batch)
+
+
+def _rgb_img(seed=7):
+    rng = np.random.RandomState(seed)
+    return jnp.asarray(rng.randint(0, 256, (3, 24, 24, 4), dtype=np.uint8))
+
+
+def test_gaussian_blur_disabled_is_identity_and_keeps_mask():
+    img = _rgb_img()
+    assert jnp.array_equal(gaussian_blur_batch(jax.random.PRNGKey(0), img, 0.0), img)
+    out = gaussian_blur_batch(jax.random.PRNGKey(1), img, 0.5)
+    assert out.shape == img.shape and out.dtype == jnp.uint8
+    assert not jnp.array_equal(out[..., :3], img[..., :3])   # RGB changed
+    assert jnp.array_equal(out[..., 3], img[..., 3])          # mask intact
+    # blur reduces high-frequency energy (per-pixel variance) on average
+    assert float(out[..., :3].astype(jnp.float32).var()) <= float(img[..., :3].astype(jnp.float32).var())
+
+
+def test_gaussian_noise_disabled_is_identity_and_keeps_mask():
+    img = _rgb_img(8)
+    assert jnp.array_equal(gaussian_noise_batch(jax.random.PRNGKey(0), img, 0.0), img)
+    out = gaussian_noise_batch(jax.random.PRNGKey(2), img, 0.05)
+    assert out.shape == img.shape and out.dtype == jnp.uint8
+    assert int(out[..., :3].max()) <= 255 and int(out[..., :3].min()) >= 0
+    assert not jnp.array_equal(out[..., :3], img[..., :3])
+    assert jnp.array_equal(out[..., 3], img[..., 3])
+
+
+def test_per_channel_multiply_disabled_is_identity_and_keeps_mask():
+    img = _rgb_img(9)
+    assert jnp.array_equal(per_channel_multiply_batch(jax.random.PRNGKey(0), img, 0.0), img)
+    out = per_channel_multiply_batch(jax.random.PRNGKey(3), img, 0.2)
+    assert out.shape == img.shape and out.dtype == jnp.uint8
+    assert not jnp.array_equal(out[..., :3], img[..., :3])
+    assert jnp.array_equal(out[..., 3], img[..., 3])

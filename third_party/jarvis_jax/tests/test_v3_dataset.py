@@ -49,3 +49,49 @@ def test_batches_stacks_and_is_deterministic():
     assert vis.shape == (2, 50)
     img4b, _, _ = next(batches(ds, batch_size=2, shuffle=True, seed=0))
     assert np.array_equal(img4, img4b)
+
+
+# --- weighted sampling of the female-courtship class -----------------------------
+
+class _StubDS:
+    """Minimal stand-in exercising V3Dataset.sampling_weights without any I/O."""
+    def __init__(self, sex, behavior):
+        self.sex = sex; self.behavior = behavior
+    def __len__(self):
+        return len(self.sex)
+    sampling_weights = V3Dataset.sampling_weights
+
+
+def test_sampling_weights_boosts_target_class():
+    s = _StubDS(sex=["female", "male", "female", "unknown"],
+               behavior=["courtship", "courtship", "general", "grooming"])
+    w = s.sampling_weights("female", "courtship", 11)          # only ann0 matches
+    assert np.isclose(w.sum(), 1.0)
+    assert np.isclose(w[0], 11 / 14) and np.allclose(w[1:], 1 / 14)   # 11 + 1 + 1 + 1 = 14
+
+
+def test_sampling_weights_none_axis_matches_any():
+    s = _StubDS(sex=["female", "male", "female"],
+               behavior=["courtship", "courtship", "general"])
+    w = s.sampling_weights("female", None, 5)                  # any behavior, sex=female
+    # anns 0 and 2 are female -> weight 5 each; ann1 male -> 1. total 11
+    assert np.allclose(w, [5 / 11, 1 / 11, 5 / 11])
+
+
+@skip
+def test_train_ds_loads_sex_behavior_tags():
+    ds = V3Dataset(ROOT, "train")
+    assert len(ds.sex) == len(ds) and len(ds.behavior) == len(ds)
+    assert "female" in set(ds.sex) and "courtship" in set(ds.behavior)
+
+
+@skip
+def test_weighted_batches_oversample_female_courtship():
+    ds = V3Dataset(ROOT, "train")
+    tgt = np.array([s == "female" and b == "courtship"
+                    for s, b in zip(ds.sex, ds.behavior)])
+    base = tgt.mean()                                     # ~0.022 uniform
+    w = ds.sampling_weights("female", "courtship", 11)
+    idx = np.random.default_rng(0).choice(len(ds), size=len(ds), replace=True, p=w)
+    boosted = tgt[idx].mean()
+    assert boosted > 5 * base                             # ~0.2 vs ~0.022
