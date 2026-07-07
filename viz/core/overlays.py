@@ -3,13 +3,19 @@ the image. Non-finite / out-of-bounds points are skipped."""
 import cv2
 import numpy as np
 
+_COORD_LIMIT = 1_000_000  # far beyond any real image; keeps cv2's own clipping intact for realistic coords
+
 def _pt(u, v):
-    return (int(round(u)), int(round(v)))
+    return (int(np.clip(round(u), -_COORD_LIMIT, _COORD_LIMIT)),
+            int(np.clip(round(v), -_COORD_LIMIT, _COORD_LIMIT)))
 
 def draw_points(img, uv, color, radius=3):
+    h, w = img.shape[0], img.shape[1]
     for p in np.asarray(uv, float).reshape(-1, 2):
         if np.isfinite(p).all():
-            cv2.circle(img, _pt(*p), radius, color, -1)
+            pt = _pt(*p)
+            if 0 <= pt[0] < w and 0 <= pt[1] < h:
+                cv2.circle(img, pt, radius, color, -1)
     return img
 
 def draw_chain(img, uv_list, color, thickness=1):
@@ -27,7 +33,7 @@ def draw_mask(img, mask_bool, color, alpha=0.35, outline=True):
     m = np.asarray(mask_bool, bool)
     if m.any():
         ov = img.copy(); ov[m] = color
-        img = cv2.addWeighted(ov, alpha, img, 1 - alpha, 0)
+        cv2.addWeighted(ov, alpha, img, 1 - alpha, 0, dst=img)
         if outline:
             cnts, _ = cv2.findContours(m.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             cv2.drawContours(img, cnts, -1, color, 1)
