@@ -1,0 +1,21 @@
+# @package recording
+# Courtship Session1 (TWO flies), multi-recording. Same 7-camera rig as Session0;
+# num_animals=2. Target a recording by overriding recording.session_dir (a path
+# string, never misparsed), which the whole-session helper does per recording:
+#   scripts/run_free_running_session.sh \
+#     --session /gscratch/portia/eabe/data/Johnson_lab/Video_recordings/courtship/Session1 \
+#     --recording session1 --summary courtship_bouts_unified_summary.csv \
+#     --out /gscratch/portia/eabe/data/Johnson_lab/courtship
+#
+# `timestamp` MUST stay quoted (unquoted 2026_04_02_16_03_48 is parsed as an int).
+# The per-recording courtship_bouts_unified_summary.csv was copied into each video
+# dir with its fly_id column rewritten "Session1_bouts_04172026/<ts>" ->
+# "Session1/<ts>" so it matches the session tag parse_bouts filters on.
+name: Session1
+timestamp: "2026_04_02_16_03_48"
+session_dir: ${paths.data_dir_johnson}/Video_recordings/courtship/Session1/${recording.timestamp}
+predictions_dir: ${recording.session_dir}/Predictions_3D_sam3
+bouts_csv: ${recording.session_dir}/courtship_bouts_unified_summary.csv
+calib_dir: ${recording.session_dir}/calibration
+num_animals: 2
+cameras: [Cam2012630, Cam2012631, Cam2012853, Cam2012855, Cam2012857, Cam2012861, Cam2012862]

@@ -106,11 +106,13 @@ def build_script(
 set -x
 source ~/.bashrc
 micromamba activate {conda_env}
+module load cuda/12.9.1                      # batch nodes don't expose libcuda by default -> JAX falls back to CPU without this
 unset LD_LIBRARY_PATH                       # let JAX use its bundled CUDA wheels
 unset JAX_PLATFORMS                         # NEVER inherit JAX_PLATFORMS=cpu from the submit env
                                             # (sbatch --export=ALL) -- that silently trains on CPU
 export XLA_PYTHON_CLIENT_MEM_FRACTION=0.9
 echo "Node: $SLURMD_NODENAME  job: $SLURM_JOB_ID"
+nvidia-smi -L
 nvidia-smi -L
 cd {pkg_dir}
 python -u -c "import jax; print('jax devices:', jax.device_count())"

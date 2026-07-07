@@ -143,17 +143,30 @@ def polish_bout(stac_h5, cfg, kp3d_mm, kp3d_conf, masks_dict, calib_dir, *, kp_s
         d0 = inp["mjx_data"].replace(qpos=jnp.asarray(q_init[t]))
         d0 = stac_utils.kinematics(inp["mjx_model"], d0); d0 = stac_utils.com_pos(inp["mjx_model"], d0)
         sites0 = np.asarray(stac_utils.get_site_xpos(d0, inp["site_idxs"]))
-        kok = np.isfinite(kp3d_mm[t]).all(-1) & (kp3d_conf[t] > 0)
+        # Require finite FK sites too: STAC can emit NaN qpos on sparse frames
+        # (-> NaN sites0), which would make _umeyama's SVD non-convergent. Those
+        # frames are simply left un-bridged (frame_ok stays False -> NaN output),
+        # matching the "None bridge -> NaN frame" contract downstream.
+        kok = (np.isfinite(kp3d_mm[t]).all(-1) & (kp3d_conf[t] > 0)
+               & np.isfinite(sites0).all(-1))
         if bridge_mode == "keypoint":
             if kok.sum() < 3:
                 continue
-            s, R, tr = _umeyama(sites0[kok], np.asarray(kp3d_mm[t])[kok])
+            try:
+                s, R, tr = _umeyama(sites0[kok], np.asarray(kp3d_mm[t])[kok])
+            except np.linalg.LinAlgError:
+                continue
+            if not (np.isfinite(s) and np.isfinite(R).all() and np.isfinite(tr).all()):
+                continue
             bridge_s[t] = s; bridge_R[t] = R; bridge_t[t] = tr; frame_ok[t] = True
         else:  # 'mask'
             if not cen_ok[t]:
                 continue
             if kok.sum() >= 3:
-                _, R, _ = _umeyama(sites0[kok], np.asarray(kp3d_mm[t])[kok])
+                try:
+                    _, R, _ = _umeyama(sites0[kok], np.asarray(kp3d_mm[t])[kok])
+                except np.linalg.LinAlgError:
+                    R = np.eye(3, dtype=np.float32)
             else:
                 R = np.eye(3, dtype=np.float32)
             model_cen = sites0.mean(axis=0)           # place FK body centroid at 3D mask centroid

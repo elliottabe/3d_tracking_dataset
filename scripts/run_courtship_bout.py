@@ -23,6 +23,7 @@ import os
 os.environ.setdefault("MUJOCO_GL", "egl")
 os.environ.setdefault("PYOPENGL_PLATFORM", "egl")
 
+import sys
 import glob
 import json
 import re
@@ -37,13 +38,13 @@ from jarvis_jax.cse.courtship_bout_masks import load_bout_masks, verify_mask_cam
 from jarvis_jax.cse.courtship_predict_2d import (
     load_detector, predict_bout_2d, reorder_detector_to_model)
 from jarvis_jax.cse.courtship_triangulate import triangulate_keypoints
+from jarvis_jax.cse.courtship_filter import filter_bout_kp3d
 from jarvis_jax.cse.courtship_scale import compute_trunk_scale
 from jarvis_jax.cse.courtship_stac import fit_offsets_once, ik_only_bout
 from jarvis_jax.cse.courtship_polish import polish_bout
 from jarvis_jax.cse.outputs import build_fly_outputs
 from jarvis_jax.cse.qc import qc_report
 from jarvis_jax.cse.reproj_video import write_camera_video
-from jarvis_jax.cse.mesh_decimate import decimate_mesh_npz
 from jarvis_jax.predict.sam3_driver import parse_bouts, session_tag_for
 
 
@@ -128,7 +129,7 @@ def one_cam_frames(video_path, start, T):
 def project_points(cam_mat_4x3, pts_mm):
     """(4,3) camera matrix (the `p_h @ M` convention of ReprojectionTool) +
     (N,3) mm points -> (N,2) pixel coords, vectorized (no per-vertex loop --
-    the decimated-mesh overlay can have thousands of vertices per frame)."""
+    the FK'd mesh-subset overlay can have hundreds of vertices per frame)."""
     pts_mm = np.asarray(pts_mm, np.float64)
     if pts_mm.shape[0] == 0:
         return np.zeros((0, 2), np.float64)
@@ -281,30 +282,15 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
 
     kp2d_path = os.path.join(bout_dir, "kp2d.npz")
     kp3d_path = os.path.join(bout_dir, "kp3d.npz")
+    kp3d_filt_path = os.path.join(bout_dir, "kp3d_filt.npz")
     stac_h5_path = os.path.join(bout_dir, "stac_ik.h5")
     qpos_path = os.path.join(bout_dir, "qpos_refined.npz")
     outputs_h5_path = os.path.join(bout_dir, "outputs.h5")
     qc_json_path = os.path.join(bout_dir, "qc.json")
     offsets_path = os.path.join(run_root, "offsets.h5")
-    decimated_mesh_path = os.path.join(run_root, "decimated_mesh.npz")
 
     os.makedirs(run_root, exist_ok=True)
     os.makedirs(bout_dir, exist_ok=True)
-
-    # -- one-time, run-root-level precompute: whichever bout/fly gets here
-    #    first does the work; every later bout/fly reuses the artifact.
-    #    decimate_mesh_npz writes with a plain np.savez (not atomic_save_npz),
-    #    so wrap it in a tmp-then-replace ourselves to keep the same
-    #    crash-safety guarantee as every other artifact in this driver.
-    #    NOTE: the decimated mesh has no skinning (rest-pose, model units) and
-    #    is NOT used by the overlay below (see Stage E overlays comment) --
-    #    kept only as a cheap, harmless precompute in case something else
-    #    wants a lightweight rest-pose mesh later. --
-    if not stage_done(decimated_mesh_path):
-        _tmp_mesh = decimated_mesh_path + ".tmp.npz"
-        decimate_mesh_npz(cfg.silhouette.mesh_npz, _tmp_mesh,
-                          target_faces=int(cfg.outputs.decimated_faces))
-        os.replace(_tmp_mesh, decimated_mesh_path)
 
     # -- Stage A: ViTPose 2-D ---------------------------------------------------
     if not stage_done(kp2d_path):
@@ -343,6 +329,22 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
         kp3d, conf3d = z["kp3d"], z["conf3d"]
 
     kp_names = list(cfg.model.KP_NAMES)
+
+    # -- Stage B2: temporal smoothing / outlier rejection of the triangulated
+    #    kp3d BEFORE scale/offsets/STAC. Distal leg tips occasionally
+    #    mistriangulate and jump many mm; STAC then bends the leg to chase the
+    #    outlier (jittery/curling IK legs). filter_bout_kp3d reuses the
+    #    free-walking preprocessing filter (conf mask -> MAD bone-length reject
+    #    -> spike removal -> spline fill -> savgol); wings are excluded so fast
+    #    wing motion survives. Raw kp3d.npz is kept as the DLT reference; the
+    #    cleaned array (saved to kp3d_filt.npz) feeds scale, offsets, STAC and
+    #    the keypoint bridge. No-op when cfg.filtering.enabled is false.
+    if bool(cfg.get("filtering") or {}) and bool(cfg.filtering.get("enabled", False)):
+        if not stage_done(kp3d_filt_path):
+            kp3d_f = filter_bout_kp3d(kp3d, conf3d, kp_names, cfg.filtering)
+            atomic_save_npz(kp3d_filt_path, kp3d=kp3d_f, conf3d=conf3d)
+        with np.load(kp3d_filt_path) as z:
+            kp3d, conf3d = z["kp3d"], z["conf3d"]
 
     # -- scale.json: trunk Procrustes body-size scale, computed ONCE (shared
     #    across all bouts/flies, since body size is constant per fly) from
@@ -447,10 +449,10 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
     #    plus the triangulated kp3d; skip cameras whose video already exists.
     #    mesh_mm comes from outputs.h5 (Stage E's build_fly_outputs): it is
     #    the FK'd `mesh_subset` in world mm, per frame -- i.e. the actual
-    #    silhouette-refined qpos posed through the skeleton, NOT the rest-pose
-    #    (T-pose) decimated mesh. The decimated mesh has no skinning, so
-    #    rigidly bridging it (the old approach) could only ever show a
-    #    canonical T-pose fly, never the articulated fit.
+    #    qpos posed through the skeleton, NOT a rigidly-bridged rest-pose
+    #    (T-pose) mesh (the old approach). A rest-pose mesh has no skinning, so
+    #    rigidly bridging it could only ever show a canonical T-pose fly, never
+    #    the articulated fit.
     if cfg.outputs.overlay:
         d_out = ioh5.load(outputs_h5_path)
         mesh_mm_all = np.asarray(d_out["mesh_mm"])   # (T,Kmesh,3) FK'd world-mm mesh subset
@@ -482,11 +484,78 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
 
             atomic_write_mp4(overlay_path, _write)
 
+    # -- Stage F: standard QC side-by-side video (raw video + SAM mask + ViTPose
+    #    2-D skeleton  |  MuJoCo IK render + 3-D sites). Auto-generated per
+    #    (bout, fly) so every run ships a visual QC artifact next to outputs.h5.
+    #    Run as an ISOLATED SUBPROCESS (python -m viz sidebyside): the viz view
+    #    re-composes its own Hydra config, which would raise "GlobalHydra is
+    #    already initialized" if called in-process under this @hydra.main app.
+    #    Capped to outputs.sidebyside_frames to bound the MuJoCo render on long
+    #    bouts. A viz failure is logged but never fails the bout (QC, not core).
+    if bool(cfg.outputs.get("sidebyside", True)):
+        sbs_path = os.path.join(bout_dir, "sidebyside.mp4")
+        if not stage_done(sbs_path):
+            import subprocess
+            n_sbs = int(cfg.outputs.get("sidebyside_frames", 300))
+            cmd = [sys.executable, "-m", "viz", "sidebyside",
+                   "--run", run_root, "--bout", str(bout_idx), "--fly", str(fly),
+                   "--n", str(n_sbs), "--camera", "track1",
+                   "--conf", str(float(cfg.detector.conf_thresh)),
+                   "--fps", str(int(cfg.outputs.overlay_fps)), "--out", sbs_path]
+            # The parent process still holds ~90% of the GPU (jax preallocated),
+            # so the viz subprocess must NOT try to grab GPU memory. Its render is
+            # MuJoCo/EGL (a small GL context, fine alongside the parent) and needs
+            # no jax-GPU, so force jax onto CPU for the subprocess.
+            sbs_env = {**os.environ, "JAX_PLATFORMS": "cpu"}
+            r = subprocess.run(cmd, capture_output=True, text=True, env=sbs_env)
+            if r.returncode != 0:
+                print(f"[courtship] bout {bout_idx} fly{fly}: sidebyside viz FAILED "
+                      f"(non-fatal):\n{r.stderr[-1500:]}")
+            else:
+                print(f"[courtship] bout {bout_idx} fly{fly}: sidebyside -> {sbs_path}")
+
     mark_done(bout_dir)
     print(f"[courtship] bout {bout_idx} fly{fly}: DONE -> {bout_dir}")
 
 
+def _log_gpu_env():
+    """Log the physical GPUs (nvidia-smi -L) and how many JAX actually recognizes,
+    at job start. If JAX silently falls back to CPU (transient CUDA-init failure),
+    every stage runs on CPU and the job appears to hang -- this line makes that
+    obvious ('jax sees 0 GPU(s)') instead of requiring a live process autopsy."""
+    import subprocess
+    if os.environ.get("JAX_PLATFORMS", "") == "cpu":
+        print("[gpu-check] WARNING: JAX_PLATFORMS=cpu is set -> the pipeline will run on CPU "
+              "(extremely slow). If unintended, it was likely inherited via `sbatch "
+              "--export=ALL` from the submit shell; `unset JAX_PLATFORMS` in the job.", flush=True)
+    try:
+        r = subprocess.run(["nvidia-smi", "-L"], capture_output=True, text=True, timeout=30)
+        print("[gpu-check] nvidia-smi -L:\n" + (r.stdout.strip() or r.stderr.strip() or "(no output)"),
+              flush=True)
+    except Exception as e:
+        print(f"[gpu-check] nvidia-smi -L failed: {e}", flush=True)
+    try:
+        import jax
+        devs = jax.devices()
+        ngpu = sum(1 for d in devs if getattr(d, "platform", "") == "gpu")
+        print(f"[gpu-check] jax sees {ngpu} GPU(s) of {len(devs)} device(s): {devs}", flush=True)
+        if ngpu == 0 and os.environ.get("JAX_PLATFORMS", "") != "cpu":
+            # Fail fast instead of grinding on CPU for hours (which also blocks the
+            # dependent chain). On a preemptible/--requeue array this reschedules
+            # onto another node. Set JAX_PLATFORMS=cpu to intentionally allow CPU.
+            raise RuntimeError(
+                "JAX has NO GPU (fell back to CpuDevice) but a GPU is present per "
+                "nvidia-smi -L above. Batch nodes need `module load cuda/12.9.1` to "
+                "expose libcuda. Failing fast so this task requeues on another node. "
+                "Set JAX_PLATFORMS=cpu to force CPU intentionally.")
+    except RuntimeError:
+        raise
+    except Exception as e:
+        print(f"[gpu-check] jax.devices() failed: {e}", flush=True)
+
+
 def main_from_cfg(cfg: DictConfig):
+    _log_gpu_env()
     bout_ids = resolve_bout_ids(cfg)
     print(f"[courtship] processing {len(bout_ids)} bout(s): {bout_ids}")
     for bout_idx in bout_ids:

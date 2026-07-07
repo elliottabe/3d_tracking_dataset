@@ -16,6 +16,15 @@ _PKG = os.path.dirname(_HERE)
 if _PKG not in sys.path:
     sys.path.insert(0, _PKG)
 
+# Pre-load huggingface_hub.file_download BEFORE the SAM3 import chain (jarvis ->
+# timm -> torch) runs. That chain leaves `tqdm` in a state where huggingface_hub's
+# LAZY file_download import later fails with "type object 'tqdm' has no attribute
+# 'set_lock'", so hf_hub_download (needed by sam3.model_builder) becomes
+# unimportable and every SAM3 array task dies at import. Loading it here, while
+# tqdm is still intact, caches the module so sam3's later
+# `from huggingface_hub import hf_hub_download` resolves. (Verified fix.)
+import huggingface_hub.file_download  # noqa: E402,F401
+
 import hydra
 from jarvis_jax.hydra_utils import CONFIG_DIR, register_resolvers
 from jarvis_jax.predict.sam3_driver import run_sam3_masks
@@ -47,7 +56,12 @@ def main_from_cfg(cfg):
     gpus = resolve_gpus(s.gpus, env=os.environ, device_count=device_count)
     if len(gpus) > 1:
         return run_sam3_masks_multi(gpus=gpus, **common)
-    return run_sam3_masks(manifest_name=s.manifest_name, lowmem=s.lowmem, **common)
+    return run_sam3_masks(
+        manifest_name=s.manifest_name, lowmem=s.lowmem,
+        overlay=bool(s.get("overlay", True)),
+        overlay_cams=int(s.get("overlay_cams", 3)),
+        overlay_frames=int(s.get("overlay_frames", 300)),
+        **common)
 
 
 @hydra.main(version_base=None, config_path=CONFIG_DIR, config_name="config")

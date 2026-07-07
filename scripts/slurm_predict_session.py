@@ -103,7 +103,8 @@ export LD_LIBRARY_PATH="$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cu13/l
 python -u scripts/sam3_masks.py paths={paths} sam3=default \\
     sam3.session_dir={session_dir} sam3.out={masks_dir} sam3.sam3_compile=false{overrides_str}
 # --- Stage 2: JAX 3D predict (needs JAX's bundled CUDA -> unset LD_LIBRARY_PATH) ---
-unset LD_LIBRARY_PATH
+module load cuda/12.9.1                      # batch nodes don't expose libcuda by default -> JAX falls back to CPU without this
+unset LD_LIBRARY_PATH                        # let JAX use its bundled CUDA wheels
 export XLA_PYTHON_CLIENT_MEM_FRACTION=0.9
 python -u scripts/predict_session.py paths={paths} model=hybridnet predict_session=default \\
     run_id={run_name} predict_session.session_dir={session_dir} \\

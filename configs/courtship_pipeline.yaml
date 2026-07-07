@@ -51,6 +51,53 @@ scaling:
   robust_stat: median      # 'median' | 'mean'
   robust: none             # 'huber' | 'none'
 
+# Pre-STAC keypoint smoothing / outlier rejection (jarvis_jax.cse.courtship_filter
+# -> utils.keypoint_filter.filter_keypoints), applied to the triangulated kp3d
+# before scale/offsets/STAC. Distal leg tips occasionally mistriangulate and jump
+# many mm; STAC then bends the leg to chase the outlier -> jittery/curling IK legs.
+# Validated on Session0 (male): foot-tip max accel 12.5->0.9 mm, IK leg jitter ~7x
+# lower, reprojection accuracy unchanged. Wings are excluded from the confidence /
+# bone-length gates so fast wing motion (song) is preserved. Set enabled: false to
+# feed raw triangulation straight to STAC (previous behaviour).
+filtering:
+  enabled: true
+  # Keypoints matching these substrings are restored to their RAW triangulation
+  # after filtering (legs/body still get the full smoothing). savgol/isolated-
+  # spike are not wing-aware and otherwise flatten the male's rapid wing
+  # extension/song (~2x wing-speed loss); this keeps wing kinematics intact.
+  preserve_raw_patterns: ['Wing']
+  confidence:
+    enabled: true
+    threshold: 0.3
+    exclude_keypoint_patterns: ['Wing']
+  bone_length:
+    enabled: true
+    threshold_std: 5.0
+    exclude_keypoint_patterns: ['Wing']
+  centroid_jump:
+    enabled: false
+  identity_relink:
+    enabled: false
+  isolated_spike:
+    enabled: true
+    threshold_factor: 10.0
+    max_iterations: 1
+  medfilt_despike:
+    enabled: false
+  medfilt:
+    enabled: false
+  interpolation:
+    enabled: true
+    use_spline: true
+    max_edge_extrap_frames: 5
+    edge_fit_window: 5
+  confidence_smooth:
+    enabled: false
+  savgol:
+    enabled: true
+    window_length: 7    # key must be `window_length` (filter_keypoints reads that; `window` is ignored -> default 11)
+    polyorder: 2
+
 # Hydra output organization. Mirrors configs/config.yaml's pattern (run.dir tied to a
 # stable location + override_dirname exclude_keys) but points at THIS pipeline's own
 # predictions dir (${outputs.out}) instead of the STAC ${paths.base_dir}. Without this

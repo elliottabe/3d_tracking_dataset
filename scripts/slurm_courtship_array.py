@@ -4,8 +4,8 @@ Submit the courtship mesh-silhouette inference pipeline (Tasks 1-9) as a chain
 of SLURM jobs with a dependency chain:
 
     [Stage-0 SAM3 array]  ->  precompute  ->  JAX array (per bout)  ->  aggregate
-     (PyTorch, optional)      (offsets +      (run_courtship_bout.py)   (session
-                               decimated mesh)                          QC dash)
+     (PyTorch, optional)      (offsets       (run_courtship_bout.py)   (session
+                               fit-once)                               QC dash)
 
 Stage-0 SAM3 is skipped entirely when every discovered bout under
 `recording.predictions_dir` already has a `sam3_masks.npz` (the common case on
@@ -101,6 +101,7 @@ def build_sam3_array_script(
     idxs: list[int],
     session_dir: str,
     masks_out: str,
+    num_animals: int = 2,
     dependency: str = "",
 ) -> str:
     """Stage-0 SAM3 mask+identity array (PyTorch env, cu13 CUDA libs).
@@ -134,9 +135,13 @@ source ~/.bashrc
 micromamba activate {conda_env}
 export LD_PRELOAD="$CONDA_PREFIX/lib/libstdc++.so.6"
 export LD_LIBRARY_PATH="$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cu13/lib"
+# Long bouts (2000+ frames) can OOM SAM3 via allocator fragmentation (GBs
+# reserved-but-unallocated). expandable_segments lets PyTorch reclaim them.
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 echo "Node: $SLURMD_NODENAME  job: $SLURM_JOB_ID  task: $SLURM_ARRAY_TASK_ID"
 cd {PKG_DIR}
 python -u scripts/sam3_masks.py sam3.session_dir={session_dir} sam3.out={masks_out} \\
+    sam3.num_animals={num_animals} \\
     sam3.bout_ids=${{SLURM_ARRAY_TASK_ID}} sam3.sam3_compile=false sam3.reuse_masks=true
 """
 
@@ -158,12 +163,12 @@ def build_precompute_script(
     overrides: str,
     dependency: str = "",
 ) -> str:
-    """Single (non-array) job: fit-once STAC offsets + decimated mesh.
+    """Single (non-array) job: fit-once STAC offsets.
 
     Runs run_courtship_bout.py restricted to `bout_id` (both flies) -- a real
     discovered bout id, since bouts are 1-based and non-contiguous (there is
     no bout_00000). Stages A-E are stage-checkpointed (jarvis_jax.cse.
-    courtship_resume), so this both seeds offsets.h5/decimated_mesh.npz
+    courtship_resume), so this both seeds offsets.h5
     (which every array task reads read-only) AND fully finishes that bout --
     the JAX array's task for `bout_id` then finds it already DONE and skips
     instantly.
@@ -187,9 +192,14 @@ def build_precompute_script(
 set -x
 source ~/.bashrc
 micromamba activate {conda_env}
+module load cuda/12.9.1
+export LD_PRELOAD="$CONDA_PREFIX/lib/libstdc++.so.6"   # cv2 (both stages)
 unset LD_LIBRARY_PATH                       # let JAX use its bundled CUDA wheels
+unset JAX_PLATFORMS                         # NEVER inherit JAX_PLATFORMS=cpu from the submit env
+                                            # (sbatch --export=ALL) -- that silently runs on CPU
 export XLA_PYTHON_CLIENT_MEM_FRACTION=0.9
 echo "Node: $SLURMD_NODENAME  job: $SLURM_JOB_ID"
+nvidia-smi -L
 cd {PROJECT_DIR}
 python -u scripts/run_courtship_bout.py --config-name={config_name} ++bout_ids={bout_id}{overrides}
 """
@@ -239,9 +249,14 @@ def build_jax_array_script(
 set -x
 source ~/.bashrc
 micromamba activate {conda_env}
+module load cuda/12.9.1
+export LD_PRELOAD="$CONDA_PREFIX/lib/libstdc++.so.6"   # cv2 (both stages)
 unset LD_LIBRARY_PATH                       # let JAX use its bundled CUDA wheels
+unset JAX_PLATFORMS                         # NEVER inherit JAX_PLATFORMS=cpu from the submit env
+                                            # (sbatch --export=ALL) -- that silently runs on CPU
 export XLA_PYTHON_CLIENT_MEM_FRACTION=0.9
 echo "Node: $SLURMD_NODENAME  job: $SLURM_JOB_ID  task: $SLURM_ARRAY_TASK_ID"
+nvidia-smi -L
 cd {PROJECT_DIR}
 python -u scripts/run_courtship_bout.py --config-name={config_name} ++bout_ids=${{SLURM_ARRAY_TASK_ID}}{overrides}
 """
@@ -413,13 +428,14 @@ def main():
             job_name=sam3_job, partition=sl.partition, account=sl.account,
             cpus=sl.cpus, mem=sl.mem, gpus=gpus, time_limit=sl.time,
             requeue=requeue, conda_env=sl.conda_env,
-            idxs=idxs, session_dir=session_dir, masks_out=predictions_dir)
+            idxs=idxs, session_dir=session_dir, masks_out=predictions_dir,
+            num_animals=int(cfg.recording.num_animals))
         _run("sam3", sam3_script, None)
         sam3_dep = f"afterok:{submitted['sam3']}"
     else:
         print("\nSAM3: skipped (every discovered bout already has sam3_masks.npz)")
 
-    # (c) precompute (offsets fit-once + decimated mesh), gated on SAM3.
+    # (c) precompute (offsets fit-once), gated on SAM3.
     precompute_job = f"ctprecomp_{name}"[:60]
     precompute_script = build_precompute_script(
         job_name=precompute_job, partition=sl.partition, account=sl.account,

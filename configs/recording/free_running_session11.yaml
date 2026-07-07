@@ -1,0 +1,23 @@
+# @package recording
+# Free-running SINGLE-fly recording (Session11). Same 7-camera rig + calibration
+# as courtship, so the detector/anatomy/stac/silhouette configs are unchanged;
+# the only assay difference is num_animals=1.
+#
+# `timestamp` MUST be quoted: unquoted 2026_03_03_14_32_16 is parsed by OmegaConf
+# as an int (underscores are digit separators) -> the path gets mangled. To target
+# another of the 7 Session11 recordings, override the whole session_dir (a path
+# string is never misparsed), e.g.
+#   python scripts/slurm_courtship_array.py recording=free_running_session11 \
+#       recording.session_dir=/gscratch/portia/eabe/data/Johnson_lab/Video_recordings/free_running/Session11/2026_03_03_14_10_44 \
+#       outputs.out=/gscratch/portia/eabe/data/Johnson_lab/free_running/Session11_2026_03_03_14_10_44_bouts
+# The bout summary (free_running_bout_summary.csv) was copied into each recording
+# dir from the free_running/session11 Predictions dirs; its fly_id column is
+# "Session11/<timestamp>" == the session tag, so parse_bouts selects the right rows.
+name: free_running_Session11
+timestamp: "2026_03_03_14_32_16"
+session_dir: ${paths.data_dir_johnson}/Video_recordings/free_running/Session11/${recording.timestamp}
+predictions_dir: ${recording.session_dir}/Predictions_3D_sam3
+bouts_csv: ${recording.session_dir}/free_running_bout_summary.csv
+calib_dir: ${recording.session_dir}/calibration
+num_animals: 1
+cameras: [Cam2012630, Cam2012631, Cam2012853, Cam2012855, Cam2012857, Cam2012861, Cam2012862]

@@ -7,6 +7,14 @@ JAX D3 pipeline to consume.
 import csv
 import math
 import os
+import sys
+
+# Pre-load huggingface_hub.file_download before the lazy torch/sam3 imports in
+# run_sam3_masks corrupt `tqdm` (they leave it without `set_lock`, which breaks
+# huggingface_hub's lazy file_download import and hence the hf_hub_download that
+# sam3.model_builder needs). Loading it at driver-import time (tqdm still intact)
+# caches it. See scripts/sam3_masks.py for the full rationale. (Verified fix.)
+import huggingface_hub.file_download  # noqa: F401
 
 
 def session_tag_for(session_dir: str) -> str:
@@ -268,9 +276,33 @@ def _enable_sam3_lowmem(predictor):
     return n
 
 
+def _write_mask_overlay(out, bout_idx, *, n_cams=3, n_frames=300):
+    """Standard SAM-mask QC: stacked per-camera overlay video (fly0/fly1 colored)
+    for one bout, written next to sam3_masks.npz. Runs `python -m viz maskvid` as
+    an ISOLATED subprocess (repo root as cwd so `viz` resolves; JAX off since the
+    2-D mask overlay needs no jax/mujoco) so a viz failure never fails the mask
+    job. No-op-safe: logs and returns on any error."""
+    import subprocess
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), *([os.pardir] * 4)))
+    bout_dir = os.path.join(out, f"bout_{bout_idx:05d}")
+    cmd = [sys.executable, "-m", "viz", "maskvid", "--run", out,
+           "--bout", str(bout_idx), "--n-cams", str(n_cams), "--n", str(n_frames),
+           "--out", os.path.join(bout_dir, f"maskvid_bout{bout_idx}.mp4")]
+    env = {**os.environ, "JAX_PLATFORMS": "cpu"}
+    try:
+        r = subprocess.run(cmd, cwd=repo_root, env=env, capture_output=True, text=True)
+        if r.returncode != 0:
+            print(f"[sam3] bout {bout_idx}: mask overlay FAILED (non-fatal):\n{r.stderr[-1200:]}")
+        else:
+            print(f"[sam3] bout {bout_idx}: mask overlay -> {bout_dir}/maskvid_bout{bout_idx}.mp4")
+    except Exception as e:  # never let QC viz kill the mask job
+        print(f"[sam3] bout {bout_idx}: mask overlay error (non-fatal): {e}")
+
+
 def run_sam3_masks(*, project, session_dir, bouts_csv, out, num_animals=2,
                    limit=0, bout_ids=None, reuse_masks=True, sam3=None,
-                   jarvis_root=None, manifest_name="manifest.json", lowmem=True):
+                   jarvis_root=None, manifest_name="manifest.json", lowmem=True,
+                   overlay=True, overlay_cams=3, overlay_frames=300):
     """Run SAM3 video tracking + identity over a session's bouts, writing a
     per-bout sam3_masks.npz + a session manifest.
 
@@ -426,6 +458,11 @@ def run_sam3_masks(*, project, session_dir, bouts_csv, out, num_animals=2,
         print(f"[sam3] bout {b['bout_idx']}: {st['num_frames']} frames, "
               f"mean cams valid {st['mean_cams_valid_per_frame']:.2f}, "
               f"{st['seconds']}s -> {npz_path}")
+        # Standard per-bout SAM-mask QC overlay (stacked cameras, fly0/fly1
+        # colored) written next to sam3_masks.npz. Non-fatal.
+        if overlay:
+            _write_mask_overlay(out, b["bout_idx"],
+                                n_cams=overlay_cams, n_frames=overlay_frames)
 
     manifest = build_manifest(session_dir, tag, sam3, per_bout)
     manifest_path = os.path.join(out, manifest_name)

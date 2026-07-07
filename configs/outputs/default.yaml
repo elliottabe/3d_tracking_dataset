@@ -7,4 +7,10 @@ out: ${paths.out_root}/${recording.name}_bouts
 overlay: true
 overlay_fps: 30
 mesh_subset: fps_500+wing        # for output h5 verts
-decimated_faces: 5000            # decimated mesh for overlay raster
+# Standard per-(bout,fly) QC side-by-side video: raw video+SAM mask+2D skeleton |
+# MuJoCo IK render + 3D sites. Generated as a pipeline stage (viz.views.sidebyside,
+# run as an isolated subprocess to avoid nested-Hydra init) so every run ships a
+# visual QC artifact. Capped to sidebyside_frames to bound MuJoCo render cost on
+# long bouts. Set sidebyside: false to skip.
+sidebyside: true
+sidebyside_frames: 300

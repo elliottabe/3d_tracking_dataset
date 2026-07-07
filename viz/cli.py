@@ -15,6 +15,8 @@ def _kp_qc(args):       from viz.views import kp_qc;        return kp_qc.run(arg
 def _fit_check(args):   from viz.views import fit_check;    return fit_check.run(args)
 def _reproj_video(args):from viz.views import reproj_video; return reproj_video.run(args)
 def _clip(args):        from viz.views import clip;         return clip.run(args)
+def _sidebyside(args):  from viz.views import sidebyside;   return sidebyside.run(args)
+def _maskvid(args):     from viz.views import maskvid;      return maskvid.run(args)
 
 def build_parser():
     p = argparse.ArgumentParser(prog="viz", description="Centralized 3d_tracking visualizations")
@@ -60,6 +62,33 @@ def build_parser():
     c.add_argument("--cameras", nargs="*", default=None); c.add_argument("--bout-dir")
     c.add_argument("--out", default=None); c.add_argument("--fps", type=int, default=None)
     c.set_defaults(func="_clip")
+
+    s = sub.add_parser("sidebyside", help="side-by-side (bout,fly) QC: raw video+SAM+2D | MuJoCo IK render")
+    s.add_argument("--run", help="run root (…/Session0_bouts_<date>)")
+    s.add_argument("--bout", type=int, required=True); s.add_argument("--fly", type=int, default=0)
+    s.add_argument("--start", type=int, default=0, help="segment start offset within the bout")
+    s.add_argument("--n", type=int, default=None, help="segment length in frames (default: to end)")
+    s.add_argument("--cams", nargs="*", default=None,
+                   help="restrict LEFT-camera auto-pick to these cameras")
+    s.add_argument("--camera", default=None, help="MuJoCo render camera (default: track1)")
+    s.add_argument("--conf", type=float, default=0.3, help="2D keypoint confidence threshold")
+    s.add_argument("--panel-h", dest="panel_h", type=int, default=480)
+    s.add_argument("--fps", type=int, default=30); s.add_argument("--out", default=None)
+    s.set_defaults(func="_sidebyside")
+
+    m = sub.add_parser("maskvid",
+                       help="stacked SAM-mask overlay per bout (fly0/fly1 colored) across a few cameras")
+    m.add_argument("--run", help="predictions dir (…/Predictions_3D_*), holds bout_NNNNN/sam3_masks.npz")
+    m.add_argument("--bout", type=int, required=True)
+    m.add_argument("--n", type=int, default=300, help="max frames rendered (default 300)")
+    m.add_argument("--n-cams", dest="n_cams", type=int, default=3,
+                   help="number of top-mask-pixel cameras to stack (default 3)")
+    m.add_argument("--cams", nargs="*", default=None,
+                   help="explicit camera-name list (overrides auto-pick)")
+    m.add_argument("--panel-h", dest="panel_h", type=int, default=320,
+                   help="per-camera panel height in px (default 320)")
+    m.add_argument("--fps", type=int, default=30); m.add_argument("--out", default=None)
+    m.set_defaults(func="_maskvid")
     return p
 
 def main(argv=None):

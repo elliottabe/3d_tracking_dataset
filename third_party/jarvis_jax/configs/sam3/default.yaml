@@ -12,6 +12,14 @@ lowmem: true       # bound GPU memory on long bouts: offload SAM3 per-frame
                    # outputs to CPU + trim past memory (set False to disable)
 sam3_version: sam3.1
 sam3_gpu: 0
+# Standard per-bout SAM-mask QC overlay video (viz.views.maskvid): stacks the
+# top `overlay_cams` cameras (by mask coverage) with fly0/fly1 masks colored, so
+# every mask run ships a visual QC + identity-consistency check next to
+# sam3_masks.npz. Runs as an isolated `python -m viz maskvid` subprocess (2-D
+# masks -> no jax/mujoco). Set overlay: false to skip.
+overlay: true
+overlay_cams: 3
+overlay_frames: 300
 gpus: null         # null/[] = use all visible GPUs (CUDA_VISIBLE_DEVICES, else
                    # torch.cuda.device_count()); a list like [0,1] overrides.
                    # >1 GPU -> bouts are fanned out one subprocess per GPU.

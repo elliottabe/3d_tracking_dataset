@@ -21,4 +21,4 @@ data_dir_johnson:  ${paths.base_dir}                                 # == base_d
 # code / model trees (separate root from the data)
 cwd_dir:        /gscratch/portia/${paths.user}/Research/MyRepos/3d_tracking_dataset/
 project_dir:    /gscratch/portia/${paths.user}/Research/MyRepos/
-body_model_dir: /gscratch/portia/${paths.user}/Research/MyRepos/fruitfly_body_models/
+body_model_dir: ${paths.cwd_dir}/models/

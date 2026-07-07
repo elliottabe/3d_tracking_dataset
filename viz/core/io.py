@@ -103,37 +103,54 @@ def load_data3d_csv(csv_path):
     return kp3d, conf, names, frames
 
 def write_video(out_path, frames_iter, fps=30, fourcc="mp4v"):
-    """Write an iterable/generator of BGR uint8 frames to an mp4 via
-    cv2.VideoWriter. Size is taken from the first frame.
+    """Write an iterable/generator of BGR uint8 frames to an H.264 mp4 that plays
+    everywhere (browsers, VSCode's preview, Artifacts): libx264 + yuv420p +
+    ``+faststart``. Encodes via imageio-ffmpeg's bundled ffmpeg; frames are BGR
+    (cv2 convention) and converted to RGB for the encoder. Size is taken from the
+    first frame; odd dimensions are padded to a multiple of 16 by imageio.
 
-    ``fourcc`` defaults to "mp4v" (preserving prior behavior for existing
-    callers/tests). If the requested fourcc fails to open a VideoWriter
-    (e.g. an OpenCV build without H.264 support), falls back to "mp4v"
-    with a printed warning rather than failing outright.
+    ``fourcc`` is accepted for backward compatibility but ignored: the previous
+    cv2 ``mp4v`` path produced MPEG-4 Part 2, which Chromium-based players (VSCode)
+    refuse to decode. Falls back to cv2 ``mp4v`` ONLY if ffmpeg is unavailable
+    (warns that the result may not play in VSCode/browsers).
     """
     out_dir = os.path.dirname(out_path)
     if out_dir:
         os.makedirs(out_dir, exist_ok=True)
-    writer = None
-    active_fourcc = fourcc
-    for frame in frames_iter:
-        frame = np.asarray(frame)
-        if writer is None:
-            h, w = frame.shape[0], frame.shape[1]
-            writer = cv2.VideoWriter(
-                out_path, cv2.VideoWriter_fourcc(*active_fourcc), float(fps), (w, h))
-            if not writer.isOpened() and active_fourcc != "mp4v":
-                print(f"[write_video] warning: fourcc '{fourcc}' failed to open "
-                      f"VideoWriter for {out_path}; falling back to 'mp4v'")
-                active_fourcc = "mp4v"
-                writer = cv2.VideoWriter(
-                    out_path, cv2.VideoWriter_fourcc(*active_fourcc), float(fps), (w, h))
-            if not writer.isOpened():
-                raise IOError(
-                    f"cv2.VideoWriter failed to open {out_path} with fourcc "
-                    f"'{fourcc}' (and fallback 'mp4v')")
-        writer.write(frame)
-    if writer is None:
+    frames_iter = iter(frames_iter)
+    try:
+        first = np.ascontiguousarray(np.asarray(next(frames_iter)))
+    except StopIteration:
         raise ValueError(f"write_video: frames_iter was empty; nothing written to {out_path}")
-    writer.release()
-    return out_path
+
+    def _to_rgb(f):
+        f = np.asarray(f)
+        if f.ndim == 3 and f.shape[2] == 3:
+            f = f[:, :, ::-1]  # BGR (caller/cv2 convention) -> RGB (imageio)
+        return np.ascontiguousarray(f)
+
+    try:
+        import imageio.v2 as imageio
+        writer = imageio.get_writer(
+            out_path, format="FFMPEG", fps=float(fps), codec="libx264",
+            pixelformat="yuv420p", macro_block_size=16,
+            output_params=["-movflags", "+faststart"])
+        try:
+            writer.append_data(_to_rgb(first))
+            for frame in frames_iter:
+                writer.append_data(_to_rgb(frame))
+        finally:
+            writer.close()
+        return out_path
+    except Exception as e:  # ffmpeg/imageio missing -> legacy cv2 (may not play in browsers)
+        print(f"[write_video] warning: H.264 encode via imageio failed ({e}); "
+              f"falling back to cv2 mp4v -- may not play in VSCode/browsers.")
+        h, w = first.shape[0], first.shape[1]
+        writer = cv2.VideoWriter(out_path, cv2.VideoWriter_fourcc(*"mp4v"), float(fps), (w, h))
+        if not writer.isOpened():
+            raise IOError(f"cv2.VideoWriter failed to open {out_path}")
+        writer.write(np.asarray(first))
+        for frame in frames_iter:
+            writer.write(np.asarray(frame))
+        writer.release()
+        return out_path
