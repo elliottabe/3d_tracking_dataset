@@ -5,8 +5,8 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-SUBMODULES=("stac-mjx" "third_party/JARVIS-HybridNet")
+source "$SCRIPT_DIR/common.sh"
+mapfile -t SUBMODULES < <(get_submodules)
 
 FEATURE_BRANCH="$1"
 MAIN_BRANCH="main"

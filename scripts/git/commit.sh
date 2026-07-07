@@ -5,8 +5,8 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-SUBMODULES=("stac-mjx" "third_party/JARVIS-HybridNet")
+source "$SCRIPT_DIR/common.sh"
+mapfile -t SUBMODULES < <(get_submodules)
 
 cd "$REPO_ROOT"
 
@@ -35,8 +35,10 @@ SUBMODULES_CHANGED=false
 # Commit changes in each submodule
 for submodule in "${SUBMODULES[@]}"; do
     if [ -e "$submodule/.git" ]; then
+        # Reattach to the tracking branch so the commit doesn't land on a detached HEAD.
+        ensure_on_branch "$submodule" || true
         cd "$REPO_ROOT/$submodule"
-        
+
         if ! git diff-index --quiet HEAD -- 2>/dev/null; then
             echo "[$submodule] Committing changes..."
             git add -A

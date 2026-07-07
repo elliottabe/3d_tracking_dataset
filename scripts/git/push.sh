@@ -1,12 +1,11 @@
 #!/bin/bash
-# Push commits in all repos
+# Push commits in all repos (submodules first, then main).
 # Usage: ./scripts/git/push.sh
+#
+# Deliberately does NOT use `set -e`: a failure in one repo must not stop the
+# others from being pushed. Failures are collected and reported at the end.
 
-set -e
-
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-SUBMODULES=("stac-mjx" "third_party/JARVIS-HybridNet")
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 
 cd "$REPO_ROOT"
 
@@ -15,55 +14,62 @@ echo "Pushing All Repositories"
 echo "========================================"
 echo
 
-# Push each submodule first
-for submodule in "${SUBMODULES[@]}"; do
-    if [ -e "$submodule/.git" ]; then
-        cd "$REPO_ROOT/$submodule"
-        
-        BRANCH=$(git symbolic-ref --short HEAD 2>/dev/null)
-        if [ -n "$BRANCH" ]; then
-            if git ls-remote --exit-code --heads origin "$BRANCH" &>/dev/null; then
-                UNPUSHED=$(git log "origin/$BRANCH..HEAD" --oneline | wc -l)
-            else
-                UNPUSHED=1
-            fi
-            if [ "$UNPUSHED" -gt 0 ]; then
-                echo "[$submodule] Pushing to origin/$BRANCH..."
-                git push --set-upstream origin "$BRANCH"
-                echo "  ✓ Pushed"
-            else
-                echo "[$submodule] No commits to push"
-            fi
-        else
-            echo "[$submodule] Detached HEAD - skipping"
-        fi
-        
-        cd "$REPO_ROOT"
-        echo
+FAILED=()
+
+# Push the repo in the current working directory. $1 = display label.
+push_current_repo() {
+    local label="$1" branch unpushed
+    branch="$(git symbolic-ref --short -q HEAD 2>/dev/null || true)"
+    if [ -z "$branch" ]; then
+        echo "[$label] Detached HEAD - skipping"
+        FAILED+=("$label (detached HEAD)")
+        return 0
     fi
+
+    if git ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
+        unpushed="$(git log "origin/$branch..HEAD" --oneline 2>/dev/null | wc -l | tr -d ' ')"
+    else
+        unpushed=1   # remote branch does not exist yet
+    fi
+
+    if [ "${unpushed:-0}" -gt 0 ]; then
+        echo "[$label] Pushing $unpushed commit(s) to origin/$branch..."
+        if git push --set-upstream origin "$branch"; then
+            echo "  ✓ Pushed"
+        else
+            echo "  ✗ Push failed"
+            FAILED+=("$label")
+        fi
+    else
+        echo "[$label] No commits to push"
+    fi
+}
+
+# Submodules first: reattach if detached, then push.
+mapfile -t SUBMODULES < <(get_submodules)
+for submodule in "${SUBMODULES[@]}"; do
+    [ -e "$REPO_ROOT/$submodule/.git" ] || continue
+    ensure_on_branch "$submodule" || FAILED+=("$submodule (reattach refused)")
+    cd "$REPO_ROOT/$submodule"
+    push_current_repo "$submodule"
+    cd "$REPO_ROOT"
+    echo
 done
 
-# Push main repo
+# Main repo last.
 cd "$REPO_ROOT"
-BRANCH=$(git symbolic-ref --short HEAD 2>/dev/null)
-if [ -n "$BRANCH" ]; then
-    if git ls-remote --exit-code --heads origin "$BRANCH" &>/dev/null; then
-        UNPUSHED=$(git log "origin/$BRANCH..HEAD" --oneline | wc -l)
-    else
-        UNPUSHED=1
-    fi
-    if [ "$UNPUSHED" -gt 0 ]; then
-        echo "[Main Repo] Pushing to origin/$BRANCH..."
-        git push --set-upstream origin "$BRANCH"
-        echo "  ✓ Pushed"
-    else
-        echo "[Main Repo] No commits to push"
-    fi
-else
-    echo "[Main Repo] Detached HEAD - skipping"
-fi
-
+push_current_repo "Main Repo"
 echo
+
 echo "========================================"
-echo "✓ Push Complete"
-echo "========================================"
+if [ "${#FAILED[@]}" -eq 0 ]; then
+    echo "✓ Push Complete"
+    echo "========================================"
+else
+    echo "⚠ Push finished with failures:"
+    for f in "${FAILED[@]}"; do
+        echo "   - $f"
+    done
+    echo "========================================"
+    exit 1
+fi
