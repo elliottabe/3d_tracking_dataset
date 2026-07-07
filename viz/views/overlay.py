@@ -87,8 +87,10 @@ def run(args):
     outs = vio.load_outputs(run_root, bout, fly)
     mesh_mm, kp3d_mm = outs["mesh_mm"], outs["kp3d_mm"]
     T = mesh_mm.shape[0]
-    if not (0 <= fr < T):
-        raise IndexError(f"frame {fr} out of range for bout {bout} fly {fly} (T={T})")
+    frame_ok = 0 <= fr < T
+    if not frame_ok:
+        print(f"[overlay] warning: frame {fr} out of range for bout {bout} fly {fly} "
+              f"(T={T}); rendering 'no data' tiles instead of aborting")
 
     try:
         kp2d, _conf2d = vio.load_kp2d(run_root, bout, fly)
@@ -119,21 +121,24 @@ def run(args):
 
     mm_al, bodyalign_note = None, None
     if args.bodyalign:
-        try:
-            kp3d_det, _ = vio.load_kp3d(run_root, bout, fly)
-            mm_fr, det_fr = kp3d_mm[fr], kp3d_det[fr]
-            ok = np.isfinite(mm_fr).all(-1) & np.isfinite(det_fr).all(-1)
-            b = [i for i in body_idx if i < len(ok) and ok[i]]
-            if len(b) >= 3:
-                s, R, t = umeyama(mm_fr[b], det_fr[b])
-                mm_al = s * (R @ mm_fr.T).T + t
-                bodyalign_note = f"bodyalign s={s:.3f} |t|={np.linalg.norm(t):.1f} n={len(b)}"
-            else:
-                print(f"[overlay] warning: only {len(b)} valid body sites (<3); --bodyalign skipped")
-                bodyalign_note = "bodyalign: insufficient body sites"
-        except (FileNotFoundError, OSError) as e:
-            print(f"[overlay] warning: kp3d.npz unavailable for --bodyalign ({e}); skipping")
-            bodyalign_note = "bodyalign: kp3d.npz missing"
+        if not frame_ok:
+            bodyalign_note = "bodyalign: frame out of range"
+        else:
+            try:
+                kp3d_det, _ = vio.load_kp3d(run_root, bout, fly)
+                mm_fr, det_fr = kp3d_mm[fr], kp3d_det[fr]
+                ok = np.isfinite(mm_fr).all(-1) & np.isfinite(det_fr).all(-1)
+                b = [i for i in body_idx if i < len(ok) and ok[i]]
+                if len(b) >= 3:
+                    s, R, t = umeyama(mm_fr[b], det_fr[b])
+                    mm_al = s * (R @ mm_fr.T).T + t
+                    bodyalign_note = f"bodyalign s={s:.3f} |t|={np.linalg.norm(t):.1f} n={len(b)}"
+                else:
+                    print(f"[overlay] warning: only {len(b)} valid body sites (<3); --bodyalign skipped")
+                    bodyalign_note = "bodyalign: insufficient body sites"
+            except Exception as e:
+                print(f"[overlay] warning: --bodyalign failed for bout={bout} fly={fly} frame={fr} ({e}); skipping")
+                bodyalign_note = "bodyalign: failed"
 
     cam_mats, cam_names = reproject.camera_matrices(rec["calib_dir"])
     cam_mat_idx = {n: i for i, n in enumerate(cam_names)}
@@ -149,17 +154,29 @@ def run(args):
             continue
 
         video_path = os.path.join(rec["session_dir"], f"{cam}.mp4")
-        try:
-            bgr = vio.read_frame(video_path, frame_idx)
-        except Exception as e:
-            print(f"[overlay] warning: cannot read frame {frame_idx} for {cam} ({e}); skipping tile")
-            continue
+        if frame_ok:
+            try:
+                bgr = vio.read_frame(video_path, frame_idx)
+            except Exception as e:
+                print(f"[overlay] warning: cannot read frame {frame_idx} for {cam} ({e}); skipping tile")
+                continue
+        else:
+            # fr is out of range for this bout -- frame_idx (start + fr) is not a
+            # meaningful video frame either, so don't attempt to decode it (it may
+            # be far beyond the video's length or, for negative fr, silently wrap).
+            # Use a blank placeholder sized from the container's metadata (no
+            # frame decode needed) so the "no data" note still has a tile to sit on.
+            cap = cv2.VideoCapture(video_path)
+            w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or 640
+            h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 480
+            cap.release()
+            bgr = np.zeros((h, w, 3), dtype=np.uint8)
 
         cam_mat = cam_mats[cmi]
         pts_for_crop = []
         notes = []
 
-        if "mesh" in show:
+        if "mesh" in show and frame_ok:
             try:
                 m = mesh_mm[fr]
                 m = m[np.isfinite(m).all(-1)]
@@ -171,7 +188,7 @@ def run(args):
                 print(f"[overlay] warning: mesh overlay failed for {cam}: {e}")
                 notes.append(("mesh error", vcolors.PALETTE[f"fly{fly}"]))
 
-        if "mask" in show:
+        if "mask" in show and frame_ok:
             try:
                 if masks is not None and masks["valid"][fr, ci] and masks["masks"][fr, ci].any():
                     overlays.draw_mask(bgr, masks["masks"][fr, ci], vcolors.PALETTE["mask"])
@@ -181,7 +198,7 @@ def run(args):
                 print(f"[overlay] warning: mask overlay failed for {cam}: {e}")
                 notes.append(("mask error", vcolors.PALETTE["mask"]))
 
-        if "kp" in show:
+        if "kp" in show and frame_ok:
             try:
                 if kp2d is not None and kp2d.shape[-2] > 0:
                     uv = kp2d[fr, ci]
@@ -196,7 +213,7 @@ def run(args):
                 print(f"[overlay] warning: kp overlay failed for {cam}: {e}")
                 notes.append(("kp error", vcolors.PALETTE["detector"]))
 
-        if "axis" in show:
+        if "axis" in show and frame_ok:
             try:
                 hh = kp3d_mm[fr][head_idx]
                 hh = hh[np.isfinite(hh).all(-1)]
@@ -215,7 +232,7 @@ def run(args):
                 print(f"[overlay] warning: axis overlay failed for {cam}: {e}")
                 notes.append(("axis error", _AXIS_COLOR))
 
-        if compare_mesh is not None:
+        if compare_mesh is not None and frame_ok:
             try:
                 cm = compare_mesh[fr] if fr < compare_mesh.shape[0] else np.zeros((0, 3))
                 cm = cm[np.isfinite(cm).all(-1)]
@@ -240,7 +257,8 @@ def run(args):
             allpts = np.concatenate(pts_for_crop, axis=0)
         else:
             allpts = np.array([[bgr.shape[1] / 2.0, bgr.shape[0] / 2.0]])
-            notes.append(("no data", _NODATA_COLOR))
+            note_text = "no data (frame out of range)" if not frame_ok else "no data"
+            notes.append((note_text, _NODATA_COLOR))
 
         crop, _ = layout.crop_to_points(bgr, allpts)
         overlays.legend(crop, [(cam, (0, 255, 255))] + notes)
