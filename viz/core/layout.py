@@ -6,10 +6,10 @@ def crop_to_points(img, uv, pad=55):
     p = np.asarray(uv, float).reshape(-1, 2)
     p = p[np.isfinite(p).all(1)]
     if len(p) == 0:
-        return img, (0, 0)
-    x0, y0 = np.maximum(p.min(0) - pad, 0).astype(int)
-    x1, y1 = (p.max(0) + pad).astype(int)
-    x1 = min(img.shape[1], x1); y1 = min(img.shape[0], y1)
+        return img.copy(), (0, 0)
+    H, W = img.shape[0], img.shape[1]
+    x0, y0 = np.clip(p.min(0) - pad, 0, [W, H]).astype(int)
+    x1, y1 = np.clip(p.max(0) + pad, 0, [W, H]).astype(int)
     return img[y0:y1, x0:x1].copy(), (int(x0), int(y0))
 
 def montage(tiles, cols=2):
