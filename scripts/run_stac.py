@@ -9,7 +9,7 @@ cwd=stac-mjx subprocess.
 
 Usage:
     python scripts/run_stac.py paths=hyak dataset=amputation anatomy=v1
-    python scripts/run_stac.py paths=hyak dataset=free_walking \
+    python scripts/run_stac.py paths=hyak dataset= \
         paths.data_dir=/path/to/Predictions_3D_XXXX
 """
 

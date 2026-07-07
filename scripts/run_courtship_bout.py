@@ -395,7 +395,7 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
     if not stage_done(qpos_path):
         qpos_refined, bridges = polish_bout(
             stac_h5_path, cfg, kp3d, conf3d, masks_dict, cfg.recording.calib_dir,
-            kp_scale=scale)
+            kp_scale=scale, bridge_mode=str(cfg.silhouette.get("bridge_mode", "mask")))
         bs, bR, bt, bok = bridges_to_arrays(bridges)
         atomic_save_npz(qpos_path, qpos=qpos_refined,
                         bridge_s=bs, bridge_R=bR, bridge_t=bt, bridge_ok=bok)

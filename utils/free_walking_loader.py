@@ -27,7 +27,7 @@ def _resolve_kp_idx(info: dict, kp_name: str) -> int:
     return names.index(kp_name)
 
 
-def load_free_walking_scutellum_z(
+def load__scutellum_z(
     h5_path: str | Path,
     kp_name: str = 'Scutellum',
     bout_keys: Optional[Sequence[str]] = None,
@@ -187,7 +187,7 @@ def _match_by_n_frames(
     return None
 
 
-def export_raw_free_walking_h5(
+def export_raw__h5(
     combined_h5_path: str | Path,
     out_path: str | Path,
     *,
@@ -198,7 +198,7 @@ def export_raw_free_walking_h5(
 ) -> dict:
     """Export a "raw-data only" free-walking h5 from an existing combined h5.
 
-    The input is the already-merged ``ik_output_combined_v1_free_walking.h5``.
+    The input is the already-merged ``ik_output_combined_v1_.h5``.
     All bouts are kept (no song or pair filter — free walking has no notion of
     pairs). For each bout, copies the standard raw arrays
     (``kp_data, marker_sites, xpos_egocentric, qpos, qvel, xpos, xquat,
@@ -219,9 +219,9 @@ def export_raw_free_walking_h5(
     out_path : path
         Destination path for the exported h5.
     bout_summary_csvs : sequence of paths, optional
-        ``free_walking_bouts_summary.csv`` files (one per Predictions_3D dir).
+        ``_bouts_summary.csv`` files (one per Predictions_3D dir).
     preproc_h5_paths : sequence of paths, optional
-        ``preprocessed_bout_*_free_walking.h5`` files for ``orig_keypoints``.
+        ``preprocessed_bout_*_.h5`` files for ``orig_keypoints``.
     overwrite : bool
         If False (default), raise ``FileExistsError`` when ``out_path`` exists.
     verbose : bool

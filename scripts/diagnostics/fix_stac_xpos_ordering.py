@@ -10,7 +10,7 @@ Usage:
     python fix_stac_xpos_ordering.py /path/to/base_dir [--dry-run] [--no-backup]
 
 Example:
-    python fix_stac_xpos_ordering.py /data2/users/eabe/datasets/Johnson_lab/free_walking
+    python fix_stac_xpos_ordering.py /data2/users/eabe/datasets/Johnson_lab/
 """
 
 import sys

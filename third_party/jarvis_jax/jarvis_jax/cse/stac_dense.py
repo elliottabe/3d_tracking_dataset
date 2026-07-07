@@ -104,7 +104,7 @@ def main():
     ap.add_argument("--pred-npz", default=None,
                     help="predict_full output; use PREDICTED vertices (real-world) vs GT")
     ap.add_argument("--overrides", nargs="*",
-                    default=["paths=hyak", "anatomy=v1", "dataset=free_walking"])
+                    default=["paths=hyak", "anatomy=v1", "dataset="])
     a = ap.parse_args()
 
     import hydra

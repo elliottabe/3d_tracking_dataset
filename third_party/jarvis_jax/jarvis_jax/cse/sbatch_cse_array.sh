@@ -42,7 +42,7 @@ cd "$PKG"
 python -u -m jarvis_jax.cse.run_stac_bout \
     --bout "$BOUT" --out "$WORK/${REC}/Fruitfly_ik_v1_cse.h5" \
     --stac-config-dir "$STAC_CFG" \
-    --overrides paths=hyak anatomy=v1 dataset=free_walking
+    --overrides paths=hyak anatomy=v1 dataset=
 
 python -u -m jarvis_jax.cse.cse_labels project \
     --bout "$BOUT" --stac-ik "$WORK/${REC}/Fruitfly_ik_v1_cse.h5" \

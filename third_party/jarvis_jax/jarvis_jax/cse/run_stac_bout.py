@@ -12,7 +12,7 @@ Usage (inside an sbatch GPU job, 3d_tracking env):
         --bout   <work>/<rec>_bout.h5 \
         --out    <work>/<rec>/Fruitfly_ik_v1_cse.h5 \
         --stac-config-dir /.../stac-mjx/configs \
-        --overrides paths=hyak anatomy=v1 dataset=free_walking
+        --overrides paths=hyak anatomy=v1 dataset=
 """
 from __future__ import annotations
 
@@ -78,7 +78,7 @@ def main():
     ap.add_argument("--bout", required=True)
     ap.add_argument("--out", required=True)
     ap.add_argument("--stac-config-dir", required=True)
-    ap.add_argument("--overrides", nargs="*", default=["paths=hyak", "anatomy=v1", "dataset=free_walking"])
+    ap.add_argument("--overrides", nargs="*", default=["paths=hyak", "anatomy=v1", "dataset="])
     a = ap.parse_args()
     run(a.bout, a.out, a.stac_config_dir, a.overrides)
 

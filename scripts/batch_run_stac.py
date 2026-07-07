@@ -32,7 +32,7 @@ Usage:
     python scripts/batch_run_stac.py --dataset courtship --anatomy v1
 
 Directory structure:
-    /data2/users/eabe/datasets/Johnson_lab/free_walking/
+    /data2/users/eabe/datasets/Johnson_lab//
         Predictions_3D_20260202-171900/
             preprocessed_bout_v1.h5          <- Input
             Fruitfly_fit_v1_free.h5         <- Output (fit_offsets stage)
@@ -204,7 +204,7 @@ def find_preprocessed_files(base_dir: Path, anatomy_name: str, dataset: str,
     Args:
         base_dir: Base directory containing prediction folders
         anatomy_name: Anatomy version (e.g., 'v1', 'v2')
-        dataset: Dataset name (e.g., 'free_walking', 'courtship')
+        dataset: Dataset name (e.g., '', 'courtship')
 
     Returns:
         List of (folder_path, version_name, fly_suffix) tuples.
@@ -438,9 +438,9 @@ Examples:
     parser.add_argument(
         '--dataset',
         type=str,
-        default='free_walking',
-        choices=['free_walking', 'courtship', 'stationary', 'amputation'],
-        help='Dataset type (default: free_walking)'
+        default='',
+        choices=['', 'courtship', 'stationary', 'amputation'],
+        help='Dataset type (default: )'
     )
     parser.add_argument(
         '--base-dir',

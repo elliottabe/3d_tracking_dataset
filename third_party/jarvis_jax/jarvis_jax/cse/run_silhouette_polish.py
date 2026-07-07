@@ -101,7 +101,7 @@ def soft_iou_of_verts(verts2d, mask, *, sigma: float = 1.3, splat_k: int = 2) ->
 def run_polish(
     recording, *, ik_h5, model_xml, mesh_npz, root, split="val", calib_dir=None,
     n_points=128, silhouette_weight=0.3, beta=8.0, huber_delta=0.0,
-    max_frames=0, smooth_weight=0.1, n_iter=50, out_dir,
+    max_frames=0, smooth_weight=0.0, n_iter=50, out_dir,   # dataset is NOT temporally coherent -> no temporal smoothing (see configs/silhouette)
     erode_px=8, sdf_hw=(128, 128), bbox_margin=0.4, margin=0.0,
     containment_weight=0.3, mesh_subset="fps_300",
     appendage_include=("wing", "leg", "abdomen"),
@@ -294,7 +294,7 @@ def main():
     ap.add_argument("--beta", type=float, default=8.0)
     ap.add_argument("--huber-delta", type=float, default=0.0)
     ap.add_argument("--max-frames", type=int, default=0)
-    ap.add_argument("--smooth-weight", type=float, default=0.1)
+    ap.add_argument("--smooth-weight", type=float, default=0.0)  # dataset not temporally coherent
     ap.add_argument("--n-iter", type=int, default=50)
     ap.add_argument("--out-dir", required=True)
     ap.add_argument("--containment-weight", type=float, default=0.3)

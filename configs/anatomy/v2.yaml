@@ -172,7 +172,7 @@ wing_names:
 # ===========================================================================
 model:
   MJCF_PATH: ${anatomy.mjcf_path}
-  name: 'fruitfly_V2_free_walking'
+  name: 'fruitfly_V2_'
 
   N_FRAMES_PER_CLIP: 500 # 1000 environments
 

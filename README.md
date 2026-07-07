@@ -52,7 +52,7 @@ python run_stac.py ...
 python scripts/batch_postprocess_predictions.py --anatomy v1
 
 # 4. Combine into single file
-python scripts/combine_data.py paths=workstation dataset=free_walking anatomy=v1
+python scripts/combine_data.py paths=workstation dataset= anatomy=v1
 ```
 
 See [BATCH_PROCESSING.md](BATCH_PROCESSING.md) for complete documentation.

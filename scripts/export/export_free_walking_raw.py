@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Export a "raw-data only" free-walking h5 from an existing combined free-walking
-h5 (e.g. ik_output_combined_v1_free_walking.h5).
+h5 (e.g. ik_output_combined_v1_.h5).
 
 Free-walking data has no fly0/fly1 pairing and no song-analysis filter, so
 this exporter is structurally simpler than the courtship one: it keeps every
@@ -10,11 +10,11 @@ attaches per-Predictions_3D bout-summary metadata + un-rescaled orig_keypoints
 when matching paths are supplied.
 
 Usage:
-    python scripts/export_free_walking_raw.py \\
-        /data2/.../free_walking/Data_analysis/analysis/v1/ik_output_combined_v1_free_walking.h5 \\
-        --out /data2/.../free_walking/free_walking_raw_combined_v1.h5 \\
-        --bout-summary-csvs /data2/.../free_walking/Predictions_3D_*/free_walking_bouts_summary.csv \\
-        --preproc-h5-paths /data2/.../free_walking/Predictions_3D_*/preprocessing/preprocessed_bout_v1_free_walking.h5
+    python scripts/export__raw.py \\
+        /data2/...//Data_analysis/analysis/v1/ik_output_combined_v1_.h5 \\
+        --out /data2/...//_raw_combined_v1.h5 \\
+        --bout-summary-csvs /data2/...//Predictions_3D_*/_bouts_summary.csv \\
+        --preproc-h5-paths /data2/...//Predictions_3D_*/preprocessing/preprocessed_bout_v1_.h5
 """
 
 import argparse
@@ -23,7 +23,7 @@ from pathlib import Path
 
 project_root = Path(__file__).resolve().parent.parent.parent  # scripts/export/ -> repo root
 sys.path.insert(0, str(project_root))
-from utils.free_walking_loader import export_raw_free_walking_h5
+from utils._loader import export_raw__h5
 
 
 def main():
@@ -36,10 +36,10 @@ def main():
     p.add_argument('--out', type=Path, required=True,
                    help='Destination path for the exported h5.')
     p.add_argument('--bout-summary-csvs', nargs='*', type=Path, default=None,
-                   help='free_walking_bouts_summary.csv files (one per '
+                   help='_bouts_summary.csv files (one per '
                         'Predictions_3D dir). Shell-glob friendly.')
     p.add_argument('--preproc-h5-paths', nargs='*', type=Path, default=None,
-                   help='preprocessed_bout_*_free_walking.h5 files (one per '
+                   help='preprocessed_bout_*_.h5 files (one per '
                         'Predictions_3D dir). Used to attach orig_keypoints.')
     p.add_argument('--overwrite', action='store_true',
                    help='Overwrite --out if it already exists.')
@@ -51,7 +51,7 @@ def main():
         print(f'Error: combined_h5 not found: {args.combined_h5}', file=sys.stderr)
         sys.exit(1)
 
-    summary = export_raw_free_walking_h5(
+    summary = export_raw__h5(
         args.combined_h5,
         args.out,
         bout_summary_csvs=args.bout_summary_csvs,

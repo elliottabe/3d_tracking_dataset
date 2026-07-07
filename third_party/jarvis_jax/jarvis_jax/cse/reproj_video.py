@@ -7,14 +7,14 @@ Never buffers all frames.
 """
 from __future__ import annotations
 import numpy as np
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 
 
 def draw_overlay_frame(raw_rgb, mesh2d, kp2d, *, contour=None):
     """Rasterize raw_rgb with mesh (cyan) + kp (magenta) [+ contour (yellow)]
     overlays to a uint8 RGB array via an Agg matplotlib figure."""
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
 
     raw = np.asarray(raw_rgb)
     if raw.dtype != np.uint8:

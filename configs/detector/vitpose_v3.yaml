@@ -1,5 +1,5 @@
 # @package detector
-ckpt: ${paths.vit_runs_root}/v3_kp_maskaware/final
+ckpt: ${paths.vit_runs_root}/v4_kp_maskaware_fc/final
 num_keypoints: 50
 crop: 448
 heatmap_size: 224

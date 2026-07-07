@@ -44,9 +44,9 @@ def test_session1_good_bouts_source(tmp_path):
     assert [r["bout_idx"] for r in rows] == [0, 1]
 
 
-def test_free_running_falls_back_to_free_walking(tmp_path):
+def test_free_running_falls_back_to_(tmp_path):
     rec = tmp_path / "rec"; proc = tmp_path / "proc"
-    _write(str(rec / "free_walking_bout_summary.csv"),
+    _write(str(rec / "_bout_summary.csv"),
            ["bout_idx", "start_frame", "end_frame"], [[0, 5, 9]])
     got = resolve_bout_summary(recording_dir=str(rec), processed_dir=str(proc), dataset="free_running")
     assert got == str(proc / "free_running_bout_summary.csv")

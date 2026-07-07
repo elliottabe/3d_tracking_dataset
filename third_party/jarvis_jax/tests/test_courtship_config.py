@@ -19,6 +19,9 @@ def test_courtship_pipeline_composes_and_paths_generalize(monkeypatch):
     assert cfg.recording.session_dir and cfg.recording.num_animals == 2
     assert cfg.detector.num_keypoints == 50 and cfg.detector.crop == 448
     assert cfg.silhouette.mesh_npz.endswith(".npz")
+    # keypoint-bridge is the courtship default (fixes the ~30px global-shift on the
+    # thin leg base that mask-mode leaves; verified both flies, IoU unchanged)
+    assert cfg.silhouette.bridge_mode == "keypoint"
     assert "bouts" not in cfg.outputs.out or True  # out is a resolvable pattern
 
 

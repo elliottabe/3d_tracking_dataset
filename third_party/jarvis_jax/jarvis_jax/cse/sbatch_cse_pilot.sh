@@ -43,7 +43,7 @@ python -u -m jarvis_jax.cse.run_stac_bout \
     --bout "$WORK/${REC}_bout.h5" \
     --out  "$WORK/${REC}/Fruitfly_ik_v1_cse.h5" \
     --stac-config-dir "$STAC_CFG" \
-    --overrides paths=hyak anatomy=v1 dataset=free_walking
+    --overrides paths=hyak anatomy=v1 dataset=
 
 # Stage 3: project canonical vertices -> aux labels (CPU)
 python -u -m jarvis_jax.cse.cse_labels project \

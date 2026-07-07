@@ -10,7 +10,19 @@ bbox_margin: 0.4
 margin: 0.0
 mesh_subset: fps_300
 appendage_include: [wing, leg, abdomen]
-smooth_weight: 0.1
+# model->mm bridge for the polish: "keypoint" (full Umeyama sites->kp3d, aligns the
+# whole model to the detector keypoints) or "mask" (translation from the SAM-blob
+# centroid). keypoint fixes a ~30px global shift that mask-mode leaves on the thin
+# leg base (coxa/trochanter) -- verified both flies: per-cam reproj 33->8px, IoU
+# unchanged. mask-mode was the old default only because of the pre-fix scrambled-kp era.
+bridge_mode: keypoint
+# jaxls temporal-smoothness weight: penalizes frame-to-frame pose change (SE3 root
+# log-diff + joint diff) over adjacent frames of a bout. 0.005 matches the keypoint
+# STAC config (configs/anatomy/v1.yaml JAXLS_SMOOTH_WEIGHT). Set to 0 when running on
+# the (shuffled, non-temporally-coherent) red_data train/val dataset -- consecutive
+# dataset annotations are NOT adjacent in time, so temporal smoothing couples
+# unrelated frames.
+smooth_weight: 0.005
 n_iter: 50
 beta: 8.0
 huber_delta: 0.0

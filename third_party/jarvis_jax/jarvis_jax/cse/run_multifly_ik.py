@@ -9,7 +9,7 @@ Reuses the Phase-2 solver + silhouette machinery unchanged; the only new
 selection input is the per-fly ann_id_by_image (from the identity map).
 
 STAC config (verified, not guessed): the overrides ``paths=hyak anatomy=v1
-dataset=free_walking`` are the EXACT overrides used by both
+dataset=`` are the EXACT overrides used by both
 ``sbatch_cse_pilot.sh`` and ``sbatch_cse_array.sh`` to produce the existing
 male ik_h5 at
 ``/gscratch/portia/eabe/data/Johnson_lab/cse_work/2026_03_18_15_31_22/Fruitfly_ik_v1_cse.h5``.
@@ -17,9 +17,9 @@ The real stac-mjx config tree lives at
 ``/gscratch/portia/eabe/Research/MyRepos/3d_tracking_dataset/stac-mjx/configs``
 (NOT under ``fly_neuromech``, which has no ``stac-mjx`` checkout at all).
 ``dataset/courtship.yaml`` also exists and is nearly identical to
-``free_walking.yaml`` (only differs in ``n_fit_frames``/``n_frames_per_clip``,
+``.yaml`` (only differs in ``n_fit_frames``/``n_frames_per_clip``,
 both of which ``run_stac_bout.run`` overrides at call time anyway based on the
-bout's actual frame count) -- ``free_walking`` is kept as the default since it
+bout's actual frame count) -- ```` is kept as the default since it
 is the proven-working config for this pipeline.
 
 Primary path: a per-fly STAC solve via ``jarvis_jax.cse.run_stac_bout.run``,
@@ -53,7 +53,7 @@ from jarvis_jax.cse.silhouette_ik_solve import (
 
 # The exact overrides used by sbatch_cse_pilot.sh / sbatch_cse_array.sh to
 # produce the existing (male) ik_h5 -- see module docstring.
-DEFAULT_STAC_OVERRIDES = ("paths=hyak", "anatomy=v1", "dataset=free_walking")
+DEFAULT_STAC_OVERRIDES = ("paths=hyak", "anatomy=v1", "dataset=")
 
 # Shared (male) fly's fitted-anatomy ik h5, used only by the stac_fallback
 # escape hatch when per-fly STAC solving is not viable.

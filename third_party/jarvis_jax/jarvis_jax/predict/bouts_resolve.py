@@ -3,7 +3,7 @@
 The pipeline reads one per-recording file `{dataset}_bout_summary.csv` from the
 processed dir. This module locates that file, creating it by normalizing the
 first available source (Session0 unified CSV or Session1 quality_viz good_bouts
-CSV). Legacy `free_walking*` files are accepted when dataset == 'free_running'.
+CSV). Legacy `*` files are accepted when dataset == 'free_running'.
 """
 import csv
 import glob
@@ -21,7 +21,7 @@ def _read_rows(path):
 def _datasets_to_try(dataset):
     out = [dataset]
     if dataset == "free_running":
-        out.append("free_walking")   # legacy files not yet renamed
+        out.append("")   # legacy files not yet renamed
     return out
 
 
