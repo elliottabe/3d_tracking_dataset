@@ -38,8 +38,21 @@ from viz.core import io as vio
 from viz.core import layout
 
 
-def _fps(args):
-    return int(getattr(args, "fps", 30) or 30)
+def _fps_or(args, default):
+    """Explicit ``--fps`` override if given, else `default`. Used by
+    stack/render (playback rate, default 30 -- matches the reference
+    make_bout_clip/stack_clips ``--playback-fps`` default)."""
+    fps = getattr(args, "fps", None)
+    return int(fps) if fps is not None else default
+
+
+def _probe_fps(video_path):
+    """Native fps of a camera's mp4 (cv2.CAP_PROP_FPS), or 0.0 if the probe
+    fails/returns an invalid value."""
+    cap = cv2.VideoCapture(str(video_path))
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    cap.release()
+    return fps
 
 
 def _discover_cameras(session_dir):
@@ -70,14 +83,19 @@ def _to_bgr(rgb):
     return cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
 
 
-def _montage_stream(session_dir, cameras, start, count):
+def _montage_stream(session_dir, cameras, start, count, tag="clip"):
     """Yield one vstacked BGR frame per timestep for `cameras` under
     session_dir[start:start+count]. read_frames yields RGB (or None on an
     unreadable frame) per camera per timestep; a None anywhere in a
     timestep skips that whole output frame (keeps all camera rows in
-    lockstep rather than desyncing the stack)."""
-    for imgs in vio.read_frames(session_dir, cameras, start, count):
-        if any(img is None for img in imgs):
+    lockstep rather than desyncing the stack) -- but that drop is printed
+    (mirroring reproj_video.py's per-frame "warning: frame {t} unreadable
+    ...; skipping" pattern) so silent data loss is visible."""
+    for t, imgs in enumerate(vio.read_frames(session_dir, cameras, start, count)):
+        missing = [cam for cam, img in zip(cameras, imgs) if img is None]
+        if missing:
+            print(f"[{tag}] warning: timestep {start + t} unreadable for camera(s) "
+                  f"{', '.join(missing)}; skipping")
             continue
         tiles = [_to_bgr(img) for img in imgs]
         yield layout.montage(tiles, cols=1)
@@ -99,7 +117,12 @@ def _cut(args):
 
     out_dir = args.out or os.path.join(session_dir, f"clips_{start}_{end}")
     os.makedirs(out_dir, exist_ok=True)
-    fps = _fps(args)
+    # fps: explicit --fps overrides everything; otherwise each camera's clip
+    # is written at ITS OWN native fps (probed below), mirroring
+    # scripts/viz/cut_videos_by_frame.py (cap.get(CAP_PROP_FPS) per camera) --
+    # this rig captures at ~hundreds of fps, so hardcoding 30 mislabels the
+    # cut clip's duration/speed.
+    explicit_fps = getattr(args, "fps", None)
 
     wrote_any = False
     for cam in cameras:
@@ -118,6 +141,17 @@ def _cut(args):
         count = min(end - start + 1, total - start)
         clip_end = start + count - 1
         out_path = os.path.join(out_dir, f"{cam}_frames_{start}_{clip_end}.mp4")
+
+        if explicit_fps is not None:
+            fps = int(explicit_fps)
+        else:
+            native_fps = _probe_fps(video_path)
+            if native_fps and native_fps > 0:
+                fps = native_fps
+            else:
+                print(f"[clip:cut] warning: could not probe native fps for {cam} "
+                      f"({video_path}); defaulting to 30")
+                fps = 30.0
 
         def _gen(cam=cam, count=count):
             for imgs in vio.read_frames(session_dir, [cam], start, count):
@@ -177,10 +211,18 @@ def _stack(args):
         print(f"[clip:stack] warning: clip lengths differ ({lengths}); truncating to {count} frames")
 
     stems = [p.stem for p in selected]
-    fps = _fps(args)
+    fps = _fps_or(args, 30)
     out = args.out or str(clip_dir_path / f"{clip_dir_path.name}_vstack.mp4")
 
-    vio.write_video(out, _montage_stream(str(clip_dir_path), stems, 0, count), fps=fps, fourcc="avc1")
+    try:
+        vio.write_video(
+            out, _montage_stream(str(clip_dir_path), stems, 0, count, tag="clip:stack"),
+            fps=fps, fourcc="avc1")
+    except ValueError as e:
+        raise RuntimeError(
+            f"clip stack: no output frames for {out} -- every timestep in "
+            f"0..{count - 1} had at least one unreadable camera frame among "
+            f"{[str(p) for p in selected]} in {clip_dir}") from e
     print(f"[clip:stack] wrote {out}")
     return 0
 
@@ -241,10 +283,18 @@ def _render(args):
     count = min(end - start + 1, max_possible)
     clip_end = start + count - 1
 
-    fps = _fps(args)
+    fps = _fps_or(args, 30)
     out = args.out or os.path.join(session_dir, f"bout_{start}_{clip_end}_vstack.mp4")
 
-    vio.write_video(out, _montage_stream(session_dir, avail, start, count), fps=fps, fourcc="avc1")
+    try:
+        vio.write_video(
+            out, _montage_stream(session_dir, avail, start, count, tag="clip:render"),
+            fps=fps, fourcc="avc1")
+    except ValueError as e:
+        raise RuntimeError(
+            f"clip render: no output frames for {out} -- every timestep in "
+            f"{start}..{clip_end} had at least one unreadable camera frame "
+            f"among {avail} in {session_dir}") from e
     print(f"[clip:render] wrote {out}")
     return 0
 

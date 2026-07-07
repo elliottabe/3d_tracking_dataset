@@ -153,6 +153,33 @@ def test_clip_cut(tmp_path):
     assert len(mp4s) == 1 and mp4s[0].stat().st_size > 0
 
 
+@_skip_clip_cut
+def test_clip_cut_native_fps(tmp_path):
+    """Regression test for the fix requiring `cut` (no --fps given) to write
+    each camera's clip at ITS OWN native fps, probed from the source mp4 via
+    cv2.CAP_PROP_FPS -- not a hardcoded 30. This rig captures at ~hundreds of
+    fps, so a hardcoded 30 badly mislabels the cut clip's duration/speed."""
+    import cv2
+    from viz.views import clip
+    class A: pass
+    a = A()
+    a.mode = "cut"; a.session_dir = CLIP_SESSION; a.start = 0; a.end = 1
+    a.cameras = ["Cam2012630"]; a.bout_dir = None; a.out = str(tmp_path); a.fps = None
+    assert clip.run(a) == 0
+    mp4s = list(tmp_path.glob("Cam2012630_frames_*.mp4"))
+    assert len(mp4s) == 1 and mp4s[0].stat().st_size > 0
+
+    src_cap = cv2.VideoCapture(os.path.join(CLIP_SESSION, "Cam2012630.mp4"))
+    src_fps = src_cap.get(cv2.CAP_PROP_FPS)
+    src_cap.release()
+    out_cap = cv2.VideoCapture(str(mp4s[0]))
+    out_fps = out_cap.get(cv2.CAP_PROP_FPS)
+    out_cap.release()
+    print(f"[test_clip_cut_native_fps] source fps={src_fps!r} output fps={out_fps!r}")
+    assert src_fps > 0
+    assert abs(out_fps - src_fps) <= 1.0
+
+
 @_skip_clip_stack
 def test_clip_stack(tmp_path):
     from viz.views import clip
