@@ -26,3 +26,19 @@ def test_kp_qc_parses_paired_recs():
     assert ns.female_vs_male is True
     assert ns.female_rec == "F" and ns.male_rec == "M"
     assert ns.func == "_kp_qc"
+
+def test_kp_qc_n_defaults_to_none():
+    # kp-qc's --n must NOT hardcode 8 (viz_keypoints.py's single-mode default):
+    # the view applies faithful per-mode defaults (8 single / 5 paired) itself,
+    # keyed off `args.n is None`. If this default ever becomes non-None again,
+    # paired mode silently reverts to the wrong (single-mode) frame count.
+    p = cli.build_parser()
+    ns = p.parse_args(["kp-qc","--run-dir","/r"])
+    assert ns.n is None
+
+def test_fit_check_n_default_unaffected():
+    # fit-check has its own unrelated --n (default 10); guard against a
+    # shared-parser refactor accidentally zeroing it out too.
+    p = cli.build_parser()
+    ns = p.parse_args(["fit-check","dummy.h5"])
+    assert ns.n == 10

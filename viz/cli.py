@@ -30,7 +30,7 @@ def build_parser():
 
     k = sub.add_parser("kp-qc", help="detector pred-vs-GT keypoints + per-kp error")
     k.add_argument("--run-dir"); k.add_argument("--ckpt"); k.add_argument("--recording")
-    k.add_argument("--n", type=int, default=8); k.add_argument("--female-vs-male", action="store_true")
+    k.add_argument("--n", type=int, default=None); k.add_argument("--female-vs-male", action="store_true")
     k.add_argument("--female-rec", default="2026_05_27_11_56_05")
     k.add_argument("--male-rec", default="2026_05_27_11_57_05")
     k.add_argument("--data-root",

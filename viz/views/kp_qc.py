@@ -8,7 +8,16 @@ Ported verbatim (model-eval + matplotlib logic) from two reference scripts:
 recording layout (_run_single, port of viz_keypoints.main), True runs the
 paired layout (_run_paired, port of viz_courtship_mf.main). Only the
 argparse-driven `main()`/CLI wrapper was dropped; the model load, per-keypoint
-error sweep, and figure code are unchanged from the source scripts.
+error sweep, and figure code are unchanged from the source scripts. The
+GT-metadata parse, model load, and per-keypoint error sweep -- identical in
+both source scripts -- are factored into shared helpers (_load_meta,
+_load_model, _eval_recording) called from both _run_single and _run_paired;
+the figure code (which differs between the two layouts) stays inline in each.
+
+Faithful per-mode `--n` defaults: single mode defaults to 8 example frames
+(viz_keypoints.py default), paired mode defaults to 5 per sex
+(viz_courtship_mf.py default). The CLI's shared `--n` flag has no default
+(None) so it doesn't clobber either; `--n K` still overrides both modes.
 
 Like the reference scripts, all heavy imports (matplotlib, jax, jarvis_jax)
 stay LAZY inside the run functions below -- module level here is stdlib +
@@ -58,50 +67,50 @@ def run(args) -> int:
     return _run_single(args)
 
 
-def _run_single(args) -> int:
-    """Port of scripts/viz_keypoints.py main(): single-recording pred-vs-GT
-    keypoints + per-keypoint error bars."""
-    ckpt = _resolve_ckpt(args)
-    data_root = _resolve_data_root(args)
-    recording = getattr(args, "recording", None) or DEFAULT_RECORDING
-    n_frames = getattr(args, "n", 8) or 8
-    out_dir = Path(getattr(args, "out", None) or getattr(args, "run_dir", None) or ".")
-    out_dir.mkdir(parents=True, exist_ok=True)
+def _load_meta(data_root, split):
+    """GT-JSON metadata: keypoint names, name->index map, skeleton edges, K.
 
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-    import jax.numpy as jnp
-    from jarvis_jax.config import ViTPoseConfig
-    from jarvis_jax.convert.build_checkpoint import load_vitpose
-    from jarvis_jax.data.v3 import V3Dataset, batches
-    from jarvis_jax.data.device import normalize_image
-    from jarvis_jax.eval.mpjpe import heatmaps_to_keypoints
-
-    meta = json.load(open(f"{data_root}/annotations/instances_{_SPLIT}.json"))
+    Verbatim shared setup from both scripts/viz_keypoints.py and
+    scripts/viz_courtship_mf.py (the `meta = json.load(...)` block)."""
+    meta = json.load(open(f"{data_root}/annotations/instances_{split}.json"))
     names = meta["keypoint_names"]
     nidx = {n: i for i, n in enumerate(names)}
     edges = [(nidx[e["keypointA"]], nidx[e["keypointB"]]) for e in meta["skeleton"]
              if e["keypointA"] in nidx and e["keypointB"] in nidx]
     K = len(names)
+    return names, nidx, edges, K
+
+
+def _load_model(ckpt):
+    """Load the ViTPose model from an Orbax checkpoint dir and switch to eval.
+
+    Verbatim shared setup from both scripts (`ViTPoseConfig()` / `load_vitpose`
+    / `model.eval()`). Import stays lazy here, not at module top."""
+    from jarvis_jax.config import ViTPoseConfig
+    from jarvis_jax.convert.build_checkpoint import load_vitpose
 
     cfg = ViTPoseConfig()
     print(f"loading model from {ckpt} ...", flush=True)
     model = load_vitpose(ckpt, cfg)
     model.eval()
-    ds = V3Dataset(data_root, _SPLIT, recordings=[recording])
-    if len(ds) == 0:
-        raise ValueError(f"no {_SPLIT} frames for recording {recording!r}")
-    print(f"{recording}: {len(ds)} {_SPLIT} frames", flush=True)
+    return model
 
-    def predict(img4_u8):
-        img = normalize_image(jnp.asarray(img4_u8)[None])
-        return np.asarray(heatmaps_to_keypoints(model(img, use_running_average=True)))[0]
 
-    # ---- per-keypoint error over the whole recording ----
+def _eval_recording(ds, model, K, batch):
+    """Per-keypoint error sweep over one recording's dataset.
+
+    Verbatim port of the "---- per-keypoint error over the whole recording
+    ----" loop shared by both scripts. Returns (per_kp (K,) mean-error array,
+    overall float MPJPE) -- same SCALE/error math/batching as the sources.
+    Import stays lazy here, not at module top."""
+    import jax.numpy as jnp
+    from jarvis_jax.data.v3 import batches
+    from jarvis_jax.data.device import normalize_image
+    from jarvis_jax.eval.mpjpe import heatmaps_to_keypoints
+
     err_sum = np.zeros(K)
     err_cnt = np.zeros(K)
-    for img4_u8, kp_xy, vis in batches(ds, _BATCH, shuffle=False, drop_last=False):
+    for img4_u8, kp_xy, vis in batches(ds, batch, shuffle=False, drop_last=False):
         img = normalize_image(jnp.asarray(img4_u8))
         pk = np.asarray(heatmaps_to_keypoints(model(img, use_running_average=True)))
         gk = np.asarray(kp_xy) * SCALE
@@ -111,6 +120,39 @@ def _run_single(args) -> int:
         err_cnt += m.sum(0)
     per_kp = np.where(err_cnt > 0, err_sum / np.maximum(err_cnt, 1), np.nan)
     overall = float(np.nansum(err_sum) / max(np.nansum(err_cnt), 1))
+    return per_kp, overall
+
+
+def _run_single(args) -> int:
+    """Port of scripts/viz_keypoints.py main(): single-recording pred-vs-GT
+    keypoints + per-keypoint error bars."""
+    ckpt = _resolve_ckpt(args)
+    data_root = _resolve_data_root(args)
+    recording = getattr(args, "recording", None) or DEFAULT_RECORDING
+    n_frames = args.n if getattr(args, "n", None) is not None else 8
+    out_dir = Path(getattr(args, "out", None) or getattr(args, "run_dir", None) or ".")
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import jax.numpy as jnp
+    from jarvis_jax.data.v3 import V3Dataset
+    from jarvis_jax.data.device import normalize_image
+    from jarvis_jax.eval.mpjpe import heatmaps_to_keypoints
+
+    names, nidx, edges, K = _load_meta(data_root, _SPLIT)
+    model = _load_model(ckpt)
+    ds = V3Dataset(data_root, _SPLIT, recordings=[recording])
+    if len(ds) == 0:
+        raise ValueError(f"no {_SPLIT} frames for recording {recording!r}")
+    print(f"{recording}: {len(ds)} {_SPLIT} frames", flush=True)
+
+    def predict(img4_u8):
+        img = normalize_image(jnp.asarray(img4_u8)[None])
+        return np.asarray(heatmaps_to_keypoints(model(img, use_running_average=True)))[0]
+
+    per_kp, overall = _eval_recording(ds, model, K, _BATCH)
     print(f"overall MPJPE: {overall:.2f}px", flush=True)
 
     # ---- Figure 1: example frames ----
@@ -176,7 +218,7 @@ def _run_paired(args) -> int:
     data_root = _resolve_data_root(args)
     female_rec = getattr(args, "female_rec", None) or DEFAULT_FEMALE_REC
     male_rec = getattr(args, "male_rec", None) or DEFAULT_MALE_REC
-    n_frames = getattr(args, "n", 5) or 5
+    n_frames = args.n if getattr(args, "n", None) is not None else 5
     out_dir = Path(getattr(args, "out", None) or getattr(args, "run_dir", None) or ".")
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -184,23 +226,12 @@ def _run_paired(args) -> int:
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     import jax.numpy as jnp
-    from jarvis_jax.config import ViTPoseConfig
-    from jarvis_jax.convert.build_checkpoint import load_vitpose
-    from jarvis_jax.data.v3 import V3Dataset, batches
+    from jarvis_jax.data.v3 import V3Dataset
     from jarvis_jax.data.device import normalize_image
     from jarvis_jax.eval.mpjpe import heatmaps_to_keypoints
 
-    meta = json.load(open(f"{data_root}/annotations/instances_{_SPLIT}.json"))
-    names = meta["keypoint_names"]
-    nidx = {n: i for i, n in enumerate(names)}
-    edges = [(nidx[e["keypointA"]], nidx[e["keypointB"]]) for e in meta["skeleton"]
-             if e["keypointA"] in nidx and e["keypointB"] in nidx]
-    K = len(names)
-
-    cfg = ViTPoseConfig()
-    print(f"loading model from {ckpt} ...", flush=True)
-    model = load_vitpose(ckpt, cfg)
-    model.eval()
+    names, nidx, edges, K = _load_meta(data_root, _SPLIT)
+    model = _load_model(ckpt)
 
     def predict(img4_u8):
         img = normalize_image(jnp.asarray(img4_u8)[None])
@@ -216,18 +247,7 @@ def _run_paired(args) -> int:
             raise ValueError(f"no {_SPLIT} frames for {sex} recording {rec!r}")
         datasets[sex] = ds
         print(f"{sex}: {rec}  {len(ds)} {_SPLIT} frames", flush=True)
-        err_sum = np.zeros(K)
-        err_cnt = np.zeros(K)
-        for img4_u8, kp_xy, vis in batches(ds, _BATCH, shuffle=False, drop_last=False):
-            img = normalize_image(jnp.asarray(img4_u8))
-            pk = np.asarray(heatmaps_to_keypoints(model(img, use_running_average=True)))
-            gk = np.asarray(kp_xy) * SCALE
-            d = np.linalg.norm(pk - gk, axis=-1)
-            m = np.asarray(vis)
-            err_sum += (d * m).sum(0)
-            err_cnt += m.sum(0)
-        per_kp[sex] = np.where(err_cnt > 0, err_sum / np.maximum(err_cnt, 1), np.nan)
-        overall[sex] = float(np.nansum(err_sum) / max(np.nansum(err_cnt), 1))
+        per_kp[sex], overall[sex] = _eval_recording(ds, model, K, _BATCH)
         print(f"  {sex} overall MPJPE: {overall[sex]:.2f}px", flush=True)
 
     # ---- Figure 1: example frames, one row per sex ----
