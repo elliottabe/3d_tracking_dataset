@@ -40,7 +40,11 @@ def build_parser():
     f = sub.add_parser("fit-check", help="STAC-fit verification frames")
     f.add_argument("ik_h5"); f.add_argument("--start", type=int, default=0)
     f.add_argument("--n", type=int, default=10); f.add_argument("--camera", default=None)
-    f.add_argument("--out", default=None); f.set_defaults(func="_fit_check")
+    f.add_argument("--out", default=None)
+    f.add_argument("--body-model-dir", default="/home/eabe/Research/MyRepos/fruitfly_body_models")
+    f.add_argument("--no-error", action="store_true")
+    f.add_argument("--n-stills", type=int, default=3)
+    f.set_defaults(func="_fit_check")
 
     r = sub.add_parser("reproj-video", help="predicted 3D reprojected onto a bout video")
     r.add_argument("--session-dir", required=True); r.add_argument("--pred-dir", required=True)

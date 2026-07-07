@@ -1,4 +1,15 @@
 import os, numpy as np, pytest
+
+# Must be set before the FIRST `import mujoco` anywhere in this process --
+# mujoco resolves its GL backend once, at import time. `from viz.views import
+# overlay, legskel` below transitively imports mujoco (viz.core.io ->
+# stac_mjx.io_dict_to_hdf5 -> stac_mjx/__init__.py -> stac_mjx.viz), which
+# would otherwise beat fit_check.py's own module-top env-var-setdefault (that
+# module is only imported lazily, inside test_fit_check_writes_mp4) and lock
+# in the wrong (non-EGL) backend for the whole test process.
+os.environ.setdefault("MUJOCO_GL", "egl")
+os.environ.setdefault("PYOPENGL_PLATFORM", "egl")
+
 from viz.views import overlay, legskel
 
 ROOT = "/gscratch/portia/eabe/data/Johnson_lab/courtship/Session0_bouts_07052026"
@@ -85,3 +96,27 @@ def test_kp_qc_writes_pngs(tmp_path):
     for name in ("viz_frames.png", "viz_perkp.png"):
         f = tmp_path / name
         assert f.exists() and f.stat().st_size > 0
+
+
+# --- fit-check: mujoco EGL render on GPU. Only run it when a GPU is
+# actually visible to JAX AND the fixture stac_ik.h5 is present.
+IK_H5 = ("/gscratch/portia/eabe/data/Johnson_lab/courtship/Session0_bouts_07052026/"
+         "bouts/bout_00001/fly1/stac_ik.h5")
+
+_skip_fit_check = pytest.mark.skipif(
+    not (os.path.isfile(IK_H5) and _jax_has_gpu()),
+    reason="fit-check needs the stac_ik.h5 fixture and a JAX-visible GPU",
+)
+
+
+@_skip_fit_check
+def test_fit_check_writes_mp4(tmp_path):
+    from viz.views import fit_check
+    class A: pass
+    a = A()
+    a.ik_h5 = IK_H5; a.start = 0; a.n = 1; a.camera = "track1"; a.out = str(tmp_path)
+    a.body_model_dir = "/home/eabe/Research/MyRepos/fruitfly_body_models"
+    a.no_error = False; a.n_stills = 1
+    assert fit_check.run(a) == 0
+    mp4s = list(tmp_path.glob("fit_check_*.mp4"))
+    assert len(mp4s) == 1 and mp4s[0].stat().st_size > 0
