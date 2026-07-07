@@ -50,6 +50,8 @@ def build_parser():
     r.add_argument("--session-dir", required=True); r.add_argument("--pred-dir", required=True)
     r.add_argument("--bout", type=int, required=True); r.add_argument("--cameras", nargs="*", default=None)
     r.add_argument("--with-masks", action="store_true"); r.add_argument("--out", default=None)
+    r.add_argument("--max-frames", type=int, default=0,
+                   help="cap the number of frames rendered per camera (0 = all)")
     r.set_defaults(func="_reproj_video")
 
     c = sub.add_parser("clip", help="multi-camera clip cut|stack|render")

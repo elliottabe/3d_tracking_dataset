@@ -63,6 +63,36 @@ def test_legskel_compare_no_crash(tmp_path):
     assert legskel.run(a) == 0 and os.path.exists(a.out) and os.path.getsize(a.out) > 0
 
 
+# --- reproj-video: reads a bout's per-fly dense 3D CSV + raw session mp4s
+# (each ~9GB) and writes one reprojected mp4 per camera. To keep this test
+# fast we render a single camera and cap at 2 frames; the core.io unit tests
+# (test_io.py::test_load_data3d_csv / test_write_video_writes_nonzero_mp4)
+# are the primary coverage for the new core functions this view is built on.
+REPROJ_SESSION = "/gscratch/portia/eabe/data/Johnson_lab/Video_recordings/courtship/Session0/2025_10_20_13_20_04"
+REPROJ_PRED = os.path.join(REPROJ_SESSION, "Predictions_3D_36233268")
+REPROJ_CAM = "Cam2012630"
+
+_skip_reproj = pytest.mark.skipif(
+    not (os.path.isdir(REPROJ_SESSION)
+         and os.path.isfile(os.path.join(REPROJ_PRED, "bout_00001", "fly0.csv"))
+         and os.path.isfile(os.path.join(REPROJ_SESSION, f"{REPROJ_CAM}.mp4"))),
+    reason="reproj-video fixture (session mp4s + per-bout fly CSVs) not present",
+)
+
+
+@_skip_reproj
+def test_reproj_video_writes_mp4(tmp_path):
+    from viz.views import reproj_video
+    class A: pass
+    a = A()
+    a.session_dir = REPROJ_SESSION; a.pred_dir = REPROJ_PRED; a.bout = 1
+    a.cameras = [REPROJ_CAM]; a.with_masks = False; a.out = str(tmp_path)
+    a.max_frames = 2
+    assert reproj_video.run(a) == 0
+    mp4s = list(tmp_path.glob("reproj_bout1_*.mp4"))
+    assert len(mp4s) == 1 and mp4s[0].stat().st_size > 0
+
+
 # --- kp-qc: matplotlib + ViTPose model eval. Slow on CPU (JAX_PLATFORMS=cpu
 # hides the GPU during the fast core suite), so only run it when a GPU is
 # actually visible to JAX AND the checkpoint + data-root are present.
