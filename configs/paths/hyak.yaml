@@ -1,21 +1,24 @@
 user: ${oc.env:USER,eabe}
 
-# set the directory where the output files get saved
-cwd_dir:  /gscratch/portia/${paths.user}/Research/MyRepos/3d_tracking_dataset/
-base_dir: /gscratch/portia/${paths.user}/data/Johnson_lab/${dataset.name}/${version}
-save_dir: ${multirun_save_dir:${paths.base_dir},${run_id}}
+# Single Johnson_lab data root -- everything below builds from it (no repeated
+# ".../data/Johnson_lab" literals).
+base_dir: /gscratch/portia/${paths.user}/data/Johnson_lab
+data_dir: ${paths.base_dir}/${dataset.name}/${version}          # dataset-version dir (STAC/preprocess I/O)
+
+# run outputs (rooted at the dataset-version dir)
+run_root: ${paths.data_dir}                                     # config.yaml hydra.run.dir/sweep.dir base
+save_dir: ${multirun_save_dir:${paths.data_dir},${run_id}}
 log_dir:  ${paths.save_dir}/logs/
 ckpt_dir: ${paths.save_dir}/ckpt/
 fig_dir:  ${paths.save_dir}/figures/
-data_dir: /gscratch/portia/${paths.user}/data/Johnson_lab/${dataset.name}/${version}
 
+# courtship pipeline path keys -- all build from base_dir (the Johnson_lab root)
+out_root:          ${paths.base_dir}/courtship
+vit_runs_root:     ${paths.base_dir}/jax_vitpose_runs
+red_data_v3_root:  ${paths.base_dir}/red_data/red_data_unified_V3   # curated real-annotation V3 dataset
+data_dir_johnson:  ${paths.base_dir}                                 # == base_dir (back-compat alias)
+
+# code / model trees (separate root from the data)
+cwd_dir:        /gscratch/portia/${paths.user}/Research/MyRepos/3d_tracking_dataset/
+project_dir:    /gscratch/portia/${paths.user}/Research/MyRepos/
 body_model_dir: /gscratch/portia/${paths.user}/Research/MyRepos/fruitfly_body_models/
-project_dir: /gscratch/portia/${paths.user}/Research/MyRepos/
-
-# courtship pipeline path keys (Task 1)
-data_dir_johnson: /gscratch/portia/${paths.user}/data/Johnson_lab
-out_root: ${paths.data_dir_johnson}/courtship
-vit_runs_root: ${paths.data_dir_johnson}/jax_vitpose_runs
-
-# curated real-annotation V3 dataset root (Task 7: mixed into detector finetune)
-red_data_v3_root: ${paths.data_dir_johnson}/red_data/red_data_unified_V3

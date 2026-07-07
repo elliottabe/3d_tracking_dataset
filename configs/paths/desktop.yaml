@@ -1,12 +1,25 @@
-user: eabe
+user: ${oc.env:USER,eabe}
 
-# set the directory where the output files get saved
-cwd_dir:  /home/${paths.user}/Research/MyRepos/Fly_tracking/
-base_dir: /home/${paths.user}/Research/data/biomech_model/${dataset.name}/RL_${dataset.name}/${version}
-save_dir: ${paths.base_dir}/run_id=${run_id}
+# Single Johnson_lab data root -- everything below builds from it.
+# NOTE: this machine's Johnson_lab data location is INFERRED from the old prefix
+# (/home/<user>/Research/data/...) -- adjust base_dir if the data lives elsewhere.
+base_dir: /home/${paths.user}/Research/data/Johnson_lab
+data_dir: ${paths.base_dir}/${dataset.name}/${version}          # dataset-version dir (STAC/preprocess I/O)
+
+# run outputs (rooted at the dataset-version dir)
+run_root: ${paths.data_dir}                                     # config.yaml hydra.run.dir/sweep.dir base
+save_dir: ${multirun_save_dir:${paths.data_dir},${run_id}}
 log_dir:  ${paths.save_dir}/logs/
 ckpt_dir: ${paths.save_dir}/ckpt/
 fig_dir:  ${paths.save_dir}/figures/
-data_dir: /home/${paths.user}/Research/data/biomech_model/${dataset.name}/datasets/Tuthill_data/
 
-project_dir: /home/${paths.user}/Research/MyRepos/
+# courtship pipeline path keys -- all build from base_dir (the Johnson_lab root)
+out_root:          ${paths.base_dir}/courtship
+vit_runs_root:     ${paths.base_dir}/jax_vitpose_runs
+red_data_v3_root:  ${paths.base_dir}/red_data/red_data_unified_V3
+data_dir_johnson:  ${paths.base_dir}
+
+# code / model trees (separate root from the data)
+cwd_dir:        /home/${paths.user}/Research/MyRepos/3d_tracking_dataset/
+project_dir:    /home/${paths.user}/Research/MyRepos/
+body_model_dir: /home/${paths.user}/Research/MyRepos/fruitfly_body_models/

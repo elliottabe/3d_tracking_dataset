@@ -50,3 +50,23 @@ scaling:
   estimator: umeyama       # 'umeyama' | 'norm_ratio'
   robust_stat: median      # 'median' | 'mean'
   robust: none             # 'huber' | 'none'
+
+# Hydra output organization. Mirrors configs/config.yaml's pattern (run.dir tied to a
+# stable location + override_dirname exclude_keys) but points at THIS pipeline's own
+# predictions dir (${outputs.out}) instead of the STAC ${paths.base_dir}. Without this
+# block Hydra defaults to `outputs/${now}/${now}` at the repo root; here the per-run
+# config snapshot (.hydra/) + log land inside the predictions dir, co-located with
+# offsets.h5 / bouts/. Per-bout parallel/SLURM launchers override
+# `hydra.run.dir=${outputs.out}/hydra/bout_<n>` to avoid collisions when several bouts
+# write into the same ${outputs.out} concurrently.
+hydra:
+  job:
+    config:
+      override_dirname:
+        exclude_keys: [paths, version, dataset, anatomy, stac, recording, detector,
+                       silhouette, outputs, slurm, note, seed, bout_ids, max_frames]
+  run:
+    dir: ${outputs.out}/hydra/${run_id}
+  sweep:
+    dir: ${outputs.out}/hydra/${run_id}
+    subdir: bout_${hydra.job.num}

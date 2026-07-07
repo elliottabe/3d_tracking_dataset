@@ -1,10 +1,25 @@
-user: eabe
+user: ${oc.env:USER,eabe}
 
-# set the directory where the output files get saved
-cwd_dir:  /gscratch/portia/${paths.user}/Research/MyRepos/Fly_tracking
-base_dir: /gscratch/scrubbed/portia/${paths.user}/biomech_model/${dataset.name}/RL_${dataset.name}/${version}
-save_dir: ${paths.base_dir}/run_id=${run_id}
+# Hyak variant that keeps Johnson_lab DATA on persistent storage but sends bulky
+# RUN OUTPUTS (hydra run dir, save_dir/logs/ckpt/figures) to /gscratch/scrubbed
+# scratch. Data + code + curated datasets stay persistent.
+base_dir: /gscratch/portia/${paths.user}/data/Johnson_lab
+data_dir: ${paths.base_dir}/${dataset.name}/${version}          # dataset-version dir (STAC/preprocess I/O)
+
+# run outputs -> SCRUBBED scratch
+run_root: /gscratch/scrubbed/portia/${paths.user}/Johnson_lab/${dataset.name}/${version}
+save_dir: ${multirun_save_dir:${paths.run_root},${run_id}}
 log_dir:  ${paths.save_dir}/logs/
 ckpt_dir: ${paths.save_dir}/ckpt/
 fig_dir:  ${paths.save_dir}/figures/
-data_dir: /gscratch/portia/${paths.user}/biomech_model/${dataset.name}/datasets/Tuthill_data/
+
+# courtship pipeline path keys -- persistent (build from base_dir)
+out_root:          ${paths.base_dir}/courtship
+vit_runs_root:     ${paths.base_dir}/jax_vitpose_runs
+red_data_v3_root:  ${paths.base_dir}/red_data/red_data_unified_V3
+data_dir_johnson:  ${paths.base_dir}
+
+# code / model trees (persistent)
+cwd_dir:        /gscratch/portia/${paths.user}/Research/MyRepos/3d_tracking_dataset/
+project_dir:    /gscratch/portia/${paths.user}/Research/MyRepos/
+body_model_dir: /gscratch/portia/${paths.user}/Research/MyRepos/fruitfly_body_models/

@@ -43,7 +43,11 @@ hydra:
 
   run:
     # dir: ${paths.base_dir}/${hydra:job.override_dirname}
-    dir: ${paths.base_dir}/${run_id}
+    # run_root = each paths config's intended run-output base (workstation/hyak:
+    # the dataset-version dir; biomech: the RL output dir). Decouples the Hydra
+    # run/snapshot dir from base_dir's per-config meaning (hyak's base_dir is the
+    # Johnson_lab data root, not an output base).
+    dir: ${paths.run_root}/${run_id}
   sweep:
-    dir: ${paths.base_dir}/${run_id}
+    dir: ${paths.run_root}/${run_id}
     subdir: ${hydra.job.override_dirname}
