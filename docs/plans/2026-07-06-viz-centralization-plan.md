@@ -16,7 +16,7 @@
 - Reuse, don't reimplement: camera matrices via `jarvis_jax.geometry.reprojection_tool.ReprojectionTool(calib_dir).camera_matrices` `(num_cam,4,3)`; SAM masks via `jarvis_jax.cse.courtship_bout_masks.load_bout_masks(npz_path, fly, expected_cameras=...)`.
 - Every core module is unit-tested; views are smoke-tested only (produce an output file without error), matching how the pipeline treats heavy renders.
 - Run pytest from repo root: `cd /gscratch/portia/eabe/Research/MyRepos/3d_tracking_dataset && OMP_NUM_THREADS=4 JAX_PLATFORMS=cpu python -m pytest viz/tests/ -q`. (JAX_PLATFORMS=cpu keeps core/io tests off the GPU; the `fit-check` smoke needs a GPU and is skipped when none is present.)
-- Scratchpad reference implementations (source for the promoted views) live in `/tmp/claude-398823/-mmfs1-gscratch-portia-eabe-Research-MyRepos-3d-tracking-dataset/3d38bebe-eeae-4891-b119-71d70de6e331/scratchpad/viz_*.py`. Treat them as behavior references to rewrite on the core, not files to copy verbatim.
+- Reference implementations (source for the promoted views) live in `docs/plans/viz-reference/*.py` (preserved from the debugging session; see its README). Treat them as behavior references to rewrite on the core, not files to copy verbatim.
 - Commit after each task. Do NOT `git add -A`; add explicit paths. End commit messages with `Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>`.
 
 ## File Structure
@@ -638,7 +638,7 @@ def courtship_recording(config_name="courtship_pipeline", overrides=None):
 
 - [ ] **Step 2: Write the overlay view.** `run(args)` must: resolve recording; `cam_mats, names = camera_matrices(calib_dir)`; load `outputs` (mesh_mm, kp3d_mm), `kp2d`, `masks` for `(bout, fly)`; for each camera read the frame at `bout_start_frame + args.frame` (compute start via the recording's `bouts_csv` — reuse `scripts/run_courtship_bout.py::bout_start_frame`; import it: `from scripts.run_courtship_bout import bout_start_frame` and pass the composed cfg); draw per `--show` tokens: `mask` → `draw_mask(mask[fr,ci])`, `mesh` → `draw_cloud(project(cam_mats[ci], mesh_mm[fr]))` in `PALETTE["fly{fly}"]`, `kp` → detector `draw_points(kp2d[fr,ci])`, `axis` → head-group centroid vs tail via `draw_axis`; `--compare RUN2` overlays a second run's fitted mesh in `PALETTE["fit"]`; `--bodyalign` computes a per-frame Umeyama on the body group mapping `kp3d_mm→kp3d` and draws the aligned sites (port `viz_bodyalign.py`'s `umeyama`). Crop each tile with `crop_to_points`, `montage(tiles)`, append `banner`. Save PNG.
 
-  (Complete code: adapt `viz_both_flies.py`+`viz_mask_orient.py`+`viz_bodyalign.py` from scratchpad, replacing their inline `project_points`/cv2 calls with `core.reproject`/`core.overlays`/`core.layout`. The scratchpad files are the line-by-line reference.)
+  (Complete code: adapt `docs/plans/viz-reference/{viz_both_flies,viz_mask_orient,viz_bodyalign}.py`, replacing their inline `project_points`/cv2 calls with `core.reproject`/`core.overlays`/`core.layout`. Those files are the line-by-line reference.)
 
 - [ ] **Step 3: Smoke test** `viz/tests/test_views_smoke.py`:
 
@@ -804,4 +804,4 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"`
 - The `overlay`/`legskel`/`kp-qc` views need the recording's `calib_dir`/`session_dir`/`predictions_dir`/`cameras`/`KP_NAMES`. Get them from `viz.core.config.courtship_recording()` (Task 6). For non-courtship/original-pipeline inputs, accept explicit `--calib-dir`/`--session-dir` overrides on those subcommands (add if a view needs them).
 - `bout_start_frame(cfg, bout)` lives in `scripts/run_courtship_bout.py`; import it (`sys.path` has the repo root when running `python -m viz` from the repo). Do NOT duplicate the bouts_csv parsing.
 - Keep views thin: parse args → load via `core.io` → reproject via `core.reproject` → draw via `core.overlays` → arrange via `core.layout` → save. Any logic worth testing belongs in the core, not a view.
-- The scratchpad `viz_*.py` are the exact behavioral references for the promoted overlays; open them side-by-side when writing Tasks 6–7 and 10.
+- The `docs/plans/viz-reference/*.py` files are the exact behavioral references for the promoted overlays; open them side-by-side when writing Tasks 6–7.
