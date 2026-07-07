@@ -1,5 +1,5 @@
 import pytest
-from viz.core import config as vconfig
+from viz import config as vconfig
 
 # Compose once at collection time: cheap (YAML merge, no I/O beyond configs/),
 # and lets the skip condition and the assertions below share one result

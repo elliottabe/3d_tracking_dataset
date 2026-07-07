@@ -5,16 +5,16 @@ Behavior ported from docs/plans/viz-reference/{viz_both_flies,viz_mask_orient,
 viz_bodyalign}.py onto viz.core (reproject/overlays/io/layout/colors) instead
 of their inline cv2/project_points/hardcoded-path code.
 
-DictConfig note: viz.core.config.courtship_recording() returns a plain dict
+DictConfig note: viz.config.courtship_recording() returns a plain dict
 (calib_dir/session_dir/predictions_dir/cameras/kp_names) used for path
 lookups here. scripts.run_courtship_bout.bout_start_frame additionally needs
 the *raw* composed Hydra DictConfig -- it reads cfg.recording.bouts_csv /
 cfg.recording.session_dir directly (via jarvis_jax.predict.sam3_driver.
 parse_bouts). Rather than re-implement that bouts_csv parsing here,
 _compose_cfg() below re-composes `courtship_pipeline` a second time (a cheap
-in-memory YAML merge, no extra artifact I/O) reusing core.config._CFG_DIR so
+in-memory YAML merge, no extra artifact I/O) reusing viz.config._CFG_DIR so
 the configs/ directory path stays defined in exactly one place. Composing
-twice per invocation is deliberate: it keeps core.config's public API (Step 1
+twice per invocation is deliberate: it keeps viz.config's public API (Step 1
 of the task brief) untouched and avoids duplicating bout_start_frame's logic.
 
 scripts.run_courtship_bout pulls in jax/mujoco/egl at import time (heavy), so
@@ -32,7 +32,7 @@ from viz.core import io as vio
 from viz.core import layout
 from viz.core import overlays
 from viz.core import reproject
-from viz.core.config import courtship_recording, _CFG_DIR
+from viz.config import courtship_recording, _CFG_DIR
 
 _AXIS_COLOR = (0, 255, 255)  # yellow tail->head arrow; view-local (not in the shared PALETTE)
 _NODATA_COLOR = (0, 0, 255)
@@ -56,7 +56,7 @@ def umeyama(X, Y):
 
 def _compose_cfg():
     """Re-compose the raw `courtship_pipeline` DictConfig, needed only for
-    scripts.run_courtship_bout.bout_start_frame. Reuses core.config._CFG_DIR
+    scripts.run_courtship_bout.bout_start_frame. Reuses viz.config._CFG_DIR
     (single source of truth for the configs/ path)."""
     os.environ.setdefault("USER", "eabe")
     with initialize_config_dir(version_base=None, config_dir=os.path.abspath(_CFG_DIR)):

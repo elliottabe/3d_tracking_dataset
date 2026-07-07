@@ -49,9 +49,11 @@ Shared engine lives in `viz/core/`:
 - `layout.py` — multi-camera tile arrangement/cropping for montages.
 - `colors.py` — one shared BGR palette + keypoint-chain semantics, derived
   from `KP_NAMES` so it works for any keypoint ordering.
-- `config.py` — resolves recording paths (`calib_dir`/`session_dir`/
-  `predictions_dir`/`cameras`/`KP_NAMES`) for the courtship pipeline via
-  Hydra (`courtship_recording()`).
+
+`viz/config.py` (package-level, not under `core/` — it's pipeline-specific,
+not pipeline-agnostic) resolves recording paths (`calib_dir`/`session_dir`/
+`predictions_dir`/`cameras`/`KP_NAMES`) for the courtship pipeline via Hydra
+(`courtship_recording()`); used by the `overlay` and `legskel` views.
 
 Each `viz/views/*.py` is a thin CLI view: parse args → load via `core.io` →
 reproject via `core.reproject` → draw via `core.overlays` → arrange via

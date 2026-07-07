@@ -1,9 +1,9 @@
-# viz/core/config.py
+# viz/config.py
 """Resolve recording paths + KP_NAMES for the courtship pipeline via Hydra."""
 import os
 from hydra import initialize_config_dir, compose
 
-_CFG_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "configs")
+_CFG_DIR = os.path.join(os.path.dirname(__file__), "..", "configs")
 
 def courtship_recording(config_name="courtship_pipeline", overrides=None):
     os.environ.setdefault("USER", "eabe")

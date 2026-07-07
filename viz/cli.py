@@ -3,7 +3,7 @@ import argparse
 
 def _add_shared(sp):
     sp.add_argument("--run", help="run root (…/Session0_bouts_<date>)")
-    sp.add_argument("--bout", type=int)
+    sp.add_argument("--bout", type=int, required=True)
     sp.add_argument("--fly", type=int, default=0)
     sp.add_argument("--frame", type=int, default=0)
     sp.add_argument("--cams", nargs="*", default=None)
@@ -25,7 +25,7 @@ def build_parser():
     o.add_argument("--compare", default=None); o.add_argument("--bodyalign", action="store_true")
     o.set_defaults(func="_overlay")
 
-    l = sub.add_parser("legskel", help="leg-joint chains: detector vs fitted vs triangulated")
+    l = sub.add_parser("legskel", help="leg-joint chains: detector-2D vs fitted-3D (+ --compare)")
     _add_shared(l); l.add_argument("--compare", default=None); l.set_defaults(func="_legskel")
 
     k = sub.add_parser("kp-qc", help="detector pred-vs-GT keypoints + per-kp error")

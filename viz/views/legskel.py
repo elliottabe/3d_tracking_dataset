@@ -32,7 +32,7 @@ from viz.core import io as vio
 from viz.core import layout
 from viz.core import overlays
 from viz.core import reproject
-from viz.core.config import courtship_recording, _CFG_DIR
+from viz.config import courtship_recording, _CFG_DIR
 
 _NODATA_COLOR = (0, 0, 255)
 _COMPARE_COLOR_NAME = "fly1"  # orange; distinct from detector(cyan)/fit(green)
@@ -40,7 +40,7 @@ _COMPARE_COLOR_NAME = "fly1"  # orange; distinct from detector(cyan)/fit(green)
 
 def _compose_cfg():
     """Re-compose the raw `courtship_pipeline` DictConfig, needed only for
-    scripts.run_courtship_bout.bout_start_frame. Reuses core.config._CFG_DIR
+    scripts.run_courtship_bout.bout_start_frame. Reuses viz.config._CFG_DIR
     (single source of truth for the configs/ path)."""
     os.environ.setdefault("USER", "eabe")
     with initialize_config_dir(version_base=None, config_dir=os.path.abspath(_CFG_DIR)):
