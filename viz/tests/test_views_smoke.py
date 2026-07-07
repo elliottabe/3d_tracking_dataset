@@ -42,3 +42,11 @@ def test_legskel_out_of_range_frame_no_crash(tmp_path):
     a = A(); a.run=ROOT; a.bout=1; a.fly=1; a.frame=999999; a.cams=None
     a.compare=None; a.out=str(tmp_path/"l_oor.png")
     assert legskel.run(a) == 0 and os.path.exists(a.out) and os.path.getsize(a.out) > 0
+
+
+@skip
+def test_legskel_compare_no_crash(tmp_path):
+    class A: pass
+    a = A(); a.run=ROOT; a.bout=1; a.fly=1; a.frame=250; a.cams=None
+    a.compare=ROOT; a.out=str(tmp_path/"l_compare.png")
+    assert legskel.run(a) == 0 and os.path.exists(a.out) and os.path.getsize(a.out) > 0
