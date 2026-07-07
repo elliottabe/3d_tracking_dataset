@@ -19,7 +19,6 @@ abort the whole run for one bad camera/frame/fly.
 import os
 
 import cv2
-import numpy as np
 
 from viz.core import colors as vcolors
 from viz.core import io as vio
@@ -31,8 +30,8 @@ def _load_fly(pred_dir, bout, fly):
     csv_path = os.path.join(pred_dir, f"bout_{int(bout):05d}", f"fly{int(fly)}.csv")
     if not os.path.isfile(csv_path):
         return None
-    kp3d, conf, names, frames = vio.load_data3d_csv(csv_path)
-    return {"kp3d": kp3d, "conf": conf, "names": names, "frames": frames, "csv_path": csv_path}
+    kp3d, _conf, names, frames = vio.load_data3d_csv(csv_path)
+    return {"kp3d": kp3d, "names": names, "frames": frames, "csv_path": csv_path}
 
 
 def run(args):
@@ -91,26 +90,45 @@ def run(args):
         raise RuntimeError(
             f"no camera videos available under {session_dir} for cameras={cameras}")
 
+    # Masks are loaded ONCE against the FULL calibration camera-name list
+    # (cam_names), never the rendered subset (avail_cameras) -- mirroring
+    # viz/views/overlay.py's invariant. `load_bout_masks` (called via
+    # vio.load_masks) only reorders its C axis by NAME when the npz carries a
+    # `cameras` array; for legacy npz files without one, `expected_cameras`
+    # is silently ignored and the returned axis is the native/full
+    # calibration order. Indexing that axis by a filtered subset's position
+    # (as this view used to do) would silently fetch the WRONG camera's mask
+    # whenever avail_cameras is a subset or reordering of cam_names. Instead
+    # we index by each camera's position in cam_names (`cam_mat_idx[cam]`,
+    # the same "native index" already used to pick `cam_mats`) below.
     masks_by_fly = {}
     if getattr(args, "with_masks", False):
         for fly in fly_data:
             try:
-                masks_by_fly[fly] = vio.load_masks(pred_dir, bout, fly, avail_cameras)
+                masks_by_fly[fly] = vio.load_masks(pred_dir, bout, fly, cam_names)
             except Exception as e:
                 print(f"[reproj-video] warning: sam3_masks.npz unavailable for fly{fly} "
                       f"({e}); rendering fly{fly} without masks")
 
     chains_by_fly = {fly: vcolors.leg_chains(d["names"]) for fly, d in fly_data.items()}
 
-    cam_frames = {cam: [] for cam in avail_cameras}
-    for t, imgs in enumerate(vio.read_frames(session_dir, avail_cameras, start, count)):
-        for ci, cam in enumerate(avail_cameras):
-            rgb = imgs[ci]
+    out_dir = args.out or os.path.join(pred_dir, "viz", f"bout_{bout:05d}")
+    os.makedirs(out_dir, exist_ok=True)
+    fps = int(getattr(args, "fps", 30) or 30)
+
+    def _cam_frames(cam, cam_mat, native_idx):
+        """Stream one camera's drawn BGR frames, one at a time. Reads this
+        camera's mp4 alone (single-element camera list to `read_frames`, so
+        each yielded `imgs` is a 1-element list) and yields each drawn frame
+        immediately -- nothing beyond the current frame is held in memory,
+        avoiding the ~9GB all-cameras-all-frames buffer this view used to
+        build before writing anything out."""
+        for t, imgs in enumerate(vio.read_frames(session_dir, [cam], start, count)):
+            rgb = imgs[0]
             if rgb is None:
                 print(f"[reproj-video] warning: frame {start + t} unreadable for {cam}; skipping")
                 continue
             bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
-            cam_mat = cam_mats[cam_mat_idx[cam]]
 
             for fly, d in fly_data.items():
                 if t >= len(d["kp3d"]):
@@ -128,27 +146,26 @@ def run(args):
                 m = masks_by_fly.get(fly)
                 if m is not None:
                     try:
-                        if t < m["valid"].shape[0] and m["valid"][t, ci] and m["masks"][t, ci].any():
-                            overlays.draw_mask(bgr, m["masks"][t, ci], vcolors.PALETTE["mask"])
+                        if (t < m["valid"].shape[0] and m["valid"][t, native_idx]
+                                and m["masks"][t, native_idx].any()):
+                            overlays.draw_mask(bgr, m["masks"][t, native_idx], vcolors.PALETTE["mask"])
                     except Exception as e:
                         print(f"[reproj-video] warning: mask overlay failed for fly{fly} "
                               f"cam {cam} t={t}: {e}")
 
-            cam_frames[cam].append(bgr)
-
-    out_dir = args.out or os.path.join(pred_dir, "viz", f"bout_{bout:05d}")
-    os.makedirs(out_dir, exist_ok=True)
-    fps = int(getattr(args, "fps", 30) or 30)
+            yield bgr
 
     wrote_any = False
     for cam in avail_cameras:
-        frames_list = cam_frames[cam]
-        if not frames_list:
+        native_idx = cam_mat_idx[cam]
+        cam_mat = cam_mats[native_idx]
+        out_path = os.path.join(out_dir, f"reproj_bout{bout}_{cam}.mp4")
+        try:
+            vio.write_video(out_path, _cam_frames(cam, cam_mat, native_idx), fps=fps)
+        except ValueError:
             print(f"[reproj-video] warning: no frames collected for {cam}; skipping write")
             continue
-        out_path = os.path.join(out_dir, f"reproj_bout{bout}_{cam}.mp4")
-        vio.write_video(out_path, frames_list, fps=fps)
-        print(f"[reproj-video] wrote {out_path} ({len(frames_list)} frames)")
+        print(f"[reproj-video] wrote {out_path}")
         wrote_any = True
 
     if not wrote_any:

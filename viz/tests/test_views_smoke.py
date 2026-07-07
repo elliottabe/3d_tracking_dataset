@@ -93,6 +93,30 @@ def test_reproj_video_writes_mp4(tmp_path):
     assert len(mp4s) == 1 and mp4s[0].stat().st_size > 0
 
 
+@_skip_reproj
+def test_reproj_video_with_masks_subset(tmp_path):
+    """Exercises the previously-buggy path: rendering a ONE-camera subset of
+    the full calibration camera list with --with-masks. Fix 1 requires masks
+    to be loaded against the full calibration camera order and indexed by
+    each camera's native (calibration) index, not its position within this
+    single-camera rendered subset -- a subset of size 1 is exactly the case
+    where "position in subset" (always 0) and "native index" (whatever
+    REPROJ_CAM's real calibration slot is) are most likely to diverge. This
+    can't assert visual mask correctness from here, but it must not crash
+    (e.g. an out-of-range native index into the mask array) and must produce
+    a real mp4.
+    """
+    from viz.views import reproj_video
+    class A: pass
+    a = A()
+    a.session_dir = REPROJ_SESSION; a.pred_dir = REPROJ_PRED; a.bout = 1
+    a.cameras = [REPROJ_CAM]; a.with_masks = True; a.out = str(tmp_path)
+    a.max_frames = 2
+    assert reproj_video.run(a) == 0
+    mp4s = list(tmp_path.glob("reproj_bout1_*.mp4"))
+    assert len(mp4s) == 1 and mp4s[0].stat().st_size > 0
+
+
 # --- kp-qc: matplotlib + ViTPose model eval. Slow on CPU (JAX_PLATFORMS=cpu
 # hides the GPU during the fast core suite), so only run it when a GPU is
 # actually visible to JAX AND the checkpoint + data-root are present.
