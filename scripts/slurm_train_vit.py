@@ -3,8 +3,7 @@
 Submit a SLURM job to train the JAX ViTPose KeypointDetect model
 (third_party/jarvis_jax) on red_data_unified_V3.
 
-Companion to scripts/slurm_train.py (which trains the PyTorch JARVIS stack).
-This one trains the JAX/Flax ViTPose reimplementation: single-host data-parallel
+Trains the JAX/Flax ViTPose reimplementation: single-host data-parallel
 across N GPUs on one node, MAE-pretrained backbone, foreground-weighted heatmap
 loss, 2-group (backbone/head) LR fine-tune.
 

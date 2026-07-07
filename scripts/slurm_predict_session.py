@@ -4,8 +4,8 @@ Submit ONE SLURM job that runs the full JAX courtship-prediction pipeline for a
 session: D2 SAM3 masks (all bouts) -> D3 JAX 3D prediction (all bouts), producing
 per-fly data3D_fly{0,1}.csv.
 
-Companion to scripts/slurm_train_3d_cached.py (same launcher pattern). The job body
-has TWO sequential stages on one multi-GPU node:
+Uses the standard SLURM launcher pattern. The job body has TWO sequential stages
+on one multi-GPU node:
   1. SAM3 masks  (scripts/sam3_masks.py) — PyTorch; reuse_masks=true skips bouts
      whose sam3_masks.npz already exists, so a requeue resumes cheaply.
   2. JAX predict (scripts/predict_session.py) — reads stage-1 masks, runs the
@@ -18,8 +18,7 @@ entrypoint loads ${paths.runs_root}/${run_id}/final. Output + masks live under
 same root so stage 2 reads stage 1's output.
 
 Per-stage CUDA libs: SAM3 (PyTorch) needs the cu13 wheels on LD_LIBRARY_PATH;
-JAX needs its own bundled CUDA, so LD_LIBRARY_PATH is unset before stage 2
-(exactly as slurm_train_3d_cached.py does for the trainer).
+JAX needs its own bundled CUDA, so LD_LIBRARY_PATH is unset before stage 2.
 
 Preemption resume
 -----------------
