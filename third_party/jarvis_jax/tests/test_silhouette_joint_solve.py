@@ -27,7 +27,7 @@ def test_stac_core_jaxls_is_byte_identical():
 def test_no_silhouette_matches_jaxls_batch_solver():
     """SilhouetteJaxlsBatchSolver with no silhouette/containment kwargs (all
     defaults) must reproduce JaxlsBatchSolver's trajectory to tight tolerance;
-    no coverage cost and no FrameVar should be added."""
+    no coverage/containment cost should be added."""
     from jarvis_jax.cse.silhouette_ik_solve import build_solver_inputs
     from stac_mjx.stac_core_jaxls import JaxlsBatchSolver
     from jarvis_jax.cse.silhouette_joint_ik import SilhouetteJaxlsBatchSolver

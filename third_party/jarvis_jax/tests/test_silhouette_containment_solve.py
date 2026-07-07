@@ -30,25 +30,28 @@ def test_containment_cost_residual_shape_and_finite():
     present_all = jnp.ones((T, n_cam), bool)
     conf_v = jnp.ones((M,))
     cam_Ms = jnp.tile(jnp.eye(2, 3)[None], (n_cam, 1, 1)); cam_ts = jnp.zeros((n_cam, 2))
+    # per-frame model->mm bridge (identity for this synthetic-camera test)
+    bridge_s = jnp.ones((T,)); bridge_R = jnp.broadcast_to(jnp.eye(3), (T, 3, 3))
+    bridge_t = jnp.zeros((T, 3))
 
     class SE3Var(jaxls.Var[jaxlie.SE3], default_factory=jaxlie.SE3.identity,
                  retract_fn=jaxlie.manifold.rplus, tangent_dim=6): ...
     class JointVar(jaxls.Var[jnp.ndarray], default_factory=lambda: jnp.zeros((m.nq - 7,))): ...
-    class FrameVar(jaxls.Var[jnp.ndarray], default_factory=lambda: jnp.zeros((1,))): ...
 
     cost = make_containment_cost(
-        SE3Var, JointVar, FrameVar, fk_repose=fk, vert_indices=vidx,
-        cam_Ms=cam_Ms, cam_ts=cam_ts, sdf_all=sdf_all, grid_scale_all=grid_scale_all,
-        grid_offset_all=grid_offset_all, present_all=present_all, conf_v=conf_v,
+        SE3Var, JointVar, fk_repose=fk, vert_indices=vidx,
+        cam_Ms=cam_Ms, cam_ts=cam_ts, conf_v=conf_v,
         sil_qs_mask=sil_qs, margin=0.0, containment_weight=1.0,
         qs_to_opt=jnp.ones((m.nq,), bool), template_qpos=jnp.asarray(anat["qpos0"]))
-    root = SE3Var(jnp.arange(T)); joint = JointVar(jnp.arange(T)); frame = FrameVar(jnp.arange(T))
-    prob = jaxls.LeastSquaresProblem(costs=[cost(root, joint, frame)],
-                                     variables=[root, joint, frame]).analyze()
+    root = SE3Var(jnp.arange(T)); joint = JointVar(jnp.arange(T))
+    # per-frame data as BATCHED factory args (jaxls vmaps the factor over T)
+    built = cost(root, joint, sdf_all, grid_scale_all, grid_offset_all, present_all,
+                 bridge_s, bridge_R, bridge_t)
+    prob = jaxls.LeastSquaresProblem(costs=[built],
+                                     variables=[root, joint]).analyze()
     vals = jaxls.VarValues.make([
         SE3Var(jnp.arange(T)).with_value(jaxlie.SE3.identity((T,))),
         JointVar(jnp.arange(T)).with_value(jnp.zeros((T, m.nq - 7))),
-        FrameVar(jnp.arange(T)).with_value(jnp.arange(T).reshape(T, 1).astype(float)),
     ])
     r = np.asarray(prob.compute_residual_vector(vals))
     assert r.shape[0] == T * n_cam * M

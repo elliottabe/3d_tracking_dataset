@@ -3,7 +3,8 @@
 For each bout frame + camera, loads the SAM mask for the selected fly, erodes it
 by `erode_px` (strips the reflection/shadow halo), samples n_points uniform
 boundary points, and returns them as an UNPACKED dict (boundary/conf_p/present +
-per-camera affine matrices) that the solver selects per frame via a FrameVar.
+per-camera affine matrices); the solver passes the per-frame boundary/conf as
+BATCHED factory arguments so jaxls vectorizes the coverage factor over frames.
 Cameras with no mask this frame get NaN boundary blocks + present=False (the
 Chamfer residual is NaN-safe).
 """

@@ -162,21 +162,61 @@ def polish_bout(stac_h5, cfg, kp3d_mm, kp3d_conf, masks_dict, calib_dir, *, kp_s
     present_g = tg["present"].copy(); present_g[~frame_ok] = False
     conf_p_g = tg["conf_p"].copy(); conf_p_g[~frame_ok] = 0.0
 
-    solver = SilhouetteJaxlsBatchSolver(n_iter=int(sil.n_iter), smooth_weight=float(sil.smooth_weight),
-                                        beta=float(sil.beta), huber_delta=float(sil.huber_delta))
-    q = solver.solve_trajectory(
-        q_init=jnp.asarray(q_init), mjx_model=inp["mjx_model"], mjx_data_template=inp["mjx_data"],
-        kp_data=kp_data, qs_to_opt=inp["qs_to_opt"], kps_to_opt=inp["kps_to_opt"],
-        lb=inp["lb"], ub=inp["ub"], site_idxs=inp["site_idxs"], q_reg_weights=inp["q_reg_weights"],
-        fk_repose=fk, cov_vert_indices=cov_idx, cont_vert_indices=cont_idx,
-        cam_Ms=jnp.asarray(cam_Ms), cam_ts=jnp.asarray(cam_ts),
-        boundary_all=jnp.asarray(tg["boundary"]), conf_p_all=jnp.asarray(conf_p_g),
-        sil_qs_mask=sil_qs, silhouette_weight=float(sil.silhouette_weight),
-        sdf_all=jnp.asarray(tg["sdf"]), grid_scale_all=jnp.asarray(tg["grid_scale"]),
-        grid_offset_all=jnp.asarray(tg["grid_offset"]), present_all=jnp.asarray(present_g),
-        conf_v=conf_v, containment_weight=float(sil.containment_weight), margin=float(sil.margin),
-        bridge_s_all=jnp.asarray(bridge_s), bridge_R_all=jnp.asarray(bridge_R),
-        bridge_t_all=jnp.asarray(bridge_t))
+    optimizer = str(getattr(sil, "optimizer", "adam"))
+    if float(sil.silhouette_weight) == 0.0 and float(sil.containment_weight) == 0.0:
+        # Polish disabled (both weights 0): Stage-D is a pass-through of the STAC +
+        # keypoint-bridge pose. This is the current default -- the silhouette polish
+        # cannot un-curl the STAC legs (one-sided containment) and drifts off the
+        # reliable keypoints; see configs/silhouette/default.yaml. Machinery below
+        # stays ready for when a weight is set.
+        q = jnp.asarray(q_init)
+    elif optimizer == "adam":
+        # Gradient-based (Adam) refinement of the appendage DOFs only; root+body
+        # stay frozen at the keypoint fit q_init. Replaces the jaxls GN/LM solve,
+        # which cannot navigate the pixel-scale nonlinear silhouette cost (jaxls
+        # uses non-scale-invariant lambda*I damping -> every GN step rejected).
+        # See silhouette_refine for the full rationale. Coverage (chamfer) and
+        # containment (SDF-relu) weights + a keypoint anchor are configurable;
+        # the diagnosis found containment the effective term and coverage able to
+        # fight it, so the config defaults to containment-dominant.
+        from jarvis_jax.cse.silhouette_refine import refine_appendages_adam
+        q = refine_appendages_adam(
+            jnp.asarray(q_init), fk_repose=fk,
+            cov_vert_indices=cov_idx, cont_vert_indices=cont_idx,
+            cam_Ms=jnp.asarray(cam_Ms), cam_ts=jnp.asarray(cam_ts),
+            boundary_all=jnp.asarray(tg["boundary"]), conf_p_all=jnp.asarray(conf_p_g),
+            sdf_all=jnp.asarray(tg["sdf"]), grid_scale_all=jnp.asarray(tg["grid_scale"]),
+            grid_offset_all=jnp.asarray(tg["grid_offset"]), present_all=jnp.asarray(present_g),
+            conf_v=conf_v, bridge_s_all=jnp.asarray(bridge_s),
+            bridge_R_all=jnp.asarray(bridge_R), bridge_t_all=jnp.asarray(bridge_t),
+            opt_mask=sil_qs, lb=inp["lb"], ub=inp["ub"],
+            silhouette_weight=float(sil.silhouette_weight),
+            containment_weight=float(sil.containment_weight),
+            smooth_weight=float(sil.smooth_weight),
+            anchor_weight=float(getattr(sil, "anchor_weight", 0.0)),
+            limit_weight=float(getattr(sil, "limit_weight", 10.0)),
+            beta=float(sil.beta), huber_delta=float(sil.huber_delta), margin=float(sil.margin),
+            n_steps=int(getattr(sil, "refine_steps", 200)),
+            lr=float(getattr(sil, "refine_lr", 1e-2)))
+    else:
+        solver = SilhouetteJaxlsBatchSolver(
+            n_iter=int(sil.n_iter), smooth_weight=float(sil.smooth_weight),
+            beta=float(sil.beta), huber_delta=float(sil.huber_delta),
+            cg_tolerance_max=float(sil.cg_tolerance_max),
+            cg_tolerance_min=float(sil.cg_tolerance_min))
+        q = solver.solve_trajectory(
+            q_init=jnp.asarray(q_init), mjx_model=inp["mjx_model"], mjx_data_template=inp["mjx_data"],
+            kp_data=kp_data, qs_to_opt=inp["qs_to_opt"], kps_to_opt=inp["kps_to_opt"],
+            lb=inp["lb"], ub=inp["ub"], site_idxs=inp["site_idxs"], q_reg_weights=inp["q_reg_weights"],
+            fk_repose=fk, cov_vert_indices=cov_idx, cont_vert_indices=cont_idx,
+            cam_Ms=jnp.asarray(cam_Ms), cam_ts=jnp.asarray(cam_ts),
+            boundary_all=jnp.asarray(tg["boundary"]), conf_p_all=jnp.asarray(conf_p_g),
+            sil_qs_mask=sil_qs, silhouette_weight=float(sil.silhouette_weight),
+            sdf_all=jnp.asarray(tg["sdf"]), grid_scale_all=jnp.asarray(tg["grid_scale"]),
+            grid_offset_all=jnp.asarray(tg["grid_offset"]), present_all=jnp.asarray(present_g),
+            conf_v=conf_v, containment_weight=float(sil.containment_weight), margin=float(sil.margin),
+            bridge_s_all=jnp.asarray(bridge_s), bridge_R_all=jnp.asarray(bridge_R),
+            bridge_t_all=jnp.asarray(bridge_t))
 
     bridges = [
         (float(bridge_s[t]), bridge_R[t].copy(), bridge_t[t].copy()) if frame_ok[t] else None

@@ -1,8 +1,42 @@
 # @package silhouette
 mesh_npz: ${paths.body_model_dir}/fruitfly_cse/fly_v1_visual_canonical_wings.npz
 xml: ${paths.body_model_dir}/fruitfly_v1/fruitfly_v1_free.xml
-silhouette_weight: 0.3
-containment_weight: 0.3
+# Stage-D optimizer for the silhouette refinement:
+#   adam  -- gradient-based (optax) refinement of the appendage DOFs only, root+
+#            body frozen at the keypoint fit. This is the working path: jaxls
+#            GN/LM cannot navigate the pixel-scale nonlinear silhouette cost (it
+#            uses non-scale-invariant lambda*I damping, so every GN step is
+#            rejected -- a plain gradient step cuts the cost ~45%). See
+#            jarvis_jax.cse.silhouette_refine.
+#   jaxls -- the original Gauss-Newton/LM solve (kept for tests/comparison only).
+optimizer: adam
+# NOTE (2026-07-07): the silhouette polish is OFF by default (both weights 0) ->
+# Stage-D returns the STAC + keypoint-bridge pose unchanged. Rationale from the
+# mask-overlay investigation: the SAM masks are good (they capture the legs), but
+# the STAC leg pose is curled (leg mesh tucked into the body), and the containment
+# term is ONE-SIDED (penalizes only verts OUTSIDE the mask) so it cannot push
+# curled-in leg verts OUT to the leg mask -- it has no gradient there. With
+# weights>0 the polish improves appendage-inside-mask 77%->87% but DRIFTS the pose
+# ~2.4x off the reliable detected keypoints (1.4mm->3.3mm), i.e. it trades keypoint
+# accuracy for 2D-blob coverage without fixing the curl. The Adam machinery is
+# sound and kept ready; re-enable (containment_weight>0, tune anchor_weight) once
+# the leg curl is fixed upstream (STAC leg-chain) and/or a corresponded leg-mask
+# term exists. See jarvis_jax.cse.silhouette_refine.
+#
+# Coverage (chamfer boundary->nearest-vertex) weight. Also FIGHTS containment on
+# real data (drags the outline back out; containment-alone 77%->87% vs both flat).
+silhouette_weight: 0.0
+# Containment (mesh-vertex outside-mask SDF-relu) weight. 0 = polish off (default).
+containment_weight: 0.0
+# Adam refinement schedule (optimizer=adam).
+refine_steps: 200
+refine_lr: 1.0e-2
+# L2 pull of the optimized appendage DOFs back to the keypoint fit q_init. 0 gives
+# the strongest silhouette fit; raise as insurance against per-frame mask gaps
+# distorting the legs (anchor=30 traded +9.5%->+5.0% inside-mask on the pilot).
+anchor_weight: 0.0
+# Soft joint-limit barrier weight (relu outside [lb,ub]); output is also clamped.
+limit_weight: 10.0
 erode_px: 8
 n_points: 128
 sdf_hw: [128, 128]
@@ -26,3 +60,12 @@ smooth_weight: 0.005
 n_iter: 50
 beta: 8.0
 huber_delta: 0.0
+# Conjugate-gradient inexact-Newton tolerance for the silhouette solve. jaxls caps
+# CG at maxiter = T*(6+n_hinges) (~44k for a 513-frame bout) and tightens the linear
+# tolerance toward cg_tolerance_min; the ill-conditioned silhouette normal equations
+# then need thousands of matvecs per LM step. This is a REFINEMENT polish, so an
+# inexact linear solve suffices -- loosening cg_tolerance_min from jaxls's 1e-7 is the
+# dominant Stage-D wall-time lever (the CG solve, not compile, dominates). 1e-7/1e-2
+# reproduces jaxls defaults.
+cg_tolerance_max: 1.0e-2
+cg_tolerance_min: 1.0e-7

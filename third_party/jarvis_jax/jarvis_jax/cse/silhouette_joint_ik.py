@@ -6,13 +6,16 @@ PLUS a differentiable silhouette boundary-Chamfer cost, over the SAME SE3Var +
 JointVar. stac_core_jaxls.py is left byte-identical (Phases 1-4 invariant); a
 test proves silhouette_weight=0 reproduces JaxlsBatchSolver's output.
 
-Two additive silhouette cost factories share the same pattern: each closes
-over per-frame constants (cam matrices, plus coverage boundary points/confidence
-or containment SDF crops/confidence) and selects the active frame via a tiny
-per-frame FrameVar (int index), rather than packing per-frame data into a
-jaxls Var. `make_silhouette_cost` is the coverage (SAM-boundary Chamfer) term;
-`make_containment_cost` is the mesh->mask containment (SDF relu) term; both are
-gated independently in `solve_trajectory` by their own weight/data kwargs.
+Two additive silhouette cost factories share the same pattern: each takes the
+frame-invariant camera matrices as closed-over constants, and receives its
+per-frame data (coverage boundary points/confidence or containment SDF
+crops/confidence, plus the model->mm bridge) as BATCHED factory arguments so
+jaxls vectorizes one factor definition over all T frames (the pyroki/jaxls
+idiom), rather than packing per-frame data into a jaxls Var or closing full
+(T,...) trajectories over a scan. `make_silhouette_cost` is the coverage
+(SAM-boundary Chamfer) term; `make_containment_cost` is the mesh->mask
+containment (SDF relu) term; both are gated independently in `solve_trajectory`
+by their own weight/data kwargs.
 """
 from __future__ import annotations
 import jax
@@ -36,18 +39,18 @@ def _identity_bridges(T):
 
 
 def make_silhouette_cost(
-    SE3Var, JointVar, FrameVar, *,
-    fk_repose, vert_indices, cam_Ms, cam_ts, boundary_all, conf_p_all,
+    SE3Var, JointVar, *,
+    fk_repose, vert_indices, cam_Ms, cam_ts,
     sil_qs_mask, beta: float, huber_delta: float, silhouette_weight: float,
-    qs_to_opt, template_qpos, bridge_s_all=None, bridge_R_all=None,
-    bridge_t_all=None, scale: float = 1.0, chunk_size: int = 32,
+    qs_to_opt, template_qpos, scale: float = 1.0, chunk_size: int = 32,
 ):
     """Coverage cost: SAM(eroded)-boundary -> nearest projected mesh vertex.
 
-    Per-frame data (boundary points, per-point confidence) is closed over as
-    constants and selected by the integer FrameVar; cameras are iterated with
-    jax.lax.scan (FK once per frame, no (C,N,M) tensor). The silhouette gradient
-    is restricted to appendage DOFs via where(sil_qs_mask, full_q, stop_grad).
+    Per-frame data (boundary points, per-point confidence, model->mm bridge) is
+    passed as BATCHED factory arguments, so jaxls vectorizes this one factor over
+    T frames; cameras are iterated with jax.lax.scan (FK once per frame, no
+    (C,N,M) tensor). The silhouette gradient is restricted to appendage DOFs via
+    where(sil_qs_mask, full_q, stop_grad).
 
     CRITICAL: fk_repose returns MODEL-frame verts, but the affine cameras map
     mm-world -> px. The per-frame model->mm bridge (s,R,t) (from
@@ -61,26 +64,20 @@ def make_silhouette_cost(
     qs_to_opt = jnp.asarray(qs_to_opt)
     sil_qs_mask = jnp.asarray(sil_qs_mask)
     cam_Ms = jnp.asarray(cam_Ms); cam_ts = jnp.asarray(cam_ts)
-    boundary_all = jnp.asarray(boundary_all); conf_p_all = jnp.asarray(conf_p_all)
-    if bridge_s_all is None:
-        bridge_s_all, bridge_R_all, bridge_t_all = _identity_bridges(boundary_all.shape[0])
-    bridge_s_all = jnp.asarray(bridge_s_all); bridge_R_all = jnp.asarray(bridge_R_all)
-    bridge_t_all = jnp.asarray(bridge_t_all)
 
     @jaxls.Cost.factory
     def silhouette_cost(var_values, root_var: SE3Var, joint_var: JointVar,
-                        frame_var: FrameVar) -> jnp.ndarray:
+                        boundary, conf_p, bridge_s, bridge_R, bridge_t) -> jnp.ndarray:
+        # per-frame (jaxls-sliced) args: boundary (C,n_pts,2), conf_p (C,n_pts),
+        # bridge_s (), bridge_R (3,3), bridge_t (3,)
         T_root = var_values[root_var]
         joints = var_values[joint_var]
-        t = jax.lax.stop_gradient(var_values[frame_var])[0].astype(jnp.int32)
         xyz = T_root.translation(); wxyz = T_root.rotation().wxyz
         q = jnp.concatenate([xyz, wxyz, joints])
         full_q = jnp.where(qs_to_opt, q, template_qpos)
         sil_q = jnp.where(sil_qs_mask, full_q, jax.lax.stop_gradient(full_q))
         verts3d = fk_repose(sil_q, scale, vert_indices)     # (M,3) FK once per frame
-        verts_mm = bridge_s_all[t] * (verts3d @ bridge_R_all[t].T) + bridge_t_all[t]
-
-        tgt_all = boundary_all[t]; conf_all = conf_p_all[t]   # (C,n_pts,2),(C,n_pts)
+        verts_mm = bridge_s * (verts3d @ bridge_R.T) + bridge_t
 
         def scan_body(carry, cam):
             M, tt, tgt, cf = cam
@@ -88,24 +85,23 @@ def make_silhouette_cost(
             r = chamfer_residual(tgt, proj, beta=beta, huber_delta=huber_delta,
                                  chunk_size=chunk_size)      # (n_pts,)
             return carry, r * cf
-        _, res = jax.lax.scan(scan_body, None, (cam_Ms, cam_ts, tgt_all, conf_all))
+        _, res = jax.lax.scan(scan_body, None, (cam_Ms, cam_ts, boundary, conf_p))
         return (res * silhouette_weight).reshape(-1)         # (C*n_pts,)
 
     return silhouette_cost
 
 
 def make_containment_cost(
-    SE3Var, JointVar, FrameVar, *,
-    fk_repose, vert_indices, cam_Ms, cam_ts, sdf_all, grid_scale_all,
-    grid_offset_all, present_all, conf_v, sil_qs_mask, margin: float,
-    containment_weight: float, qs_to_opt, template_qpos,
-    bridge_s_all=None, bridge_R_all=None, bridge_t_all=None, scale: float = 1.0,
+    SE3Var, JointVar, *,
+    fk_repose, vert_indices, cam_Ms, cam_ts, conf_v, sil_qs_mask, margin: float,
+    containment_weight: float, qs_to_opt, template_qpos, scale: float = 1.0,
 ):
     """Containment cost: appendage verts outside the mask -> relu(SDF) penalty.
 
-    Per-frame SDF crops + transforms are closed over as constants and selected
-    by the integer FrameVar; cameras iterated with jax.lax.scan (FK once/frame).
-    Gradient restricted to appendage DOFs via where(sil_qs_mask, full_q, stop_grad).
+    Per-frame SDF crops + transforms are passed as BATCHED factory arguments, so
+    jaxls vectorizes this one factor over T frames; cameras iterated with
+    jax.lax.scan (FK once/frame). Gradient restricted to appendage DOFs via
+    where(sil_qs_mask, full_q, stop_grad).
 
     CRITICAL: verts are FK'd in MODEL frame, then mapped to mm via the per-frame
     model->mm bridge (s,R,t) BEFORE the affine (mm->px) projection:
@@ -116,37 +112,30 @@ def make_containment_cost(
     template_qpos = jnp.asarray(template_qpos)
     qs_to_opt = jnp.asarray(qs_to_opt); sil_qs_mask = jnp.asarray(sil_qs_mask)
     cam_Ms = jnp.asarray(cam_Ms); cam_ts = jnp.asarray(cam_ts)
-    sdf_all = jnp.asarray(sdf_all); grid_scale_all = jnp.asarray(grid_scale_all)
-    grid_offset_all = jnp.asarray(grid_offset_all)
-    present_all = jnp.asarray(present_all); conf_v = jnp.asarray(conf_v)
-    if bridge_s_all is None:
-        bridge_s_all, bridge_R_all, bridge_t_all = _identity_bridges(sdf_all.shape[0])
-    bridge_s_all = jnp.asarray(bridge_s_all); bridge_R_all = jnp.asarray(bridge_R_all)
-    bridge_t_all = jnp.asarray(bridge_t_all)
+    conf_v = jnp.asarray(conf_v)
 
     @jaxls.Cost.factory
     def containment_cost(var_values, root_var: SE3Var, joint_var: JointVar,
-                         frame_var: FrameVar) -> jnp.ndarray:
+                         sdf, grid_scale, grid_offset, present,
+                         bridge_s, bridge_R, bridge_t) -> jnp.ndarray:
+        # per-frame (jaxls-sliced) args: sdf (C,H,W), grid_scale (C,2),
+        # grid_offset (C,2), present (C,), bridge_s (), bridge_R (3,3), bridge_t (3,)
         T_root = var_values[root_var]; joints = var_values[joint_var]
-        t = jax.lax.stop_gradient(var_values[frame_var])[0].astype(jnp.int32)
         xyz = T_root.translation(); wxyz = T_root.rotation().wxyz
         q = jnp.concatenate([xyz, wxyz, joints])
         full_q = jnp.where(qs_to_opt, q, template_qpos)
         sil_q = jnp.where(sil_qs_mask, full_q, jax.lax.stop_gradient(full_q))
         verts3d = fk_repose(sil_q, scale, vert_indices)     # (M,3) model frame
-        verts_mm = bridge_s_all[t] * (verts3d @ bridge_R_all[t].T) + bridge_t_all[t]
-
-        sdf_t = sdf_all[t]; gs_t = grid_scale_all[t]
-        go_t = grid_offset_all[t]; pr_t = present_all[t]
+        verts_mm = bridge_s * (verts3d @ bridge_R.T) + bridge_t
 
         def scan_body(carry, cam):
-            M, tt, sdf, gs, go, present = cam
+            M, tt, sdf_c, gs, go, pres = cam
             proj = verts_mm @ M.T + tt                       # (M,2)
-            r = containment_residual(proj, sdf, gs, go, conf_v,
-                                     margin=margin, present=present)
+            r = containment_residual(proj, sdf_c, gs, go, conf_v,
+                                     margin=margin, present=pres)
             return carry, r                                  # (M,)
         _, res = jax.lax.scan(scan_body, None,
-                              (cam_Ms, cam_ts, sdf_t, gs_t, go_t, pr_t))
+                              (cam_Ms, cam_ts, sdf, grid_scale, grid_offset, present))
         return (res * containment_weight).reshape(-1)        # (C*M,)
 
     return containment_cost
@@ -161,8 +150,8 @@ class SilhouetteJaxlsBatchSolver:
     `silhouette_weight` and `containment_weight` independently gate their
     respective additive costs (each also requires its data kwarg -
     `boundary_all` / `sdf_all` - to be non-None); there is no `sil_data`
-    kwarg. With both weights 0 (the default), neither cost nor the shared
-    FrameVar is added, and the solve reproduces JaxlsBatchSolver's output
+    kwarg. With both weights 0 (the default), neither silhouette cost is
+    added, and the solve reproduces JaxlsBatchSolver's output
     (to atol=1e-5): the marker/reg/limit/smoothness cost formulas, the
     [root, joint, kp] variable ordering, the SE3-from-normalized-quat
     initial values, and the solve config (auto linear solver,
@@ -175,7 +164,8 @@ class SilhouetteJaxlsBatchSolver:
     _DENSE_THRESHOLD = 5000
 
     def __init__(self, n_iter=50, linear_solver="auto", lambda_initial=1.0,
-                 smooth_weight=0.0, use_se3_root=True, beta=8.0, huber_delta=0.0):
+                 smooth_weight=0.0, use_se3_root=True, beta=8.0, huber_delta=0.0,
+                 cg_tolerance_max=1e-2, cg_tolerance_min=1e-7, verbose=False):
         assert use_se3_root, "Phase 6 sibling supports SE3-root mode only"
         self.n_iter = n_iter
         self.linear_solver = linear_solver
@@ -184,6 +174,15 @@ class SilhouetteJaxlsBatchSolver:
         self.use_se3_root = use_se3_root
         self.beta = beta
         self.huber_delta = huber_delta
+        self.verbose = verbose
+        # Conjugate-gradient inexact-Newton tolerance (Eisenstat-Walker). jaxls
+        # caps CG at maxiter=len(x)=T*(6+n_hinges) (~44k for a 513-frame bout)
+        # and tightens toward tolerance_min; with the ill-conditioned silhouette
+        # normal equations that means thousands of matvecs per LM step. For a
+        # REFINEMENT polish an inexact linear solve is enough, so loosen these to
+        # trade a little linear-solve accuracy for a large wall-time win.
+        self.cg_tolerance_max = cg_tolerance_max
+        self.cg_tolerance_min = cg_tolerance_min
 
     def _pick_linear_solver(self, T, tangent_dim):
         if self.linear_solver != "auto":
@@ -231,7 +230,6 @@ class SilhouetteJaxlsBatchSolver:
                      retract_fn=jaxlie.manifold.rplus, tangent_dim=6): ...
         class JointVar(jaxls.Var[jnp.ndarray], default_factory=lambda: dummy_joints): ...
         class KpVar(jaxls.Var[jnp.ndarray], default_factory=lambda: dummy_kp): ...
-        class FrameVar(jaxls.Var[jnp.ndarray], default_factory=lambda: jnp.zeros((1,))): ...
 
         root_all = SE3Var(jnp.arange(T))
         joint_all = JointVar(jnp.arange(T))
@@ -286,35 +284,27 @@ class SilhouetteJaxlsBatchSolver:
 
         variables = [root_all, joint_all, kp_all]
 
-        frame_all = None
-        if use_sil:
-            frame_all = FrameVar(jnp.arange(T))
-            variables.append(frame_all)
-
         if use_cov:
             cov_cost = make_silhouette_cost(
-                SE3Var, JointVar, FrameVar,
+                SE3Var, JointVar,
                 fk_repose=fk_repose, vert_indices=cov_vert_indices,
-                cam_Ms=cam_Ms, cam_ts=cam_ts, boundary_all=boundary_all,
-                conf_p_all=conf_p_all, sil_qs_mask=sil_qs_mask, beta=self.beta,
+                cam_Ms=cam_Ms, cam_ts=cam_ts, sil_qs_mask=sil_qs_mask, beta=self.beta,
                 huber_delta=self.huber_delta, silhouette_weight=silhouette_weight,
-                qs_to_opt=qs_to_opt, template_qpos=mjx_data_template.qpos,
-                bridge_s_all=bridge_s_all, bridge_R_all=bridge_R_all,
-                bridge_t_all=bridge_t_all, scale=1.0)
-            costs.append(cov_cost(root_all, joint_all, frame_all))
+                qs_to_opt=qs_to_opt, template_qpos=mjx_data_template.qpos, scale=1.0)
+            # per-frame data as BATCHED factory args (jaxls vectorizes over T)
+            costs.append(cov_cost(root_all, joint_all, boundary_all, conf_p_all,
+                                  bridge_s_all, bridge_R_all, bridge_t_all))
 
         if use_cont:
             cont_cost = make_containment_cost(
-                SE3Var, JointVar, FrameVar,
+                SE3Var, JointVar,
                 fk_repose=fk_repose, vert_indices=cont_vert_indices,
-                cam_Ms=cam_Ms, cam_ts=cam_ts, sdf_all=sdf_all,
-                grid_scale_all=grid_scale_all, grid_offset_all=grid_offset_all,
-                present_all=present_all, conf_v=conf_v, sil_qs_mask=sil_qs_mask,
+                cam_Ms=cam_Ms, cam_ts=cam_ts, conf_v=conf_v, sil_qs_mask=sil_qs_mask,
                 margin=margin, containment_weight=containment_weight,
-                qs_to_opt=qs_to_opt, template_qpos=mjx_data_template.qpos,
-                bridge_s_all=bridge_s_all, bridge_R_all=bridge_R_all,
-                bridge_t_all=bridge_t_all, scale=1.0)
-            costs.append(cont_cost(root_all, joint_all, frame_all))
+                qs_to_opt=qs_to_opt, template_qpos=mjx_data_template.qpos, scale=1.0)
+            costs.append(cont_cost(root_all, joint_all, sdf_all, grid_scale_all,
+                                   grid_offset_all, present_all,
+                                   bridge_s_all, bridge_R_all, bridge_t_all))
 
         analyzed = jaxls.LeastSquaresProblem(costs=costs, variables=variables).analyze()
 
@@ -329,25 +319,30 @@ class SilhouetteJaxlsBatchSolver:
             JointVar(jnp.arange(T)).with_value(hinges_init),
             KpVar(jnp.arange(T)).with_value(kp_data),
         ]
-        if use_sil:
-            init_list.append(FrameVar(jnp.arange(T)).with_value(
-                jnp.arange(T).reshape(T, 1).astype(jnp.float32)))
 
         tangent_dim = 6 + n_hinges
         linear_solver = self._pick_linear_solver(T, tangent_dim)
-        # Both silhouette costs now close their per-frame data (boundary/SDF
-        # crops, confidences) over as constants and add only a 1-dim FrameVar
-        # per frame - the OPTIMIZED tangent the threshold above counts
-        # (6+n_hinges) already reflects the true problem size. Forcing
-        # conjugate_gradient here is therefore conservative (avoids relying on
-        # the _DENSE_THRESHOLD heuristic while the silhouette factors are
-        # active) rather than required to prevent an OOM, as it was under the
-        # retired SilVar packing (which put O(n_cam*n_pts) into the Var itself).
+        # The silhouette costs pass their per-frame data (boundary/SDF crops,
+        # confidences, bridge transforms) as BATCHED factory arguments, so
+        # jaxls vectorizes one factor definition over T frames -- the optimized
+        # tangent is (6+n_hinges) per frame, exactly what the threshold above
+        # counts. Forcing conjugate_gradient while the silhouette factors are
+        # active keeps the linear solve memory-bounded on long bouts where the
+        # dense normal-equation factorization would blow up.
         if use_sil and self.linear_solver == "auto":
             linear_solver = "conjugate_gradient"
 
+        # jaxls carries the CG tolerance by passing a ConjugateGradientConfig
+        # *as* the linear_solver argument (it extracts the config and sets the
+        # solver to "conjugate_gradient" internally).
+        linear_solver_arg = linear_solver
+        if linear_solver == "conjugate_gradient":
+            linear_solver_arg = jaxls.ConjugateGradientConfig(
+                tolerance_max=self.cg_tolerance_max,
+                tolerance_min=self.cg_tolerance_min)
+
         sol = analyzed.solve(
-            verbose=False, linear_solver=linear_solver,
+            verbose=self.verbose, linear_solver=linear_solver_arg,
             trust_region=jaxls.TrustRegionConfig(lambda_initial=self.lambda_initial),
             termination=jaxls.TerminationConfig(max_iterations=self.n_iter),
             initial_vals=jaxls.VarValues.make(init_list))
