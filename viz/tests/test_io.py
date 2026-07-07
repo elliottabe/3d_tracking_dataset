@@ -56,3 +56,25 @@ def test_write_video_writes_nonzero_mp4(tmp_path):
     ok, frame = cap.read()
     cap.release()
     assert ok and frame is not None
+
+
+def test_write_video_avc1_writes_nonzero_reopenable_mp4(tmp_path):
+    # avc1 (H.264) is available in this cv2 build (4.13.0); even if it weren't,
+    # write_video falls back to mp4v internally, so this should always produce
+    # a nonzero, reopenable mp4 either way.
+    out = tmp_path / "vids" / "out_avc1.mp4"
+    frames = []
+    for i in range(3):
+        f = np.zeros((16, 16, 3), dtype=np.uint8)
+        f[:] = i * 30
+        frames.append(f)
+
+    result = io.write_video(str(out), frames, fps=10, fourcc="avc1")
+
+    assert result == str(out)
+    assert out.exists() and out.stat().st_size > 0
+
+    cap = cv2.VideoCapture(str(out))
+    ok, frame = cap.read()
+    cap.release()
+    assert ok and frame is not None

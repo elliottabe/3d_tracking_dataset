@@ -117,6 +117,68 @@ def test_reproj_video_with_masks_subset(tmp_path):
     assert len(mp4s) == 1 and mp4s[0].stat().st_size > 0
 
 
+# --- clip: cut|stack|render, all pure cv2/numpy (no jax/mujoco), so these
+# run on CPU regardless of GPU visibility. cut/render read the full session
+# mp4s (~9GB each) but only a couple frames per camera; stack reads
+# already-small pre-cut clips.
+CLIP_SESSION = REPROJ_SESSION  # same session dir used by reproj-video fixtures
+CLIP_STACK_DIR = ("/gscratch/portia/eabe/data/Johnson_lab/Video_recordings/courtship/Session1/"
+                   "2026_04_02_12_11_50/clips_125664_126200")
+
+_skip_clip_cut = pytest.mark.skipif(
+    not (os.path.isdir(CLIP_SESSION)
+         and os.path.isfile(os.path.join(CLIP_SESSION, "Cam2012630.mp4"))),
+    reason="clip cut fixture (session mp4) not present",
+)
+_skip_clip_stack = pytest.mark.skipif(
+    not os.path.isdir(CLIP_STACK_DIR),
+    reason="clip stack fixture (pre-cut clips dir) not present",
+)
+_skip_clip_render = pytest.mark.skipif(
+    not (os.path.isdir(CLIP_SESSION)
+         and os.path.isfile(os.path.join(CLIP_SESSION, "Cam2012630.mp4"))),
+    reason="clip render fixture (session mp4) not present",
+)
+
+
+@_skip_clip_cut
+def test_clip_cut(tmp_path):
+    from viz.views import clip
+    class A: pass
+    a = A()
+    a.mode = "cut"; a.session_dir = CLIP_SESSION; a.start = 0; a.end = 1
+    a.cameras = ["Cam2012630"]; a.bout_dir = None; a.out = str(tmp_path); a.fps = 30
+    assert clip.run(a) == 0
+    mp4s = list(tmp_path.glob("Cam2012630_frames_*.mp4"))
+    assert len(mp4s) == 1 and mp4s[0].stat().st_size > 0
+
+
+@_skip_clip_stack
+def test_clip_stack(tmp_path):
+    from viz.views import clip
+    class A: pass
+    a = A()
+    a.mode = "stack"; a.session_dir = CLIP_STACK_DIR; a.cameras = None
+    a.out = str(tmp_path / "stack.mp4"); a.fps = 30
+    a.start = None; a.end = None; a.bout_dir = None
+    assert clip.run(a) == 0
+    out = tmp_path / "stack.mp4"
+    assert out.exists() and out.stat().st_size > 0
+
+
+@_skip_clip_render
+def test_clip_render(tmp_path):
+    from viz.views import clip
+    class A: pass
+    a = A()
+    a.mode = "render"; a.session_dir = CLIP_SESSION; a.start = 0; a.end = 2
+    a.cameras = ["Cam2012630", "Cam2012631"]; a.bout_dir = None
+    a.out = str(tmp_path / "render.mp4"); a.fps = 30
+    assert clip.run(a) == 0
+    out = tmp_path / "render.mp4"
+    assert out.exists() and out.stat().st_size > 0
+
+
 # --- kp-qc: matplotlib + ViTPose model eval. Slow on CPU (JAX_PLATFORMS=cpu
 # hides the GPU during the fast core suite), so only run it when a GPU is
 # actually visible to JAX AND the checkpoint + data-root are present.

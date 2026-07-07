@@ -102,21 +102,36 @@ def load_data3d_csv(csv_path):
 
     return kp3d, conf, names, frames
 
-def write_video(out_path, frames_iter, fps=30):
+def write_video(out_path, frames_iter, fps=30, fourcc="mp4v"):
     """Write an iterable/generator of BGR uint8 frames to an mp4 via
-    cv2.VideoWriter (mp4v fourcc). Size is taken from the first frame."""
+    cv2.VideoWriter. Size is taken from the first frame.
+
+    ``fourcc`` defaults to "mp4v" (preserving prior behavior for existing
+    callers/tests). If the requested fourcc fails to open a VideoWriter
+    (e.g. an OpenCV build without H.264 support), falls back to "mp4v"
+    with a printed warning rather than failing outright.
+    """
     out_dir = os.path.dirname(out_path)
     if out_dir:
         os.makedirs(out_dir, exist_ok=True)
-    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
     writer = None
+    active_fourcc = fourcc
     for frame in frames_iter:
         frame = np.asarray(frame)
         if writer is None:
             h, w = frame.shape[0], frame.shape[1]
-            writer = cv2.VideoWriter(out_path, fourcc, float(fps), (w, h))
+            writer = cv2.VideoWriter(
+                out_path, cv2.VideoWriter_fourcc(*active_fourcc), float(fps), (w, h))
+            if not writer.isOpened() and active_fourcc != "mp4v":
+                print(f"[write_video] warning: fourcc '{fourcc}' failed to open "
+                      f"VideoWriter for {out_path}; falling back to 'mp4v'")
+                active_fourcc = "mp4v"
+                writer = cv2.VideoWriter(
+                    out_path, cv2.VideoWriter_fourcc(*active_fourcc), float(fps), (w, h))
             if not writer.isOpened():
-                raise IOError(f"cv2.VideoWriter failed to open {out_path}")
+                raise IOError(
+                    f"cv2.VideoWriter failed to open {out_path} with fourcc "
+                    f"'{fourcc}' (and fallback 'mp4v')")
         writer.write(frame)
     if writer is None:
         raise ValueError(f"write_video: frames_iter was empty; nothing written to {out_path}")

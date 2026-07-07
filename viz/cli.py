@@ -58,7 +58,8 @@ def build_parser():
     c.add_argument("mode", choices=["cut", "stack", "render"])
     c.add_argument("--session-dir"); c.add_argument("--start", type=int); c.add_argument("--end", type=int)
     c.add_argument("--cameras", nargs="*", default=None); c.add_argument("--bout-dir")
-    c.add_argument("--out", default=None); c.set_defaults(func="_clip")
+    c.add_argument("--out", default=None); c.add_argument("--fps", type=int, default=30)
+    c.set_defaults(func="_clip")
     return p
 
 def main(argv=None):
