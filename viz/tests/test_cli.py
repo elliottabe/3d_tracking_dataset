@@ -18,3 +18,11 @@ def test_main_dispatches(monkeypatch):
     monkeypatch.setattr(c, "_overlay", lambda args: (called.setdefault("frame", args.frame), 0)[1])
     assert c.main(["overlay","--run","/r","--bout","1","--fly","0","--frame","7"]) == 0
     assert called["frame"] == 7   # main resolved c._overlay at call time (name-based)
+
+def test_kp_qc_parses_paired_recs():
+    p = cli.build_parser()
+    ns = p.parse_args(["kp-qc","--run-dir","/r","--female-vs-male",
+                        "--female-rec","F","--male-rec","M"])
+    assert ns.female_vs_male is True
+    assert ns.female_rec == "F" and ns.male_rec == "M"
+    assert ns.func == "_kp_qc"

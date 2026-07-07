@@ -31,6 +31,10 @@ def build_parser():
     k = sub.add_parser("kp-qc", help="detector pred-vs-GT keypoints + per-kp error")
     k.add_argument("--run-dir"); k.add_argument("--ckpt"); k.add_argument("--recording")
     k.add_argument("--n", type=int, default=8); k.add_argument("--female-vs-male", action="store_true")
+    k.add_argument("--female-rec", default="2026_05_27_11_56_05")
+    k.add_argument("--male-rec", default="2026_05_27_11_57_05")
+    k.add_argument("--data-root",
+                    default="/gscratch/portia/eabe/data/Johnson_lab/red_data/red_data_unified_V3")
     k.add_argument("--out", default=None); k.set_defaults(func="_kp_qc")
 
     f = sub.add_parser("fit-check", help="STAC-fit verification frames")
