@@ -27,9 +27,10 @@ Notes on selected flags:
   `overlay` additionally takes `--show` (comma list, default
   `mesh,kp,mask,axis`), `--compare` (a second run dir), and `--bodyalign`
   (flag); `legskel` additionally takes `--compare`.
-- `kp-qc` resolves paths via `viz.core.config.courtship_recording()`-style
-  Hydra config rather than `--run`; `--n` has no default so it doesn't
-  override the mode-specific defaults (8 for single, 5-per-sex for paired).
+- `kp-qc` takes explicit CLI args (`--data-root`, `--recording` or
+  `--female-rec`/`--male-rec`, `--ckpt`/`--run-dir`) and does NOT use the
+  courtship-pipeline Hydra config; `--n` has no default so it doesn't override
+  the mode-specific defaults (8 for single, 5-per-sex for paired).
 - `fit-check` takes the STAC `ik_h5` output as a positional argument; add
   `--no-error` to drop the residual tendons, `--n-stills` to control how many
   still frames are also written alongside the video.
