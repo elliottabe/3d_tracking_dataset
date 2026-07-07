@@ -19,3 +19,33 @@ def test_reproject_all_stacks_per_camera():
     cam_mats = np.stack([M, M*1.0])
     out = reproject.reproject_all(cam_mats, np.array([[1.,1.,5.]]))
     assert out.shape == (2,1,2)
+
+def test_camera_matrices_reuses_reprojection_tool(monkeypatch):
+    # Fake ReprojectionTool with minimal interface
+    class FakeCamera:
+        def __init__(self, name):
+            self.name = name
+
+    class FakeRT:
+        def __init__(self, calib_dir):
+            pass  # ignore calib_dir
+
+        @property
+        def camera_matrices(self):
+            # Return float64 array so we can test dtype conversion
+            return np.arange(24, dtype=np.float64).reshape(2, 4, 3)
+
+        @property
+        def _camera_list(self):
+            return [FakeCamera("cam0"), FakeCamera("cam1")]
+
+    monkeypatch.setattr(reproject, "ReprojectionTool", FakeRT)
+    cam_mats, names = reproject.camera_matrices("ignored")
+
+    # Assert shape and dtype conversion
+    assert cam_mats.shape == (2, 4, 3)
+    assert cam_mats.dtype == np.float32
+    # Assert names extracted in order
+    assert names == ["cam0", "cam1"]
+    # Assert values preserved through conversion
+    assert np.allclose(cam_mats, np.arange(24, dtype=np.float64).reshape(2, 4, 3))
