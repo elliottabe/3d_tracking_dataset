@@ -67,3 +67,10 @@ kp_names:
   - T3R_TaT1
   - T3R_TaT3
   - T3R_TaTip
+
+kp2d_filter:
+  enabled: false          # flip true after the wobble diagnostic confirms it helps
+  min_cutoff: 1.0         # lower -> stronger smoothing when the joint is still
+  beta: 0.5               # higher -> less smoothing (less lag) when moving fast
+  d_cutoff: 1.0
+  preserve_raw_patterns: [Wing]

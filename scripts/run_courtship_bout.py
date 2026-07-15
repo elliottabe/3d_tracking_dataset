@@ -406,6 +406,20 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
         # every downstream stage are consistently in cfg.model.KP_NAMES order.
         kp2d, conf = reorder_detector_to_model(
             kp2d, conf, list(cfg.detector.kp_names), list(cfg.model.KP_NAMES))
+        # Optional per-camera 1-Euro 2D smoothing (kills ViTPose soft-argmax
+        # high-freq wobble at the source, before triangulation). Applied in
+        # MODEL kp order (post-reorder) so preserve_raw_patterns match KP_NAMES.
+        # Default-off; validated via the 2D-wobble diagnostic. Wings are kept raw.
+        _kf = cfg.detector.get("kp2d_filter", None)
+        if _kf is not None and bool(_kf.get("enabled", False)):
+            from jarvis_jax.cse.kp2d_oneeuro import filter_kp2d_oneeuro
+            kp2d = filter_kp2d_oneeuro(
+                kp2d, conf, list(cfg.model.KP_NAMES),
+                conf_thresh=float(cfg.detector.conf_thresh),
+                min_cutoff=float(_kf.get("min_cutoff", 1.0)),
+                beta=float(_kf.get("beta", 0.0)),
+                d_cutoff=float(_kf.get("d_cutoff", 1.0)),
+                preserve_raw_patterns=tuple(_kf.get("preserve_raw_patterns", ["Wing"])))
         atomic_save_npz(kp2d_path, kp2d=kp2d, conf=conf)
     with np.load(kp2d_path) as z:
         kp2d, conf = z["kp2d"], z["conf"]
