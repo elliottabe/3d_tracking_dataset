@@ -83,3 +83,51 @@ def decode_heatmaps(hm, *, method="soft_centroid", in_size=448, radius=7, sharpe
     if method == "gaussian":
         return decode_gaussian(hm, in_size=in_size)
     raise ValueError(f"unknown decode method {method!r}")
+
+
+def peak_concentration(hm, *, radius=7):
+    """(B,H,W,K) -> (B,K) fraction of positive heatmap mass within +/-radius of
+    the argmax peak. ~1.0 = tight/sharp peak; small = diffuse."""
+    hm = np.asarray(hm)
+    b, h, w, k = hm.shape
+    p = np.maximum(hm, 0.0)
+    idx = p.reshape(b, h * w, k).argmax(1)                    # (B,K)
+    py = idx // w; px = idx % w
+    ys = np.arange(h)[None, :, None, None]
+    xs = np.arange(w)[None, None, :, None]
+    win = ((np.abs(ys - py[:, None, None, :]) <= radius)
+           & (np.abs(xs - px[:, None, None, :]) <= radius))
+    inside = (p * win).sum((1, 2))
+    total = p.sum((1, 2)) + 1e-8
+    return inside / total
+
+
+def wobble(kp, *, window=11, polyorder=2):
+    """kp (T,K,2) single-camera track -> (K,) high-frequency wobble in px:
+    std over time of the residual (kp - savgol(kp)), combined over x and y.
+    NaN frames are interior-interpolated for the smooth and excluded from the
+    residual. Returns NaN for joints with too few finite frames."""
+    from scipy.signal import savgol_filter
+    kp = np.asarray(kp, np.float64)
+    T, K, _ = kp.shape
+    out = np.full(K, np.nan)
+    win = min(window, T if T % 2 == 1 else T - 1)
+    if win % 2 == 0:
+        win -= 1
+    if win < polyorder + 2 or win < 3:
+        return out
+    xi = np.arange(T)
+    for j in range(K):
+        res = []
+        for d in range(2):
+            v = kp[:, j, d]
+            fin = np.isfinite(v)
+            if fin.sum() < win:
+                continue
+            vv = v.copy()
+            vv[~fin] = np.interp(xi[~fin], xi[fin], v[fin])
+            sm = savgol_filter(vv, win, polyorder)
+            res.append((v[fin] - sm[fin]) ** 2)
+        if res:
+            out[j] = float(np.sqrt(np.concatenate(res).mean()))
+    return out
