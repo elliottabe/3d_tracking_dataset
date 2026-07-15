@@ -395,7 +395,8 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
             frames_iter = all_cams_frames(caps, start, T)
             kp2d, conf = predict_bout_2d(
                 vit, frames_iter, masks_dict["masks"], centroids, masks_dict["valid"], cam_mats,
-                crop=int(cfg.detector.crop), batch=int(cfg.detector.get("batch", 64)))
+                crop=int(cfg.detector.crop), batch=int(cfg.detector.get("batch", 64)),
+                decode_sharpen=float(cfg.detector.get("decode_sharpen", 1.0)))
         finally:
             for cap in caps:
                 cap.release()

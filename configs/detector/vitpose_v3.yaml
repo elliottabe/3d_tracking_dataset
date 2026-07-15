@@ -4,6 +4,10 @@ num_keypoints: 50
 crop: 448
 heatmap_size: 224
 conf_thresh: 0.3      # min 2D peak conf for a view to enter triangulation
+decode_sharpen: 3.0   # soft-argmax sharpening power; 1.0 = original centroid.
+                      # Set from the Task-4 wobble diagnostic (mean wobble soft
+                      # s1=0.727 -> s3=0.573 px); matches the repo's existing
+                      # 3D-path sharpen=3.0.
 
 # Detector output channel order (order "O"): the tracking/COCO training order the
 # retrained ViTPose (v3_kp_maskaware, trained on red_data_unified_V3) emits. This

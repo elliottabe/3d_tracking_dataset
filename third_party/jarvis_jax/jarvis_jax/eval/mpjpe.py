@@ -3,7 +3,7 @@ import jax
 import jax.numpy as jnp
 
 
-def heatmaps_to_keypoints(hm, *, in_size=448, radius=7):
+def heatmaps_to_keypoints(hm, *, in_size=448, radius=7, sharpen=1.0):
     """(B,H,W,K) heatmaps -> (B,K,2) keypoints in `in_size` pixel coords.
 
     Argmax locates each keypoint's peak, then a local mass-centroid within a
@@ -22,8 +22,8 @@ def heatmaps_to_keypoints(hm, *, in_size=448, radius=7):
     ys = jnp.arange(h)[None, :, None, None]
     xs = jnp.arange(w)[None, None, :, None]
     win = ((jnp.abs(ys - py) <= radius) & (jnp.abs(xs - px) <= radius)).astype(p.dtype)
-    pw = p * win
-    z = pw.sum(axis=(1, 2)) + 1e-8                          # (B,K)
+    pw = (p * win) ** sharpen        # sharpen>1 concentrates mass near the peak,
+    z = pw.sum(axis=(1, 2)) + 1e-8   # reducing diffuse-tail drift; 1.0 == original
     gx = jnp.arange(w, dtype=hm.dtype)[None, None, :, None]
     gy = jnp.arange(h, dtype=hm.dtype)[None, :, None, None]
     x = (pw * gx).sum(axis=(1, 2)) / z

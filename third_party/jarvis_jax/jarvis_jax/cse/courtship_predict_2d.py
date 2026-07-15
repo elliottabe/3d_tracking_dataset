@@ -64,22 +64,24 @@ def reorder_detector_to_model(kp2d, conf, detector_kp_names, model_kp_names):
     return kp2d[..., perm, :], conf[..., perm]
 
 
-def peaks_and_conf(hm):
-    """hm (B,Hh,Wh,K) logits -> (kp2d_crop (B,K,2) in 448px, conf (B,K) peak value)."""
-    kp = heatmaps_to_keypoints(hm, in_size=448)               # (B,K,2)
+def peaks_and_conf(hm, *, decode_sharpen=1.0):
+    """hm (B,Hh,Wh,K) logits -> (kp2d_crop (B,K,2) in 448px, conf (B,K) peak value).
+    decode_sharpen>1 sharpens the soft-argmax centroid (kills high-freq wobble
+    from ViTPose's diffuse tails; see docs/superpowers/plans 2D-wobble)."""
+    kp = heatmaps_to_keypoints(hm, in_size=448, sharpen=decode_sharpen)  # (B,K,2)
     conf = jax.nn.relu(hm).max(axis=(1, 2))                    # (B,K)
     return kp, conf
 
 
-def _forward(vit, crops4_u8):
+def _forward(vit, crops4_u8, *, decode_sharpen=1.0):
     """(B,448,448,4) uint8 -> (kp2d_crop (B,K,2), conf (B,K)) on device."""
     x = normalize_image(jnp.asarray(crops4_u8))
     hm = vit(x, use_running_average=True)
-    return peaks_and_conf(hm)
+    return peaks_and_conf(hm, decode_sharpen=decode_sharpen)
 
 
 def predict_bout_2d(vitpose, frames_iter, masks, centroids, valid, cam_mats,
-                    *, crop: int = 448, batch: int = 64):
+                    *, crop: int = 448, batch: int = 64, decode_sharpen: float = 1.0):
     """Per (frame,cam): crop -> ViTPose -> full-frame 2-D kp + conf.
 
     frames_iter: iterable of length T, each -> (C,H,W,3) uint8 RGB (all cameras
@@ -104,7 +106,7 @@ def predict_bout_2d(vitpose, frames_iter, masks, centroids, valid, cam_mats,
         allc = np.concatenate(crops, 0)             # (n_valid_frames*C, 448,448,4)
         outs_kp, outs_cf = [], []
         for i in range(0, allc.shape[0], batch):
-            k, cf = _forward(vitpose, allc[i:i + batch])
+            k, cf = _forward(vitpose, allc[i:i + batch], decode_sharpen=decode_sharpen)
             outs_kp.append(np.asarray(k)); outs_cf.append(np.asarray(cf))
         kp_crop = np.concatenate(outs_kp, 0); cf = np.concatenate(outs_cf, 0)
         K = kp_crop.shape[1]
