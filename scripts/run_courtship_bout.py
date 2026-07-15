@@ -30,11 +30,11 @@ import re
 
 import numpy as np
 import hydra
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 
 from jarvis_jax.cse.courtship_resume import (
     atomic_save_npz, atomic_save_json, stage_done, mark_done, bout_complete)
-from jarvis_jax.cse.courtship_bout_masks import load_bout_masks, verify_mask_camera_order
+from jarvis_jax.cse.courtship_bout_masks import load_bout_masks, check_bout_camera_order
 from jarvis_jax.cse.courtship_predict_2d import (
     load_detector, predict_bout_2d, reorder_detector_to_model)
 from jarvis_jax.cse.courtship_triangulate import triangulate_keypoints
@@ -153,6 +153,82 @@ def high_confidence_sample(kp3d, max_frames=None):
     return idx
 
 
+def _import_segment_calibration():
+    """Import the segment-calibration entry points, adding the repo root to
+    sys.path if the pipeline's cwd/PYTHONPATH didn't already expose `utils`
+    (mirrors jarvis_jax.cse.courtship_filter._filter_keypoints)."""
+    try:
+        from jarvis_jax.cse.courtship_segment_fit import optimize_segment_scales
+        from utils.segment_calibration import build_segment_map
+    except ImportError:
+        repo = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
+        if repo not in sys.path:
+            sys.path.insert(0, repo)
+        from jarvis_jax.cse.courtship_segment_fit import optimize_segment_scales
+        from utils.segment_calibration import build_segment_map
+    return optimize_segment_scales, build_segment_map
+
+
+def compute_segment_scales(cfg, kp3d, kp_names, scale, run_root):
+    """Per-segment (per-limb) SHAPE calibration M-step (the validated recipe).
+
+    A single global trunk scale + STAC marker offsets leaves a per-limb
+    proportion mismatch (model femur too long, tarsus too short) so the IK can't
+    reach the keypoints (~0.9mm on the femur-tibia joint). This runs an
+    UN-MORPHED offsets+ik on a high-confidence calibration sample in a TEMP dir
+    (so the real run_root/offsets.h5 is untouched and, crucially, so the temp
+    fit sees NO SEGMENT_SCALES), reads the resulting qpos + kp_data (model
+    units) from that stac_ik.h5, runs the Adam-on-MJX differentiable M-step
+    (jarvis_jax.cse.courtship_segment_fit.optimize_segment_scales), and returns a
+    JSON-serializable list of per-segment scale entries ready for
+    cfg.model.SEGMENT_SCALES / stac_mjx.rescale.rescale_per_segment.
+    """
+    import tempfile
+    import shutil
+    import mujoco
+    import stac_mjx.io_dict_to_hdf5 as ioh5
+
+    optimize_segment_scales, build_segment_map = _import_segment_calibration()
+
+    # High-confidence calibration sample (no NaN markers), capped for a fast fit.
+    sample_idx = high_confidence_sample(kp3d, max_frames=300)
+
+    tmp_dir = tempfile.mkdtemp(prefix="segcalib_", dir=run_root)
+    try:
+        # UN-MORPHED offsets + ik. cfg.model.SEGMENT_SCALES must be unset here
+        # (it is: calibration runs BEFORE it is set), so run_stac fits/solves on
+        # the base model and the resulting qpos is a base-model pose.
+        fit_offsets_once(cfg, kp3d[sample_idx], kp_names,
+                         offsets_path="offsets.h5", save_path=tmp_dir, scale=scale)
+        ik_only_bout(cfg, kp3d[sample_idx], kp_names, offsets_path="offsets.h5",
+                     out_h5="stac_ik.h5", save_path=tmp_dir, scale=scale)
+        d = ioh5.load(os.path.join(tmp_dir, "stac_ik.h5"))
+        qpos = np.asarray(d["qpos"])                                  # (T,nq)
+        kp_model = np.asarray(d["kp_data"]).reshape(len(qpos), len(kp_names), 3)
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    mj_model = mujoco.MjModel.from_xml_path(str(cfg.model.MJCF_PATH))
+    segment_map = build_segment_map(dict(cfg.model.KEYPOINT_MODEL_PAIRS))
+    scales, _info = optimize_segment_scales(
+        mj_model, segment_map, kp_names, qpos, kp_model,
+        lam_reg=0.001, lam_target=0.0, lr=0.01, iters=500, clamp=(0.6, 1.6),
+        verbose=True)
+    return [{"name": s["name"], "geom_body": s.get("geom_body", ""),
+             "length_body": s.get("length_body", ""),
+             "scale": float(scales[s["name"]]),
+             "scale_sites_on_body": s.get("scale_sites_on_body", "")}
+            for s in segment_map]
+
+
+def apply_segment_scales(cfg, seg_entries):
+    """Set cfg.model.SEGMENT_SCALES so stac_mjx morphs the model (Stac.__init__
+    reads it and calls rescale_per_segment before compiling). Must run BEFORE
+    the offsets fit so the real offsets.h5 is fit on the MORPHED model."""
+    OmegaConf.set_struct(cfg.model, False)
+    cfg.model.SEGMENT_SCALES = OmegaConf.create(seg_entries)
+
+
 def bridges_to_arrays(bridges):
     """length-T list of (s,R,t)|None -> (bridge_s (T,), bridge_R (T,3,3),
     bridge_t (T,3), bridge_ok (T,) bool) for npz persistence (RESOLUTIONS #2:
@@ -184,6 +260,14 @@ def atomic_write_mp4(path, write_fn):
     tmp = path[:-4] + ".tmp.mp4" if path.endswith(".mp4") else path + ".tmp"
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     write_fn(tmp)
+    if not os.path.exists(tmp):
+        # imageio never creates the file when zero frames are appended (e.g. a
+        # bout whose frame window runs past the end of the source video), so
+        # os.replace would crash with FileNotFoundError. This artifact is
+        # cosmetic QC -- warn and skip rather than fail the bout.
+        print(f"[atomic_write_mp4] WARNING: writer produced no file for {path} "
+              f"(0 frames?) -- skipping this video.")
+        return None
     os.replace(tmp, path)
     return path
 
@@ -264,21 +348,26 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
     predictions_dir = str(cfg.recording.predictions_dir)
     bout_npz = os.path.join(predictions_dir, f"bout_{bout_idx:05d}", "sam3_masks.npz")
     cameras = list(cfg.recording.cameras)
-    masks_dict = load_bout_masks(bout_npz, fly, expected_cameras=cameras)
-    T, C = masks_dict["T"], masks_dict["C"]
 
     from jarvis_jax.geometry.reprojection_tool import ReprojectionTool
     rt = ReprojectionTool(cfg.recording.calib_dir)
     cam_mats = np.asarray(rt.camera_matrices, np.float32)  # (C,4,3); order matches recording.cameras
 
-    # Calibration-based guard (cheap, once per bout): fail LOUD if this
-    # bout's stored mask camera axis doesn't match the calibration's camera
-    # order -- the camera-order-scramble bug this check exists to catch
-    # (see jarvis_jax.cse.courtship_bout_masks.verify_mask_camera_order).
-    # Name-based reordering above (expected_cameras=) already self-corrects
-    # any FUTURE mask file that carries a `cameras` array; this geometric
-    # check additionally catches legacy files that don't.
-    verify_mask_camera_order(masks_dict["centroids"], masks_dict["valid"], rt)
+    # Non-mutating camera-order QC (cheap, once per bout). Camera identity is
+    # trusted from the self-labelling `cameras` array sam3_driver writes (the
+    # mask write path is order-preserving: masks are packed by cam_idx and the
+    # `cameras` array records that same order), and name-based reordering in
+    # load_bout_masks(expected_cameras=) below applies it. This check only
+    # SURFACES bad mask-centroid geometry (almost always a per-camera SAM3
+    # tracking error in the bout) and NEVER mutates the file or fails the bout
+    # -- auto-remapping on coarse mask centroids was found to corrupt
+    # correctly-ordered masks when a single camera is mis-tracked.
+    _cam = check_bout_camera_order(bout_npz, fly, cameras, rt)
+    print(f"[camera-order] bout {bout_idx} fly{fly}: {_cam['status']}"
+          f" (identity={_cam.get('identity_resid')}, worst_cam={_cam.get('worst_cam')})")
+
+    masks_dict = load_bout_masks(bout_npz, fly, expected_cameras=cameras)
+    T, C = masks_dict["T"], masks_dict["C"]
 
     kp2d_path = os.path.join(bout_dir, "kp2d.npz")
     kp3d_path = os.path.join(bout_dir, "kp3d.npz")
@@ -295,10 +384,10 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
     # -- Stage A: ViTPose 2-D ---------------------------------------------------
     if not stage_done(kp2d_path):
         start = bout_start_frame(cfg, bout_idx)
-        # Centroids come from masks_dict (already reordered/verified above),
+        # Centroids come from masks_dict (already reordered/autofixed above),
         # NOT a fresh raw npz read -- they must stay in lockstep with
-        # masks_dict["masks"]'s camera axis (see verify_mask_camera_order
-        # guard above).
+        # masks_dict["masks"]'s camera axis (see autofix_bout_camera_order
+        # above).
         centroids = masks_dict["centroids"]
         caps = open_video_captures(cfg.recording.session_dir, cameras)
         try:
@@ -364,6 +453,27 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
                                       "estimator": str(cfg.scaling.estimator)})
     with open(scale_path) as _f:
         scale = float(json.load(_f)["scale"])
+
+    # -- segment_scales.json: per-segment (per-limb) SHAPE calibration. Like
+    #    scale.json, this is a per-fly-constant morph computed ONCE per session
+    #    (shared across all bouts/flies, whoever gets there first) and persisted
+    #    to run_root/segment_scales.json. The single trunk `scale` above fixes
+    #    overall body SIZE but leaves a per-limb PROPORTION mismatch (model femur
+    #    too long, tarsus too short) that STAC marker offsets can't absorb, so the
+    #    IK can't reach the keypoints. cfg.model.SEGMENT_SCALES is then set in
+    #    EVERY process (each bout is a separate process) so stac_mjx morphs the
+    #    model (Stac.__init__ -> rescale_per_segment, prints "[calibration]
+    #    morphed N body segments"). CRITICAL: this must run BEFORE the offsets fit
+    #    so the real offsets.h5 is fit on the MORPHED model. Gated by
+    #    cfg.model.segment_calibration (anatomy config).
+    if bool(cfg.model.get("segment_calibration", True)):
+        seg_scales_path = os.path.join(run_root, "segment_scales.json")
+        if not stage_done(seg_scales_path):
+            seg_entries = compute_segment_scales(cfg, kp3d, kp_names, scale, run_root)
+            atomic_save_json(seg_scales_path, seg_entries)
+        with open(seg_scales_path) as _f:
+            seg_entries = json.load(_f)
+        apply_segment_scales(cfg, seg_entries)
 
     # -- offsets.h5: fit ONCE (shared across all bouts/flies) on a
     #    high-confidence kp3d sample from whichever bout gets there first --
@@ -462,27 +572,34 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
             overlay_path = os.path.join(overlay_dir, f"{cam}_reproj.mp4")
             if stage_done(overlay_path):
                 continue
-            mesh2d_by_frame, kp2d_by_frame_overlay = [], []
-            for t in range(T):
-                mesh_t = mesh_mm_all[t]
-                mesh_ok = np.isfinite(mesh_t).all(-1)
-                if not mesh_ok.any():
-                    mesh2d_by_frame.append(np.zeros((0, 2)))
-                else:
-                    mesh2d_by_frame.append(project_points(cam_mats[ci], mesh_t[mesh_ok]))
-                kp_t = kp3d[t]
-                kp_ok = np.isfinite(kp_t).all(-1)
-                kp2d_by_frame_overlay.append(project_points(cam_mats[ci], kp_t[kp_ok]))
-            video_path = os.path.join(cfg.recording.session_dir, f"{cam}.mp4")
+            # Per-camera overlays are cosmetic QC and outputs.h5 is already
+            # written above -- a render failure on one camera must never fail
+            # the bout (mirrors Stage F's "logged but never fails the bout").
+            try:
+                mesh2d_by_frame, kp2d_by_frame_overlay = [], []
+                for t in range(T):
+                    mesh_t = mesh_mm_all[t]
+                    mesh_ok = np.isfinite(mesh_t).all(-1)
+                    if not mesh_ok.any():
+                        mesh2d_by_frame.append(np.zeros((0, 2)))
+                    else:
+                        mesh2d_by_frame.append(project_points(cam_mats[ci], mesh_t[mesh_ok]))
+                    kp_t = kp3d[t]
+                    kp_ok = np.isfinite(kp_t).all(-1)
+                    kp2d_by_frame_overlay.append(project_points(cam_mats[ci], kp_t[kp_ok]))
+                video_path = os.path.join(cfg.recording.session_dir, f"{cam}.mp4")
 
-            def _write(tmp, video_path=video_path, mesh2d_by_frame=mesh2d_by_frame,
-                      kp2d_by_frame_overlay=kp2d_by_frame_overlay):
-                write_camera_video(
-                    tmp, frames_rgb_iter=one_cam_frames(video_path, start, T),
-                    mesh2d_by_frame=mesh2d_by_frame, kp2d_by_frame=kp2d_by_frame_overlay,
-                    fps=int(cfg.outputs.overlay_fps))
+                def _write(tmp, video_path=video_path, mesh2d_by_frame=mesh2d_by_frame,
+                          kp2d_by_frame_overlay=kp2d_by_frame_overlay):
+                    write_camera_video(
+                        tmp, frames_rgb_iter=one_cam_frames(video_path, start, T),
+                        mesh2d_by_frame=mesh2d_by_frame, kp2d_by_frame=kp2d_by_frame_overlay,
+                        fps=int(cfg.outputs.overlay_fps))
 
-            atomic_write_mp4(overlay_path, _write)
+                atomic_write_mp4(overlay_path, _write)
+            except Exception as e:  # noqa: BLE001 -- QC artifact, never fatal
+                print(f"[overlay] WARNING: bout {bout_idx} fly{fly} cam {cam} "
+                      f"reproj overlay failed ({type(e).__name__}: {e}) -- skipping.")
 
     # -- Stage F: standard QC side-by-side video (raw video + SAM mask + ViTPose
     #    2-D skeleton  |  MuJoCo IK render + 3-D sites). Auto-generated per
@@ -497,10 +614,16 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
         if not stage_done(sbs_path):
             import subprocess
             n_sbs = int(cfg.outputs.get("sidebyside_frames", 300))
+            # Pass THIS recording's session/predictions dir + the bout's absolute
+            # start frame, else the viz resolves the default (Session0) recording
+            # and renders the wrong video/masks/frames.
             cmd = [sys.executable, "-m", "viz", "sidebyside",
                    "--run", run_root, "--bout", str(bout_idx), "--fly", str(fly),
                    "--n", str(n_sbs), "--camera", "track1",
                    "--conf", str(float(cfg.detector.conf_thresh)),
+                   "--session-dir", str(cfg.recording.session_dir),
+                   "--predictions-dir", str(cfg.recording.predictions_dir),
+                   "--start-frame", str(int(bout_start_frame(cfg, bout_idx))),
                    "--fps", str(int(cfg.outputs.overlay_fps)), "--out", sbs_path]
             # The parent process still holds ~90% of the GPU (jax preallocated),
             # so the viz subprocess must NOT try to grab GPU memory. Its render is
