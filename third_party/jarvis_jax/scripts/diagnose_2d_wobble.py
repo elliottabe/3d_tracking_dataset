@@ -10,7 +10,7 @@ isolates the decode + heatmap shape from crop/centroid jitter.
 
 Usage (submit to ckpt via scripts/slurm_diagnose_wobble.sh; see the plan):
     python third_party/jarvis_jax/scripts/diagnose_2d_wobble.py \
-        +bout_id=3 +camera=track1 +n_frames=500 +fly=0 \
+        +bout_id=3 +camera=Cam2012630 +n_frames=500 +fly=0 \
         +diag_out=diagnostics/wobble_diag.npz
 """
 import os
