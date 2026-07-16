@@ -1,7 +1,7 @@
 # @package recording
 name: Session0
 session_dir: ${paths.data_dir_johnson}/Video_recordings/courtship/Session0/2025_10_20_13_20_04
-predictions_dir: ${recording.session_dir}/Predictions_3D_36233268_fixed   # camera-order-CORRECTED masks (carry camera names); legacy Predictions_3D_36233268 masks were camera-swapped
+predictions_dir: ${recording.session_dir}/Predictions_3D_sam3_all30   # current full-session SAM3 run: 30 bouts, camera-named masks (correct order) + sex_meta. (Predictions_3D_36233268_fixed was removed; legacy Predictions_3D_36233268 lacks camera names / was swapped.)
 bouts_csv: ${recording.session_dir}/courtship_bouts_unified_summary.csv
 calib_dir: ${recording.session_dir}/calibration
 num_animals: 2
