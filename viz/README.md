@@ -42,7 +42,7 @@ Notes on selected flags:
 
 Shared engine lives in `viz/core/`:
 - `reproject.py` — 3D(mm)→2D(px) camera reprojection (`ReprojectionTool`
-  convention, matches `scripts/run_courtship_bout.py::project_points`).
+  convention, matches `scripts/run_bout.py::project_points`).
 - `overlays.py` — cv2 drawing primitives (points, chains, masks, axes) on a
   BGR uint8 image.
 - `io.py` — artifact loaders, run-path resolution, frame reading/writing.

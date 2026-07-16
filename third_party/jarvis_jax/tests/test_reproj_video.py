@@ -4,7 +4,7 @@ import pytest
 
 
 def test_draw_overlay_frame_returns_uint8_same_size():
-    from jarvis_jax.cse.reproj_video import draw_overlay_frame
+    from jarvis_jax.tracking.reproj_video import draw_overlay_frame
     raw = np.zeros((32, 40, 3), np.uint8)
     mesh2d = np.array([[5.0, 5.0], [10.0, 8.0], [20.0, 15.0]])
     kp2d = np.array([[6.0, 6.0], [25.0, 20.0]])
@@ -17,7 +17,7 @@ def test_draw_overlay_frame_returns_uint8_same_size():
 
 def test_write_camera_video_streams_and_counts(tmp_path):
     import imageio
-    from jarvis_jax.cse.reproj_video import write_camera_video
+    from jarvis_jax.tracking.reproj_video import write_camera_video
     T = 2
     frames = [np.zeros((32, 40, 3), np.uint8) for _ in range(T)]
     mesh2d = [np.array([[5.0, 5.0], [10.0, 8.0]]) for _ in range(T)]

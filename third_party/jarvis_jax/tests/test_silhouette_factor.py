@@ -5,7 +5,7 @@ import jaxls
 import jaxlie
 import pytest
 
-from jarvis_jax.cse.silhouette_joint_ik import make_silhouette_cost
+from jarvis_jax.tracking.silhouette_joint_ik import make_silhouette_cost
 
 XML = "/gscratch/portia/eabe/Research/MyRepos/fruitfly_body_models/fruitfly_v1/fruitfly_v1_free.xml"
 MESH = "/gscratch/portia/eabe/Research/MyRepos/fruitfly_body_models/fruitfly_cse/fly_v1_visual_canonical_wings.npz"
@@ -14,9 +14,9 @@ skip = pytest.mark.skipif(not (os.path.exists(XML) and os.path.exists(MESH)), re
 
 @skip
 def test_silhouette_cost_builds_and_residual_shape():
-    from jarvis_jax.cse.silhouette_ik import load_anatomy, make_fk_repose
-    from jarvis_jax.cse.silhouette_dof import build_appendage_dof_mask
-    from jarvis_jax.cse.silhouette_targets import silhouette_fk_indices
+    from jarvis_jax.tracking.silhouette_ik import load_anatomy, make_fk_repose
+    from jarvis_jax.tracking.silhouette_dof import build_appendage_dof_mask
+    from jarvis_jax.tracking.silhouette_targets import silhouette_fk_indices
     import mujoco
     anat = load_anatomy(XML, MESH); fk = make_fk_repose(anat)
     m = mujoco.MjModel.from_xml_path(XML)

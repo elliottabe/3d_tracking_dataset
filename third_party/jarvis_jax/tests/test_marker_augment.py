@@ -1,5 +1,5 @@
 import numpy as np
-from jarvis_jax.cse.marker_augment import augment_wing_markers, WING_MARKER_IDS
+from jarvis_jax.tracking.marker_augment import augment_wing_markers, WING_MARKER_IDS
 
 
 def test_augment_overrides_wing_markers_and_boosts_weight():

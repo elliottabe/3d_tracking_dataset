@@ -25,7 +25,7 @@ reprojection and cv2/matplotlib overlay drawing:
 - **Video-clip assembly**: `scripts/viz/{cut_videos_by_frame,make_bout_clip,render_bout_clips,stack_clips}.py`.
 
 They all duplicate logic that already exists as `project_points`
-(`scripts/run_courtship_bout.py`) and `ReprojectionTool`
+(`scripts/run_bout.py`) and `ReprojectionTool`
 (`jarvis_jax.geometry.reprojection_tool`).
 
 ## Architecture
@@ -44,7 +44,7 @@ viz/
 ├── core/
 │   ├── reproject.py     # cam_matrices(calib_dir); project(cam_mat, pts3d); reproject_all(rt, pts3d) -> per-cam 2D  (wraps ReprojectionTool/project_points)
 │   ├── overlays.py      # cv2 primitives: keypoints, skeleton, mesh-cloud, mask outline/fill, leg-chains, head->tail axis, legend
-│   ├── io.py            # loaders: outputs.h5 (kp3d_mm/mesh_mm), kp2d/kp3d npz, SAM masks (reuse jarvis_jax.cse.courtship_bout_masks), video frames, COCO GT, data3D CSVs
+│   ├── io.py            # loaders: outputs.h5 (kp3d_mm/mesh_mm), kp2d/kp3d npz, SAM masks (reuse jarvis_jax.tracking.bout_masks), video frames, COCO GT, data3D CSVs
 │   ├── layout.py        # per-camera montage/grid, crop-to-content, banner
 │   └── colors.py        # single palette: fly0/fly1, head/tail, detector/fit, keypoint groups
 └── tests/               # unit tests for the core

@@ -5,7 +5,7 @@ import mujoco
 import pytest
 from hydra import initialize_config_dir, compose
 
-from jarvis_jax.cse.courtship_scale import (
+from jarvis_jax.tracking.scale import (
     DEFAULT_TRUNK_KEYPOINTS, compute_trunk_scale)
 
 CFG_DIR = "/gscratch/portia/eabe/Research/MyRepos/3d_tracking_dataset/configs"
@@ -14,7 +14,7 @@ CFG_DIR = "/gscratch/portia/eabe/Research/MyRepos/3d_tracking_dataset/configs"
 def _cfg():
     os.environ.setdefault("USER", "eabe")
     with initialize_config_dir(version_base=None, config_dir=CFG_DIR):
-        return compose(config_name="courtship_pipeline")
+        return compose(config_name="pipeline")
 
 
 def _tracking_site_positions(model_xml):

@@ -35,7 +35,7 @@ checkpoint (Task 6's `finetune_detector.finetune`).
 Incomplete (bout, fly) dirs (pipeline still running / never run) are skipped
 (counted and logged, not silent) -- this driver only consumes
 already-finished pipeline output, it does not run the pipeline itself (see
-`scripts/slurm_courtship_array.py` for that, which is resumable and
+`scripts/slurm_bout_array.py` for that, which is resumable and
 idempotent). A bout whose video frames fail to read (corrupt/short video) is
 also skipped with a warning naming the bout, rather than killing the whole
 multi-hour, multi-recording run.
@@ -57,16 +57,16 @@ from omegaconf import OmegaConf
 
 import stac_mjx.io_dict_to_hdf5 as ioh5
 from jarvis_jax.geometry.reprojection_tool import ReprojectionTool
-from jarvis_jax.cse.courtship_bout_masks import load_bout_masks
-from jarvis_jax.cse.courtship_pseudolabel import (
+from jarvis_jax.tracking.bout_masks import load_bout_masks
+from jarvis_jax.tracking.courtship_pseudolabel import (
     reproject_sites, gate_pseudolabels, records_for_bout, GateCfg)
-from jarvis_jax.cse.build_pseudolabel_dataset import PseudoLabelWriter
-from jarvis_jax.cse.finetune_detector import finetune
+from jarvis_jax.tracking.build_pseudolabel_dataset import PseudoLabelWriter
+from jarvis_jax.tracking.finetune_detector import finetune
 from jarvis_jax.predict.sam3_driver import parse_bouts, session_tag_for
 
 import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from scripts.run_courtship_bout import all_cams_frames, open_video_captures
+from scripts.run_bout import all_cams_frames, open_video_captures
 
 
 def resolve_label_source(src):
@@ -149,12 +149,12 @@ def resolve_label_source(src):
 
 def start_frame_for(bouts_csv, session_dir, bout_idx):
     """Absolute start-frame for bout_idx from THIS source's bouts_csv (mirrors
-    `run_courtship_bout.bout_start_frame`'s logic, parameterized per-source
+    `run_bout.bout_start_frame`'s logic, parameterized per-source
     instead of reading a single global `cfg.recording`).
 
     NOTE: reads the session's bouts CSV (the same source D2/SAM3 itself parses
     via `jarvis_jax.predict.sam3_driver.parse_bouts`), not the D2
-    manifest.json -- see `run_courtship_bout.bout_start_frame`'s docstring for
+    manifest.json -- see `run_bout.bout_start_frame`'s docstring for
     why the CSV is the authoritative, append-only source."""
     tag = session_tag_for(session_dir)
     bouts = parse_bouts(bouts_csv, tag, bout_ids=[bout_idx])
@@ -164,7 +164,7 @@ def start_frame_for(bouts_csv, session_dir, bout_idx):
 
 
 def _mask_npz(predictions_dir, bout_idx):
-    """Locate this bout's SAM3 masks -- same layout `run_courtship_bout.py`
+    """Locate this bout's SAM3 masks -- same layout `run_bout.py`
     itself reads from (`<predictions_dir>/bout_<idx:05d>/sam3_masks.npz`)."""
     return os.path.join(str(predictions_dir), f"bout_{bout_idx:05d}", "sam3_masks.npz")
 
@@ -213,7 +213,7 @@ def _records_for_fly_dir(resolved, rt, cams, gcfg, rec_tag, fly_dir, out_h5, kp2
     # T-consistency guard: masks and outputs.h5's kp3d_mm must cover the exact
     # same bout frame range. A stale outputs.h5 left from a different (e.g.
     # differently-trimmed) run would silently desync gating from masks_dict --
-    # fail loudly instead of gating garbage (mirrors run_courtship_bout.py's
+    # fail loudly instead of gating garbage (mirrors run_bout.py's
     # stac_ik.h5-vs-masks stale-artifact guard, lines 307-317). NOT caught by
     # the frame-read try/except below.
     if masks["masks"].shape[0] != kp3d_mm.shape[0]:
@@ -223,7 +223,7 @@ def _records_for_fly_dir(resolved, rt, cams, gcfg, rec_tag, fly_dir, out_h5, kp2
             f"-- delete it and rerun this bout/fly.")
 
     # NOTE (keypoint-order footgun -- BEFORE un-shelving the finetune path):
-    #   kp3d_mm (and, after the O->model reorder in run_courtship_bout, kp2d.npz)
+    #   kp3d_mm (and, after the O->model reorder in run_bout, kp2d.npz)
     #   are in cfg.model.KP_NAMES == XML SITE order. So mesh2d/det/labels here are
     #   all XML-order -> gating below is internally consistent. BUT the pseudo-label
     #   COCO written from `labels` is therefore XML-order, while the REAL red_data
@@ -231,9 +231,9 @@ def _records_for_fly_dir(resolved, rt, cams, gcfg, rec_tag, fly_dir, out_h5, kp2
     #   configs/detector/vitpose_v3.yaml kp_names). Mixing the two orders in
     #   ConcatV3 would train the detector on contradictory channel semantics.
     #   FIX before enabling: emit pseudo-labels in order O (apply the inverse of
-    #   courtship_predict_2d.detector_to_model_perm to `labels` here), OR rebuild
+    #   predict_2d.detector_to_model_perm to `labels` here), OR rebuild
     #   real red_data in XML order. Also: load_bout_masks above is called WITHOUT
-    #   expected_cameras/verify_mask_camera_order (unlike run_courtship_bout) --
+    #   expected_cameras/verify_mask_camera_order (unlike run_bout) --
     #   add that guard here too when un-shelving.
     mesh2d = reproject_sites(rt, kp3d_mm)
     labels, _ = gate_pseudolabels(mesh2d, det, conf, pf, masks["valid"], cfg=gcfg)

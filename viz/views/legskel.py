@@ -15,7 +15,7 @@ chains use PALETTE["fly1"] (orange) -- distinct from both cyan and green
 (and from PALETTE["head"]/red, reserved by the overlay view's axis/head
 markers) so three chain layers stay legible on one tile.
 
-DictConfig note / lazy scripts.run_courtship_bout import: identical
+DictConfig note / lazy scripts.run_bout import: identical
 rationale to viz/views/overlay.py -- see that module's docstring. Duplicated
 here (rather than imported from overlay.py) so this view has no dependency
 on its sibling view module.
@@ -39,12 +39,12 @@ _COMPARE_COLOR_NAME = "fly1"  # orange; distinct from detector(cyan)/fit(green)
 
 
 def _compose_cfg():
-    """Re-compose the raw `courtship_pipeline` DictConfig, needed only for
-    scripts.run_courtship_bout.bout_start_frame. Reuses viz.config._CFG_DIR
+    """Re-compose the raw `pipeline` DictConfig, needed only for
+    scripts.run_bout.bout_start_frame. Reuses viz.config._CFG_DIR
     (single source of truth for the configs/ path)."""
     os.environ.setdefault("USER", "eabe")
     with initialize_config_dir(version_base=None, config_dir=os.path.abspath(_CFG_DIR)):
-        return compose(config_name="courtship_pipeline")
+        return compose(config_name="pipeline")
 
 
 def _draw_leg_chains(bgr, chains, points_by_idx, color, project_fn=None):
@@ -78,7 +78,7 @@ def run(args):
     bout, fly, fr = int(args.bout), int(args.fly), int(args.frame)
 
     cfg = _compose_cfg()
-    from scripts.run_courtship_bout import bout_start_frame  # lazy: pulls in jax/mujoco/egl
+    from scripts.run_bout import bout_start_frame  # lazy: pulls in jax/mujoco/egl
     start = bout_start_frame(cfg, bout)
     frame_idx = start + fr
 

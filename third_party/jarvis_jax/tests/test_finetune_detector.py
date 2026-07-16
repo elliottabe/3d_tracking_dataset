@@ -12,7 +12,7 @@ import jax
 import numpy as np
 import pytest
 
-from jarvis_jax.cse.build_pseudolabel_dataset import bbox_from_mask, write_pseudolabel_coco
+from jarvis_jax.tracking.build_pseudolabel_dataset import bbox_from_mask, write_pseudolabel_coco
 
 V3_CKPT = os.environ.get(
     "V3_CKPT",
@@ -43,7 +43,7 @@ def _tiny_root(root, split, n=2):
 
 @run
 def test_finetune_smoke(tmp_path):
-    from jarvis_jax.cse.finetune_detector import finetune
+    from jarvis_jax.tracking.finetune_detector import finetune
 
     real = str(tmp_path / "real")
     pseudo = str(tmp_path / "pseudo")
@@ -73,7 +73,7 @@ def test_finetune_never_writes_to_v3_ckpt(tmp_path):
     them. This only exercises the path guard at the top of `finetune()`,
     which raises before anything is loaded -- no GPU or real checkpoint
     needed, so it isn't gated behind `run` (the GPU/checkpoint skipif)."""
-    from jarvis_jax.cse.finetune_detector import finetune
+    from jarvis_jax.tracking.finetune_detector import finetune
 
     fake_v3_ckpt = str(tmp_path / "v3_ckpt_does_not_exist")
     real = str(tmp_path / "real")
@@ -94,7 +94,7 @@ def test_finetune_raises_on_empty_held_out_val(tmp_path):
     work, so this is CPU-safe and uses a v3_ckpt path that doesn't even
     exist -- if the guard didn't fire first, this would instead fail trying
     to load that nonexistent checkpoint."""
-    from jarvis_jax.cse.finetune_detector import finetune
+    from jarvis_jax.tracking.finetune_detector import finetune
 
     real = str(tmp_path / "real")
     pseudo = str(tmp_path / "pseudo")

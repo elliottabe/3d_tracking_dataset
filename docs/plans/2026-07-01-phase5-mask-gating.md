@@ -436,7 +436,7 @@ from jarvis_jax.eval.mpjpe import heatmaps_to_keypoints
 
 
 def test_gate_zeroes_outside_preserves_inside():
-    from jarvis_jax.cse.gating import gate_heatmaps
+    from jarvis_jax.densepose.gating import gate_heatmaps
     B, H, W, K = 1, 32, 32, 2
     hm = jnp.zeros((B, H, W, K))
     # ch0: a strong peak INSIDE the mask; ch1: a spurious peak OUTSIDE the mask.
@@ -455,7 +455,7 @@ def test_gate_zeroes_outside_preserves_inside():
 
 
 def test_gate_moves_decoded_keypoint_onto_the_fly():
-    from jarvis_jax.cse.gating import gate_heatmaps
+    from jarvis_jax.densepose.gating import gate_heatmaps
     B, H, W, K = 1, 32, 32, 1
     # a TALL spurious off-fly peak plus a smaller on-fly peak; ungated argmax picks
     # the spurious one, gated argmax picks the on-fly one.
@@ -469,7 +469,7 @@ def test_gate_moves_decoded_keypoint_onto_the_fly():
 
 
 def test_dilate_admits_a_peak_just_outside_the_raw_mask():
-    from jarvis_jax.cse.gating import gate_heatmaps
+    from jarvis_jax.densepose.gating import gate_heatmaps
     B, H, W, K = 1, 16, 16, 1
     hm = jnp.zeros((B, H, W, K)).at[0, 8, 10, 0].set(2.0)   # peak at x=10
     mask = jnp.zeros((B, 16, 16)).at[0, 8, 8].set(1.0)      # raw mask covers x=8 only
@@ -478,7 +478,7 @@ def test_dilate_admits_a_peak_just_outside_the_raw_mask():
 
 
 def test_full_mask_is_identity():
-    from jarvis_jax.cse.gating import gate_heatmaps
+    from jarvis_jax.densepose.gating import gate_heatmaps
     rng = np.random.default_rng(0)
     hm = jnp.asarray(rng.normal(size=(2, 16, 16, 3)).astype("float32"))
     mask = jnp.ones((2, 16, 16))                           # whole image is fly
@@ -489,7 +489,7 @@ def test_full_mask_is_identity():
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `cd third_party/jarvis_jax && JAX_PLATFORMS=cpu OMP_NUM_THREADS=4 python -m pytest tests/test_inference_gating.py -v`
-Expected: FAIL with `ModuleNotFoundError: No module named 'jarvis_jax.cse.gating'`.
+Expected: FAIL with `ModuleNotFoundError: No module named 'jarvis_jax.densepose.gating'`.
 
 - [ ] **Step 3: Write minimal implementation**
 
@@ -534,7 +534,7 @@ Wire the opt-in into `predict_full.py`: add the arg (after `--sharpen`, line 27)
 and apply it to the decoded 2-D heatmaps + the 3-D volume input, right after `hm = np.asarray(hyb.predict_heatmaps(crops))` (line 60):
 ```python
         if a.gate_dilate > 0:
-            from jarvis_jax.cse.gating import gate_heatmaps
+            from jarvis_jax.densepose.gating import gate_heatmaps
             mask448 = jnp.asarray(crops[..., 3]).reshape(b * nc, crops.shape[2], crops.shape[3])
             hm = np.asarray(gate_heatmaps(
                 jnp.asarray(hm).reshape(b * nc, 224, 224, J), mask448, a.gate_dilate)
@@ -793,7 +793,7 @@ _HAVE_MESH = os.path.exists(MESH)
 
 @pytest.mark.skipif(not _HAVE_MESH, reason="canonical mesh not present")
 def test_dense_swap_is_involution_full_length():
-    from jarvis_jax.cse.dense_lr_swap import build_dense_lr_swap
+    from jarvis_jax.densepose.dense_lr_swap import build_dense_lr_swap
     swap = build_dense_lr_swap(MESH, "fps_300", BASE_50)
     assert swap.shape == (50 + 300,)
     assert swap.dtype == np.int32
@@ -807,7 +807,7 @@ def test_dense_swap_is_involution_full_length():
 
 @pytest.mark.skipif(not _HAVE_MESH, reason="canonical mesh not present")
 def test_named_kp_left_maps_to_right():
-    from jarvis_jax.cse.dense_lr_swap import build_dense_lr_swap
+    from jarvis_jax.densepose.dense_lr_swap import build_dense_lr_swap
     swap = build_dense_lr_swap(MESH, "fps_300", BASE_50)
     i_L = BASE_50.index("WingL_V12"); i_R = BASE_50.index("WingR_V12")
     assert swap[i_L] == i_R and swap[i_R] == i_L
@@ -818,7 +818,7 @@ def test_named_kp_left_maps_to_right():
 
 @pytest.mark.skipif(not _HAVE_MESH, reason="canonical mesh not present")
 def test_left_wing_vertex_maps_to_a_right_wing_vertex():
-    from jarvis_jax.cse.dense_lr_swap import build_dense_lr_swap
+    from jarvis_jax.densepose.dense_lr_swap import build_dense_lr_swap
     z = np.load(MESH, allow_pickle=True)
     fps = z["fps_300"]; seg = z["vertex_segment"][fps]   # per-fps segment id
     swap = build_dense_lr_swap(MESH, "fps_300", BASE_50)
@@ -834,7 +834,7 @@ def test_left_wing_vertex_maps_to_a_right_wing_vertex():
 def test_flipping_a_synthetic_example_swaps_L_and_R():
     """End-to-end: apply the dense swap the way flip_batch does (kp[:, swap]) and
     confirm a synthetic labeled example with distinct L/R coords swaps correctly."""
-    from jarvis_jax.cse.dense_lr_swap import build_dense_lr_swap
+    from jarvis_jax.densepose.dense_lr_swap import build_dense_lr_swap
     swap = build_dense_lr_swap(MESH, "fps_300", BASE_50)
     J = 50 + 300
     kp = np.arange(J * 2).reshape(J, 2).astype(np.float32)  # unique per-channel coords
@@ -850,7 +850,7 @@ def test_flipping_a_synthetic_example_swaps_L_and_R():
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `cd third_party/jarvis_jax && JAX_PLATFORMS=cpu OMP_NUM_THREADS=4 python -m pytest tests/test_lr_swap_dense.py -v`
-Expected: FAIL with `ModuleNotFoundError: No module named 'jarvis_jax.cse.dense_lr_swap'`.
+Expected: FAIL with `ModuleNotFoundError: No module named 'jarvis_jax.densepose.dense_lr_swap'`.
 
 - [ ] **Step 3: Write minimal implementation**
 
@@ -993,8 +993,8 @@ Replace the flip/aug block (lines 95-97) with a dense-swap-aware version:
 ```python
     # aug: flip ON iff --flip-p>0, using the dense (50+M) L/R involution.
     if a.flip_p > 0.0:
-        from jarvis_jax.cse.dense_lr_swap import build_dense_lr_swap
-        from jarvis_jax.cse.cse_labels import model_kp_order  # 50 canonical STAC names
+        from jarvis_jax.densepose.dense_lr_swap import build_dense_lr_swap
+        from jarvis_jax.densepose.cse_labels import model_kp_order  # 50 canonical STAC names
         base_names = model_kp_order(a.base_names)
         M = a.num_joints - 50
         lr_swap = build_dense_lr_swap(a.mesh_npz, f"fps_{M}", base_names)
@@ -1066,7 +1066,7 @@ mkdir -p "$RUN"
 
 cd "$PKG"
 python -u -c "import jax; print('jax devices:', jax.device_count())"
-python -u -m jarvis_jax.cse.train_keypoints_cse_full \
+python -u -m jarvis_jax.densepose.train_keypoints_cse_full \
     --root "$ROOT" \
     --aux-train "$WORK/cse_labels_train_M300.npz" \
     --aux-val   "$WORK/cse_labels_val_M300.npz" \
@@ -1099,7 +1099,7 @@ sbatch /gscratch/portia/eabe/Research/MyRepos/3d_tracking_dataset/third_party/ja
 source ~/.bashrc && micromamba activate 3d_tracking && unset LD_LIBRARY_PATH
 export XLA_PYTHON_CLIENT_MEM_FRACTION=0.9
 cd /gscratch/portia/eabe/Research/MyRepos/3d_tracking_dataset/third_party/jarvis_jax
-python -u -m jarvis_jax.cse.train_keypoints_cse_full \
+python -u -m jarvis_jax.densepose.train_keypoints_cse_full \
   --root /gscratch/portia/eabe/data/Johnson_lab/red_data/red_data_unified_V3 \
   --aux-train /gscratch/portia/eabe/data/Johnson_lab/cse_work/cse_labels_train_M300.npz \
   --aux-val   /gscratch/portia/eabe/data/Johnson_lab/cse_work/cse_labels_val_M300.npz \
@@ -1175,7 +1175,7 @@ SUMMARY = f"{RUNS}/cse_vit350_gated/ablation.json"
 
 def test_off_fly_mass_metric_matches_mask_containment():
     """The headline metric IS mean mask_containment over the batch (dilated)."""
-    from jarvis_jax.cse.eval_gating_ablation import off_fly_mass_frac
+    from jarvis_jax.densepose.eval_gating_ablation import off_fly_mass_frac
     from jarvis_jax.train.losses import mask_containment
     pred = jnp.zeros((1, 8, 8, 1)).at[0, 6, 6, 0].set(1.0)   # peak outside
     mask = jnp.zeros((1, 8, 8)).at[0, 1, 1].set(1.0)
@@ -1209,7 +1209,7 @@ def test_ablation_summary_exists_and_is_well_formed():
 - [ ] **Step 2: Run the CPU logic test (fails until the module exists)**
 
 Run: `cd third_party/jarvis_jax && JAX_PLATFORMS=cpu OMP_NUM_THREADS=4 python -m pytest tests/test_gating_ablation.py::test_off_fly_mass_metric_matches_mask_containment -v`
-Expected: FAIL with `ModuleNotFoundError: No module named 'jarvis_jax.cse.eval_gating_ablation'`.
+Expected: FAIL with `ModuleNotFoundError: No module named 'jarvis_jax.densepose.eval_gating_ablation'`.
 
 - [ ] **Step 3: Write the eval/ablation script**
 
@@ -1258,7 +1258,7 @@ def _eval_arm(ckpt, ds, batch, num_joints, dilate, gate_decode, in_size=448):
     from jarvis_jax.data.device import normalize_image
     from jarvis_jax.data.v3 import batches
     from jarvis_jax.eval.mpjpe import heatmaps_to_keypoints, mpjpe
-    from jarvis_jax.cse.gating import gate_heatmaps
+    from jarvis_jax.densepose.gating import gate_heatmaps
     import jax
 
     m = ViTPose(ViTPoseConfig(num_keypoints=num_joints), rngs=nnx.Rngs(0))
@@ -1314,7 +1314,7 @@ def main():
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
 
-    from jarvis_jax.cse.cse_dataset import CSEImageDataset
+    from jarvis_jax.densepose.cse_dataset import CSEImageDataset
     ds = CSEImageDataset(a.root, "val", a.aux_val)
     summary = {}
     for arm, ckpt in (("ungated_ckpt", a.ungated_ckpt), ("gated_ckpt", a.gated_ckpt)):
@@ -1344,7 +1344,7 @@ Expected: PASS.
 source ~/.bashrc && micromamba activate 3d_tracking && unset LD_LIBRARY_PATH
 export XLA_PYTHON_CLIENT_MEM_FRACTION=0.9
 cd /gscratch/portia/eabe/Research/MyRepos/3d_tracking_dataset/third_party/jarvis_jax
-python -u -m jarvis_jax.cse.eval_gating_ablation \
+python -u -m jarvis_jax.densepose.eval_gating_ablation \
   --ungated-ckpt /gscratch/portia/eabe/data/Johnson_lab/jax_vitpose_runs/cse_vit350_wings/final \
   --gated-ckpt   /gscratch/portia/eabe/data/Johnson_lab/jax_vitpose_runs/cse_vit350_gated/final \
   --num-joints 350 --dilate 11 --batch 8 \

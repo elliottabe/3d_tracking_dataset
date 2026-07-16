@@ -12,7 +12,7 @@ SUMMARY = f"{RUNS}/cse_vit350_gated/ablation.json"
 
 def test_off_fly_mass_metric_matches_mask_containment():
     """The headline metric IS mean mask_containment over the batch (dilated)."""
-    from jarvis_jax.cse.eval_gating_ablation import off_fly_mass_frac
+    from jarvis_jax.densepose.eval_gating_ablation import off_fly_mass_frac
     from jarvis_jax.train.losses import mask_containment
     pred = jnp.zeros((1, 8, 8, 1)).at[0, 6, 6, 0].set(1.0)   # peak outside
     mask = jnp.zeros((1, 8, 8)).at[0, 1, 1].set(1.0)

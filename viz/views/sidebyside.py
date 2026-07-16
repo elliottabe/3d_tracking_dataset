@@ -20,7 +20,7 @@ index list.
 Env / import ordering (load-bearing, matches viz/views/fit_check.py): MUJOCO_GL
 and PYOPENGL_PLATFORM must be "egl" BEFORE mujoco is imported anywhere, so they
 are set at module import time here. The heavy render path
-(stac_mjx.stac.Stac -> jax + mujoco) and scripts.run_courtship_bout
+(stac_mjx.stac.Stac -> jax + mujoco) and scripts.run_bout
 (bout_start_frame, which also pulls in jax/mujoco/egl) are imported lazily
 inside run(), keeping `import viz.views.sidebyside` itself cheap under
 JAX_PLATFORMS=cpu (same lazy-import convention as the sibling views).
@@ -56,13 +56,13 @@ _MASK_FILL = (180, 120, 60)        # BGR fill for the SAM mask overlay
 
 
 def _compose_cfg():
-    """Re-compose the raw `courtship_pipeline` DictConfig, needed only for
-    scripts.run_courtship_bout.bout_start_frame. Reuses viz.config._CFG_DIR
+    """Re-compose the raw `pipeline` DictConfig, needed only for
+    scripts.run_bout.bout_start_frame. Reuses viz.config._CFG_DIR
     (single source of truth for the configs/ path); mirrors viz/views/legskel.py.
     """
     os.environ.setdefault("USER", "eabe")
     with initialize_config_dir(version_base=None, config_dir=os.path.abspath(_CFG_DIR)):
-        return compose(config_name="courtship_pipeline")
+        return compose(config_name="pipeline")
 
 
 def _skeleton_edges(kp_names):
@@ -95,7 +95,7 @@ def _band(width, text):
 def run(args):
     # cwd-independence: repo_root is 3 levels up from this file
     # (viz/views/sidebyside.py -> viz/views -> viz -> repo root); needed so the
-    # lazy `scripts.run_courtship_bout` import below resolves.
+    # lazy `scripts.run_bout` import below resolves.
     repo_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     if repo_root not in sys.path:
         sys.path.insert(0, repo_root)
@@ -166,7 +166,7 @@ def run(args):
     if getattr(args, "start_frame", None) is not None:
         start_abs = int(args.start_frame)
     else:
-        from scripts.run_courtship_bout import bout_start_frame  # lazy: pulls in jax/mujoco/egl
+        from scripts.run_bout import bout_start_frame  # lazy: pulls in jax/mujoco/egl
         start_abs = bout_start_frame(_compose_cfg(), bout)
 
     # --- RIGHT panel: MuJoCo render of the IK pose ---

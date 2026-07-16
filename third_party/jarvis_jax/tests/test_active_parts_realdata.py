@@ -61,7 +61,7 @@ def test_run_active_parts_ik_per_frame(cond, rec, expect_off, locked, reproj_max
       - the missing part is not hallucinated (locked qpos == rest)."""
     if not _ik_ready(cond, rec):
         pytest.skip(f"run T6 dataprep for {os.path.basename(cond)} first")
-    from jarvis_jax.cse.run_active_parts_ik import run_active_parts_ik
+    from jarvis_jax.tracking.run_active_parts_ik import run_active_parts_ik
     out = run_active_parts_ik(
         rec, cond_root=cond, model_xml=XML, mesh_npz=MESH, split=SPLIT,
         use_silhouette=True, max_frames=0, n_iter=50, out_dir=str(tmp_path))

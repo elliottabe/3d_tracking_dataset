@@ -1,7 +1,7 @@
 import jax
 import jax.numpy as jnp
 import numpy as np
-from jarvis_jax.cse.silhouette_containment import bilinear_sample, containment_residual
+from jarvis_jax.tracking.silhouette_containment import bilinear_sample, containment_residual
 
 
 def _ramp_sdf(H=20, W=20):

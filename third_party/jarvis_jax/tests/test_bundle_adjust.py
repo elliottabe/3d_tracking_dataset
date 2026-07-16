@@ -1,6 +1,6 @@
 import numpy as np
-from jarvis_jax.cse.affine_camera import reconstruct_affine, factor_affine, project_affine
-from jarvis_jax.cse.bundle_adjust import assemble_observations, initial_points
+from jarvis_jax.tracking.affine_camera import reconstruct_affine, factor_affine, project_affine
+from jarvis_jax.tracking.bundle_adjust import assemble_observations, initial_points
 
 P_REAL = np.array([
     [8.1001, 0.0074869, -0.031773, -2.828],
@@ -33,7 +33,7 @@ def test_assemble_and_triangulate_recovers_points():
 
 
 def test_solve_recovers_perturbed_cameras():
-    from jarvis_jax.cse.bundle_adjust import solve_bundle_adjust, mean_reproj_error, initial_points
+    from jarvis_jax.tracking.bundle_adjust import solve_bundle_adjust, mean_reproj_error, initial_points
     true_cams = _two_cam_rig()
     rng = np.random.default_rng(1)
     pts = rng.uniform([-3, -3, 8], [3, 3, 14], size=(40, 3))
@@ -57,7 +57,7 @@ def test_solve_recovers_perturbed_cameras():
 
 
 def test_refine_reverts_when_no_improvement():
-    from jarvis_jax.cse.bundle_adjust import refine_calibration
+    from jarvis_jax.tracking.bundle_adjust import refine_calibration
     # Perfect data + perfect cameras: BA cannot improve -> must return factory cams.
     cams = _two_cam_rig()
     rng = np.random.default_rng(2)
@@ -75,7 +75,7 @@ def test_refine_reverts_when_no_improvement():
 
 def test_load_kp2d_orders_cameras_like_reprojection_tool(tmp_path):
     import json, cv2
-    from jarvis_jax.cse.run_bundle_adjust import load_kp2d_from_coco
+    from jarvis_jax.tracking.run_bundle_adjust import load_kp2d_from_coco
     root = tmp_path; rec = "RECX"
     (root / "annotations").mkdir(parents=True)
     (root / "calib_params" / rec).mkdir(parents=True)

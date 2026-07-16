@@ -4,7 +4,7 @@ from jarvis_jax.eval.mpjpe import heatmaps_to_keypoints
 
 
 def test_gate_zeroes_outside_preserves_inside():
-    from jarvis_jax.cse.gating import gate_heatmaps
+    from jarvis_jax.densepose.gating import gate_heatmaps
     B, H, W, K = 1, 32, 32, 2
     hm = jnp.zeros((B, H, W, K))
     # ch0: a strong peak INSIDE the mask; ch1: a spurious peak OUTSIDE the mask.
@@ -23,7 +23,7 @@ def test_gate_zeroes_outside_preserves_inside():
 
 
 def test_gate_moves_decoded_keypoint_onto_the_fly():
-    from jarvis_jax.cse.gating import gate_heatmaps
+    from jarvis_jax.densepose.gating import gate_heatmaps
     B, H, W, K = 1, 32, 32, 1
     # a TALL spurious off-fly peak plus a smaller on-fly peak; ungated argmax picks
     # the spurious one, gated argmax picks the on-fly one.
@@ -37,7 +37,7 @@ def test_gate_moves_decoded_keypoint_onto_the_fly():
 
 
 def test_dilate_admits_a_peak_just_outside_the_raw_mask():
-    from jarvis_jax.cse.gating import gate_heatmaps
+    from jarvis_jax.densepose.gating import gate_heatmaps
     B, H, W, K = 1, 16, 16, 1
     hm = jnp.zeros((B, H, W, K)).at[0, 8, 10, 0].set(2.0)   # peak at x=10
     mask = jnp.zeros((B, 16, 16)).at[0, 8, 8].set(1.0)      # raw mask covers x=8 only
@@ -46,7 +46,7 @@ def test_dilate_admits_a_peak_just_outside_the_raw_mask():
 
 
 def test_full_mask_is_identity():
-    from jarvis_jax.cse.gating import gate_heatmaps
+    from jarvis_jax.densepose.gating import gate_heatmaps
     rng = np.random.default_rng(0)
     hm = jnp.asarray(rng.normal(size=(2, 16, 16, 3)).astype("float32"))
     mask = jnp.ones((2, 16, 16))                           # whole image is fly

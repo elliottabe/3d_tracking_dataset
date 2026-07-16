@@ -3,7 +3,7 @@
 # multi-recording session -- one dependency-chained SLURM chain PER RECORDING
 # (SAM3 --array over that recording's bouts -> precompute -> jax --array over the
 # same bouts -> aggregate), each writing to its own output dir. This is the
-# whole-session wrapper around scripts/slurm_courtship_array.py, which processes
+# whole-session wrapper around scripts/slurm_bout_array.py, which processes
 # ONE recording per call.
 #
 # Works for any assay -- the only per-assay differences are the recording config
@@ -29,7 +29,7 @@
 #
 # Notes:
 #   * Bootstraps <recording>/Predictions_3D_sam3/bout_<idx> dirs (from the summary)
-#     so slurm_courtship_array can discover the bouts.
+#     so slurm_bout_array can discover the bouts.
 #   * `env -u JAX_PLATFORMS` strips a stray JAX_PLATFORMS=cpu from the submit shell
 #     (the sbatch scripts also unset it) so jobs use the GPU.
 #   * Idempotent: SAM3 reuse_masks + per-bout stage checkpoints -> re-running only
@@ -71,7 +71,7 @@ for d in "$SESSION_DIR"/*/; do
         echo "skip $ts (no $SUMMARY)"
         continue
     fi
-    # Bootstrap bout dirs so slurm_courtship_array can discover the bouts.
+    # Bootstrap bout dirs so slurm_bout_array can discover the bouts.
     pred="$d/Predictions_3D_sam3"
     for i in $(tail -n +2 "$summary" | awk -F, 'NF{print $2}'); do
         mkdir -p "$pred/$(printf 'bout_%05d' "$i")"
@@ -81,7 +81,7 @@ for d in "$SESSION_DIR"/*/; do
     env -u JAX_PLATFORMS python -c "import sys; sys.path.insert(0,'third_party/jarvis_jax'); \
 from jarvis_jax.predict.sam3_driver import ensure_sync_plan; \
 p=ensure_sync_plan('$d'); print('[sync] status=', getattr(p,'status','none'))" || true
-    env -u JAX_PLATFORMS python scripts/slurm_courtship_array.py $DRY \
+    env -u JAX_PLATFORMS python scripts/slurm_bout_array.py $DRY \
         recording="$RECORDING_CFG" \
         recording.session_dir="$d" \
         outputs.out="$OUT_BASE/${SESSION_NAME}/${ts}/pose"

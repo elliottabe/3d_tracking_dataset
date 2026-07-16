@@ -4,7 +4,7 @@ import os
 import numpy as np
 import cv2
 import stac_mjx.io_dict_to_hdf5 as ioh5
-from jarvis_jax.cse.courtship_bout_masks import load_bout_masks
+from jarvis_jax.tracking.bout_masks import load_bout_masks
 
 def fly_dir(run_root, bout, fly):
     return os.path.join(run_root, "bouts", f"bout_{int(bout):05d}", f"fly{int(fly)}")

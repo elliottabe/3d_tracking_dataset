@@ -12,7 +12,7 @@ except Exception as e:  # pragma: no cover - environment-dependent
     _ERR = e
 
 
-@pytest.mark.skipif(_REC is None, reason=f"courtship_pipeline hydra compose failed: {_ERR}")
+@pytest.mark.skipif(_REC is None, reason=f"pipeline hydra compose failed: {_ERR}")
 def test_courtship_recording_shape():
     rec = _REC
     assert isinstance(rec["calib_dir"], str) and rec["calib_dir"]

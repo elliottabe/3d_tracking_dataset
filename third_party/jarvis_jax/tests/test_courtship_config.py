@@ -5,17 +5,17 @@ from omegaconf import OmegaConf
 CFG_DIR = "/gscratch/portia/eabe/Research/MyRepos/3d_tracking_dataset/configs"
 
 # configs/outputs/default.yaml uses the `basename` resolver; register it (in
-# production it is an import side effect of run_courtship_bout / slurm_courtship_array).
+# production it is an import side effect of run_bout / slurm_bout_array).
 OmegaConf.register_new_resolver(
     "basename", lambda p: os.path.basename(os.path.normpath(str(p))), replace=True)
 
 
 def _compose(overrides):
     with initialize_config_dir(version_base=None, config_dir=CFG_DIR):
-        return compose(config_name="courtship_pipeline", overrides=overrides)
+        return compose(config_name="pipeline", overrides=overrides)
 
 
-def test_courtship_pipeline_composes_and_paths_generalize(monkeypatch):
+def test_pipeline_composes_and_paths_generalize(monkeypatch):
     monkeypatch.setenv("USER", "someone")
     cfg = _compose(["paths=hyak"])
     # user comes from env; no hardcoded 'eabe'
@@ -36,18 +36,18 @@ def test_default_user_when_env_absent(monkeypatch):
     assert cfg.paths.user == "eabe"   # fallback default
 
 
-def test_courtship_pipeline_fully_resolves(monkeypatch):
+def test_pipeline_fully_resolves(monkeypatch):
     """Reproduces the exact resolution stac_mjx.run_stac -> io.save_data_to_h5
     performs (`OmegaConf.to_container(config, resolve=True)` on the WHOLE cfg,
     not just cfg.stac) before writing the config into the output h5.
 
-    courtship_pipeline.yaml reuses the `stac`/`paths` groups, which interpolate
+    pipeline.yaml reuses the `stac`/`paths` groups, which interpolate
     `${dataset.name}`/`${version}` (paths.base_dir/data_dir) and
     `${preprocessing.input_filename}` (stac.data_path) — none of which
-    courtship_pipeline defined until this fix. paths.save_dir also calls the
+    pipeline defined until this fix. paths.save_dir also calls the
     custom `multirun_save_dir` resolver, which is registered as an import side
     effect of `stac_mjx` (via stac_mjx/path_utils.py) — exactly what happens in
-    the real pipeline, since jarvis_jax.cse.courtship_stac does `import
+    the real pipeline, since jarvis_jax.tracking.stac does `import
     stac_mjx` before ever calling stac_mjx.run_stac.
     """
     monkeypatch.setenv("USER", "eabe")

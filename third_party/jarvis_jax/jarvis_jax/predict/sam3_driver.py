@@ -63,7 +63,7 @@ def append_cameras_to_npz(npz_path, cameras):
     """Append a `cameras` (C,) name-string array to an already-written
     sam3_masks.npz, WITHOUT reopening/recompressing the (often 50-500 MB)
     packed mask arrays -- this is what makes every future mask file
-    self-identifying (see jarvis_jax.cse.courtship_bout_masks.load_bout_masks
+    self-identifying (see jarvis_jax.tracking.bout_masks.load_bout_masks
     / detect_camera_order, written to guard against the camera-axis-scramble
     bug: the packed masks' C axis previously carried NO identifying metadata).
 
@@ -487,7 +487,7 @@ def canonicalize_male_fly(bm, num_animals, *, male_slot=1, score_ratio_thr=1.8):
 def _append_suspect_cameras_to_npz(npz_path, suspect_cameras):
     """Append a `suspect_cameras` (name-string) array to a sam3_masks.npz --
     cameras whose masks are geometric outliers the self-repair could NOT
-    improve (see repair_outlier_cameras). Downstream (run_courtship_bout /
+    improve (see repair_outlier_cameras). Downstream (run_bout /
     check_bout_camera_order) can drop these views. Same cheap zip-append trick
     as append_cameras_to_npz; no-op if empty."""
     import io

@@ -1,6 +1,6 @@
 # tests/test_silhouette_boundary.py
 import numpy as np
-from jarvis_jax.cse.silhouette_boundary import mask_boundary_pixels, sample_boundary_points
+from jarvis_jax.tracking.silhouette_boundary import mask_boundary_pixels, sample_boundary_points
 
 
 def test_boundary_pixels_of_a_solid_square():

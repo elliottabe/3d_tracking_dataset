@@ -1,5 +1,5 @@
 import numpy as np
-from jarvis_jax.cse.courtship_triangulate import triangulate_keypoints
+from jarvis_jax.tracking.triangulate import triangulate_keypoints
 
 
 def _cam(P):  # P is (3,4); center3d expects (4,3)=P.T

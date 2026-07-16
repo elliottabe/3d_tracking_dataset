@@ -3,7 +3,7 @@ import numpy as np
 import jax.numpy as jnp
 import pytest
 
-from jarvis_jax.cse.silhouette_refine import refine_appendages_adam
+from jarvis_jax.tracking.silhouette_refine import refine_appendages_adam
 
 XML = "/gscratch/portia/eabe/Research/MyRepos/fruitfly_body_models/fruitfly_v1/fruitfly_v1_free.xml"
 MESH = "/gscratch/portia/eabe/Research/MyRepos/fruitfly_body_models/fruitfly_cse/fly_v1_visual_canonical_wings.npz"
@@ -16,9 +16,9 @@ def test_refine_reduces_objective_moves_only_appendages_respects_limits():
     opt_mask (appendage) DOFs -- root/body exactly unchanged, and (3) keep the
     optimized DOFs within their joint limits. Uses an all-'outside' SDF so the
     containment term has a real inward gradient."""
-    from jarvis_jax.cse.silhouette_ik import load_anatomy, make_fk_repose
-    from jarvis_jax.cse.silhouette_dof import build_appendage_dof_mask, appendage_vertex_indices
-    from jarvis_jax.cse.silhouette_targets import silhouette_fk_indices
+    from jarvis_jax.tracking.silhouette_ik import load_anatomy, make_fk_repose
+    from jarvis_jax.tracking.silhouette_dof import build_appendage_dof_mask, appendage_vertex_indices
+    from jarvis_jax.tracking.silhouette_targets import silhouette_fk_indices
     import mujoco
     anat = load_anatomy(XML, MESH); fk = make_fk_repose(anat)
     m = mujoco.MjModel.from_xml_path(XML)

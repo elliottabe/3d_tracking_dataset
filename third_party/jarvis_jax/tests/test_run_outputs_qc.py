@@ -4,14 +4,14 @@ import pytest
 
 
 def test_module_importable_and_has_cli():
-    import jarvis_jax.cse.run_outputs_qc as m
+    import jarvis_jax.tracking.run_outputs_qc as m
     assert hasattr(m, "run_outputs_qc") and callable(m.run_outputs_qc)
     assert hasattr(m, "main") and callable(m.main)
     assert hasattr(m, "resolve_calib_dir") and callable(m.resolve_calib_dir)
 
 
 def test_resolve_calib_dir_prefers_refined(tmp_path):
-    from jarvis_jax.cse.run_outputs_qc import resolve_calib_dir
+    from jarvis_jax.tracking.run_outputs_qc import resolve_calib_dir
     rec = "2026_03_18_15_31_22"
     root = tmp_path / "root"
     cse = tmp_path / "cse_work"
@@ -28,7 +28,7 @@ def test_resolve_calib_dir_prefers_refined(tmp_path):
 
 
 def test_resolve_calib_dir_raises_when_missing(tmp_path):
-    from jarvis_jax.cse.run_outputs_qc import resolve_calib_dir
+    from jarvis_jax.tracking.run_outputs_qc import resolve_calib_dir
     with pytest.raises(FileNotFoundError):
         resolve_calib_dir("nope", root=str(tmp_path / "r"), cse_work_dir=str(tmp_path / "c"))
 
@@ -45,7 +45,7 @@ def test_run_outputs_qc_smoke_keys(tmp_path):
     """Tiny 2-frame real-data smoke (coordinator GPU): asserts the output h5
     keys + QC json keys exist. NOT a scientific magnitude check."""
     import stac_mjx.io_dict_to_hdf5 as ioh5
-    from jarvis_jax.cse.run_outputs_qc import run_outputs_qc
+    from jarvis_jax.tracking.run_outputs_qc import run_outputs_qc
     rep = run_outputs_qc(
         "2026_03_18_15_31_22", ik_h5=IK, model_xml=XML, mesh_npz=MESH, root=ROOT,
         split="val", cse_work_dir=CSE, out_dir=str(tmp_path), mesh_subset="fps_500",

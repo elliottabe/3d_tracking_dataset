@@ -41,7 +41,7 @@ class _FakeRT:
 
 
 def test_per_camera_reproj_error_zero_on_consistent():
-    from jarvis_jax.cse.qc import per_camera_reproj_error
+    from jarvis_jax.tracking.qc import per_camera_reproj_error
     rt = _FakeRT()
     kp3d = np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
     kp2d = {0: np.array([[1., 2.], [4., 5.]]),   # (x,y)
@@ -53,7 +53,7 @@ def test_per_camera_reproj_error_zero_on_consistent():
 
 
 def test_per_camera_reproj_error_offset():
-    from jarvis_jax.cse.qc import per_camera_reproj_error
+    from jarvis_jax.tracking.qc import per_camera_reproj_error
     rt = _FakeRT()
     kp3d = np.array([[0.0, 0.0, 0.0]])
     kp2d = {0: np.array([[3.0, 4.0]])}   # true proj is (0,0); err = 5
@@ -63,7 +63,7 @@ def test_per_camera_reproj_error_offset():
 
 
 def test_loo_reproj_near_zero_when_consistent():
-    from jarvis_jax.cse.qc import loo_reproj
+    from jarvis_jax.tracking.qc import loo_reproj
     rt = _FakeRT()
     # one keypoint at (1,2,3); its two 2-D obs are the exact projections.
     kp2d = {0: np.array([[1., 2.]]), 1: np.array([[1., 3.]])}
@@ -75,7 +75,7 @@ def test_loo_reproj_near_zero_when_consistent():
 
 
 def test_loo_reproj_three_cams_consistent():
-    from jarvis_jax.cse.qc import loo_reproj
+    from jarvis_jax.tracking.qc import loo_reproj
 
     class _RT3(_FakeRT):
         def __init__(s):
@@ -99,7 +99,7 @@ def test_loo_reproj_three_cams_consistent():
 
 
 def test_qc_report_bundles_keys():
-    from jarvis_jax.cse.qc import qc_report
+    from jarvis_jax.tracking.qc import qc_report
     rt = _FakeRT()
     kp3d_by_frame = [np.array([[1., 2., 3.]])]
     mesh_by_frame = [np.zeros((0, 3))]              # no mesh -> empty iou

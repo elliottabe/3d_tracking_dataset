@@ -1,11 +1,11 @@
 """Tests for the courtship pre-STAC keypoint filter wrapper
-(jarvis_jax.cse.courtship_filter): it must build sane skeleton edges, be a
+(jarvis_jax.tracking.filter): it must build sane skeleton edges, be a
 no-op when disabled, and remove a foot-tip spike while preserving shape."""
 import numpy as np
 import pytest
 from omegaconf import OmegaConf
 
-from jarvis_jax.cse.courtship_filter import (
+from jarvis_jax.tracking.filter import (
     courtship_skeleton_edges, filter_bout_kp3d,
 )
 

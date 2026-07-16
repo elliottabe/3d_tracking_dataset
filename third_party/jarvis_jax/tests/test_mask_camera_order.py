@@ -23,7 +23,7 @@ import numpy as np
 import pytest
 
 from jarvis_jax.geometry.reprojection_tool import ReprojectionTool
-from jarvis_jax.cse.courtship_bout_masks import (
+from jarvis_jax.tracking.bout_masks import (
     load_bout_masks, detect_camera_order, verify_mask_camera_order,
     detect_camera_order_robust, check_bout_camera_order,
 )

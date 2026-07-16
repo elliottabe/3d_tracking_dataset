@@ -1,5 +1,5 @@
 import os, numpy as np
-from jarvis_jax.cse.courtship_resume import (atomic_save_npz, atomic_save_json,
+from jarvis_jax.tracking.resume import (atomic_save_npz, atomic_save_json,
                                              stage_done, mark_done, bout_complete)
 
 

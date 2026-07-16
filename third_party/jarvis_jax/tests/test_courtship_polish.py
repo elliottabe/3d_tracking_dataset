@@ -1,5 +1,5 @@
 import numpy as np
-from jarvis_jax.cse.courtship_polish import courtship_targets_from_masks
+from jarvis_jax.tracking.polish import courtship_targets_from_masks
 
 
 def test_targets_from_masks_shapes_and_present():

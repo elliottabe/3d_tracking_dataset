@@ -1,6 +1,6 @@
 # tests/test_build_pseudolabel_dataset.py
 import numpy as np, json, os
-from jarvis_jax.cse.build_pseudolabel_dataset import (
+from jarvis_jax.tracking.build_pseudolabel_dataset import (
     write_pseudolabel_coco, bbox_from_mask, PseudoLabelWriter)
 from jarvis_jax.data.v3 import V3Dataset
 

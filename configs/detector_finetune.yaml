@@ -6,7 +6,7 @@ defaults:
 # `${dataset.name}`/`${version}` and the custom `multirun_save_dir` resolver's
 # `${run_id}`) resolve, even though this config never reads them itself. Not
 # wired to a `- dataset: courtship` defaults entry for the same
-# cascade-avoidance reason as `courtship_pipeline.yaml`.
+# cascade-avoidance reason as `pipeline.yaml`.
 dataset:
   name: courtship
   version: v1

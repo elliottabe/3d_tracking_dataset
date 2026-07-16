@@ -2,9 +2,9 @@ import os
 
 import numpy as np
 import pytest
-from jarvis_jax.cse.affine_camera import factor_affine, reconstruct_affine, project_affine
-from jarvis_jax.cse.identity_link import score_assignment, _dlt_affine, link_frameset
-from jarvis_jax.cse.identity_link import link_recording
+from jarvis_jax.tracking.affine_camera import factor_affine, reconstruct_affine, project_affine
+from jarvis_jax.tracking.identity_link import score_assignment, _dlt_affine, link_frameset
+from jarvis_jax.tracking.identity_link import link_recording
 
 ROOT = "/gscratch/portia/eabe/data/Johnson_lab/red_data/red_data_unified_V3"
 REC = "2026_04_07_11_33_33"
@@ -210,7 +210,7 @@ def test_link_recording_two_fly_framesets_reproject_cleanly():
     import json
     import numpy as np
     from jarvis_jax.geometry.reprojection_tool import ReprojectionTool
-    from jarvis_jax.cse.identity_link import score_assignment, _ann_kp
+    from jarvis_jax.tracking.identity_link import score_assignment, _ann_kp
     coco = json.load(open(COCO))
     id2ann = {}
     for a in coco["annotations"]:

@@ -1,5 +1,5 @@
 import numpy as np
-from jarvis_jax.cse.kp2d_oneeuro import one_euro_1d, filter_kp2d_oneeuro
+from jarvis_jax.tracking.kp2d_oneeuro import one_euro_1d, filter_kp2d_oneeuro
 
 
 def test_one_euro_constant_is_unchanged():

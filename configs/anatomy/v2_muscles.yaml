@@ -175,7 +175,7 @@ model:
   name: 'fruitfly_V2_muscles'
 
   # Per-segment (per-limb) SHAPE calibration for courtship (see v1.yaml for the
-  # rationale). run_courtship_bout computes per-segment scales ONCE per session
+  # rationale). run_bout computes per-segment scales ONCE per session
   # (Adam MJX M-step), persists to <run_root>/segment_scales.json, and sets
   # cfg.model.SEGMENT_SCALES so stac_mjx morphs the model before offsets + IK.
   segment_calibration: true

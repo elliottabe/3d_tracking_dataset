@@ -53,7 +53,7 @@ Create `third_party/jarvis_jax/tests/test_silhouette_sdf.py`:
 
 ```python
 import numpy as np
-from jarvis_jax.cse.silhouette_sdf import _mask_bbox, _mask_to_sdf_crop
+from jarvis_jax.tracking.silhouette_sdf import _mask_bbox, _mask_to_sdf_crop
 
 
 def test_mask_bbox_expands_by_margin():
@@ -94,7 +94,7 @@ def test_sdf_crop_empty_returns_none():
 - [ ] **Step 2: Run tests to verify they fail**
 
 Run: `cd third_party/jarvis_jax && JAX_PLATFORMS=cpu OMP_NUM_THREADS=4 python -m pytest tests/test_silhouette_sdf.py -v`
-Expected: FAIL with `ModuleNotFoundError: No module named 'jarvis_jax.cse.silhouette_sdf'`.
+Expected: FAIL with `ModuleNotFoundError: No module named 'jarvis_jax.tracking.silhouette_sdf'`.
 
 - [ ] **Step 3: Write the implementation**
 
@@ -119,7 +119,7 @@ import cv2
 from scipy import ndimage
 
 from jarvis_jax.geometry.reprojection_tool import ReprojectionTool
-from jarvis_jax.cse.silhouette_ik_solve import (
+from jarvis_jax.tracking.silhouette_ik_solve import (
     _cam2img_for_frame, _ann_for_image, _load_sam_mask,
 )
 
@@ -256,7 +256,7 @@ Create `third_party/jarvis_jax/tests/test_silhouette_containment.py`:
 import jax
 import jax.numpy as jnp
 import numpy as np
-from jarvis_jax.cse.silhouette_containment import bilinear_sample, containment_residual
+from jarvis_jax.tracking.silhouette_containment import bilinear_sample, containment_residual
 
 
 def _ramp_sdf(H=20, W=20):
@@ -317,7 +317,7 @@ def test_gradient_pulls_inward_and_is_finite():
 - [ ] **Step 2: Run tests to verify they fail**
 
 Run: `cd third_party/jarvis_jax && JAX_PLATFORMS=cpu OMP_NUM_THREADS=4 python -m pytest tests/test_silhouette_containment.py -v`
-Expected: FAIL with `ModuleNotFoundError: No module named 'jarvis_jax.cse.silhouette_containment'`.
+Expected: FAIL with `ModuleNotFoundError: No module named 'jarvis_jax.tracking.silhouette_containment'`.
 
 - [ ] **Step 3: Write the implementation**
 
@@ -414,7 +414,7 @@ import os
 import re
 import numpy as np
 import pytest
-from jarvis_jax.cse.silhouette_dof import (
+from jarvis_jax.tracking.silhouette_dof import (
     build_appendage_dof_mask, appendage_vertex_indices, APPENDAGE_PATTERNS,
 )
 
@@ -469,7 +469,7 @@ def test_appendage_vertices_are_subset_of_fps_and_appendage_only():
 - [ ] **Step 2: Run tests to verify they fail**
 
 Run: `cd third_party/jarvis_jax && JAX_PLATFORMS=cpu OMP_NUM_THREADS=4 python -m pytest tests/test_silhouette_dof.py -v`
-Expected: FAIL with `ModuleNotFoundError: No module named 'jarvis_jax.cse.silhouette_dof'`.
+Expected: FAIL with `ModuleNotFoundError: No module named 'jarvis_jax.tracking.silhouette_dof'`.
 
 - [ ] **Step 3: Write the implementation**
 
@@ -488,7 +488,7 @@ from __future__ import annotations
 import re
 import numpy as np
 
-from jarvis_jax.cse.silhouette_targets import silhouette_fk_indices
+from jarvis_jax.tracking.silhouette_targets import silhouette_fk_indices
 
 APPENDAGE_PATTERNS = {
     "wing": r"wing",
@@ -560,7 +560,7 @@ Replace `third_party/jarvis_jax/tests/test_silhouette_targets.py` with:
 
 ```python
 import numpy as np
-import jarvis_jax.cse.silhouette_targets as tgt
+import jarvis_jax.tracking.silhouette_targets as tgt
 
 
 class _FakeCam:
@@ -722,7 +722,7 @@ import jaxls
 import jaxlie
 import pytest
 
-from jarvis_jax.cse.silhouette_joint_ik import make_silhouette_cost
+from jarvis_jax.tracking.silhouette_joint_ik import make_silhouette_cost
 
 XML = "/gscratch/portia/eabe/Research/MyRepos/fruitfly_body_models/fruitfly_v1/fruitfly_v1_free.xml"
 MESH = "/gscratch/portia/eabe/Research/MyRepos/fruitfly_body_models/fruitfly_cse/fly_v1_visual_canonical_wings.npz"
@@ -731,9 +731,9 @@ skip = pytest.mark.skipif(not (os.path.exists(XML) and os.path.exists(MESH)), re
 
 @skip
 def test_silhouette_cost_builds_and_residual_shape():
-    from jarvis_jax.cse.silhouette_ik import load_anatomy, make_fk_repose
-    from jarvis_jax.cse.silhouette_dof import build_appendage_dof_mask
-    from jarvis_jax.cse.silhouette_targets import silhouette_fk_indices
+    from jarvis_jax.tracking.silhouette_ik import load_anatomy, make_fk_repose
+    from jarvis_jax.tracking.silhouette_dof import build_appendage_dof_mask
+    from jarvis_jax.tracking.silhouette_targets import silhouette_fk_indices
     import mujoco
     anat = load_anatomy(XML, MESH); fk = make_fk_repose(anat)
     m = mujoco.MjModel.from_xml_path(XML)
@@ -1035,7 +1035,7 @@ import jaxls
 import jaxlie
 import pytest
 
-from jarvis_jax.cse.silhouette_joint_ik import make_containment_cost
+from jarvis_jax.tracking.silhouette_joint_ik import make_containment_cost
 
 XML = "/gscratch/portia/eabe/Research/MyRepos/fruitfly_body_models/fruitfly_v1/fruitfly_v1_free.xml"
 MESH = "/gscratch/portia/eabe/Research/MyRepos/fruitfly_body_models/fruitfly_cse/fly_v1_visual_canonical_wings.npz"
@@ -1044,8 +1044,8 @@ skip = pytest.mark.skipif(not (os.path.exists(XML) and os.path.exists(MESH)), re
 
 @skip
 def test_containment_cost_residual_shape_and_finite():
-    from jarvis_jax.cse.silhouette_ik import load_anatomy, make_fk_repose
-    from jarvis_jax.cse.silhouette_dof import build_appendage_dof_mask, appendage_vertex_indices
+    from jarvis_jax.tracking.silhouette_ik import load_anatomy, make_fk_repose
+    from jarvis_jax.tracking.silhouette_dof import build_appendage_dof_mask, appendage_vertex_indices
     import mujoco
     anat = load_anatomy(XML, MESH); fk = make_fk_repose(anat)
     m = mujoco.MjModel.from_xml_path(XML)
@@ -1093,7 +1093,7 @@ Expected: FAIL with `ImportError: cannot import name 'make_containment_cost'`.
 
 - [ ] **Step 3: Add `make_containment_cost` and wire it in**
 
-In `silhouette_joint_ik.py`, add the import near the top: `from jarvis_jax.cse.silhouette_containment import containment_residual`. Add this factory next to `make_silhouette_cost`:
+In `silhouette_joint_ik.py`, add the import near the top: `from jarvis_jax.tracking.silhouette_containment import containment_residual`. Add this factory next to `make_silhouette_cost`:
 
 ```python
 def make_containment_cost(
@@ -1175,10 +1175,10 @@ Append to `third_party/jarvis_jax/tests/test_silhouette_containment_solve.py`:
 def test_containment_baseline_reproduces_and_moves_qpos():
     # containment_weight=0 -> identical to no-silhouette; weight>0 with an
     # all-"outside" SDF must move qpos (appendage DOFs) away from init.
-    from jarvis_jax.cse.silhouette_ik_solve import build_solver_inputs
-    from jarvis_jax.cse.silhouette_ik import load_anatomy, make_fk_repose
-    from jarvis_jax.cse.silhouette_dof import build_appendage_dof_mask, appendage_vertex_indices
-    from jarvis_jax.cse.silhouette_joint_ik import SilhouetteJaxlsBatchSolver
+    from jarvis_jax.tracking.silhouette_ik_solve import build_solver_inputs
+    from jarvis_jax.tracking.silhouette_ik import load_anatomy, make_fk_repose
+    from jarvis_jax.tracking.silhouette_dof import build_appendage_dof_mask, appendage_vertex_indices
+    from jarvis_jax.tracking.silhouette_joint_ik import SilhouetteJaxlsBatchSolver
     import mujoco
     IK = "/gscratch/portia/eabe/data/Johnson_lab/cse_work/2026_03_18_15_31_22/Fruitfly_ik_v1_cse.h5"
     if not os.path.exists(IK):
@@ -1244,7 +1244,7 @@ Add to `third_party/jarvis_jax/tests/test_run_silhouette_polish.py`:
 
 ```python
 import numpy as np
-from jarvis_jax.cse.run_silhouette_polish import filled_tri_iou
+from jarvis_jax.tracking.run_silhouette_polish import filled_tri_iou
 
 
 def test_filled_tri_iou_perfect_and_partial():
@@ -1397,7 +1397,7 @@ Rewrite `run_polish` to: (a) build targets via the new dict API + `erode_px`; (b
                 mpjpe_stac_before=mpjpe_b, mpjpe_stac_after=mpjpe_a, n_frames=T)
 ```
 
-Update the `run_polish` signature (line 80) to add the new kwargs and the imports block (lines 90-99) to add `from jarvis_jax.cse.silhouette_sdf import build_sdf_stack` and `from jarvis_jax.cse.silhouette_dof import build_appendage_dof_mask, appendage_vertex_indices`. Update `main()` (lines 240-274) to add `--containment-weight` (default 0.3), `--erode-px` (default 8), `--margin` (default 0.0), `--sdf-hw` (default 128), and print the three before/after deltas with the honest do-no-harm framing (IoU up = good; reproj RMSE + MPJPE-vs-STAC must not worsen beyond tolerance).
+Update the `run_polish` signature (line 80) to add the new kwargs and the imports block (lines 90-99) to add `from jarvis_jax.tracking.silhouette_sdf import build_sdf_stack` and `from jarvis_jax.tracking.silhouette_dof import build_appendage_dof_mask, appendage_vertex_indices`. Update `main()` (lines 240-274) to add `--containment-weight` (default 0.3), `--erode-px` (default 8), `--margin` (default 0.0), `--sdf-hw` (default 128), and print the three before/after deltas with the honest do-no-harm framing (IoU up = good; reproj RMSE + MPJPE-vs-STAC must not worsen beyond tolerance).
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
@@ -1433,7 +1433,7 @@ Run (on the gpu-l40s node, env activated, `unset LD_LIBRARY_PATH`):
 
 ```bash
 cd /gscratch/portia/eabe/Research/MyRepos/3d_tracking_dataset/third_party/jarvis_jax
-python -m jarvis_jax.cse.run_silhouette_polish \
+python -m jarvis_jax.tracking.run_silhouette_polish \
   --recording 2026_03_18_15_31_22 \
   --ik-h5 /gscratch/portia/eabe/data/Johnson_lab/cse_work/2026_03_18_15_31_22/Fruitfly_ik_v1_cse.h5 \
   --xml /gscratch/portia/eabe/Research/MyRepos/fruitfly_body_models/fruitfly_v1/fruitfly_v1_free.xml \

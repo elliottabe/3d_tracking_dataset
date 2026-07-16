@@ -1,5 +1,5 @@
 import numpy as np
-from jarvis_jax.cse.courtship_pseudolabel import gate_pseudolabels, GateCfg
+from jarvis_jax.tracking.courtship_pseudolabel import gate_pseudolabels, GateCfg
 
 def test_gates_frame_and_consensus():
     T,C,K = 2,2,3
@@ -38,7 +38,7 @@ def test_nan_mesh_site_is_scrubbed_and_marked_invisible():
     assert labels[0,0,0,2] == 1                      # non-NaN agreeing site -> vis 1
 
 def test_records_for_bout_emits_only_visible():
-    from jarvis_jax.cse.courtship_pseudolabel import records_for_bout
+    from jarvis_jax.tracking.courtship_pseudolabel import records_for_bout
     T,C,K,H,W = 1,2,3,16,16
     labels=np.zeros((T,C,K,3)); labels[0,0,:,2]=1; labels[0,0,:,:2]=5  # cam0 visible
     masks=np.zeros((T,C,H,W),bool); masks[0,0,4:8,4:8]=True; masks[0,1,4:8,4:8]=True

@@ -7,7 +7,7 @@ xml: ${paths.body_model_dir}/fruitfly_v1/fruitfly_v1_free.xml
 #            GN/LM cannot navigate the pixel-scale nonlinear silhouette cost (it
 #            uses non-scale-invariant lambda*I damping, so every GN step is
 #            rejected -- a plain gradient step cuts the cost ~45%). See
-#            jarvis_jax.cse.silhouette_refine.
+#            jarvis_jax.tracking.silhouette_refine.
 #   jaxls -- the original Gauss-Newton/LM solve (kept for tests/comparison only).
 optimizer: adam
 # NOTE (2026-07-07): the silhouette polish is OFF by default (both weights 0) ->
@@ -21,7 +21,7 @@ optimizer: adam
 # accuracy for 2D-blob coverage without fixing the curl. The Adam machinery is
 # sound and kept ready; re-enable (containment_weight>0, tune anchor_weight) once
 # the leg curl is fixed upstream (STAC leg-chain) and/or a corresponded leg-mask
-# term exists. See jarvis_jax.cse.silhouette_refine.
+# term exists. See jarvis_jax.tracking.silhouette_refine.
 #
 # Coverage (chamfer boundary->nearest-vertex) weight. Also FIGHTS containment on
 # real data (drags the outline back out; containment-alone 77%->87% vs both flat).

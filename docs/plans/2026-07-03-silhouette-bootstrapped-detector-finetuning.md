@@ -23,14 +23,14 @@
 - `jarvis_jax.geometry.reprojection_tool.ReprojectionTool(calib_dir)`: `.camera_matrices` (C,4,3), `.num_cameras`, `.reproject_point(X3)->(C,2)`, `.reconstruct_point(pts (C,2), cams_to_use=list)->(3,)`.
 - `outputs.h5` (per bout/fly, written by `build_fly_outputs`): `kp3d_mm` (T,50,3) FK'd sites world-mm (NaN where bridge None), `mesh_mm` (T,Kmesh,3), `kp_names`.
 - `kp2d.npz` (per bout/fly): `kp2d` (T,C,50,2) full-px, `conf` (T,C,50).
-- `jarvis_jax.cse.courtship_bout_masks.load_bout_masks(npz, fly) -> {masks (T,C,H,W) bool, valid (T,C), T,C,H,W}`.
-- `jarvis_jax.cse.qc` / `courtship_qc`: `silhouette_iou_report(rt, mesh_mm, masks_by_cam)->{"hard":{c:..},"soft":{c:..}}`, `per_camera_reproj_error(rt, kp3d_mm, kp2d_by_cam, vis_by_cam)`, `loo_reproj(rt, kp2d_by_cam, vis_by_cam)`.
+- `jarvis_jax.tracking.bout_masks.load_bout_masks(npz, fly) -> {masks (T,C,H,W) bool, valid (T,C), T,C,H,W}`.
+- `jarvis_jax.tracking.qc` / `courtship_qc`: `silhouette_iou_report(rt, mesh_mm, masks_by_cam)->{"hard":{c:..},"soft":{c:..}}`, `per_camera_reproj_error(rt, kp3d_mm, kp2d_by_cam, vis_by_cam)`, `loo_reproj(rt, kp2d_by_cam, vis_by_cam)`.
 - `jarvis_jax.data.v3.V3Dataset(root, split, *, crop=448, heatmap_size=224, sigma=7.0, recordings=None)`; `V3Dataset.__getitem__ -> (img4 (448,448,4) u8, kp_xy (50,2) hm-coords, vis (50,) bool)`; `batches(ds, batch_size, *, shuffle, seed, drop_last)`; COCO at `root/annotations/instances_{split}.json` (images: id/file_name/width/height; annotations: id/image_id/bbox[x,y,w,h]/keypoints[x,y,v]*50); images at `root/<file_name>`; masks at `root/sam3_masks/{split}/<file_noext>.npz` (`masks` (N,H,W), `ann_ids` (N,), `matched` (N,) bool).
 - `jarvis_jax.data.transforms.crop_origin(bbox[x,y,w,h], img_w, img_h, crop=448)->(x0,y0)`; `transform_keypoints(kps (50,3), x0, y0, crop, heatmap_size)->(hm_xy (50,2), vis (50,))`.
 - `jarvis_jax.convert.build_checkpoint.load_vitpose(ckpt_dir, ViTPoseConfig())->ViTPose`; `jarvis_jax.models.vitpose.ViTPose`, `ViTPoseConfig`.
 - `jarvis_jax.train.train`: `make_optimizer(model, tcfg)`, `make_train_step(mask_weight, aug, lr_swap, heatmap_size, mask_dilate)`, `eval_mpjpe(model, ds, batch_size, in_size=448)`, `TrainConfig`.
 - `jarvis_jax.data.device.normalize_image`, `render_heatmaps`; `jarvis_jax.eval.mpjpe.heatmaps_to_keypoints`, `mpjpe`.
-- Pipeline driver `scripts/run_courtship_bout.py`; SLURM array `scripts/slurm_courtship_array.py`; recording config `configs/recording/*.yaml`.
+- Pipeline driver `scripts/run_bout.py`; SLURM array `scripts/slurm_bout_array.py`; recording config `configs/recording/*.yaml`.
 
 ---
 
@@ -41,10 +41,10 @@ The QC path emits median metrics; Gate A needs **per-frame** values. Add a pure 
 **Files:**
 - Create: `third_party/jarvis_jax/jarvis_jax/cse/qc_perframe.py`
 - Test: `third_party/jarvis_jax/tests/test_qc_perframe.py`
-- Modify: `scripts/run_courtship_bout.py` (write `qc_perframe.npz` in Stage E, next to `qc.json`)
+- Modify: `scripts/run_bout.py` (write `qc_perframe.npz` in Stage E, next to `qc.json`)
 
 **Interfaces:**
-- Consumes: `ReprojectionTool`, `silhouette_iou_report`, `per_camera_reproj_error` (from `jarvis_jax.cse.qc`).
+- Consumes: `ReprojectionTool`, `silhouette_iou_report`, `per_camera_reproj_error` (from `jarvis_jax.tracking.qc`).
 - Produces: `per_frame_qc(rt, *, mesh_by_frame, kp3d_by_frame, kp2d_by_frame, vis_by_frame, masks_by_frame) -> dict{"soft_iou":(T,), "hard_iou":(T,), "reproj_px":(T,), "n_cams":(T,)}` (NaN where a frame has no usable cam).
 
 - [ ] **Step 1: Write the failing test**
@@ -52,7 +52,7 @@ The QC path emits median metrics; Gate A needs **per-frame** values. Add a pure 
 ```python
 # tests/test_qc_perframe.py
 import numpy as np, pytest
-from jarvis_jax.cse.qc_perframe import per_frame_qc
+from jarvis_jax.tracking.qc_perframe import per_frame_qc
 
 class FakeRT:
     num_cameras = 2
@@ -83,7 +83,7 @@ def test_per_frame_qc_shapes_and_nan():
 # jarvis_jax/cse/qc_perframe.py
 """Per-frame QC metrics feeding the pseudo-label Gate A (soft/hard IoU, marker reproj)."""
 import numpy as np
-from jarvis_jax.cse.qc import silhouette_iou_report, per_camera_reproj_error
+from jarvis_jax.tracking.qc import silhouette_iou_report, per_camera_reproj_error
 
 
 def per_frame_qc(rt, *, mesh_by_frame, kp3d_by_frame, kp2d_by_frame,
@@ -112,12 +112,12 @@ If `per_camera_reproj_error` returns a per-camera dict rather than a flat list, 
 
 - [ ] **Step 4: Run tests** — `JAX_PLATFORMS=cpu python -m pytest tests/test_qc_perframe.py -v` → PASS.
 
-- [ ] **Step 5: Wire into the driver.** In `scripts/run_courtship_bout.py` Stage E (right after `qc_report(...)` writes `qc.json`, ~line 353), add — reusing the `kp3d_by_frame/mesh_by_frame/kp2d_by_frame/vis_by_frame/masks_by_frame` locals already built there:
+- [ ] **Step 5: Wire into the driver.** In `scripts/run_bout.py` Stage E (right after `qc_report(...)` writes `qc.json`, ~line 353), add — reusing the `kp3d_by_frame/mesh_by_frame/kp2d_by_frame/vis_by_frame/masks_by_frame` locals already built there:
 
 ```python
     qc_perframe_path = os.path.join(bout_dir, f"fly{fly}", "qc_perframe.npz")
     if not stage_done(qc_perframe_path):
-        from jarvis_jax.cse.qc_perframe import per_frame_qc
+        from jarvis_jax.tracking.qc_perframe import per_frame_qc
         pf = per_frame_qc(rt, mesh_by_frame=mesh_by_frame, kp3d_by_frame=kp3d_by_frame,
                           kp2d_by_frame=kp2d_by_frame, vis_by_frame=vis_by_frame,
                           masks_by_frame=masks_by_frame)
@@ -128,7 +128,7 @@ If `per_camera_reproj_error` returns a per-camera dict rather than a flat list, 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add third_party/jarvis_jax/jarvis_jax/cse/qc_perframe.py third_party/jarvis_jax/tests/test_qc_perframe.py scripts/run_courtship_bout.py
+git add third_party/jarvis_jax/jarvis_jax/cse/qc_perframe.py third_party/jarvis_jax/tests/test_qc_perframe.py scripts/run_bout.py
 git commit -m "feat(cse): per-frame QC metrics (Gate A inputs) + driver wiring"
 ```
 
@@ -154,7 +154,7 @@ Reproject `kp3d_mm` to each camera and apply Gate A (per-frame) + Gate B (per-ke
 ```python
 # tests/test_courtship_pseudolabel.py
 import numpy as np
-from jarvis_jax.cse.courtship_pseudolabel import gate_pseudolabels, GateCfg
+from jarvis_jax.tracking.courtship_pseudolabel import gate_pseudolabels, GateCfg
 
 def test_gates_frame_and_consensus():
     T,C,K = 2,2,3
@@ -261,7 +261,7 @@ Turn gated labels into the V3 COCO dataset (frame jpg + SAM mask npz + COCO anno
 ```python
 # tests/test_build_pseudolabel_dataset.py
 import numpy as np, json, os
-from jarvis_jax.cse.build_pseudolabel_dataset import write_pseudolabel_coco, bbox_from_mask
+from jarvis_jax.tracking.build_pseudolabel_dataset import write_pseudolabel_coco, bbox_from_mask
 from jarvis_jax.data.v3 import V3Dataset
 
 def test_roundtrip_loads_in_v3(tmp_path):
@@ -361,7 +361,7 @@ Glue Task-2 gated labels + the source video frames + masks into Task-3 records f
 
 ```python
 def test_records_for_bout_emits_only_visible():
-    from jarvis_jax.cse.courtship_pseudolabel import records_for_bout
+    from jarvis_jax.tracking.courtship_pseudolabel import records_for_bout
     T,C,K,H,W = 1,2,3,16,16
     labels=np.zeros((T,C,K,3)); labels[0,0,:,2]=1; labels[0,0,:,:2]=5  # cam0 visible
     masks=np.zeros((T,C,H,W),bool); masks[0,0,4:8,4:8]=True; masks[0,1,4:8,4:8]=True
@@ -377,7 +377,7 @@ def test_records_for_bout_emits_only_visible():
 - [ ] **Step 3: Implement** (append to `courtship_pseudolabel.py`)
 
 ```python
-from jarvis_jax.cse.build_pseudolabel_dataset import bbox_from_mask
+from jarvis_jax.tracking.build_pseudolabel_dataset import bbox_from_mask
 
 def records_for_bout(labels, masks, frames_iter, cam_names, rec_tag, start_frame):
     T, C, K, _ = labels.shape
@@ -496,7 +496,7 @@ Continue-train from `v3` on the mixed dataset, early-stop on held-out courtship 
 ```python
 # tests/test_finetune_detector.py  (GPU)
 import numpy as np, os
-from jarvis_jax.cse.build_pseudolabel_dataset import write_pseudolabel_coco, bbox_from_mask
+from jarvis_jax.tracking.build_pseudolabel_dataset import write_pseudolabel_coco, bbox_from_mask
 
 def _tiny_root(tmp, split, n=2):
     recs=[]
@@ -509,7 +509,7 @@ def _tiny_root(tmp, split, n=2):
     write_pseudolabel_coco(tmp, recs, split=split)
 
 def test_finetune_smoke(tmp_path):
-    from jarvis_jax.cse.finetune_detector import finetune
+    from jarvis_jax.tracking.finetune_detector import finetune
     real=str(tmp_path/"real"); pseudo=str(tmp_path/"pseudo"); out=str(tmp_path/"v4")
     os.makedirs(real); os.makedirs(pseudo)
     _tiny_root(real,"train"); _tiny_root(real,"val"); _tiny_root(pseudo,"train")
@@ -605,7 +605,7 @@ End-to-end driver + Hydra config that: (a) reads which bouts/recordings have pip
 - Test: `third_party/jarvis_jax/tests/test_detector_finetune_config.py` (config composes + resolves)
 
 **Interfaces:**
-- Consumes: all prior tasks; `all_cams_frames`/`bout_start_frame`/`parse_bouts` from `scripts/run_courtship_bout.py`; `slurm_courtship_array.py` (pseudo-label generation = the pipeline run, already resumable).
+- Consumes: all prior tasks; `all_cams_frames`/`bout_start_frame`/`parse_bouts` from `scripts/run_bout.py`; `slurm_bout_array.py` (pseudo-label generation = the pipeline run, already resumable).
 - Config `configs/detector_finetune.yaml`:
 
 ```yaml
@@ -673,14 +673,14 @@ from omegaconf import OmegaConf
 
 import stac_mjx.io_dict_to_hdf5 as ioh5
 from jarvis_jax.geometry.reprojection_tool import ReprojectionTool
-from jarvis_jax.cse.courtship_bout_masks import load_bout_masks
-from jarvis_jax.cse.courtship_pseudolabel import (
+from jarvis_jax.tracking.bout_masks import load_bout_masks
+from jarvis_jax.tracking.courtship_pseudolabel import (
     reproject_sites, gate_pseudolabels, records_for_bout, GateCfg)
-from jarvis_jax.cse.build_pseudolabel_dataset import write_pseudolabel_coco
-from jarvis_jax.cse.finetune_detector import finetune
+from jarvis_jax.tracking.build_pseudolabel_dataset import write_pseudolabel_coco
+from jarvis_jax.tracking.finetune_detector import finetune
 import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from scripts.run_courtship_bout import all_cams_frames, open_video_captures, bout_start_frame
+from scripts.run_bout import all_cams_frames, open_video_captures, bout_start_frame
 
 
 @hydra.main(version_base=None, config_path="../configs", config_name="detector_finetune")
@@ -725,7 +725,7 @@ if __name__ == "__main__":
     main()
 ```
 
-Add `red_data_v3_root: ${paths.data_dir_johnson}/red_data/red_data_unified_V3` to `configs/paths/hyak.yaml` if absent (it is the real-annotation root the finetune mixes in). Reuse `all_cams_frames`/`open_video_captures`/`bout_start_frame` exactly as defined in `run_courtship_bout.py`; if their signatures differ, adapt the call.
+Add `red_data_v3_root: ${paths.data_dir_johnson}/red_data/red_data_unified_V3` to `configs/paths/hyak.yaml` if absent (it is the real-annotation root the finetune mixes in). Reuse `all_cams_frames`/`open_video_captures`/`bout_start_frame` exactly as defined in `run_bout.py`; if their signatures differ, adapt the call.
 
 - [ ] **Step 4: Run tests** — `JAX_PLATFORMS=cpu python -m pytest tests/test_detector_finetune_config.py -v` → PASS. Also `python -c "import ast; ast.parse(open('scripts/run_pseudolabel_finetune.py').read())"`.
 
@@ -742,7 +742,7 @@ git commit -m "feat: pseudo-label finetune orchestration + config (v3->v4 bootst
 
 Not a task — the coordinator executes these to validate end-to-end:
 
-1. **Pseudo-label generation = the deferred full run.** Ensure pipeline outputs (+ `qc_perframe.npz` from Task 1) exist for the train-split courtship recordings + Session0 by running `scripts/slurm_courtship_array.py` (resumable). This is the expensive step; it doubles as the full-session run.
+1. **Pseudo-label generation = the deferred full run.** Ensure pipeline outputs (+ `qc_perframe.npz` from Task 1) exist for the train-split courtship recordings + Session0 by running `scripts/slurm_bout_array.py` (resumable). This is the expensive step; it doubles as the full-session run.
 2. **Bootstrap round 1.** Run `scripts/run_pseudolabel_finetune.py label_sources=[...]` on GPU → `v4` checkpoint + printed validation.
 3. **Adoption gate (spec §Validation):** accept `v4` only if held-out courtship female MPJPE improves vs. v3's 26px AND full-val MPJPE stays ~6–7px AND a de-risk bout re-run with `v4` (point `configs/detector/*.yaml` at `v4`) beats the recorded v3 baseline (fly0 soft-IoU 0.102, per-cam reproj 55px, LOO 46px). Record numbers in the ledger.
 4. **Optional round 2:** if round 1 improves held-out LOO, refit the pipeline with `v4`, regenerate gated pseudo-labels, finetune again; stop when held-out stops improving or after 2 rounds.

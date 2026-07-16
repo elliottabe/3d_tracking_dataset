@@ -48,7 +48,7 @@ def test_require_label_sources_raises_when_empty():
 
 
 def test_require_nonempty_pseudo_dataset_raises_when_empty(tmp_path):
-    from jarvis_jax.cse.build_pseudolabel_dataset import PseudoLabelWriter
+    from jarvis_jax.tracking.build_pseudolabel_dataset import PseudoLabelWriter
 
     writer = PseudoLabelWriter(str(tmp_path), split="train")
     with pytest.raises(ValueError, match="pseudo-label dataset"):

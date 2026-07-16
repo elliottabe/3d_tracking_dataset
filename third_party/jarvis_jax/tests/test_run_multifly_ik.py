@@ -23,7 +23,7 @@ STAC_CFG = os.environ.get(
 
 
 def test_ann_id_by_image_for_fly_flattens_map():
-    from jarvis_jax.cse.run_multifly_ik import ann_id_by_image_for_fly
+    from jarvis_jax.tracking.run_multifly_ik import ann_id_by_image_for_fly
     # minimal synthetic identity map + a matching coco stub
     import json, tempfile
     coco = {
@@ -54,7 +54,7 @@ def test_run_multifly_ik_both_flies_reproject_cleanly(tmp_path):
     """GPU real run on a small frame slice: BOTH flies produce an ik_h5 and a
     per-fly silhouette-IK report with reproj_px below an explicit threshold, and
     the two flies' solved keypoints are demonstrably different (de-collapsed)."""
-    from jarvis_jax.cse.run_multifly_ik import run_multifly_ik
+    from jarvis_jax.tracking.run_multifly_ik import run_multifly_ik
     out = run_multifly_ik(
         REC, root=ROOT, calib_dir=CALIB, anatomy_yaml=ANATOMY, model_xml=XML,
         mesh_npz=MESH, stac_config_dir=STAC_CFG, out_dir=str(tmp_path),
@@ -88,7 +88,7 @@ def test_run_multifly_ablation_recovers_second_fly_wing(tmp_path):
     """GPU real run: withhold fly1's wing keypoints; the silhouette condition (c)
     must recover wing extent toward the SAM tip (recovery_to_sam > 0) while the
     OTHER fly still reprojects cleanly."""
-    from jarvis_jax.cse.run_multifly_ik import run_multifly_ablation
+    from jarvis_jax.tracking.run_multifly_ik import run_multifly_ablation
     out = run_multifly_ablation(
         REC, root=ROOT, calib_dir=CALIB, anatomy_yaml=ANATOMY, model_xml=XML,
         mesh_npz=MESH, stac_config_dir=STAC_CFG, out_dir=str(tmp_path),

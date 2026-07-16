@@ -2,7 +2,7 @@ import os
 import re
 import numpy as np
 import pytest
-from jarvis_jax.cse.silhouette_dof import (
+from jarvis_jax.tracking.silhouette_dof import (
     build_appendage_dof_mask, appendage_vertex_indices, APPENDAGE_PATTERNS,
 )
 

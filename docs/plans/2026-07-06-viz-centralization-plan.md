@@ -12,8 +12,8 @@
 
 - Package is top-level `viz/`, importable as `viz.core.*` / `viz.views.*`, runnable as `python -m viz <subcommand> …`.
 - The core is pipeline-agnostic: pure geometry + cv2/matplotlib + artifact loaders. NO pipeline-specific logic in `viz/core/`; pipeline specifics live in `viz/views/`.
-- Reprojection uses the ReprojectionTool convention verbatim: `ph = [pts,1] (N,4); proj = ph @ M (N,3); uv = proj[:,:2]/proj[:,2:3]` where `M` is the `(4,3)` camera matrix. Do NOT reinvent it — this matches `scripts/run_courtship_bout.py::project_points`.
-- Reuse, don't reimplement: camera matrices via `jarvis_jax.geometry.reprojection_tool.ReprojectionTool(calib_dir).camera_matrices` `(num_cam,4,3)`; SAM masks via `jarvis_jax.cse.courtship_bout_masks.load_bout_masks(npz_path, fly, expected_cameras=...)`.
+- Reprojection uses the ReprojectionTool convention verbatim: `ph = [pts,1] (N,4); proj = ph @ M (N,3); uv = proj[:,:2]/proj[:,2:3]` where `M` is the `(4,3)` camera matrix. Do NOT reinvent it — this matches `scripts/run_bout.py::project_points`.
+- Reuse, don't reimplement: camera matrices via `jarvis_jax.geometry.reprojection_tool.ReprojectionTool(calib_dir).camera_matrices` `(num_cam,4,3)`; SAM masks via `jarvis_jax.tracking.bout_masks.load_bout_masks(npz_path, fly, expected_cameras=...)`.
 - Every core module is unit-tested; views are smoke-tested only (produce an output file without error), matching how the pipeline treats heavy renders.
 - Run pytest from repo root: `cd /gscratch/portia/eabe/Research/MyRepos/3d_tracking_dataset && OMP_NUM_THREADS=4 JAX_PLATFORMS=cpu python -m pytest viz/tests/ -q`. (JAX_PLATFORMS=cpu keeps core/io tests off the GPU; the `fit-check` smoke needs a GPU and is skipped when none is present.)
 - Reference implementations (source for the promoted views) live in `docs/plans/viz-reference/*.py` (preserved from the debugging session; see its README). Treat them as behavior references to rewrite on the core, not files to copy verbatim.
@@ -170,7 +170,7 @@ def leg_chains(kp_names):
 # viz/core/reproject.py
 """3D(mm)->2D(px) reprojection, ReprojectionTool `ph @ M` convention.
 M is a (4,3) camera matrix; ph=[pts,1]. Verbatim match to
-scripts/run_courtship_bout.py::project_points."""
+scripts/run_bout.py::project_points."""
 import numpy as np
 from jarvis_jax.geometry.reprojection_tool import ReprojectionTool
 
@@ -319,8 +319,8 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"`
   - `load_outputs(run_root, bout, fly) -> dict` with `kp3d_mm (T,K,3)`, `mesh_mm (T,M,3)`, `kp_names (list)` (via `stac_mjx.io_dict_to_hdf5.load`)
   - `load_kp2d(run_root, bout, fly) -> tuple(kp2d (T,C,K,2), conf (T,C,K))`
   - `load_kp3d(run_root, bout, fly) -> tuple(kp3d (T,K,3), conf3d (T,K))`
-  - `load_masks(predictions_dir, bout, fly, cameras) -> dict` (wraps `jarvis_jax.cse.courtship_bout_masks.load_bout_masks`, `expected_cameras=cameras`)
-  - `read_frame(video_path, frame_idx) -> np.ndarray (H,W,3) BGR` and `read_frames(session_dir, cameras, start, count) -> generator of (C,H,W,3) RGB` (thin wrappers over cv2.VideoCapture; mirror `scripts/run_courtship_bout.py::open_video_captures/all_cams_frames`)
+  - `load_masks(predictions_dir, bout, fly, cameras) -> dict` (wraps `jarvis_jax.tracking.bout_masks.load_bout_masks`, `expected_cameras=cameras`)
+  - `read_frame(video_path, frame_idx) -> np.ndarray (H,W,3) BGR` and `read_frames(session_dir, cameras, start, count) -> generator of (C,H,W,3) RGB` (thin wrappers over cv2.VideoCapture; mirror `scripts/run_bout.py::open_video_captures/all_cams_frames`)
 
 - [ ] **Step 1: Write failing tests** (use a tiny synthetic outputs.h5 + kp2d.npz written in the test):
 
@@ -355,7 +355,7 @@ import os
 import numpy as np
 import cv2
 import stac_mjx.io_dict_to_hdf5 as ioh5
-from jarvis_jax.cse.courtship_bout_masks import load_bout_masks
+from jarvis_jax.tracking.bout_masks import load_bout_masks
 
 def fly_dir(run_root, bout, fly):
     return os.path.join(run_root, "bouts", f"bout_{int(bout):05d}", f"fly{int(fly)}")
@@ -610,7 +610,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"`
 **Reference sources** (behavior to reproduce, rewritten on the core): scratchpad `viz_both_flies.py` (both-fly mesh cloud, per-cam montage), `viz_mask_orient.py` (SAM mask + mesh + head/tail axis), `viz_detector_headtail.py` (detector head/tail dots), `viz_legmask_overlay.py` (mask + detector + fit, 2×2), `viz_bodyalign.py` (per-frame body-aligned fit vs raw vs detector).
 
 **Interfaces:**
-- Consumes: `core.reproject.{camera_matrices,reproject_all,project}`, `core.overlays.*`, `core.io.{load_outputs,load_kp2d,load_masks,read_frame}`, `core.layout.{crop_to_points,montage,banner}`, `core.colors.{PALETTE,keypoint_groups,leg_chains}`. Needs the recording's `calib_dir`, `session_dir`, `predictions_dir`, `cameras`, `KP_NAMES` — resolve via a Hydra compose of `courtship_pipeline` (see below).
+- Consumes: `core.reproject.{camera_matrices,reproject_all,project}`, `core.overlays.*`, `core.io.{load_outputs,load_kp2d,load_masks,read_frame}`, `core.layout.{crop_to_points,montage,banner}`, `core.colors.{PALETTE,keypoint_groups,leg_chains}`. Needs the recording's `calib_dir`, `session_dir`, `predictions_dir`, `cameras`, `KP_NAMES` — resolve via a Hydra compose of `pipeline` (see below).
 - Produces: `viz.views.overlay.run(args) -> int` writing a PNG to `args.out` (default `overlay_bout{bout}_fly{fly}_f{frame}.png`).
 
 - [ ] **Step 1:** Add a config-resolution helper (used by overlay + legskel). Create `viz/core/config.py`:
@@ -623,7 +623,7 @@ from hydra import initialize_config_dir, compose
 
 _CFG_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "configs")
 
-def courtship_recording(config_name="courtship_pipeline", overrides=None):
+def courtship_recording(config_name="pipeline", overrides=None):
     os.environ.setdefault("USER", "eabe")
     with initialize_config_dir(version_base=None, config_dir=os.path.abspath(_CFG_DIR)):
         c = compose(config_name=config_name, overrides=overrides or [])
@@ -636,7 +636,7 @@ def courtship_recording(config_name="courtship_pipeline", overrides=None):
     }
 ```
 
-- [ ] **Step 2: Write the overlay view.** `run(args)` must: resolve recording; `cam_mats, names = camera_matrices(calib_dir)`; load `outputs` (mesh_mm, kp3d_mm), `kp2d`, `masks` for `(bout, fly)`; for each camera read the frame at `bout_start_frame + args.frame` (compute start via the recording's `bouts_csv` — reuse `scripts/run_courtship_bout.py::bout_start_frame`; import it: `from scripts.run_courtship_bout import bout_start_frame` and pass the composed cfg); draw per `--show` tokens: `mask` → `draw_mask(mask[fr,ci])`, `mesh` → `draw_cloud(project(cam_mats[ci], mesh_mm[fr]))` in `PALETTE["fly{fly}"]`, `kp` → detector `draw_points(kp2d[fr,ci])`, `axis` → head-group centroid vs tail via `draw_axis`; `--compare RUN2` overlays a second run's fitted mesh in `PALETTE["fit"]`; `--bodyalign` computes a per-frame Umeyama on the body group mapping `kp3d_mm→kp3d` and draws the aligned sites (port `viz_bodyalign.py`'s `umeyama`). Crop each tile with `crop_to_points`, `montage(tiles)`, append `banner`. Save PNG.
+- [ ] **Step 2: Write the overlay view.** `run(args)` must: resolve recording; `cam_mats, names = camera_matrices(calib_dir)`; load `outputs` (mesh_mm, kp3d_mm), `kp2d`, `masks` for `(bout, fly)`; for each camera read the frame at `bout_start_frame + args.frame` (compute start via the recording's `bouts_csv` — reuse `scripts/run_bout.py::bout_start_frame`; import it: `from scripts.run_bout import bout_start_frame` and pass the composed cfg); draw per `--show` tokens: `mask` → `draw_mask(mask[fr,ci])`, `mesh` → `draw_cloud(project(cam_mats[ci], mesh_mm[fr]))` in `PALETTE["fly{fly}"]`, `kp` → detector `draw_points(kp2d[fr,ci])`, `axis` → head-group centroid vs tail via `draw_axis`; `--compare RUN2` overlays a second run's fitted mesh in `PALETTE["fit"]`; `--bodyalign` computes a per-frame Umeyama on the body group mapping `kp3d_mm→kp3d` and draws the aligned sites (port `viz_bodyalign.py`'s `umeyama`). Crop each tile with `crop_to_points`, `montage(tiles)`, append `banner`. Save PNG.
 
   (Complete code: adapt `docs/plans/viz-reference/{viz_both_flies,viz_mask_orient,viz_bodyalign}.py`, replacing their inline `project_points`/cv2 calls with `core.reproject`/`core.overlays`/`core.layout`. Those files are the line-by-line reference.)
 
@@ -802,6 +802,6 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"`
 ## Notes for the implementer
 
 - The `overlay`/`legskel`/`kp-qc` views need the recording's `calib_dir`/`session_dir`/`predictions_dir`/`cameras`/`KP_NAMES`. Get them from `viz.core.config.courtship_recording()` (Task 6). For non-courtship/original-pipeline inputs, accept explicit `--calib-dir`/`--session-dir` overrides on those subcommands (add if a view needs them).
-- `bout_start_frame(cfg, bout)` lives in `scripts/run_courtship_bout.py`; import it (`sys.path` has the repo root when running `python -m viz` from the repo). Do NOT duplicate the bouts_csv parsing.
+- `bout_start_frame(cfg, bout)` lives in `scripts/run_bout.py`; import it (`sys.path` has the repo root when running `python -m viz` from the repo). Do NOT duplicate the bouts_csv parsing.
 - Keep views thin: parse args → load via `core.io` → reproject via `core.reproject` → draw via `core.overlays` → arrange via `core.layout` → save. Any logic worth testing belongs in the core, not a view.
 - The `docs/plans/viz-reference/*.py` files are the exact behavioral references for the promoted overlays; open them side-by-side when writing Tasks 6–7.

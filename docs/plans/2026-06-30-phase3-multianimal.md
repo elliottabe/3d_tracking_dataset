@@ -13,7 +13,7 @@
 - **Identity linker is JAX-native affine** (spec decision 9 / user decision 3): build the linker from the existing affine-correct primitives (`ReprojectionTool.reconstruct_point`/`reproject_point`, `affine_camera.project_affine`/`reconstruct_affine`), mirroring the `BoutMasks.assign_identities` *algorithm* only — do NOT import `JARVIS-HybridNet/jarvis/prediction/sam3_video_tracker.py`.
 - **Affine/telecentric cameras** (spec decision 8): per-camera 3×4 DLT with 3rd row `[0,0,0,1]`; projection `uv = P[:2,:3]@X + P[:2,3]` (no perspective divide). `reproject_point`/`reconstruct_point`'s `/proj[2]` divide is a no-op for affine cams (divides by 1). Keep all geometry affine-consistent.
 - **3-D observation model** (spec decision 7): triangulate observations to 3-D, fit model markers to 3-D. Silhouette landmarks enter as confidence-gated 3-D markers via `marker_augment.augment_wing_markers` (`only_missing=True`, default `wing_weight=0.5`). No 2-D reprojection IK term, no dense-pose head (later phases).
-- **Reuse, don't fork:** the IK backbone is `stac_mjx.stac_core_jaxls.JaxlsBatchSolver.solve_trajectory` — do NOT modify it. Per-fly STAC reuses `jarvis_jax.cse.run_stac_bout.run` unchanged. Silhouette IK reuses `silhouette_ik_solve.run_single_fly`/`run_ablation`, extended only by an `ann_id_by_image` argument.
+- **Reuse, don't fork:** the IK backbone is `stac_mjx.stac_core_jaxls.JaxlsBatchSolver.solve_trajectory` — do NOT modify it. Per-fly STAC reuses `jarvis_jax.tracking.run_stac_bout.run` unchanged. Silhouette IK reuses `silhouette_ik_solve.run_single_fly`/`run_ablation`, extended only by an `ann_id_by_image` argument.
 - **Anatomy-agnostic** `(model_xml, canonical_mesh_npz)`, V1 now: `/gscratch/portia/eabe/Research/MyRepos/fruitfly_body_models/fruitfly_v1/fruitfly_v1_free.xml` (nq=93) + `/gscratch/portia/eabe/Research/MyRepos/fruitfly_body_models/fruitfly_cse/fly_v1_collision_canonical_wings.npz`.
 - **Female handling = keypoint-withhold ablation on the 2nd fly** (user decision 2): reuse Phase-2 `run_ablation`/`_withhold_wing_kp`; withhold fly1's wing keypoints, show the silhouette recovers wing extent while both flies still reproject cleanly. NOT keypoint-starved-from-extra_masks, NOT a Phase-5 detector. Sex disambiguation (male vs female) is out of scope — use arbitrary stable `fly0`/`fly1` slots (both anns are `sex:"unknown"` for this recording); note it as a follow-up.
 - **Validation recording:** `2026_04_07_11_33_33`, split `val`, data root `/gscratch/portia/eabe/data/Johnson_lab/red_data/red_data_unified_V3`. Has BOTH flies COCO-annotated (181 two-annotation frames). Its existing `cse_work/2026_04_07_11_33_33/Fruitfly_ik_v1_cse.h5` and `cse_work/2026_04_07_11_33_33_bout.h5` are IDENTITY-COLLAPSED (first/last-ann-wins) and MUST NOT be trusted or reused; Phase 3 regenerates per-fly artifacts.
@@ -66,7 +66,7 @@ ANATOMY = "<stac_mjx configs>/anatomy/v1.yaml"  # KEYPOINT_MODEL_PAIRS source fo
 - Test: `third_party/jarvis_jax/tests/test_identity_link.py`
 
 **Interfaces:**
-- Consumes: `jarvis_jax.geometry.reprojection_tool.ReprojectionTool` (`reconstruct_point(points2d (num_cam,2), cams_to_use: list[int]|None) -> (3,)`, `reproject_point(p3d (3,)) -> (num_cam,2)`); `jarvis_jax.cse.affine_camera.project_affine`, `reconstruct_affine`, `factor_affine` (test fixture only).
+- Consumes: `jarvis_jax.geometry.reprojection_tool.ReprojectionTool` (`reconstruct_point(points2d (num_cam,2), cams_to_use: list[int]|None) -> (3,)`, `reproject_point(p3d (3,)) -> (num_cam,2)`); `jarvis_jax.tracking.affine_camera.project_affine`, `reconstruct_affine`, `factor_affine` (test fixture only).
 - Produces:
   - `score_assignment(kp2d_per_cam (n_cam, K, 3), cams_present: list[int], cam_mats (n_cam, 3, 4)) -> float` — given ONE fly's per-camera 2-D keypoints (last channel = coco visibility flag `v`; `v>0` = present), triangulate each of the `K` keypoints that is visible in ≥2 of `cams_present` (affine DLT via `_dlt_affine`), reproject into every present camera, and return the mean per-(keypoint, camera) pixel residual over visible observations. Returns `float("inf")` if no keypoint triangulates.
   - `_dlt_affine(cam_mats (n_cam,3,4), cam_ids: list[int], pts2d (n_cam,2)) -> (3,)` — module-private affine DLT-SVD (same math as `ReprojectionTool.reconstruct_point` / `silhouette_landmarks._triangulate`), indexing `cam_mats`/`pts2d` by absolute camera id.
@@ -79,8 +79,8 @@ Create `third_party/jarvis_jax/tests/test_identity_link.py`:
 ```python
 import numpy as np
 import pytest
-from jarvis_jax.cse.affine_camera import factor_affine, reconstruct_affine, project_affine
-from jarvis_jax.cse.identity_link import score_assignment, _dlt_affine, link_frameset
+from jarvis_jax.tracking.affine_camera import factor_affine, reconstruct_affine, project_affine
+from jarvis_jax.tracking.identity_link import score_assignment, _dlt_affine, link_frameset
 
 # A real telecentric DLT (from the rig) + 6 rotated copies -> 7 affine cameras
 # with angular diversity, so affine triangulation is well-conditioned.
@@ -196,7 +196,7 @@ def test_link_frameset_robust_to_order_swap_and_missing_cam():
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `cd third_party/jarvis_jax && JAX_PLATFORMS=cpu OMP_NUM_THREADS=4 python -m pytest tests/test_identity_link.py -v`
-Expected: FAIL with `ModuleNotFoundError: No module named 'jarvis_jax.cse.identity_link'`.
+Expected: FAIL with `ModuleNotFoundError: No module named 'jarvis_jax.tracking.identity_link'`.
 
 - [ ] **Step 3: Write minimal implementation**
 
@@ -410,7 +410,7 @@ Add to `third_party/jarvis_jax/tests/test_identity_link.py`:
 
 ```python
 import os
-from jarvis_jax.cse.identity_link import link_recording
+from jarvis_jax.tracking.identity_link import link_recording
 
 ROOT = "/gscratch/portia/eabe/data/Johnson_lab/red_data/red_data_unified_V3"
 REC = "2026_04_07_11_33_33"
@@ -433,7 +433,7 @@ def test_link_recording_two_fly_framesets_reproject_cleanly():
     import json
     import numpy as np
     from jarvis_jax.geometry.reprojection_tool import ReprojectionTool
-    from jarvis_jax.cse.identity_link import score_assignment, _ann_kp
+    from jarvis_jax.tracking.identity_link import score_assignment, _ann_kp
     coco = json.load(open(COCO))
     id2ann = {}
     for a in coco["annotations"]:
@@ -559,7 +559,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 - Test: `third_party/jarvis_jax/tests/test_multifly_bout.py`
 
 **Interfaces:**
-- Consumes: Task 2 `link_recording` output type `dict[str, dict[int, dict[int, int]]]`; `jarvis_jax.cse.cse_labels` helpers `model_kp_order(anatomy_yaml) -> list[str]`, `_reorder_index(src_names, dst_names) -> np.ndarray`, `model_rest_keypoints(model, kp_names) -> (K,3)`, `umeyama_scale(data_pts, model_pts, valid) -> float`; `ReprojectionTool.reconstruct_point`; `mujoco.MjModel.from_xml_path`.
+- Consumes: Task 2 `link_recording` output type `dict[str, dict[int, dict[int, int]]]`; `jarvis_jax.densepose.cse_labels` helpers `model_kp_order(anatomy_yaml) -> list[str]`, `_reorder_index(src_names, dst_names) -> np.ndarray`, `model_rest_keypoints(model, kp_names) -> (K,3)`, `umeyama_scale(data_pts, model_pts, valid) -> float`; `ReprojectionTool.reconstruct_point`; `mujoco.MjModel.from_xml_path`.
 - Produces:
   - `build_fly_bout(coco_path: str, calib_dir: str, recording: str, identity_map: dict, fly_id: int, anatomy_yaml: str, model_xml: str, out_h5: str, *, split: str = "val") -> tuple[str, float]` — for each frameset in `identity_map`, gather THIS `fly_id`'s per-camera annotation (via `identity_map[fs_key][fly_id]`), triangulate all 50 keypoints in model order (≥2 visible cameras), scale to model cm via the recording's Umeyama scale, and write a bout h5 with the EXACT `cse_labels.build_bout` schema: datasets `keypoints (T,K,3) f32`, `kp_names (K,) S20`, `vis (T,K) bool`, `fs_keys (T,) S64`, `fs_imgids (T,n_cam) int64`; attrs `scale`, `recording`. Returns `(out_h5, scale)`. Framesets where this fly has `<2` cameras with visible keypoints are skipped (dropped from `T`).
 
@@ -572,8 +572,8 @@ import os
 import h5py
 import numpy as np
 import pytest
-from jarvis_jax.cse.multifly_bout import build_fly_bout
-from jarvis_jax.cse.identity_link import link_recording
+from jarvis_jax.tracking.multifly_bout import build_fly_bout
+from jarvis_jax.tracking.identity_link import link_recording
 
 ROOT = "/gscratch/portia/eabe/data/Johnson_lab/red_data/red_data_unified_V3"
 REC = "2026_04_07_11_33_33"
@@ -646,7 +646,7 @@ def test_build_fly_bout_two_flies_differ_and_schema_matches(tmp_path):
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `cd third_party/jarvis_jax && JAX_PLATFORMS=cpu OMP_NUM_THREADS=4 python -m pytest tests/test_multifly_bout.py -v`
-Expected: FAIL with `ModuleNotFoundError: No module named 'jarvis_jax.cse.multifly_bout'`.
+Expected: FAIL with `ModuleNotFoundError: No module named 'jarvis_jax.tracking.multifly_bout'`.
 
 - [ ] **Step 3: Write minimal implementation**
 
@@ -673,7 +673,7 @@ import numpy as np
 import mujoco
 
 from jarvis_jax.geometry.reprojection_tool import ReprojectionTool
-from jarvis_jax.cse.cse_labels import (
+from jarvis_jax.densepose.cse_labels import (
     model_kp_order, model_rest_keypoints, umeyama_scale, _reorder_index,
 )
 
@@ -785,7 +785,7 @@ Add to `third_party/jarvis_jax/tests/test_silhouette_ik_solve.py`:
 
 ```python
 def test_ann_for_image_selects_by_ann_id_by_image():
-    from jarvis_jax.cse.silhouette_ik_solve import _ann_for_image
+    from jarvis_jax.tracking.silhouette_ik_solve import _ann_for_image
     id2ann_multi = {100: [{"id": 5, "keypoints": [1]}, {"id": 6, "keypoints": [2]}]}
     # explicit selection picks the chosen ann
     a = _ann_for_image(id2ann_multi, 100, {100: 6})
@@ -805,8 +805,8 @@ def test_triangulate_kp_mm_uses_selected_ann():
     ann chosen by ann_id_by_image, not the first one -- so fly0 and fly1 yield
     different 3-D keypoints (regression guard for identity threading)."""
     import numpy as np
-    from jarvis_jax.cse.silhouette_ik_solve import _triangulate_kp_mm
-    from jarvis_jax.cse.affine_camera import factor_affine, reconstruct_affine, project_affine
+    from jarvis_jax.tracking.silhouette_ik_solve import _triangulate_kp_mm
+    from jarvis_jax.tracking.affine_camera import factor_affine, reconstruct_affine, project_affine
 
     class _FakeRT:
         def __init__(self, cam_mats):
@@ -968,7 +968,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 - Test: `third_party/jarvis_jax/tests/test_run_multifly_ik.py`
 
 **Interfaces:**
-- Consumes: Task 2 `link_recording`; Task 3 `build_fly_bout`; `jarvis_jax.cse.run_stac_bout.run(bout_h5, out_h5, stac_config_dir, overrides) -> ik_p`; Task 4 `run_single_fly(recording, *, ik_h5, model_xml, mesh_npz, root, split, calib_dir, use_silhouette, wing_weight, only_missing, max_frames, smooth_weight, n_iter, corridor, out_dir, ann_id_by_image) -> dict`.
+- Consumes: Task 2 `link_recording`; Task 3 `build_fly_bout`; `jarvis_jax.tracking.run_stac_bout.run(bout_h5, out_h5, stac_config_dir, overrides) -> ik_p`; Task 4 `run_single_fly(recording, *, ik_h5, model_xml, mesh_npz, root, split, calib_dir, use_silhouette, wing_weight, only_missing, max_frames, smooth_weight, n_iter, corridor, out_dir, ann_id_by_image) -> dict`.
 - Produces:
   - `ann_id_by_image_for_fly(identity_map: dict, coco_path: str, recording: str, fly_id: int) -> dict[int, int]` — flatten the per-frameset identity map into a single `{image_id: ann_id}` dict for one fly (image_id read from the chosen ann's `image_id`). This is the `ann_id_by_image` Task 4 consumes.
   - `run_multifly_ik(recording: str, *, root: str, calib_dir: str, anatomy_yaml: str, model_xml: str, mesh_npz: str, stac_config_dir: str, out_dir: str, split: str = "val", n_flies: int = 2, coco_path: str | None = None, use_silhouette: bool = True, max_frames: int = 0, n_iter: int = 50, wing_weight: float = 0.5) -> dict` — full pipeline: `link_recording` → per fly `build_fly_bout` → `run_stac_bout.run` (per-fly ik_h5) → `run_single_fly(..., ann_id_by_image=ann_id_by_image_for_fly(...))`. Returns `{"identity_map_size": int, "flies": {fly_id: {"bout_h5": str, "ik_h5": str, "n_framesets": int, "report": <run_single_fly dict>}}}`.
@@ -999,7 +999,7 @@ STAC_CFG = os.environ.get(
 
 
 def test_ann_id_by_image_for_fly_flattens_map():
-    from jarvis_jax.cse.run_multifly_ik import ann_id_by_image_for_fly
+    from jarvis_jax.tracking.run_multifly_ik import ann_id_by_image_for_fly
     # minimal synthetic identity map + a matching coco stub
     import json, tempfile
     coco = {
@@ -1029,7 +1029,7 @@ def test_run_multifly_ik_both_flies_reproject_cleanly(tmp_path):
     """GPU real run on a small frame slice: BOTH flies produce an ik_h5 and a
     per-fly silhouette-IK report with reproj_px below an explicit threshold, and
     the two flies' solved keypoints are demonstrably different (de-collapsed)."""
-    from jarvis_jax.cse.run_multifly_ik import run_multifly_ik
+    from jarvis_jax.tracking.run_multifly_ik import run_multifly_ik
     out = run_multifly_ik(
         REC, root=ROOT, calib_dir=CALIB, anatomy_yaml=ANATOMY, model_xml=XML,
         mesh_npz=MESH, stac_config_dir=STAC_CFG, out_dir=str(tmp_path),
@@ -1060,7 +1060,7 @@ def test_run_multifly_ik_both_flies_reproject_cleanly(tmp_path):
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `cd third_party/jarvis_jax && JAX_PLATFORMS=cpu OMP_NUM_THREADS=4 python -m pytest tests/test_run_multifly_ik.py::test_ann_id_by_image_for_fly_flattens_map -v`
-Expected: FAIL with `ModuleNotFoundError: No module named 'jarvis_jax.cse.run_multifly_ik'`.
+Expected: FAIL with `ModuleNotFoundError: No module named 'jarvis_jax.tracking.run_multifly_ik'`.
 
 - [ ] **Step 3: Write minimal implementation**
 
@@ -1078,7 +1078,7 @@ Reuses the Phase-2 solver + silhouette machinery unchanged; the only new
 selection input is the per-fly ann_id_by_image (from the identity map).
 
 STAC dependency (honest note): the primary path is a per-fly STAC solve via
-jarvis_jax.cse.run_stac_bout.run, which fits per-fly offsets + q_init. If
+jarvis_jax.tracking.run_stac_bout.run, which fits per-fly offsets + q_init. If
 run_stac proves intractable in a given environment, an ESCAPE HATCH is provided
 (`stac_fallback=True`): reuse an existing (male) fly's fitted offsets/marker_sites
 ik_h5 as the anatomy and seed solve_ik with a per-fly q_init derived from the
@@ -1093,10 +1093,10 @@ import os
 
 import numpy as np
 
-from jarvis_jax.cse.identity_link import link_recording
-from jarvis_jax.cse.multifly_bout import build_fly_bout
-from jarvis_jax.cse import run_stac_bout
-from jarvis_jax.cse.silhouette_ik_solve import run_single_fly
+from jarvis_jax.tracking.identity_link import link_recording
+from jarvis_jax.tracking.multifly_bout import build_fly_bout
+from jarvis_jax.tracking import run_stac_bout
+from jarvis_jax.tracking.silhouette_ik_solve import run_single_fly
 
 
 def ann_id_by_image_for_fly(identity_map, coco_path, recording, fly_id):
@@ -1212,7 +1212,7 @@ def test_run_multifly_ablation_recovers_second_fly_wing(tmp_path):
     """GPU real run: withhold fly1's wing keypoints; the silhouette condition (c)
     must recover wing extent toward the SAM tip (recovery_to_sam > 0) while the
     OTHER fly still reprojects cleanly."""
-    from jarvis_jax.cse.run_multifly_ik import run_multifly_ablation
+    from jarvis_jax.tracking.run_multifly_ik import run_multifly_ablation
     out = run_multifly_ablation(
         REC, root=ROOT, calib_dir=CALIB, anatomy_yaml=ANATOMY, model_xml=XML,
         mesh_npz=MESH, stac_config_dir=STAC_CFG, out_dir=str(tmp_path),
@@ -1245,7 +1245,7 @@ Expected: FAIL with `ImportError: cannot import name 'run_multifly_ablation'`.
 Add to `third_party/jarvis_jax/jarvis_jax/cse/run_multifly_ik.py`:
 
 ```python
-from jarvis_jax.cse.silhouette_ik_solve import run_ablation
+from jarvis_jax.tracking.silhouette_ik_solve import run_ablation
 
 
 def _prepare_fly_ik(recording, fly_dir, coco_path, calib_dir, identity_map, fly_id,
