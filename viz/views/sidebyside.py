@@ -102,6 +102,10 @@ def run(args):
 
     rec = courtship_recording()
     all_cameras = list(rec["cameras"])
+    # Recording overrides: without these the view uses the DEFAULT recording
+    # (Session0) -> wrong videos/masks/frames for any other recording.
+    session_dir = getattr(args, "session_dir", None) or rec["session_dir"]
+    predictions_dir = getattr(args, "predictions_dir", None) or rec["predictions_dir"]
     bout, fly = int(args.bout), int(args.fly)
     T0 = int(args.start)
     conf_thr = float(getattr(args, "conf", 0.3) or 0.3)
@@ -148,19 +152,22 @@ def run(args):
 
     # --- SAM masks (T,C,H,W) for this fly, indexed against the full camera list ---
     try:
-        masks = vio.load_masks(rec["predictions_dir"], bout, fly, all_cameras)
+        masks = vio.load_masks(predictions_dir, bout, fly, all_cameras)
         mk, mv, H, W = masks["masks"], masks["valid"], masks["H"], masks["W"]
     except Exception as e:
         print(f"[sidebyside] warning: masks unavailable ({e}); rendering without SAM overlay")
         mk = mv = None
-        cap = cv2.VideoCapture(os.path.join(rec["session_dir"], f"{left_cam}.mp4"))
+        cap = cv2.VideoCapture(os.path.join(session_dir, f"{left_cam}.mp4"))
         W = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or 640
         H = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 480
         cap.release()
 
     # --- absolute start frame of this bout (to seek the raw video) ---
-    from scripts.run_courtship_bout import bout_start_frame  # lazy: pulls in jax/mujoco/egl
-    start_abs = bout_start_frame(_compose_cfg(), bout)
+    if getattr(args, "start_frame", None) is not None:
+        start_abs = int(args.start_frame)
+    else:
+        from scripts.run_courtship_bout import bout_start_frame  # lazy: pulls in jax/mujoco/egl
+        start_abs = bout_start_frame(_compose_cfg(), bout)
 
     # --- RIGHT panel: MuJoCo render of the IK pose ---
     from stac_mjx.stac import Stac  # heavy (jax + mujoco); lazy on purpose
@@ -171,9 +178,14 @@ def run(args):
     if out_dir:
         os.makedirs(out_dir, exist_ok=True)
     print("[sidebyside] rendering MuJoCo IK ...", flush=True)
+    # stac.render REQUIRES a save_path (imageio sniffs the .mp4 extension), but
+    # we only consume the returned frames (`rframes`) for compositing -- so this
+    # is a throwaway intermediate; keep a clean name (no double .mp4) and delete
+    # it after the final side-by-side is written.
+    mj_render_path = (out_path[:-4] if out_path.endswith(".mp4") else out_path) + ".mjrender.mp4"
     rframes = list(stac.render(
         qpos, kp_data, offsets, n_frames=N,
-        save_path=out_path + ".mjrender.mp4",
+        save_path=mj_render_path,
         start_frame=T0, camera=render_cam,
         height=panel_h, width=int(panel_h * 1.33), show_marker_error=False))
 
@@ -215,7 +227,7 @@ def run(args):
     left_title = f"{left_cam} video + SAM mask + ViTPose 2D skeleton"
     right_title = f"MuJoCo IK render ({render_cam}) + 3D sites"
     frames_out = []
-    left_stream = vio.read_frames(rec["session_dir"], [left_cam], start_abs + T0, N)
+    left_stream = vio.read_frames(session_dir, [left_cam], start_abs + T0, N)
     for k, imgs in enumerate(left_stream):
         rgb = imgs[0]
         bgr = (cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR) if rgb is not None
@@ -241,6 +253,10 @@ def run(args):
         raise RuntimeError(f"no frames rendered for bout {bout} fly {fly} (left cam {left_cam})")
 
     vio.write_video(out_path, frames_out, fps=int(getattr(args, "fps", 30) or 30))
+    try:
+        os.remove(mj_render_path)   # throwaway MuJoCo intermediate (frames already composited)
+    except OSError:
+        pass
     still_path = os.path.splitext(out_path)[0] + "_still.png"
     cv2.imwrite(still_path, frames_out[len(frames_out) // 2])
     print(f"[sidebyside] wrote {out_path} ({len(frames_out)} frames) + {still_path}")

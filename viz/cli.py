@@ -8,6 +8,13 @@ def _add_shared(sp):
     sp.add_argument("--frame", type=int, default=0)
     sp.add_argument("--cams", nargs="*", default=None)
     sp.add_argument("--out", default=None)
+    # Recording overrides: without these the view resolves the DEFAULT recording
+    # (Session0) via viz.config.courtship_recording -> wrong videos/frames for any
+    # other recording (free-running, Session1, ...). Pipeline hooks pass these.
+    sp.add_argument("--session-dir", dest="session_dir", default=None,
+                    help="recording dir holding the Cam*.mp4 (default: Session0)")
+    sp.add_argument("--start-frame", dest="start_frame", type=int, default=None,
+                    help="absolute first video frame of the bout (default: bout_start_frame)")
 
 def _overlay(args):     from viz.views import overlay;      return overlay.run(args)
 def _legskel(args):     from viz.views import legskel;      return legskel.run(args)
@@ -74,6 +81,12 @@ def build_parser():
     s.add_argument("--conf", type=float, default=0.3, help="2D keypoint confidence threshold")
     s.add_argument("--panel-h", dest="panel_h", type=int, default=480)
     s.add_argument("--fps", type=int, default=30); s.add_argument("--out", default=None)
+    s.add_argument("--session-dir", dest="session_dir", default=None,
+                   help="recording dir with Cam*.mp4 (default: Session0 via config)")
+    s.add_argument("--predictions-dir", dest="predictions_dir", default=None,
+                   help="SAM3 masks dir (default: recording.predictions_dir)")
+    s.add_argument("--start-frame", dest="start_frame", type=int, default=None,
+                   help="absolute first video frame of the bout (default: bout_start_frame)")
     s.set_defaults(func="_sidebyside")
 
     m = sub.add_parser("maskvid",
@@ -85,6 +98,10 @@ def build_parser():
                    help="number of top-mask-pixel cameras to stack (default 3)")
     m.add_argument("--cams", nargs="*", default=None,
                    help="explicit camera-name list (overrides auto-pick)")
+    m.add_argument("--session-dir", dest="session_dir", default=None,
+                   help="recording dir with Cam*.mp4 (default: Session0 via config)")
+    m.add_argument("--start-frame", dest="start_frame", type=int, default=None,
+                   help="absolute first video frame of the bout (default: bout_start_frame)")
     m.add_argument("--panel-h", dest="panel_h", type=int, default=320,
                    help="per-camera panel height in px (default 320)")
     m.add_argument("--fps", type=int, default=30); m.add_argument("--out", default=None)

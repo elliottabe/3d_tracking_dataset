@@ -48,7 +48,9 @@ def main_from_cfg(cfg):
     jarvis_root = s.jarvis_root if s.jarvis_root else None
     sam3_kwargs = {"sam3_version": s.sam3_version, "gpu_id": s.sam3_gpu,
                    "compile": s.sam3_compile, "text_prompt": s.sam3_text,
-                   "checkpoint_path": s.sam3_checkpoint}
+                   "checkpoint_path": s.sam3_checkpoint,
+                   "chunk_len": int(s.get("chunk_len", 1400)),
+                   "chunk_overlap": int(s.get("chunk_overlap", 120))}
     common = dict(project=s.project, session_dir=s.session_dir, bouts_csv=bouts_csv,
                   out=out, num_animals=s.num_animals, limit=s.limit, bout_ids=bout_ids,
                   reuse_masks=s.reuse_masks, jarvis_root=jarvis_root, sam3=sam3_kwargs)
@@ -61,6 +63,8 @@ def main_from_cfg(cfg):
         overlay=bool(s.get("overlay", True)),
         overlay_cams=int(s.get("overlay_cams", 3)),
         overlay_frames=int(s.get("overlay_frames", 300)),
+        repair_outliers=bool(s.get("repair_outliers", True)),
+        repair_resid_thresh=float(s.get("repair_resid_thresh", 40.0)),
         **common)
 
 

@@ -25,6 +25,7 @@ import pytest
 from jarvis_jax.geometry.reprojection_tool import ReprojectionTool
 from jarvis_jax.cse.courtship_bout_masks import (
     load_bout_masks, detect_camera_order, verify_mask_camera_order,
+    detect_camera_order_robust, check_bout_camera_order,
 )
 
 CALIB_DIR = ("/gscratch/portia/eabe/data/Johnson_lab/Video_recordings/"
@@ -209,3 +210,150 @@ def test_load_bout_masks_backward_compatible_no_kwargs(tmp_path):
     out = load_bout_masks(p, fly=0)
     assert out["T"] == 3 and out["C"] == 2 and out["H"] == 8 and out["W"] == 13
     assert "cameras" not in out
+
+
+# ---------------------------------------------------------------------------
+# detect_camera_order_robust: partial-visibility-tolerant detection
+# ---------------------------------------------------------------------------
+
+def _partial_valid(valid, rng, n_invalid):
+    """Knock out `n_invalid` random cameras per frame (in-place), leaving the
+    rest valid -- simulates a bout where the fly is never visible in every
+    camera at once."""
+    T, C = valid.shape
+    for t in range(T):
+        for c in rng.choice(C, size=n_invalid, replace=False):
+            valid[t, c] = False
+    return valid
+
+
+@needs_calib
+def test_detect_robust_recovers_permutation_with_partial_visibility(rt):
+    """A scramble must still be recovered when NO frame has every camera valid
+    -- the case the strict detect_camera_order raises on."""
+    C = rt.num_cameras
+    centroids, valid = _synthetic_track(rt, n_frames=12, seed=3)
+    true_perm = tuple(np.roll(np.arange(C), 2).tolist())
+    scrambled = centroids[:, list(true_perm)]
+    rng = np.random.default_rng(0)
+    valid = _partial_valid(valid.copy(), rng, n_invalid=2)   # 5/7 valid per frame
+    assert not valid.all(axis=1).any()                       # no all-valid frame
+
+    det = detect_camera_order_robust(scrambled, valid, rt, n_frames=12, min_valid_cams=4)
+    assert det["n_frames_used"] > 0
+    assert det["best_perm"] == true_perm
+    assert det["identity_resid"] > 20.0
+    assert det["best_resid"] < 1.0
+
+
+@needs_calib
+def test_detect_robust_unverifiable_when_too_sparse(rt):
+    """< 3 valid cameras in every frame -> cannot triangulate -> report
+    n_frames_used==0 (NOT raise)."""
+    centroids, valid = _synthetic_track(rt, n_frames=6)
+    valid[:] = False
+    valid[:, :2] = True                                      # only 2 cameras ever valid
+    det = detect_camera_order_robust(centroids, valid, rt, n_frames=6, min_valid_cams=4)
+    assert det["n_frames_used"] == 0
+    assert not np.isfinite(det["identity_resid"])
+
+
+# ---------------------------------------------------------------------------
+# check_bout_camera_order: NON-MUTATING QC (never remaps, never raises on data)
+# ---------------------------------------------------------------------------
+
+def _make_geo_npz(tmp_path, rt, *, scramble_perm=None, n=12, n_invalid=0,
+                  bad_cam=None, cameras=None, seed=7, name="sam3_masks.npz"):
+    """Geometrically-consistent sam3_masks.npz: `n` random 3D points projected
+    through the real calibration give the per-camera centroids (CORRECT camera
+    order == calibration order). `scramble_perm` permutes the stored C axis;
+    `bad_cam` corrupts ONE camera's centroids (simulating a SAM3 mis-track);
+    `n_invalid` knocks out cameras per frame. Native (A,C,T,...) layout."""
+    C = rt.num_cameras
+    rng = np.random.default_rng(seed)
+    pts3d = rng.uniform(low=[-15, -15, -5], high=[15, 15, 15], size=(n, 3))
+    cent_corr = np.zeros((C, n, 2), np.float32)              # (C,T,2) correct order
+    for t, p in enumerate(pts3d):
+        cent_corr[:, t] = rt.reproject_point(p)              # (C,2)
+    if bad_cam is not None:
+        cent_corr[bad_cam] += 250.0                          # gross per-camera error
+    valid_corr = np.ones((C, n), bool)                       # (C,T)
+    if n_invalid:
+        valid_corr = _partial_valid(valid_corr.T.copy(), rng, n_invalid).T
+    packed_corr = np.zeros((C, n, 1, 1), np.uint8)
+    for c in range(C):
+        packed_corr[c, :, 0, 0] = c
+
+    if scramble_perm is not None:
+        sp = list(scramble_perm)
+        cent_corr, valid_corr, packed_corr = cent_corr[sp], valid_corr[sp], packed_corr[sp]
+
+    kwargs = dict(packed=packed_corr[None], valid=valid_corr[None],
+                  centroids=cent_corr[None], shape=np.array([1, 8], np.int32))
+    if cameras is not None:
+        kwargs["cameras"] = np.array(cameras)
+    p = tmp_path / name
+    np.savez(p, **kwargs)
+    return str(p)
+
+
+def _unchanged(p):
+    """True if the npz on disk is byte-identical to when check was called
+    (check_bout_camera_order must never mutate)."""
+    return not os.path.exists(p + ".scrambled.bak")
+
+
+@needs_calib
+def test_check_aligned_when_geometry_good(tmp_path, rt):
+    expected = list(rt.cameras)
+    p = _make_geo_npz(tmp_path, rt)                           # clean, correct order
+    st = check_bout_camera_order(p, 0, expected, rt)
+    assert st["status"] == "aligned"
+    assert st["worst_cam"] is None and _unchanged(p)
+
+
+@needs_calib
+def test_check_correctly_named_nonidentity_is_aligned(tmp_path, rt):
+    """Non-identity stored order with a truthful `cameras` array: the pipeline's
+    name reorder yields calibration order, so the check sees aligned geometry."""
+    expected = list(rt.cameras)
+    C = rt.num_cameras
+    scrambled = list(np.roll(np.arange(C), 1))
+    p = _make_geo_npz(tmp_path, rt, scramble_perm=tuple(scrambled),
+                      cameras=[expected[i] for i in scrambled])
+    st = check_bout_camera_order(p, 0, expected, rt)
+    assert st["status"] == "aligned" and _unchanged(p)
+
+
+@needs_calib
+def test_check_flags_bad_camera_never_mutates(tmp_path, rt):
+    """One mis-tracked camera -> 'suspect' naming that camera, file UNTOUCHED.
+    This is the real failure mode (not a scramble) and must NOT be remapped."""
+    expected = list(rt.cameras)
+    p = _make_geo_npz(tmp_path, rt, bad_cam=4)
+    st = check_bout_camera_order(p, 0, expected, rt)
+    assert st["status"] == "suspect"
+    assert st["worst_cam"] == 4                               # names the bad camera
+    assert _unchanged(p)                                      # never mutated
+
+
+@needs_calib
+def test_check_bad_data_never_raises_and_never_mutates(tmp_path, rt):
+    """Even a fully scrambled-looking file is only flagged, never remapped or
+    raised on -- one odd bout cannot block a session."""
+    expected = list(rt.cameras)
+    C = rt.num_cameras
+    p = _make_geo_npz(tmp_path, rt, scramble_perm=tuple(np.roll(np.arange(C), 2)),
+                      cameras=expected)                       # data != label
+    st = check_bout_camera_order(p, 0, expected, rt)          # must not raise
+    assert st["status"] in ("suspect", "aligned")
+    assert _unchanged(p)
+
+
+@needs_calib
+def test_check_unverified_when_too_sparse(tmp_path, rt):
+    expected = list(rt.cameras)
+    C = rt.num_cameras
+    p = _make_geo_npz(tmp_path, rt, n_invalid=C - 2)          # only 2 cams/frame
+    st = check_bout_camera_order(p, 0, expected, rt)
+    assert st["status"] == "unverified" and _unchanged(p)

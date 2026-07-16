@@ -20,6 +20,15 @@ sam3_gpu: 0
 overlay: true
 overlay_cams: 3
 overlay_frames: 300
+# End-of-bout self-repair: if a camera's masks are a geometric outlier (SAM3
+# locked onto a reflection/shadow/wrong blob), re-segment that camera with a
+# box prompt at the fly reprojected from the good cameras and keep it only if
+# the reprojection residual clearly improves; else flag it in `suspect_cameras`
+# in the npz. repair_resid_thresh = per-camera leave-one-out reprojection
+# residual (px) above which a camera is an outlier (baseline ~10px; a mis-track
+# is 100px+). Set repair_outliers: false to skip.
+repair_outliers: true
+repair_resid_thresh: 40.0
 gpus: null         # null/[] = use all visible GPUs (CUDA_VISIBLE_DEVICES, else
                    # torch.cuda.device_count()); a list like [0,1] overrides.
                    # >1 GPU -> bouts are fanned out one subprocess per GPU.
@@ -29,6 +38,13 @@ manifest_name: manifest.json   # internal: multi-GPU workers write per-GPU
 sam3_compile: false
 sam3_text: insect
 sam3_checkpoint: null
+# Long-bout chunking (bounds GPU memory): bouts > chunk_len frames are tracked
+# in overlapping chunks (each session freed between chunks), with identity
+# carried across a boundary by box-prompting the next chunk at the previous
+# chunk's object bboxes + an overlap IoU match. ~2000+ frame bouts OOM a 44 GB
+# card single-pass. chunk_len=0 disables (always single-pass).
+chunk_len: 1000
+chunk_overlap: 120
 # JARVIS checkout that owns the projects/ directory (red_data_unified lives here,
 # not in third_party/JARVIS-HybridNet). Set to null to fall back to the
 # JARVIS_ROOT env var, then third_party/JARVIS-HybridNet (which has no

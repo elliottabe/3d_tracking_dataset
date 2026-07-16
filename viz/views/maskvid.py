@@ -74,6 +74,9 @@ def run(args):
 
     rec = courtship_recording()
     all_cameras = list(rec["cameras"])
+    # Recording override: the raw videos live in the recording being processed,
+    # NOT necessarily the default (Session0) courtship_recording() returns.
+    session_dir = getattr(args, "session_dir", None) or rec["session_dir"]
     bout = int(args.bout)
     n_cap = int(args.n) if getattr(args, "n", None) else 300
     n_cams = int(getattr(args, "n_cams", 3) or 3)
@@ -142,8 +145,11 @@ def run(args):
     print(f"[maskvid] crop x[{cx0}:{cx1}] y[{cy0}:{cy1}] -> {panel_w}x{panel_h} per cam")
 
     # --- absolute start frame of this bout (to seek the raw video) ---
-    from scripts.run_courtship_bout import bout_start_frame  # lazy: pulls in pipeline deps
-    start_abs = bout_start_frame(_compose_cfg(), bout)
+    if getattr(args, "start_frame", None) is not None:
+        start_abs = int(args.start_frame)
+    else:
+        from scripts.run_courtship_bout import bout_start_frame  # lazy: pulls in pipeline deps
+        start_abs = bout_start_frame(_compose_cfg(), bout)
 
     def _panel(bgr, cam, t):
         for f, m in present.items():
@@ -160,7 +166,7 @@ def run(args):
     top_band = layout.banner(panel_w, legend_items)
 
     frames_out = []
-    stream = vio.read_frames(rec["session_dir"], chosen, start_abs, N)
+    stream = vio.read_frames(session_dir, chosen, start_abs, N)
     for k, imgs in enumerate(stream):
         blocks = [top_band]
         for cam, rgb in zip(chosen, imgs):
@@ -172,7 +178,7 @@ def run(args):
     if not frames_out:
         raise RuntimeError(
             f"no frames rendered for bout {bout} (cams {chosen}); check the "
-            f"session videos under {rec['session_dir']}")
+            f"session videos under {session_dir}")
 
     out_path = args.out or os.path.join(
         args.run, f"bout_{bout:05d}", f"maskvid_bout{bout}.mp4")

@@ -205,6 +205,15 @@ model:
   MJCF_PATH: ${anatomy.mjcf_path}
   name: 'fruitfly_V1_'
 
+  # Per-segment (per-limb) SHAPE calibration for courtship. A single global trunk
+  # scale + STAC marker offsets leaves a per-limb proportion mismatch (model femur
+  # too long, tarsus too short) so the IK can't reach the keypoints. When true,
+  # run_courtship_bout computes per-segment scales ONCE per session (Adam MJX
+  # M-step), persists them to <run_root>/segment_scales.json, and sets
+  # cfg.model.SEGMENT_SCALES so stac_mjx morphs the model before fitting offsets
+  # and running IK (halves the IK site-error). Set false to disable.
+  segment_calibration: true
+
   N_FRAMES_PER_CLIP: 500 # 1000 environments
 
   # Tolerance for the optimizations of the full model, limb, and root.

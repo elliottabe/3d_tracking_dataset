@@ -37,6 +37,8 @@ Usage:
     python scripts/slurm_courtship_array.py --slurm gpu_l40s \\
         outputs.out=/gscratch/portia/eabe/data/Johnson_lab/courtship/Session0_bouts_070326
 
+    python scripts/slurm_courtship_array.py --dry-run recording=session0 recording.predictions_dir=/gscratch/portia/eabe/data/Johnson_lab/Video_recordings/courtship/Session0/2025_10_20_13_20_04/Predictions_3D_sam3_all30
+
     # See the scripts + dependency chain without submitting:
     python scripts/slurm_courtship_array.py --dry-run
 """

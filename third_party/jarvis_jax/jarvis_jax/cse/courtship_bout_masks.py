@@ -235,3 +235,214 @@ def verify_mask_camera_order(centroids, valid, rt, *, max_resid: float = 20.0,
          f"via {det['best_perm']}) -- not a clear camera-order scramble; "
          f"proceeding, but this bout's masks/geometry may have other issues.")
     return det
+
+
+# ---------------------------------------------------------------------------
+# Partial-visibility-tolerant detection + in-place AUTOFIX.
+#
+# `detect_camera_order` / `verify_mask_camera_order` above REQUIRE a frame
+# where EVERY camera is valid and RAISE otherwise -- too strict for courtship
+# bouts where a fly is never simultaneously visible in all cameras (a bout
+# with no all-camera-valid frame hard-fails the whole task) -- and they only
+# GUARD (never correct). The functions below (a) verify using frames where
+# only a SUBSET of cameras is valid (triangulating from that subset via
+# `rt.reconstruct_point(cams_to_use=...)`), and (b) auto-correct a
+# CONFIDENTLY-scrambled legacy mask file IN PLACE (with a .bak), warning and
+# proceeding on the sparse/ambiguous cases rather than failing the bout.
+# ---------------------------------------------------------------------------
+
+def _masked_resid_for_perm(centroids, valid_row, t, perm, rt):
+    """Per-frame mean reprojection residual (px) under `perm`, using ONLY the
+    cameras valid at frame `t`. Assigns mask-index i's centroid to calibration
+    camera `perm[i]` for every i where `valid_row[i]`, triangulates from just
+    those cameras, and averages the reprojection error over them. Returns
+    (resid_px, n_cams_used); resid is np.nan when fewer than 2 cameras valid."""
+    C = len(perm)
+    pts2d = np.zeros((C, 2), dtype=np.float64)
+    cams_used = []
+    for i, cam in enumerate(perm):
+        if valid_row[i]:
+            pts2d[cam] = centroids[t, i]
+            cams_used.append(cam)
+    if len(cams_used) < 2:
+        return float("nan"), len(cams_used)
+    X = rt.reconstruct_point(pts2d, cams_to_use=cams_used)
+    repro = rt.reproject_point(X)
+    err = float(np.linalg.norm(repro[cams_used] - pts2d[cams_used], axis=-1).mean())
+    return err, len(cams_used)
+
+
+def detect_camera_order_robust(centroids, valid, rt, *, n_frames: int = 30,
+                               min_valid_cams: int = 4,
+                               early_accept_resid: float | None = None) -> dict:
+    """Partial-visibility-tolerant sibling of `detect_camera_order`.
+
+    Samples up to `n_frames` frames that have at least `min_valid_cams` valid
+    cameras (falling back to the frames with the MOST valid cameras, provided
+    that maximum is >= 3, when none reach the threshold). For every camera
+    permutation, takes the median (over sampled frames) of the masked
+    per-frame reprojection residual (`_masked_resid_for_perm`, which uses only
+    each frame's valid cameras). Unlike `detect_camera_order`, this NEVER
+    raises on sparse validity -- it reports `n_frames_used == 0` when the
+    masks are too sparse to verify geometrically (fewer than 3 cameras valid
+    in every frame).
+
+    When `early_accept_resid` is given and the IDENTITY mapping's residual is
+    already <= it, returns immediately with `best_perm == identity` WITHOUT
+    the full C! permutation search -- the common aligned case (avoids ~C!
+    triangulations per bout).
+
+    Returns dict(identity_resid, best_perm, best_resid, n_frames_used,
+    min_cams_used); identity_resid/best_resid are np.nan when
+    n_frames_used == 0. Raises ValueError only for C != rt.num_cameras or
+    C > 8 (mirroring `detect_camera_order`)."""
+    centroids = np.asarray(centroids, dtype=np.float64)
+    valid = np.asarray(valid, dtype=bool)
+    T, C = centroids.shape[0], centroids.shape[1]
+    if C != rt.num_cameras:
+        raise ValueError(
+            f"detect_camera_order_robust: centroids has C={C} cameras but "
+            f"rt.num_cameras={rt.num_cameras}")
+    if C > 8:
+        raise ValueError(
+            f"detect_camera_order_robust: C={C} cameras is too many for a "
+            f"brute-force permutation search ({C}! permutations) -- refusing "
+            f"to hang.")
+
+    n_valid_per_frame = valid.sum(axis=1)
+    order = np.argsort(-n_valid_per_frame)                 # most-valid frames first
+    eligible = order[n_valid_per_frame[order] >= min_valid_cams]
+    if eligible.size == 0:
+        max_valid = int(n_valid_per_frame.max()) if T else 0
+        if max_valid >= 3:                                 # still triangulable
+            eligible = order[n_valid_per_frame[order] >= max_valid]
+        else:
+            return dict(identity_resid=float("nan"), best_perm=tuple(range(C)),
+                        best_resid=float("nan"), n_frames_used=0,
+                        min_cams_used=int(max_valid))
+    frame_idx = eligible[:n_frames]
+    identity = tuple(range(C))
+    min_cams_used = int(n_valid_per_frame[frame_idx].min())
+
+    # Fast path: if identity is already good enough, skip the C! search.
+    if early_accept_resid is not None:
+        id_resids = [r for r in (_masked_resid_for_perm(centroids, valid[t], t, identity, rt)[0]
+                                 for t in frame_idx) if np.isfinite(r)]
+        id_med = float(np.median(id_resids)) if id_resids else float("nan")
+        if np.isfinite(id_med) and id_med <= early_accept_resid:
+            return dict(identity_resid=id_med, best_perm=identity, best_resid=id_med,
+                        n_frames_used=int(frame_idx.size), min_cams_used=min_cams_used)
+
+    identity_resid, best_perm, best_resid = None, None, np.inf
+    for perm in itertools.permutations(range(C)):
+        resids = []
+        for t in frame_idx:
+            r, _ = _masked_resid_for_perm(centroids, valid[t], t, perm, rt)
+            if np.isfinite(r):
+                resids.append(r)
+        if not resids:
+            continue
+        med = float(np.median(resids))
+        if perm == identity:
+            identity_resid = med
+        if med < best_resid:
+            best_perm, best_resid = perm, med
+
+    return dict(
+        identity_resid=float(identity_resid) if identity_resid is not None else float("nan"),
+        best_perm=best_perm if best_perm is not None else identity,
+        best_resid=float(best_resid) if np.isfinite(best_resid) else float("nan"),
+        n_frames_used=int(frame_idx.size),
+        min_cams_used=min_cams_used)
+
+
+def _per_camera_identity_resid(centroids, valid, rt, *, n_frames: int = 40):
+    """Median per-camera reprojection residual (px, length C) under the IDENTITY
+    mapping, over up to `n_frames` all-camera-valid frames. Returns None when
+    no all-valid frame exists. Used to NAME the camera(s) whose mask centroids
+    are bad (a SAM3 per-camera tracking error), which is what a high overall
+    residual almost always means now (see check_bout_camera_order)."""
+    centroids = np.asarray(centroids, dtype=np.float64)
+    valid = np.asarray(valid, dtype=bool)
+    T, C = centroids.shape[0], centroids.shape[1]
+    frames = np.where(valid.all(axis=1))[0][:n_frames]
+    if frames.size == 0:
+        return None
+    per_cam = np.zeros((frames.size, C))
+    for k, t in enumerate(frames):
+        X = rt.reconstruct_point(centroids[t])
+        repro = rt.reproject_point(X)
+        per_cam[k] = np.linalg.norm(repro - centroids[t], axis=-1)
+    return np.median(per_cam, axis=0)
+
+
+def check_bout_camera_order(npz_path, fly, expected_cameras, rt, *,
+                            max_resid: float = 20.0, n_frames: int = 30) -> dict:
+    """NON-MUTATING QC check of a bout's mask camera-axis geometry. NEVER writes
+    the file and NEVER raises on data problems (so one odd bout can't block a
+    whole session) -- returns a status dict and logs a WARNING that NAMES the
+    worst camera when mask-centroid reprojection is poor.
+
+    Status is one of:
+      'aligned'    -- centroids (in the order the pipeline uses them, after any
+                      `load_bout_masks` name-based reorder) triangulate cleanly.
+      'suspect'    -- identity reprojection is poor. In the CURRENT pipeline the
+                      SAM3 write path is order-preserving and self-labelling
+                      (masks packed by cam_idx + a `cameras` array in the same
+                      order), so this is almost always a per-camera SAM3
+                      TRACKING error -- a bad mask centroid in one/few cameras,
+                      NOT a camera-axis scramble. The warning names the worst
+                      camera. (A genuine legacy camera-order scramble would also
+                      land here; correct it deliberately with
+                      scripts/fix_mask_camera_order.py only after confirming.)
+      'unverified' -- no all-camera-valid frame to verify against; proceeds.
+
+    Why non-mutating: mask CENTROIDS are coarse, and a single mis-tracked camera
+    makes a brute-force permutation search find a spuriously-lower-residual
+    ordering -- so AUTO-REMAPPING on this signal corrupts correctly-ordered
+    masks (observed on real data: a bout with one bad camera at 129px was
+    "recovered" to a wrong permutation). Camera identity is trusted from the
+    self-labelling `cameras` array `sam3_driver` writes; this check only
+    surfaces bad geometry for QC and downstream robust handling."""
+    with np.load(npz_path) as z:
+        npz_cameras = ([str(c) for c in np.asarray(z["cameras"]).tolist()]
+                       if "cameras" in z.files else None)
+        valid = np.asarray(z["valid"])
+        centroids = np.asarray(z["centroids"])
+
+    A, C = valid.shape[0], valid.shape[1]
+    if not (0 <= fly < A):
+        raise ValueError(f"{npz_path}: fly={fly} out of range (A={A})")
+
+    # `perm_name[i]` = stored index `load_bout_masks(expected_cameras=)` places
+    # at output index i (identity for legacy files with no `cameras` array), so
+    # we check the centroids AS THE PIPELINE WILL USE THEM.
+    perm_name = (_camera_permutation(npz_cameras, expected_cameras)
+                 if npz_cameras is not None else np.arange(C, dtype=int))
+    centroids_pv = centroids[fly].transpose(1, 0, 2)[:, perm_name]   # (T,C,2)
+    valid_pv = valid[fly].transpose(1, 0)[:, perm_name]              # (T,C)
+
+    per_cam = _per_camera_identity_resid(centroids_pv, valid_pv, rt, n_frames=max(n_frames, 40))
+    if per_cam is None:
+        return dict(status="unverified", identity_resid=float("nan"),
+                    worst_cam=None, npz=npz_path)
+
+    overall = float(np.mean(per_cam))
+    worst = int(np.argmax(per_cam))
+    if overall <= max_resid:
+        return dict(status="aligned", identity_resid=overall,
+                    worst_cam=None, npz=npz_path)
+
+    worst_name = (list(rt.cameras)[worst] if worst < len(list(rt.cameras))
+                  else f"cam{worst}")
+    print(f"[camera-order] WARNING: {npz_path} fly{fly}: mask-centroid "
+          f"reprojection is poor (mean {overall:.1f}px). Worst camera: "
+          f"cam{worst} ({worst_name}) at {per_cam[worst]:.1f}px vs "
+          f"{np.median(per_cam):.1f}px median -- almost certainly a per-camera "
+          f"SAM3 tracking error in this bout, NOT a camera scramble (the write "
+          f"path is order-preserving + self-labelling). Proceeding on the "
+          f"`cameras` label untouched; the bad camera degrades this bout's "
+          f"silhouette/bridge only. If a TRUE camera-order scramble is ever "
+          f"confirmed, correct it with scripts/fix_mask_camera_order.py.")
+    return dict(status="suspect", identity_resid=overall, worst_cam=worst,
+                worst_cam_resid=float(per_cam[worst]), npz=npz_path)
