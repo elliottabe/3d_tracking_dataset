@@ -69,6 +69,9 @@ def register_custom_resolvers():
     OmegaConf.register_new_resolver('divide', lambda x, y: x//y, use_cache=False,replace=True)
     OmegaConf.register_new_resolver('contains', lambda x, y: x.lower() in y.lower(), use_cache=False,replace=True)
     OmegaConf.register_new_resolver('resolve_default', lambda default, arg: default if arg=='' else arg, use_cache=False,replace=True)
+    # basename of a path (used by configs/outputs/default.yaml to derive the
+    # per-recording output dir name from recording.session_dir).
+    OmegaConf.register_new_resolver('basename', lambda p: os.path.basename(os.path.normpath(str(p))), use_cache=False, replace=True)
 
 # Auto-register when module is imported
 register_custom_resolvers()

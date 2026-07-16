@@ -3,7 +3,12 @@
 # resolve under a plain hydra.compose() (only under @hydra.main app runs).
 # The date stamp is applied by the driver/CLI at run time (Tasks 11/12 pass
 # outputs.out=... explicitly), so this composes cleanly under compose() too.
-out: ${paths.out_root}/${recording.name}_bouts
+# Canonical per-recording output tree:
+#   processed/<assay>/<Session>/<recording-timestamp>/pose/
+# ${basename:${recording.session_dir}} = the recording-dir name; this works for
+# both the default recording and the job-array sweep (which overrides
+# recording.session_dir per recording), so the output always tracks the input.
+out: ${paths.processed_root}/${dataset.name}/${recording.name}/${basename:${recording.session_dir}}/pose
 overlay: true
 overlay_fps: 30
 mesh_subset: fps_500+wing        # for output h5 verts

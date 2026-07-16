@@ -14,6 +14,7 @@ fig_dir:  ${paths.save_dir}/figures/
 
 # courtship pipeline path keys -- all build from base_dir (the Johnson_lab root)
 out_root:          ${paths.base_dir}/courtship
+processed_root:    ${paths.base_dir}/processed                       # canonical per-recording output tree: processed/<assay>/<Session>/<recording>/
 vit_runs_root:     ${paths.base_dir}/jax_vitpose_runs
 red_data_v3_root:  ${paths.base_dir}/red_data/red_data_unified_V3   # curated real-annotation V3 dataset
 data_dir_johnson:  ${paths.base_dir}                                 # == base_dir (back-compat alias)

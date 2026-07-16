@@ -53,6 +53,12 @@ PROJECT_DIR = Path(__file__).resolve().parent.parent
 PKG_DIR = PROJECT_DIR / "third_party" / "jarvis_jax"
 CONFIG_DIR = PROJECT_DIR / "configs"
 
+# Register the `basename` resolver used by configs/outputs/default.yaml so the
+# submit-side compose_cfg() below can read cfg.outputs.out.
+from omegaconf import OmegaConf  # noqa: E402
+OmegaConf.register_new_resolver(
+    "basename", lambda p: os.path.basename(os.path.normpath(str(p))), replace=True)
+
 
 # ---------------------------------------------------------------------------
 # Bout discovery

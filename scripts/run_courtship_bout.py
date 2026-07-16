@@ -47,6 +47,13 @@ from jarvis_jax.cse.qc import qc_report
 from jarvis_jax.cse.reproj_video import write_camera_video
 from jarvis_jax.predict.sam3_driver import parse_bouts, session_tag_for
 
+# Register the `basename` OmegaConf resolver used by configs/outputs/default.yaml
+# (out = .../${recording.name}/${basename:${recording.session_dir}}/pose). Done as
+# an import side effect here so @hydra.main composition resolves outputs.out
+# whether it is the default pattern or an explicit override.
+OmegaConf.register_new_resolver(
+    "basename", lambda p: os.path.basename(os.path.normpath(str(p))), replace=True)
+
 
 # ---------------------------------------------------------------------------
 # Small, pure(-ish) helpers factored out for readability / testability.

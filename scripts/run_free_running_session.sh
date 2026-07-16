@@ -23,8 +23,9 @@
 # (num_animals=2) and the courtship summary name:
 #   scripts/run_free_running_session.sh \
 #     --session /gscratch/portia/eabe/data/Johnson_lab/Video_recordings/courtship/Session1 \
-#     --recording session1 --summary courtship_bouts_unified_summary.csv \
-#     --out /gscratch/portia/eabe/data/Johnson_lab/courtship
+#     --recording session1 --summary courtship_bouts_unified_summary.csv
+#   (outputs default to <base>/processed/courtship/<Session>/<recording>/pose;
+#    pass --out <base> only to override the assay-level root.)
 #
 # Notes:
 #   * Bootstraps <recording>/Predictions_3D_sam3/bout_<idx> dirs (from the summary)
@@ -37,7 +38,7 @@ set -euo pipefail
 
 RECORDING_CFG="free_running_session11"
 SUMMARY="free_running_bout_summary.csv"
-OUT_BASE="/gscratch/portia/eabe/data/Johnson_lab/free_running"
+OUT_BASE=""   # default derived below: <base>/processed/<assay> (assay from session path)
 SESSION_DIR=""
 DRY=""
 while [ $# -gt 0 ]; do
@@ -54,6 +55,10 @@ done
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 SESSION_NAME="$(basename "$SESSION_DIR")"
+# assay is the parent dir of the session (.../Video_recordings/<assay>/<Session>);
+# outputs land in the canonical tree <base>/processed/<assay>/<Session>/<recording>/pose
+ASSAY="$(basename "$(dirname "$SESSION_DIR")")"
+: "${OUT_BASE:=/gscratch/portia/${USER:-eabe}/data/Johnson_lab/processed/${ASSAY}}"
 cd "$REPO"
 
 shopt -s nullglob
@@ -76,7 +81,7 @@ for d in "$SESSION_DIR"/*/; do
     env -u JAX_PLATFORMS python scripts/slurm_courtship_array.py $DRY \
         recording="$RECORDING_CFG" \
         recording.session_dir="$d" \
-        outputs.out="$OUT_BASE/${SESSION_NAME}_${ts}_bouts"
+        outputs.out="$OUT_BASE/${SESSION_NAME}/${ts}/pose"
     n=$((n + 1))
 done
 echo "submitted $n recording chain(s) for $SESSION_NAME"

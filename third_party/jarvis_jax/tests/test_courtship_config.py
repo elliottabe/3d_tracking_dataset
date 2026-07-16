@@ -4,6 +4,11 @@ from omegaconf import OmegaConf
 
 CFG_DIR = "/gscratch/portia/eabe/Research/MyRepos/3d_tracking_dataset/configs"
 
+# configs/outputs/default.yaml uses the `basename` resolver; register it (in
+# production it is an import side effect of run_courtship_bout / slurm_courtship_array).
+OmegaConf.register_new_resolver(
+    "basename", lambda p: os.path.basename(os.path.normpath(str(p))), replace=True)
+
 
 def _compose(overrides):
     with initialize_config_dir(version_base=None, config_dir=CFG_DIR):
