@@ -151,10 +151,28 @@ def ensure_sync_plan(session_dir):
         _warn_decoded_count_mismatch(session_dir)
         return None
     if not os.path.exists(sp):
+        import tempfile
+
         plan = analyze_recording(str(session_dir))
-        with open(sp, "w") as f:
-            _json.dump({k: v for k, v in plan.items() if not k.startswith("_")}, f,
-                       separators=(",", ":"))
+        # Atomic write: the SAM3 stage runs as a parallel SLURM array (one task per
+        # bout) and run_sam3_masks_multi fans out one worker per GPU, so several
+        # processes may hit this concurrently. A unique temp (mkstemp -> distinct per
+        # thread AND process) written then os.replace'd into place makes the visible
+        # sync_plan.json always complete -- analyze_recording is deterministic, so
+        # racing writers produce identical content and os.replace is an atomic
+        # last-writer-wins, never a truncated/partial file.
+        fd, tmp = tempfile.mkstemp(dir=str(session_dir), prefix=".sync_plan.", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w") as f:
+                _json.dump({k: v for k, v in plan.items() if not k.startswith("_")}, f,
+                           separators=(",", ":"))
+            os.replace(tmp, sp)
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
         print(f"[sync] {session_dir}: wrote plan status={plan['status']} "
               f"predict_len={plan['predict_len']} first_drop_slot={plan['first_drop_slot']}")
     return load_plan(session_dir)
@@ -1000,6 +1018,10 @@ def run_sam3_masks_multi(*, gpus, project, session_dir, bouts_csv, out,
             reuse_masks=reuse_masks, sam3=sam3, jarvis_root=jarvis_root)
 
     os.makedirs(out, exist_ok=True)
+    # Pre-generate the sync plan once here in the parent so the per-GPU workers
+    # below just load an already-written sync_plan.json (avoids N workers racing to
+    # create it; the atomic write in ensure_sync_plan is the backstop).
+    ensure_sync_plan(session_dir)
     groups = split_bouts_contiguous(all_ids, len(gpus))
     python = python or sys.executable
     if script is None:
