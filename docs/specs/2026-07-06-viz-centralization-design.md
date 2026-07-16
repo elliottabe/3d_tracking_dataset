@@ -25,7 +25,7 @@ reprojection and cv2/matplotlib overlay drawing:
 - **Video-clip assembly**: `scripts/viz/{cut_videos_by_frame,make_bout_clip,render_bout_clips,stack_clips}.py`.
 
 They all duplicate logic that already exists as `project_points`
-(`scripts/run_courtship_bout.py`) and `ReprojectionTool`
+(`scripts/run_bout.py`) and `ReprojectionTool`
 (`jarvis_jax.geometry.reprojection_tool`).
 
 ## Architecture

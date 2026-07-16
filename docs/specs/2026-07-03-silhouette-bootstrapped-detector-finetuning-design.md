@@ -25,7 +25,7 @@ IK produce good 3D kinematics on courtship recordings.
   frames per courtship recording, both sexes); female-courtship is a tiny fraction.
 - Reliable assets: multiview calibration (7 telecentric cams), SAM3 per-fly masks, the articulated
   MuJoCo mesh + validated silhouette-containment IK, DLT triangulation, and the now-working
-  courtship inference pipeline (`run_courtship_bout.py`) that writes per-frame `outputs.h5`
+  courtship inference pipeline (`run_bout.py`) that writes per-frame `outputs.h5`
   (`kp3d_mm` = FK'd 50 keypoint-sites in world mm), `qc.json`, `kp2d.npz`, and per-bout SAM masks.
 
 **Constraint:** courtship fly identity (male/female) is unreliable (sex_swaps); treat sex-agnostically.
@@ -153,7 +153,7 @@ drift alarm; the real-annotation mix is the forgetting guard.
 
 Pseudo-label generation *is* the deferred full-session pipeline run (Session0 30 bouts × 2 flies +
 other courtship recordings), executed via the existing resumable SLURM array
-(`slurm_courtship_array.py`). No new heavy infra.
+(`slurm_bout_array.py`). No new heavy infra.
 
 ## Out of scope (v1)
 

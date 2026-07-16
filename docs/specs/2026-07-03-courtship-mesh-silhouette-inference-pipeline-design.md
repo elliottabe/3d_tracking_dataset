@@ -159,15 +159,15 @@ bout; `sex_swaps` recorded in metadata but kinematics is sex-agnostic.
 decimated-mesh builder helper (one-time, e.g. `build_decimated_mesh.py` or a
 function in an existing mesh module).
 
-**Config (extend existing repo-root `configs/`, §6a):** add `courtship_pipeline.yaml`
+**Config (extend existing repo-root `configs/`, §6a):** add `pipeline.yaml`
 + `recording/`, `detector/`, `silhouette/`, `outputs/`, `slurm/` groups; reuse the
 existing `paths/`, `stac/`, `anatomy/`; generalize `paths/hyak.yaml`
 (`user → ${oc.env:USER,eabe}`). Also generalize the submodule's
 `third_party/jarvis_jax/configs/paths/hyak.yaml` the same way.
 
-**New drivers** (`scripts/`, Hydra apps rooted at repo `configs/`): `run_courtship_bout.py` (single bout, both flies —
+**New drivers** (`scripts/`, Hydra apps rooted at repo `configs/`): `run_bout.py` (single bout, both flies —
 the de-risk + the array-job body; writes per-stage artifacts atomically and
-skips stages whose artifact exists, so it resumes correctly after preemption) and `slurm_courtship_array.py` (submits, in
+skips stages whose artifact exists, so it resumes correctly after preemption) and `slurm_bout_array.py` (submits, in
 order: an optional **Stage-0 SAM3 job/array** for recordings lacking masks; the
 offset-fit + decimated-mesh precompute; the SLURM array over bouts; the QC
 aggregation job) on gpu-l40s. The orchestrator checks for existing masks and only
@@ -191,7 +191,7 @@ pipeline code**; paths are **generalized via env interpolation**.
 **Add** these groups + a top-level pipeline config:
 ```
 configs/
-├── courtship_pipeline.yaml     # NEW top-level defaults list: paths, recording, detector, silhouette, outputs, slurm, + reuse anatomy/stac
+├── pipeline.yaml     # NEW top-level defaults list: paths, recording, detector, silhouette, outputs, slurm, + reuse anatomy/stac
 ├── recording/session0.yaml     # NEW: session_dir, bouts_csv, calibration, cameras, num_animals
 ├── detector/vitpose_v3.yaml    # NEW: ViTPose ckpt path (from config), in_ch=4, heatmap params
 ├── silhouette/default.yaml     # NEW: mesh npz, silhouette+containment weights, erode_px, appendage DOF set, conf source
@@ -220,7 +220,7 @@ path-generalizable without editing the submodule; additionally,
 env-interpolation pattern for consistency (a targeted generalization of the
 existing hardcoded file).
 
-The drivers (`run_courtship_bout.py`, `slurm_courtship_array.py`) are Hydra apps
+The drivers (`run_bout.py`, `slurm_bout_array.py`) are Hydra apps
 with `config_path` = the repo-root `configs/`.
 
 ## 7. Data flow

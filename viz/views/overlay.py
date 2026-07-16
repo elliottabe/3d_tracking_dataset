@@ -7,17 +7,17 @@ of their inline cv2/project_points/hardcoded-path code.
 
 DictConfig note: viz.config.courtship_recording() returns a plain dict
 (calib_dir/session_dir/predictions_dir/cameras/kp_names) used for path
-lookups here. scripts.run_courtship_bout.bout_start_frame additionally needs
+lookups here. scripts.run_bout.bout_start_frame additionally needs
 the *raw* composed Hydra DictConfig -- it reads cfg.recording.bouts_csv /
 cfg.recording.session_dir directly (via jarvis_jax.predict.sam3_driver.
 parse_bouts). Rather than re-implement that bouts_csv parsing here,
-_compose_cfg() below re-composes `courtship_pipeline` a second time (a cheap
+_compose_cfg() below re-composes `pipeline` a second time (a cheap
 in-memory YAML merge, no extra artifact I/O) reusing viz.config._CFG_DIR so
 the configs/ directory path stays defined in exactly one place. Composing
 twice per invocation is deliberate: it keeps viz.config's public API (Step 1
 of the task brief) untouched and avoids duplicating bout_start_frame's logic.
 
-scripts.run_courtship_bout pulls in jax/mujoco/egl at import time (heavy), so
+scripts.run_bout pulls in jax/mujoco/egl at import time (heavy), so
 it -- and only it -- is imported lazily inside run(), not at module scope.
 """
 import os
@@ -55,12 +55,12 @@ def umeyama(X, Y):
 
 
 def _compose_cfg():
-    """Re-compose the raw `courtship_pipeline` DictConfig, needed only for
-    scripts.run_courtship_bout.bout_start_frame. Reuses viz.config._CFG_DIR
+    """Re-compose the raw `pipeline` DictConfig, needed only for
+    scripts.run_bout.bout_start_frame. Reuses viz.config._CFG_DIR
     (single source of truth for the configs/ path)."""
     os.environ.setdefault("USER", "eabe")
     with initialize_config_dir(version_base=None, config_dir=os.path.abspath(_CFG_DIR)):
-        return compose(config_name="courtship_pipeline")
+        return compose(config_name="pipeline")
 
 
 def run(args):
@@ -76,7 +76,7 @@ def run(args):
     bout, fly, fr = int(args.bout), int(args.fly), int(args.frame)
 
     cfg = _compose_cfg()
-    from scripts.run_courtship_bout import bout_start_frame  # lazy: pulls in jax/mujoco/egl
+    from scripts.run_bout import bout_start_frame  # lazy: pulls in jax/mujoco/egl
     start = bout_start_frame(cfg, bout)
     frame_idx = start + fr
 

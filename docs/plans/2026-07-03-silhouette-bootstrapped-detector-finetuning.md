@@ -30,7 +30,7 @@
 - `jarvis_jax.convert.build_checkpoint.load_vitpose(ckpt_dir, ViTPoseConfig())->ViTPose`; `jarvis_jax.models.vitpose.ViTPose`, `ViTPoseConfig`.
 - `jarvis_jax.train.train`: `make_optimizer(model, tcfg)`, `make_train_step(mask_weight, aug, lr_swap, heatmap_size, mask_dilate)`, `eval_mpjpe(model, ds, batch_size, in_size=448)`, `TrainConfig`.
 - `jarvis_jax.data.device.normalize_image`, `render_heatmaps`; `jarvis_jax.eval.mpjpe.heatmaps_to_keypoints`, `mpjpe`.
-- Pipeline driver `scripts/run_courtship_bout.py`; SLURM array `scripts/slurm_courtship_array.py`; recording config `configs/recording/*.yaml`.
+- Pipeline driver `scripts/run_bout.py`; SLURM array `scripts/slurm_bout_array.py`; recording config `configs/recording/*.yaml`.
 
 ---
 
@@ -41,7 +41,7 @@ The QC path emits median metrics; Gate A needs **per-frame** values. Add a pure 
 **Files:**
 - Create: `third_party/jarvis_jax/jarvis_jax/cse/qc_perframe.py`
 - Test: `third_party/jarvis_jax/tests/test_qc_perframe.py`
-- Modify: `scripts/run_courtship_bout.py` (write `qc_perframe.npz` in Stage E, next to `qc.json`)
+- Modify: `scripts/run_bout.py` (write `qc_perframe.npz` in Stage E, next to `qc.json`)
 
 **Interfaces:**
 - Consumes: `ReprojectionTool`, `silhouette_iou_report`, `per_camera_reproj_error` (from `jarvis_jax.tracking.qc`).
@@ -112,7 +112,7 @@ If `per_camera_reproj_error` returns a per-camera dict rather than a flat list, 
 
 - [ ] **Step 4: Run tests** — `JAX_PLATFORMS=cpu python -m pytest tests/test_qc_perframe.py -v` → PASS.
 
-- [ ] **Step 5: Wire into the driver.** In `scripts/run_courtship_bout.py` Stage E (right after `qc_report(...)` writes `qc.json`, ~line 353), add — reusing the `kp3d_by_frame/mesh_by_frame/kp2d_by_frame/vis_by_frame/masks_by_frame` locals already built there:
+- [ ] **Step 5: Wire into the driver.** In `scripts/run_bout.py` Stage E (right after `qc_report(...)` writes `qc.json`, ~line 353), add — reusing the `kp3d_by_frame/mesh_by_frame/kp2d_by_frame/vis_by_frame/masks_by_frame` locals already built there:
 
 ```python
     qc_perframe_path = os.path.join(bout_dir, f"fly{fly}", "qc_perframe.npz")
@@ -128,7 +128,7 @@ If `per_camera_reproj_error` returns a per-camera dict rather than a flat list, 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add third_party/jarvis_jax/jarvis_jax/cse/qc_perframe.py third_party/jarvis_jax/tests/test_qc_perframe.py scripts/run_courtship_bout.py
+git add third_party/jarvis_jax/jarvis_jax/cse/qc_perframe.py third_party/jarvis_jax/tests/test_qc_perframe.py scripts/run_bout.py
 git commit -m "feat(cse): per-frame QC metrics (Gate A inputs) + driver wiring"
 ```
 
@@ -605,7 +605,7 @@ End-to-end driver + Hydra config that: (a) reads which bouts/recordings have pip
 - Test: `third_party/jarvis_jax/tests/test_detector_finetune_config.py` (config composes + resolves)
 
 **Interfaces:**
-- Consumes: all prior tasks; `all_cams_frames`/`bout_start_frame`/`parse_bouts` from `scripts/run_courtship_bout.py`; `slurm_courtship_array.py` (pseudo-label generation = the pipeline run, already resumable).
+- Consumes: all prior tasks; `all_cams_frames`/`bout_start_frame`/`parse_bouts` from `scripts/run_bout.py`; `slurm_bout_array.py` (pseudo-label generation = the pipeline run, already resumable).
 - Config `configs/detector_finetune.yaml`:
 
 ```yaml
@@ -680,7 +680,7 @@ from jarvis_jax.tracking.build_pseudolabel_dataset import write_pseudolabel_coco
 from jarvis_jax.tracking.finetune_detector import finetune
 import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from scripts.run_courtship_bout import all_cams_frames, open_video_captures, bout_start_frame
+from scripts.run_bout import all_cams_frames, open_video_captures, bout_start_frame
 
 
 @hydra.main(version_base=None, config_path="../configs", config_name="detector_finetune")
@@ -725,7 +725,7 @@ if __name__ == "__main__":
     main()
 ```
 
-Add `red_data_v3_root: ${paths.data_dir_johnson}/red_data/red_data_unified_V3` to `configs/paths/hyak.yaml` if absent (it is the real-annotation root the finetune mixes in). Reuse `all_cams_frames`/`open_video_captures`/`bout_start_frame` exactly as defined in `run_courtship_bout.py`; if their signatures differ, adapt the call.
+Add `red_data_v3_root: ${paths.data_dir_johnson}/red_data/red_data_unified_V3` to `configs/paths/hyak.yaml` if absent (it is the real-annotation root the finetune mixes in). Reuse `all_cams_frames`/`open_video_captures`/`bout_start_frame` exactly as defined in `run_bout.py`; if their signatures differ, adapt the call.
 
 - [ ] **Step 4: Run tests** — `JAX_PLATFORMS=cpu python -m pytest tests/test_detector_finetune_config.py -v` → PASS. Also `python -c "import ast; ast.parse(open('scripts/run_pseudolabel_finetune.py').read())"`.
 
@@ -742,7 +742,7 @@ git commit -m "feat: pseudo-label finetune orchestration + config (v3->v4 bootst
 
 Not a task — the coordinator executes these to validate end-to-end:
 
-1. **Pseudo-label generation = the deferred full run.** Ensure pipeline outputs (+ `qc_perframe.npz` from Task 1) exist for the train-split courtship recordings + Session0 by running `scripts/slurm_courtship_array.py` (resumable). This is the expensive step; it doubles as the full-session run.
+1. **Pseudo-label generation = the deferred full run.** Ensure pipeline outputs (+ `qc_perframe.npz` from Task 1) exist for the train-split courtship recordings + Session0 by running `scripts/slurm_bout_array.py` (resumable). This is the expensive step; it doubles as the full-session run.
 2. **Bootstrap round 1.** Run `scripts/run_pseudolabel_finetune.py label_sources=[...]` on GPU → `v4` checkpoint + printed validation.
 3. **Adoption gate (spec §Validation):** accept `v4` only if held-out courtship female MPJPE improves vs. v3's 26px AND full-val MPJPE stays ~6–7px AND a de-risk bout re-run with `v4` (point `configs/detector/*.yaml` at `v4`) beats the recorded v3 baseline (fly0 soft-IoU 0.102, per-cam reproj 55px, LOO 46px). Record numbers in the ledger.
 4. **Optional round 2:** if round 1 improves held-out LOO, refit the pipeline with `v4`, regenerate gated pseudo-labels, finetune again; stop when held-out stops improving or after 2 rounds.

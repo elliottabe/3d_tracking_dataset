@@ -69,7 +69,7 @@ def test_config_detector_order_reorders_to_correct_anatomy():
     from hydra import initialize_config_dir, compose
     cfg_dir = "/gscratch/portia/eabe/Research/MyRepos/3d_tracking_dataset/configs"
     with initialize_config_dir(version_base=None, config_dir=cfg_dir):
-        cfg = compose(config_name="courtship_pipeline", overrides=["paths=hyak"])
+        cfg = compose(config_name="pipeline", overrides=["paths=hyak"])
     det = list(cfg.detector.kp_names); mod = list(cfg.model.KP_NAMES)
     assert len(det) == 50 and set(det) == set(mod)
     perm = detector_to_model_perm(det, mod)

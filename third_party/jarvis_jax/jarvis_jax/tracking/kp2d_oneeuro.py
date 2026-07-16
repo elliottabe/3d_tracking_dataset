@@ -8,7 +8,7 @@ fast motion. Low-confidence frames split the signal into independent segments
 so the filter never smooths across a tracking dropout, and named keypoints
 (default: wings) are passed through untouched to preserve song kinematics.
 
-Default-off: wired as a gated Stage-A step in scripts/run_courtship_bout.py.
+Default-off: wired as a gated Stage-A step in scripts/run_bout.py.
 """
 import numpy as np
 

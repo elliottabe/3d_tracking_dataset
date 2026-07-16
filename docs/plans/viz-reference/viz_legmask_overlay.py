@@ -8,12 +8,12 @@ import numpy as np, cv2
 os.environ.setdefault("USER", "eabe")
 from hydra import initialize_config_dir, compose
 with initialize_config_dir(version_base=None, config_dir="/gscratch/portia/eabe/Research/MyRepos/3d_tracking_dataset/configs"):
-    cfg = compose(config_name="courtship_pipeline")
+    cfg = compose(config_name="pipeline")
 sys.path.insert(0, "/gscratch/portia/eabe/Research/MyRepos/3d_tracking_dataset")
 import stac_mjx.io_dict_to_hdf5 as ioh5
 from jarvis_jax.geometry.reprojection_tool import ReprojectionTool
 from jarvis_jax.tracking.bout_masks import load_bout_masks
-from scripts.run_courtship_bout import project_points, bout_start_frame, all_cams_frames, open_video_captures
+from scripts.run_bout import project_points, bout_start_frame, all_cams_frames, open_video_captures
 
 bout, fly, fr = 1, 1, 250
 THICK = 18

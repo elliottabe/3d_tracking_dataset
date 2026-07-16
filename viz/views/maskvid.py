@@ -18,7 +18,7 @@ flies' mask bboxes across the chosen cameras) so every camera panel keeps a
 constant size for every frame -- a per-frame crop would change panel
 dimensions and break the video encoder (same rationale as sidebyside).
 
-DictConfig / lazy scripts.run_courtship_bout import: identical rationale to
+DictConfig / lazy scripts.run_bout import: identical rationale to
 viz/views/sidebyside.py -- bout_start_frame (which pulls in the pipeline's
 CSV parsing) is imported lazily inside run() so `import viz.views.maskvid` is
 cheap. Reusing bout_start_frame keeps the seeked video frames aligned with the
@@ -41,12 +41,12 @@ _CAM_BANNER_COLOR = (0, 255, 255)  # yellow camera-name label (matches legskel)
 
 
 def _compose_cfg():
-    """Re-compose the raw `courtship_pipeline` DictConfig, needed only for
-    scripts.run_courtship_bout.bout_start_frame. Reuses viz.config._CFG_DIR
+    """Re-compose the raw `pipeline` DictConfig, needed only for
+    scripts.run_bout.bout_start_frame. Reuses viz.config._CFG_DIR
     (single source of truth for the configs/ path); mirrors sidebyside."""
     os.environ.setdefault("USER", "eabe")
     with initialize_config_dir(version_base=None, config_dir=os.path.abspath(_CFG_DIR)):
-        return compose(config_name="courtship_pipeline")
+        return compose(config_name="pipeline")
 
 
 def _load_fly_masks(run_root, bout, fly, cameras):
@@ -67,7 +67,7 @@ def _load_fly_masks(run_root, bout, fly, cameras):
 def run(args):
     # cwd-independence: repo_root is 3 levels up from this file
     # (viz/views/maskvid.py -> viz/views -> viz -> repo root); needed so the
-    # lazy `scripts.run_courtship_bout` import below resolves.
+    # lazy `scripts.run_bout` import below resolves.
     repo_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     if repo_root not in sys.path:
         sys.path.insert(0, repo_root)
@@ -148,7 +148,7 @@ def run(args):
     if getattr(args, "start_frame", None) is not None:
         start_abs = int(args.start_frame)
     else:
-        from scripts.run_courtship_bout import bout_start_frame  # lazy: pulls in pipeline deps
+        from scripts.run_bout import bout_start_frame  # lazy: pulls in pipeline deps
         start_abs = bout_start_frame(_compose_cfg(), bout)
 
     def _panel(bgr, cam, t):

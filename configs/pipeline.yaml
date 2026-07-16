@@ -29,7 +29,7 @@ version: ${dataset.version}
 run_id: 'analysis'
 
 # stac/default.yaml's `data_path` interpolates `${preprocessing.input_filename}`,
-# but courtship_pipeline has no `preprocessing` group (bouts are loaded directly
+# but pipeline has no `preprocessing` group (bouts are loaded directly
 # from recording.predictions_dir, not via cfg.stac.data_path/io.load_mocap).
 # stac_mjx.run_stac -> io.save_data_to_h5 still does a full-config resolve+save,
 # so this key must exist even though its value is never read. Not wired to a

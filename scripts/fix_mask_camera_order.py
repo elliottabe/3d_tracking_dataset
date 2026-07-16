@@ -40,7 +40,7 @@ from jarvis_jax.tracking.bout_masks import detect_camera_order
 
 def bout_dirs(predictions_dir: str) -> list[int]:
     """Sorted bout indices discovered as bout_<idx> dirs under predictions_dir
-    (mirrors scripts/run_courtship_bout.py's `_bout_dirs`)."""
+    (mirrors scripts/run_bout.py's `_bout_dirs`)."""
     idxs = []
     for d in sorted(glob.glob(os.path.join(predictions_dir, "bout_*"))):
         m = re.match(r"bout_(\d+)$", os.path.basename(d))

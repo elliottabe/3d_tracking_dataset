@@ -33,10 +33,10 @@ New (`third_party/jarvis_jax/jarvis_jax/cse/`):
 - `courtship_qc.py` — aggregate per-bout QC JSON → session dashboard (json + plots).
 
 New (repo `scripts/`):
-- `run_courtship_bout.py` — resumable single-bout, both-flies driver (chains stages A–E, atomic stage artifacts, skip-complete). Hydra app on repo `configs/`.
-- `slurm_courtship_array.py` — submit Stage-0 SAM3 (if needed) → precompute → JAX array → aggregate, with SLURM dependency + `--requeue`.
+- `run_bout.py` — resumable single-bout, both-flies driver (chains stages A–E, atomic stage artifacts, skip-complete). Hydra app on repo `configs/`.
+- `slurm_bout_array.py` — submit Stage-0 SAM3 (if needed) → precompute → JAX array → aggregate, with SLURM dependency + `--requeue`.
 
-New (repo `configs/`): `courtship_pipeline.yaml`, `recording/session0.yaml`, `detector/vitpose_v3.yaml`, `silhouette/default.yaml`, `outputs/default.yaml`, `slurm/ckpt_g2.yaml`, `slurm/gpu_l40s.yaml`.
+New (repo `configs/`): `pipeline.yaml`, `recording/session0.yaml`, `detector/vitpose_v3.yaml`, `silhouette/default.yaml`, `outputs/default.yaml`, `slurm/ckpt_g2.yaml`, `slurm/gpu_l40s.yaml`.
 
 Modify: `configs/paths/hyak.yaml` (generalize `user`), `third_party/jarvis_jax/configs/paths/hyak.yaml` (generalize `user`).
 
@@ -49,11 +49,11 @@ Reused unchanged: `models/vitpose.py`, `convert/build_checkpoint.load_vitpose`, 
 **Files:**
 - Modify: `configs/paths/hyak.yaml` (line 1: `user`)
 - Modify: `third_party/jarvis_jax/configs/paths/hyak.yaml` (the `user`/roots)
-- Create: `configs/recording/session0.yaml`, `configs/detector/vitpose_v3.yaml`, `configs/silhouette/default.yaml`, `configs/outputs/default.yaml`, `configs/slurm/ckpt_g2.yaml`, `configs/slurm/gpu_l40s.yaml`, `configs/courtship_pipeline.yaml`
+- Create: `configs/recording/session0.yaml`, `configs/detector/vitpose_v3.yaml`, `configs/silhouette/default.yaml`, `configs/outputs/default.yaml`, `configs/slurm/ckpt_g2.yaml`, `configs/slurm/gpu_l40s.yaml`, `configs/pipeline.yaml`
 - Test: `third_party/jarvis_jax/tests/test_courtship_config.py`
 
 **Interfaces:**
-- Produces: a composable Hydra config `courtship_pipeline` with groups `paths, recording, detector, silhouette, outputs, slurm` (+ reused `anatomy, stac`). Keys used by later tasks: `recording.{session_dir,bouts_csv,calib_dir,num_animals,cameras}`, `detector.{ckpt,num_keypoints,crop,heatmap_size,conf_thresh}`, `silhouette.{mesh_npz,silhouette_weight,containment_weight,erode_px,mesh_subset,appendage_include,n_points,sdf_hw,bbox_margin,margin,smooth_weight,n_iter}`, `outputs.{out,overlay,mesh_subset,decimated_faces}`, `paths.*`, `slurm.*`.
+- Produces: a composable Hydra config `pipeline` with groups `paths, recording, detector, silhouette, outputs, slurm` (+ reused `anatomy, stac`). Keys used by later tasks: `recording.{session_dir,bouts_csv,calib_dir,num_animals,cameras}`, `detector.{ckpt,num_keypoints,crop,heatmap_size,conf_thresh}`, `silhouette.{mesh_npz,silhouette_weight,containment_weight,erode_px,mesh_subset,appendage_include,n_points,sdf_hw,bbox_margin,margin,smooth_weight,n_iter}`, `outputs.{out,overlay,mesh_subset,decimated_faces}`, `paths.*`, `slurm.*`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -68,10 +68,10 @@ CFG_DIR = "/gscratch/portia/eabe/Research/MyRepos/3d_tracking_dataset/configs"
 
 def _compose(overrides):
     with initialize_config_dir(version_base=None, config_dir=CFG_DIR):
-        return compose(config_name="courtship_pipeline", overrides=overrides)
+        return compose(config_name="pipeline", overrides=overrides)
 
 
-def test_courtship_pipeline_composes_and_paths_generalize(monkeypatch):
+def test_pipeline_composes_and_paths_generalize(monkeypatch):
     monkeypatch.setenv("USER", "someone")
     cfg = _compose(["paths=hyak"])
     # user comes from env; no hardcoded 'eabe'
@@ -92,7 +92,7 @@ def test_default_user_when_env_absent(monkeypatch):
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `cd third_party/jarvis_jax && JAX_PLATFORMS=cpu python -m pytest tests/test_courtship_config.py -v`
-Expected: FAIL (no `courtship_pipeline` config; `paths.user` hardcoded to `eabe`).
+Expected: FAIL (no `pipeline` config; `paths.user` hardcoded to `eabe`).
 
 - [ ] **Step 3: Generalize `user` + write the config groups**
 
@@ -178,7 +178,7 @@ conda_env: 3d_tracking
 mail_user: ${oc.env:USER,eabe}@uw.edu
 ```
 
-Create `configs/courtship_pipeline.yaml`:
+Create `configs/pipeline.yaml`:
 ```yaml
 defaults:
   - _self_
@@ -213,7 +213,7 @@ Expected: 2 passed.
 
 ```bash
 cd /gscratch/portia/eabe/Research/MyRepos/3d_tracking_dataset
-git add configs/paths/hyak.yaml configs/recording configs/detector configs/silhouette configs/outputs configs/slurm configs/courtship_pipeline.yaml third_party/jarvis_jax/configs/paths/hyak.yaml third_party/jarvis_jax/tests/test_courtship_config.py
+git add configs/paths/hyak.yaml configs/recording configs/detector configs/silhouette configs/outputs configs/slurm configs/pipeline.yaml third_party/jarvis_jax/configs/paths/hyak.yaml third_party/jarvis_jax/tests/test_courtship_config.py
 git commit -m "feat(cse): courtship pipeline Hydra config groups + generalized (env) paths
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
@@ -1102,15 +1102,15 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 
 ---
 
-### Task 9: `run_courtship_bout.py` — resumable per-bout driver (stages A–E)
+### Task 9: `run_bout.py` — resumable per-bout driver (stages A–E)
 
 **Files:**
-- Create: `scripts/run_courtship_bout.py`
+- Create: `scripts/run_bout.py`
 - Create: `third_party/jarvis_jax/jarvis_jax/cse/courtship_resume.py` (the pure stage-skip/atomic helpers, so they're unit-testable)
 - Test: `third_party/jarvis_jax/tests/test_courtship_resume.py`
 
 **Interfaces:**
-- Produces (`courtship_resume.py`): `atomic_save_npz(path, **arrays)` / `atomic_save_json(path, obj)` / `atomic_write(path, write_fn)` (write to `path+".tmp"`, `os.replace`); `stage_done(path) -> bool` (exists and non-empty); `mark_done(bout_dir)` (writes `DONE`); `bout_complete(bout_dir) -> bool` (`DONE` exists). `run_courtship_bout.py` (Hydra app, `config_path=<repo>/configs`, `config_name=courtship_pipeline`): for the bout index (`bout_ids`/array id) and each fly, run A→E, skipping stages whose artifact exists, writing to `<run_root>/bouts/bout_<idx:05d>/fly<f>/` (`kp2d.npz, kp3d.npz, stac_ik.h5, qpos_refined.npz, outputs.h5, qc.json`) atomically, then `overlays/`, then `DONE`.
+- Produces (`courtship_resume.py`): `atomic_save_npz(path, **arrays)` / `atomic_save_json(path, obj)` / `atomic_write(path, write_fn)` (write to `path+".tmp"`, `os.replace`); `stage_done(path) -> bool` (exists and non-empty); `mark_done(bout_dir)` (writes `DONE`); `bout_complete(bout_dir) -> bool` (`DONE` exists). `run_bout.py` (Hydra app, `config_path=<repo>/configs`, `config_name=pipeline`): for the bout index (`bout_ids`/array id) and each fly, run A→E, skipping stages whose artifact exists, writing to `<run_root>/bouts/bout_<idx:05d>/fly<f>/` (`kp2d.npz, kp3d.npz, stac_ik.h5, qpos_refined.npz, outputs.h5, qc.json`) atomically, then `overlays/`, then `DONE`.
 
 - [ ] **Step 1: Write the failing test** (pure resume helpers)
 
@@ -1202,9 +1202,9 @@ def bout_complete(bout_dir) -> bool:
 Run: `cd third_party/jarvis_jax && JAX_PLATFORMS=cpu python -m pytest tests/test_courtship_resume.py -v`
 Expected: 3 passed.
 
-- [ ] **Step 5: Write the driver `scripts/run_courtship_bout.py`**
+- [ ] **Step 5: Write the driver `scripts/run_bout.py`**
 
-Create `scripts/run_courtship_bout.py` — a Hydra app (`config_path="../configs"`, `config_name="courtship_pipeline"`) that, for the selected bout index and each fly in `range(recording.num_animals)`:
+Create `scripts/run_bout.py` — a Hydra app (`config_path="../configs"`, `config_name="pipeline"`) that, for the selected bout index and each fly in `range(recording.num_animals)`:
 1. Resolve `run_root = cfg.outputs.out`, `bout_dir = <run_root>/bouts/bout_<idx:05d>/fly<f>/`. If `bout_complete(bout_dir_parent)` → return.
 2. Resolve `bout_npz = <predictions_dir>/bout_<idx:05d>/sam3_masks.npz`; `masks = load_bout_masks(bout_npz, fly)`.
 3. **Stage A** (`kp2d.npz`): if not present → open the 7 `Cam*.mp4`, iterate the bout's frames (seek to bout start), build a per-frame `(C,H,W,3)` RGB generator, `vit = load_detector(cfg.detector.ckpt)`, `kp2d, conf = predict_bout_2d(vit, frames_iter, masks["masks"], centroids, masks["valid"], cam_mats_4x3, batch=cfg... )`; `atomic_save_npz(kp2d.npz, kp2d=kp2d, conf=conf)`. (`centroids` from the npz `centroids[fly]`.)
@@ -1220,14 +1220,14 @@ Include a `main()` guarded by `@hydra.main`. Selection of the bout index: `cfg.b
 
 - [ ] **Step 6: Import/CLI smoke**
 
-Run: `cd /gscratch/portia/eabe/Research/MyRepos/3d_tracking_dataset && JAX_PLATFORMS=cpu python -c "import ast; ast.parse(open('scripts/run_courtship_bout.py').read()); print('parse ok')"`
+Run: `cd /gscratch/portia/eabe/Research/MyRepos/3d_tracking_dataset && JAX_PLATFORMS=cpu python -c "import ast; ast.parse(open('scripts/run_bout.py').read()); print('parse ok')"`
 Expected: `parse ok`. (Full run is the Task 11 GPU de-risk.)
 
 - [ ] **Step 7: Commit**
 
 ```bash
 cd /gscratch/portia/eabe/Research/MyRepos/3d_tracking_dataset
-git add scripts/run_courtship_bout.py third_party/jarvis_jax/jarvis_jax/cse/courtship_resume.py third_party/jarvis_jax/tests/test_courtship_resume.py
+git add scripts/run_bout.py third_party/jarvis_jax/jarvis_jax/cse/courtship_resume.py third_party/jarvis_jax/tests/test_courtship_resume.py
 git commit -m "feat(cse): resumable per-bout courtship driver (atomic stage artifacts, skip-complete)
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
@@ -1235,27 +1235,27 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 
 ---
 
-### Task 10: `slurm_courtship_array.py` — array submission + dependency chain
+### Task 10: `slurm_bout_array.py` — array submission + dependency chain
 
 **Files:**
-- Create: `scripts/slurm_courtship_array.py`
-- Test: `third_party/jarvis_jax/tests/test_slurm_courtship_array.py`
+- Create: `scripts/slurm_bout_array.py`
+- Test: `third_party/jarvis_jax/tests/test_slurm_bout_array.py`
 
 **Interfaces:**
-- Produces: a submitter that (a) counts bouts under `predictions_dir`; (b) if any bout lacks `sam3_masks.npz` → submit a **Stage-0 SAM3 array** (PyTorch env) over those bouts; (c) submit a **precompute** job (offsets fit-once + decimated mesh) `--dependency=afterok:<sam3>`; (d) submit the **JAX array** (`run_courtship_bout.py +bout_ids=$SLURM_ARRAY_TASK_ID`) `--dependency=afterok:<precompute>` with `--requeue`; (e) submit an **aggregation** job `--dependency=afterok:<jax_array>`. `--dry-run` prints the scripts. Partition from `cfg.slurm`.
+- Produces: a submitter that (a) counts bouts under `predictions_dir`; (b) if any bout lacks `sam3_masks.npz` → submit a **Stage-0 SAM3 array** (PyTorch env) over those bouts; (c) submit a **precompute** job (offsets fit-once + decimated mesh) `--dependency=afterok:<sam3>`; (d) submit the **JAX array** (`run_bout.py +bout_ids=$SLURM_ARRAY_TASK_ID`) `--dependency=afterok:<precompute>` with `--requeue`; (e) submit an **aggregation** job `--dependency=afterok:<jax_array>`. `--dry-run` prints the scripts. Partition from `cfg.slurm`.
 
 - [ ] **Step 1: Write the failing test** (pure script-building, no sbatch)
 
-Create `third_party/jarvis_jax/tests/test_slurm_courtship_array.py`:
+Create `third_party/jarvis_jax/tests/test_slurm_bout_array.py`:
 
 ```python
 import importlib.util, sys
 
-SPEC = "/gscratch/portia/eabe/Research/MyRepos/3d_tracking_dataset/scripts/slurm_courtship_array.py"
+SPEC = "/gscratch/portia/eabe/Research/MyRepos/3d_tracking_dataset/scripts/slurm_bout_array.py"
 
 
 def _load():
-    spec = importlib.util.spec_from_file_location("slurm_courtship_array", SPEC)
+    spec = importlib.util.spec_from_file_location("slurm_bout_array", SPEC)
     m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m); return m
 
 
@@ -1264,7 +1264,7 @@ def test_build_array_script_has_requeue_and_bout_id():
     s = m.build_jax_array_script(job_name="c", partition="ckpt-g2", account="portia",
                                  cpus=8, mem=48, gpus=1, time_limit="8:00:00", requeue=True,
                                  conda_env="3d_tracking", n_bouts=30, run_dir="/tmp/rd",
-                                 config_name="courtship_pipeline", overrides="")
+                                 config_name="pipeline", overrides="")
     assert "--array=0-29" in s and "--requeue" in s
     assert "+bout_ids=${SLURM_ARRAY_TASK_ID}" in s
     assert "unset LD_LIBRARY_PATH" in s        # JAX env
@@ -1281,28 +1281,28 @@ def test_sam3_script_uses_pytorch_env():
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cd third_party/jarvis_jax && JAX_PLATFORMS=cpu python -m pytest tests/test_slurm_courtship_array.py -v`
+Run: `cd third_party/jarvis_jax && JAX_PLATFORMS=cpu python -m pytest tests/test_slurm_bout_array.py -v`
 Expected: FAIL (module missing).
 
 - [ ] **Step 3: Write the submitter**
 
-Create `scripts/slurm_courtship_array.py` with pure `build_sam3_array_script(...)`, `build_precompute_script(...)`, `build_jax_array_script(...)`, `build_aggregate_script(...)` returning sbatch script strings, plus a `main()` (argparse: `--config-name`, `--slurm`, `--dry-run`, passthrough overrides) that composes the Hydra config to read `recording`/`outputs`/`slurm`, counts bouts, and submits with `sbatch --parsable` capturing job ids for `--dependency=afterok:<id>`. The JAX array body activates the JAX env (`unset LD_LIBRARY_PATH`, `XLA_PYTHON_CLIENT_MEM_FRACTION=0.9`) and runs `python scripts/run_courtship_bout.py +bout_ids=${SLURM_ARRAY_TASK_ID} <overrides>`; the SAM3 body sets the cu13 `LD_LIBRARY_PATH` + `LD_PRELOAD` and runs `python scripts/sam3_masks.py sam3.session_dir=... sam3.out=... sam3.bout_ids=${SLURM_ARRAY_TASK_ID}`. Mirror the header/style of `scripts/slurm_train_vit.py` (partition/account/gpus/requeue lines). Use `#SBATCH --array=0-<n_bouts-1>` and `#SBATCH --requeue` when `requeue`.
+Create `scripts/slurm_bout_array.py` with pure `build_sam3_array_script(...)`, `build_precompute_script(...)`, `build_jax_array_script(...)`, `build_aggregate_script(...)` returning sbatch script strings, plus a `main()` (argparse: `--config-name`, `--slurm`, `--dry-run`, passthrough overrides) that composes the Hydra config to read `recording`/`outputs`/`slurm`, counts bouts, and submits with `sbatch --parsable` capturing job ids for `--dependency=afterok:<id>`. The JAX array body activates the JAX env (`unset LD_LIBRARY_PATH`, `XLA_PYTHON_CLIENT_MEM_FRACTION=0.9`) and runs `python scripts/run_bout.py +bout_ids=${SLURM_ARRAY_TASK_ID} <overrides>`; the SAM3 body sets the cu13 `LD_LIBRARY_PATH` + `LD_PRELOAD` and runs `python scripts/sam3_masks.py sam3.session_dir=... sam3.out=... sam3.bout_ids=${SLURM_ARRAY_TASK_ID}`. Mirror the header/style of `scripts/slurm_train_vit.py` (partition/account/gpus/requeue lines). Use `#SBATCH --array=0-<n_bouts-1>` and `#SBATCH --requeue` when `requeue`.
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `cd third_party/jarvis_jax && JAX_PLATFORMS=cpu python -m pytest tests/test_slurm_courtship_array.py -v`
+Run: `cd third_party/jarvis_jax && JAX_PLATFORMS=cpu python -m pytest tests/test_slurm_bout_array.py -v`
 Expected: 2 passed.
 
 - [ ] **Step 5: Dry-run smoke** (no submission)
 
-Run: `cd /gscratch/portia/eabe/Research/MyRepos/3d_tracking_dataset && python scripts/slurm_courtship_array.py --dry-run 2>&1 | grep -E "array=|dependency|requeue|sam3|run_courtship_bout" | head`
+Run: `cd /gscratch/portia/eabe/Research/MyRepos/3d_tracking_dataset && python scripts/slurm_bout_array.py --dry-run 2>&1 | grep -E "array=|dependency|requeue|sam3|run_bout" | head`
 Expected: prints the 4 scripts with the dependency chain (no `sbatch` called).
 
 - [ ] **Step 6: Commit**
 
 ```bash
 cd /gscratch/portia/eabe/Research/MyRepos/3d_tracking_dataset
-git add scripts/slurm_courtship_array.py third_party/jarvis_jax/tests/test_slurm_courtship_array.py
+git add scripts/slurm_bout_array.py third_party/jarvis_jax/tests/test_slurm_bout_array.py
 git commit -m "feat(cse): SLURM array submitter (SAM3->precompute->JAX array->aggregate, requeue)
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
@@ -1316,7 +1316,7 @@ NOT a pytest — coordinator-run acceptance on the GPU node. Deliverable: `bout_
 
 - [ ] **Step 1: Run the full CPU-safe unit suite once**
 
-Run: `cd third_party/jarvis_jax && JAX_PLATFORMS=cpu OMP_NUM_THREADS=4 python -m pytest tests/test_courtship_config.py tests/test_courtship_bout_masks.py tests/test_courtship_triangulate.py tests/test_courtship_predict_2d.py tests/test_courtship_stac.py tests/test_mesh_decimate.py tests/test_courtship_polish.py tests/test_courtship_qc.py tests/test_courtship_resume.py tests/test_slurm_courtship_array.py -v`
+Run: `cd third_party/jarvis_jax && JAX_PLATFORMS=cpu OMP_NUM_THREADS=4 python -m pytest tests/test_courtship_config.py tests/test_courtship_bout_masks.py tests/test_courtship_triangulate.py tests/test_courtship_predict_2d.py tests/test_courtship_stac.py tests/test_mesh_decimate.py tests/test_courtship_polish.py tests/test_courtship_qc.py tests/test_courtship_resume.py tests/test_slurm_bout_array.py -v`
 Expected: all pass.
 
 - [ ] **Step 2: Precompute (offsets + decimated mesh) then run bout 1 on GPU**
@@ -1324,7 +1324,7 @@ Expected: all pass.
 Run (GPU node, JAX env):
 ```bash
 cd /gscratch/portia/eabe/Research/MyRepos/3d_tracking_dataset
-OMP_NUM_THREADS=4 python scripts/run_courtship_bout.py +bout_ids=1 \
+OMP_NUM_THREADS=4 python scripts/run_bout.py +bout_ids=1 \
   outputs.out=/gscratch/portia/eabe/data/Johnson_lab/courtship/Session0_derisk
 ```
 Expected: `Session0_derisk/bouts/bout_00001/fly0/{kp2d,kp3d,qpos_refined}.npz + stac_ik.h5 + outputs.h5 + qc.json`, `fly1/...`, `overlays/Cam*_reproj.mp4`, and `DONE` in each fly dir. (The driver runs the offset-fit precompute on first invocation if `offsets.h5`/`decimated_mesh.npz` are absent.)
@@ -1344,7 +1344,7 @@ NOT a pytest — coordinator-run. Deliverable: all 30 bouts × 2 flies processed
 Run:
 ```bash
 cd /gscratch/portia/eabe/Research/MyRepos/3d_tracking_dataset
-python scripts/slurm_courtship_array.py --slurm ckpt_g2 \
+python scripts/slurm_bout_array.py --slurm ckpt_g2 \
   outputs.out=/gscratch/portia/eabe/data/Johnson_lab/courtship/Session0_bouts_$(date +%m%d%Y)
 ```
 Expected: prints submitted job ids (sam3 skipped — masks exist; precompute; JAX array 0-29; aggregate) with the dependency chain. Monitor `squeue -u $USER`.

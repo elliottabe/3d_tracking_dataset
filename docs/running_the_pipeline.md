@@ -5,7 +5,7 @@ keypoints and an articulated IK fit:
 
 ```
 SAM3 masks (--array over bouts)  ->  precompute (offsets fit-once)  ->  jax array (--array over bouts)  ->  aggregate
-   (PyTorch, per-bout id masks)       (run_courtship_bout, bout 1)      (ViTPose 2D -> triangulate ->        (session QC
+   (PyTorch, per-bout id masks)       (run_bout, bout 1)      (ViTPose 2D -> triangulate ->        (session QC
                                                                         smooth -> STAC IK -> polish ->        dashboard)
                                                                         outputs.h5 + sidebyside viz)
 ```
@@ -67,7 +67,7 @@ grinding on CPU).
 
 ## Single recording
 
-`slurm_courtship_array.py` processes one recording (SAM3 → precompute → jax →
+`slurm_bout_array.py` processes one recording (SAM3 → precompute → jax →
 aggregate). It discovers bouts from `bout_*` dirs under `recording.predictions_dir`,
 so **bootstrap those dirs first** from the summary:
 
@@ -78,7 +78,7 @@ D=/gscratch/portia/eabe/data/Johnson_lab/Video_recordings/courtship/Session0/202
 for i in $(tail -n +2 "$D/courtship_bouts_unified_summary.csv" | awk -F, 'NF{print $2}'); do
     mkdir -p "$D/Predictions_3D_sam3/bout_$(printf %05d $i)"
 done
-env -u JAX_PLATFORMS python scripts/slurm_courtship_array.py \
+env -u JAX_PLATFORMS python scripts/slurm_bout_array.py \
     recording=session0 recording.session_dir="$D" \
     outputs.out=/gscratch/portia/eabe/data/Johnson_lab/courtship/Session0_bouts
 ```

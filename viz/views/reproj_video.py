@@ -6,7 +6,7 @@ JARVIS's `create_multi_animal_videos3D` -- see scripts/viz_predictions_reproject
 for the old JARVIS-backed reference this replaces.
 
 Frame range comes from the per-bout dense CSV's own frame column (col0), via
-`core.io.load_data3d_csv`, NOT from `scripts.run_courtship_bout.bout_start_frame`
+`core.io.load_data3d_csv`, NOT from `scripts.run_bout.bout_start_frame`
 -- that keeps this view free of the heavy jax/mujoco/egl import chain (unlike
 viz/views/overlay.py, which needs `bout_start_frame` for a different reason
 and imports it lazily).

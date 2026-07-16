@@ -2,7 +2,7 @@
 # ckpt validation for the desync gate: regenerate 16_21_32 (reindex) bouts 1-2
 # masks WITH the gate into a throwaway dir, to compare cross-camera consistency
 # vs the existing (desynced) Predictions_3D_sam3 masks. SAM3 env = cu13 libs
-# (mirrors slurm_courtship_array.build_sam3_array_script), NOT the jax pipeline env.
+# (mirrors slurm_bout_array.build_sam3_array_script), NOT the jax pipeline env.
 #SBATCH --job-name=sync-validate
 #SBATCH --partition=ckpt-g2
 #SBATCH --account=portia

@@ -16,8 +16,8 @@ so a preempted/resumed run picks up where it left off. A ``DONE`` marker per
 completed bout/fly.
 
 Usage:
-    python scripts/run_courtship_bout.py paths=hyak +bout_ids=3
-    python scripts/run_courtship_bout.py paths=hyak            # bout_ids='' -> all bouts
+    python scripts/run_bout.py paths=hyak +bout_ids=3
+    python scripts/run_bout.py paths=hyak            # bout_ids='' -> all bouts
 """
 import os
 os.environ.setdefault("MUJOCO_GL", "egl")
@@ -757,7 +757,7 @@ def main_from_cfg(cfg: DictConfig):
             process_bout_fly(cfg, bout_idx, fly)
 
 
-@hydra.main(version_base=None, config_path="../configs", config_name="courtship_pipeline")
+@hydra.main(version_base=None, config_path="../configs", config_name="pipeline")
 def main(cfg: DictConfig):
     main_from_cfg(cfg)
 

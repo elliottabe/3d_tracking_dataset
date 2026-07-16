@@ -1,6 +1,6 @@
 """3D(mm)->2D(px) reprojection, ReprojectionTool `ph @ M` convention.
 M is a (4,3) camera matrix; ph=[pts,1]. Verbatim match to
-scripts/run_courtship_bout.py::project_points."""
+scripts/run_bout.py::project_points."""
 import numpy as np
 from jarvis_jax.geometry.reprojection_tool import ReprojectionTool
 

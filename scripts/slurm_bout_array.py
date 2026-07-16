@@ -4,7 +4,7 @@ Submit the courtship mesh-silhouette inference pipeline (Tasks 1-9) as a chain
 of SLURM jobs with a dependency chain:
 
     [Stage-0 SAM3 array]  ->  precompute  ->  JAX array (per bout)  ->  aggregate
-     (PyTorch, optional)      (offsets       (run_courtship_bout.py)   (session
+     (PyTorch, optional)      (offsets       (run_bout.py)   (session
                                fit-once)                               QC dash)
 
 Stage-0 SAM3 is skipped entirely when every discovered bout under
@@ -24,23 +24,23 @@ precompute step) are submitted with `--requeue`. Every array task writes to a
 deterministic `<outputs.out>/bouts/bout_<idx:05d>/fly<f>/` derived from the
 (fixed) array task id, so a preempt+requeue lands in the same directory and
 `jarvis_jax.tracking.resume` skips already-completed stages (see
-`scripts/run_courtship_bout.py`). Re-running this submitter after a partial
+`scripts/run_bout.py`). Re-running this submitter after a partial
 array failure is safe: SAM3 (`reuse_masks=true`) and every bout stage are
 idempotent, so only unfinished work is redone.
 
 Usage:
     # Submit the full chain for Session0 on ckpt-g2 (masks assumed present):
-    python scripts/slurm_courtship_array.py
+    python scripts/slurm_bout_array.py
 
     # A different slurm profile + Hydra overrides (both forwarded to every
     # job's python command):
-    python scripts/slurm_courtship_array.py --slurm gpu_l40s \\
+    python scripts/slurm_bout_array.py --slurm gpu_l40s \\
         outputs.out=/gscratch/portia/eabe/data/Johnson_lab/courtship/Session0_bouts_070326
 
-    python scripts/slurm_courtship_array.py --dry-run recording=session0 recording.predictions_dir=/gscratch/portia/eabe/data/Johnson_lab/Video_recordings/courtship/Session0/2025_10_20_13_20_04/Predictions_3D_sam3_all30
+    python scripts/slurm_bout_array.py --dry-run recording=session0 recording.predictions_dir=/gscratch/portia/eabe/data/Johnson_lab/Video_recordings/courtship/Session0/2025_10_20_13_20_04/Predictions_3D_sam3_all30
 
     # See the scripts + dependency chain without submitting:
-    python scripts/slurm_courtship_array.py --dry-run
+    python scripts/slurm_bout_array.py --dry-run
 """
 
 import argparse
@@ -68,7 +68,7 @@ OmegaConf.register_new_resolver(
 
 def bout_indices(predictions_dir: str) -> list[int]:
     """Sorted bout indices discovered as bout_<idx> dirs under predictions_dir
-    (mirrors scripts/run_courtship_bout.py::_bout_dirs)."""
+    (mirrors scripts/run_bout.py::_bout_dirs)."""
     idxs = []
     for d in sorted(glob.glob(os.path.join(predictions_dir, "bout_*"))):
         m = re.match(r"bout_(\d+)$", os.path.basename(d))
@@ -173,7 +173,7 @@ def build_precompute_script(
 ) -> str:
     """Single (non-array) job: fit-once STAC offsets.
 
-    Runs run_courtship_bout.py restricted to `bout_id` (both flies) -- a real
+    Runs run_bout.py restricted to `bout_id` (both flies) -- a real
     discovered bout id, since bouts are 1-based and non-contiguous (there is
     no bout_00000). Stages A-E are stage-checkpointed (jarvis_jax.tracking.
     courtship_resume), so this both seeds offsets.h5
@@ -209,7 +209,7 @@ export XLA_PYTHON_CLIENT_MEM_FRACTION=0.9
 echo "Node: $SLURMD_NODENAME  job: $SLURM_JOB_ID"
 nvidia-smi -L
 cd {PROJECT_DIR}
-python -u scripts/run_courtship_bout.py --config-name={config_name} ++bout_ids={bout_id}{overrides}
+python -u scripts/run_bout.py --config-name={config_name} ++bout_ids={bout_id}{overrides}
 """
 
 
@@ -230,7 +230,7 @@ def build_jax_array_script(
     overrides: str,
     dependency: str = "",
 ) -> str:
-    """JAX array over bouts: run_courtship_bout.py +bout_ids=$SLURM_ARRAY_TASK_ID.
+    """JAX array over bouts: run_bout.py +bout_ids=$SLURM_ARRAY_TASK_ID.
 
     One array task per real bout id in `idxs` (1-based, possibly
     non-contiguous -- see `bout_indices`/`_array_spec`), so `$SLURM_ARRAY_
@@ -266,7 +266,7 @@ export XLA_PYTHON_CLIENT_MEM_FRACTION=0.9
 echo "Node: $SLURMD_NODENAME  job: $SLURM_JOB_ID  task: $SLURM_ARRAY_TASK_ID"
 nvidia-smi -L
 cd {PROJECT_DIR}
-python -u scripts/run_courtship_bout.py --config-name={config_name} ++bout_ids=${{SLURM_ARRAY_TASK_ID}}{overrides}
+python -u scripts/run_bout.py --config-name={config_name} ++bout_ids=${{SLURM_ARRAY_TASK_ID}}{overrides}
 """
 
 
@@ -364,8 +364,8 @@ def slurm_submit(script: str, *, dependency: str | None = None) -> str:
 def main():
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument('--config-name', default='courtship_pipeline',
-                   help='Hydra config name under configs/ (default: courtship_pipeline)')
+    p.add_argument('--config-name', default='pipeline',
+                   help='Hydra config name under configs/ (default: pipeline)')
     p.add_argument('--slurm', default='ckpt_g2',
                    help='Hydra slurm config group (default: ckpt_g2)')
     p.add_argument('--dry-run', action='store_true',

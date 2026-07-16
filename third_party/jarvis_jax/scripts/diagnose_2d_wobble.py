@@ -25,7 +25,7 @@ from omegaconf import DictConfig
 _REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), *([os.pardir] * 3)))
 if _REPO not in sys.path:
     sys.path.insert(0, _REPO)
-from scripts.run_courtship_bout import (                       # noqa: E402
+from scripts.run_bout import (                       # noqa: E402
     bout_start_frame, open_video_captures, all_cams_frames)
 from jarvis_jax.tracking.bout_masks import load_bout_masks     # noqa: E402
 from jarvis_jax.tracking.predict_2d import load_detector      # noqa: E402
@@ -114,7 +114,7 @@ def _print_table(wobble_by_method, concentration, kp_names):
               f"conc={concentration[j]:.3f}")
 
 
-@hydra.main(version_base=None, config_path="../../../configs", config_name="courtship_pipeline")
+@hydra.main(version_base=None, config_path="../../../configs", config_name="pipeline")
 def main(cfg: DictConfig):
     bout_idx = int(cfg.get("bout_id", 3))
     fly = int(cfg.get("fly", 0))
