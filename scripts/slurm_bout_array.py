@@ -176,7 +176,7 @@ def build_precompute_script(
     Runs run_bout.py restricted to `bout_id` (both flies) -- a real
     discovered bout id, since bouts are 1-based and non-contiguous (there is
     no bout_00000). Stages A-E are stage-checkpointed (jarvis_jax.tracking.
-    courtship_resume), so this both seeds offsets.h5
+    resume), so this both seeds offsets.h5
     (which every array task reads read-only) AND fully finishes that bout --
     the JAX array's task for `bout_id` then finds it already DONE and skips
     instantly.

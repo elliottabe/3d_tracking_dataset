@@ -261,7 +261,7 @@ def arrays_to_bridges(s, R, t, ok):
 
 
 def atomic_write_mp4(path, write_fn):
-    """Like courtship_resume.atomic_write, but keeps the '.mp4' suffix on the
+    """Like resume.atomic_write, but keeps the '.mp4' suffix on the
     temp file: imageio's writer picks its backend by sniffing the URI's
     extension, so a bare '<path>.tmp' (no '.mp4') makes it fall back to the
     wrong plugin (e.g. TIFF) and crash on the 'fps' kwarg."""

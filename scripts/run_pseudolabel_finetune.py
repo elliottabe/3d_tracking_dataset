@@ -231,7 +231,7 @@ def _records_for_fly_dir(resolved, rt, cams, gcfg, rec_tag, fly_dir, out_h5, kp2
     #   configs/detector/vitpose_v3.yaml kp_names). Mixing the two orders in
     #   ConcatV3 would train the detector on contradictory channel semantics.
     #   FIX before enabling: emit pseudo-labels in order O (apply the inverse of
-    #   courtship_predict_2d.detector_to_model_perm to `labels` here), OR rebuild
+    #   predict_2d.detector_to_model_perm to `labels` here), OR rebuild
     #   real red_data in XML order. Also: load_bout_masks above is called WITHOUT
     #   expected_cameras/verify_mask_camera_order (unlike run_bout) --
     #   add that guard here too when un-shelving.
