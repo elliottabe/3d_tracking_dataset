@@ -78,6 +78,9 @@ for d in "$SESSION_DIR"/*/; do
     done
     nb=$(tail -n +2 "$summary" | awk 'NF' | wc -l)
     echo "=== $SESSION_NAME / $ts : $nb bouts -> submitting chain ($RECORDING_CFG) ==="
+    env -u JAX_PLATFORMS python -c "import sys; sys.path.insert(0,'third_party/jarvis_jax'); \
+from jarvis_jax.predict.sam3_driver import ensure_sync_plan; \
+p=ensure_sync_plan('$d'); print('[sync] status=', getattr(p,'status','none'))" || true
     env -u JAX_PLATFORMS python scripts/slurm_courtship_array.py $DRY \
         recording="$RECORDING_CFG" \
         recording.session_dir="$d" \

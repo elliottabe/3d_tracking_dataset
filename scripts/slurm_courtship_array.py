@@ -381,6 +381,17 @@ def main():
     run_root = str(cfg.outputs.out)
     name = str(cfg.recording.name)
 
+    # Desync gate: generate <session_dir>/sync_plan.json (idempotent) so the SAM3 +
+    # courtship workers consume it. Clean/no-meta recordings are unaffected.
+    try:
+        import sys as _sys
+        _sys.path.insert(0, str(PKG_DIR))
+        from jarvis_jax.predict.sam3_driver import ensure_sync_plan
+        _plan = ensure_sync_plan(session_dir)
+        print(f"[sync] {name}: plan status={getattr(_plan, 'status', 'none')}")
+    except Exception as e:  # noqa: BLE001 -- gate is best-effort at submit time
+        print(f"[sync] {name}: plan generation skipped ({type(e).__name__}: {e})")
+
     # Bout count reads the filesystem (predictions_dir); guard so --dry-run
     # still demos the scripts even if that path is unreachable/empty.
     try:
