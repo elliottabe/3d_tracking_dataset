@@ -9,6 +9,8 @@
 #SBATCH --job-name=ik-error
 #SBATCH --partition=ckpt-g2
 #SBATCH --account=portia
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=1
 #SBATCH --gpus=1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=48G
