@@ -45,7 +45,8 @@ from jarvis_jax.cse.courtship_polish import polish_bout
 from jarvis_jax.cse.outputs import build_fly_outputs
 from jarvis_jax.cse.qc import qc_report
 from jarvis_jax.cse.reproj_video import write_camera_video
-from jarvis_jax.predict.sam3_driver import parse_bouts, session_tag_for
+from jarvis_jax.predict.sam3_driver import parse_bouts, session_tag_for, masks_are_stale
+from jarvis_jax.predict.synced_reader import load_plan, read_window, read_one_cam
 
 # Register the `basename` OmegaConf resolver used by configs/outputs/default.yaml
 # (out = .../${recording.name}/${basename:${recording.session_dir}}/pose). Done as
@@ -360,6 +361,12 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
     rt = ReprojectionTool(cfg.recording.calib_dir)
     cam_mats = np.asarray(rt.camera_matrices, np.float32)  # (C,4,3); order matches recording.cameras
 
+    # Canonical-slot sync plan for this session (frame_sync.py / Task 2-4): None or
+    # status "clean" makes every synced_reader read below byte-identical/positional
+    # to the pre-sync-gate behavior; a trim/reindex plan realigns per-camera reads
+    # to the shared canonical slot axis instead of raw mp4 frame index.
+    sync_plan = load_plan(cfg.recording.session_dir)
+
     # Non-mutating camera-order QC (cheap, once per bout). Camera identity is
     # trusted from the self-labelling `cameras` array sam3_driver writes (the
     # mask write path is order-preserving: masks are packed by cam_idx and the
@@ -388,6 +395,25 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
     os.makedirs(run_root, exist_ok=True)
     os.makedirs(bout_dir, exist_ok=True)
 
+    # -- staleness cascade: if this bout's masks were (re)written under a sync plan
+    #    the previously-computed pose artifacts don't reflect (e.g. the plan's
+    #    status/delta changed since kp2d/kp3d/... were computed from the old
+    #    masks), those downstream artifacts are stale and must recompute. The
+    #    masks themselves are the SAM3 stage's (Task 4) responsibility -- this
+    #    only clears the POSE artifacts derived from them. Session-shared
+    #    offsets.h5/scale.json/segment_scales.json are deliberately left alone
+    #    (they are per-fly body constants, not per-bout).
+    if os.path.exists(bout_npz) and masks_are_stale(bout_npz, sync_plan):
+        print(f"[sync] bout {bout_idx} fly{fly}: masks stale for plan "
+              f"status={getattr(sync_plan, 'status', None)} -- invalidating downstream artifacts")
+        for _p in (kp2d_path, kp3d_path, kp3d_filt_path, stac_h5_path, qpos_path,
+                   outputs_h5_path, qc_json_path, os.path.join(bout_dir, "qc_perframe.npz")):
+            try:
+                if os.path.exists(_p):
+                    os.remove(_p)
+            except OSError:
+                pass
+
     # -- Stage A: ViTPose 2-D ---------------------------------------------------
     if not stage_done(kp2d_path):
         start = bout_start_frame(cfg, bout_idx)
@@ -396,17 +422,21 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
         # masks_dict["masks"]'s camera axis (see autofix_bout_camera_order
         # above).
         centroids = masks_dict["centroids"]
-        caps = open_video_captures(cfg.recording.session_dir, cameras)
-        try:
-            vit = load_detector(cfg.detector.ckpt, num_keypoints=int(cfg.detector.num_keypoints))
-            frames_iter = all_cams_frames(caps, start, T)
-            kp2d, conf = predict_bout_2d(
-                vit, frames_iter, masks_dict["masks"], centroids, masks_dict["valid"], cam_mats,
-                crop=int(cfg.detector.crop), batch=int(cfg.detector.get("batch", 64)),
-                decode_sharpen=float(cfg.detector.get("decode_sharpen", 1.0)))
-        finally:
-            for cap in caps:
-                cap.release()
+
+        def _frames_iter():
+            # read_window yields (frames (C,H,W,3), present (C,) bool) per canonical
+            # slot; predict_bout_2d only wants the frames -- dropped/absent cameras
+            # already come back as zero frames from read_window and are masked out
+            # downstream via masks_dict["valid"].
+            for _frames, _present in read_window(
+                    cfg.recording.session_dir, cameras, sync_plan, start, T):
+                yield _frames
+
+        vit = load_detector(cfg.detector.ckpt, num_keypoints=int(cfg.detector.num_keypoints))
+        kp2d, conf = predict_bout_2d(
+            vit, _frames_iter(), masks_dict["masks"], centroids, masks_dict["valid"], cam_mats,
+            crop=int(cfg.detector.crop), batch=int(cfg.detector.get("batch", 64)),
+            decode_sharpen=float(cfg.detector.get("decode_sharpen", 1.0)))
         # The detector emits channels in its training (tracking/COCO) order, which
         # is NOT the XML/model order the rest of the pipeline (triangulation, STAC,
         # silhouette IK, QC) assumes. Reorder O -> model order here so kp2d.npz and
@@ -609,12 +639,19 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
                     kp_t = kp3d[t]
                     kp_ok = np.isfinite(kp_t).all(-1)
                     kp2d_by_frame_overlay.append(project_points(cam_mats[ci], kp_t[kp_ok]))
-                video_path = os.path.join(cfg.recording.session_dir, f"{cam}.mp4")
+                def _frames_rgb(cam=cam):
+                    # read_one_cam yields (frame_rgb (H,W,3)|None, present); a dropped
+                    # slot (frame None) still needs a placeholder frame so
+                    # write_camera_video's frame-count bookkeeping stays in lockstep
+                    # with mesh2d_by_frame/kp2d_by_frame_overlay (one entry per T).
+                    for _fr, _present in read_one_cam(
+                            cfg.recording.session_dir, cam, sync_plan, start, T):
+                        yield _fr if _fr is not None else np.zeros((1, 1, 3), np.uint8)
 
-                def _write(tmp, video_path=video_path, mesh2d_by_frame=mesh2d_by_frame,
+                def _write(tmp, mesh2d_by_frame=mesh2d_by_frame,
                           kp2d_by_frame_overlay=kp2d_by_frame_overlay):
                     write_camera_video(
-                        tmp, frames_rgb_iter=one_cam_frames(video_path, start, T),
+                        tmp, frames_rgb_iter=_frames_rgb(),
                         mesh2d_by_frame=mesh2d_by_frame, kp2d_by_frame=kp2d_by_frame_overlay,
                         fps=int(cfg.outputs.overlay_fps))
 
