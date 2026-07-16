@@ -23,7 +23,7 @@ import mujoco
 import trimesh
 from scipy.spatial import cKDTree
 
-from jarvis_jax.cse.build_canonical_mesh import _mesh_geom, _stratified_fps, _wing_membrane_geoms
+from jarvis_jax.mesh.build_canonical_mesh import _mesh_geom, _stratified_fps, _wing_membrane_geoms
 
 GT = mujoco.mjtGeom
 

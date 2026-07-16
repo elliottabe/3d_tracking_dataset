@@ -740,7 +740,7 @@ Create `third_party/jarvis_jax/tests/test_mesh_decimate.py`:
 
 ```python
 import numpy as np, trimesh
-from jarvis_jax.cse.mesh_decimate import decimate_mesh_npz
+from jarvis_jax.mesh.mesh_decimate import decimate_mesh_npz
 
 
 def test_decimation_reduces_faces_keeps_watertight_shape(tmp_path):

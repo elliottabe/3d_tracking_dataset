@@ -33,7 +33,7 @@ Outputs ``<out_dir>/<name>.npz`` and ``.obj``.  NPZ fields:
     keyframe, units, source, max_edge   metadata
 
 CLI:
-    python -m jarvis_jax.cse.build_canonical_mesh \
+    python -m jarvis_jax.mesh.build_canonical_mesh \
         --xml /.../fruitfly_v1/fruitfly_v1_free.xml \
         --out /.../fruitfly_body_models/fruitfly_cse \
         --max-edge 0.01

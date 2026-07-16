@@ -109,7 +109,7 @@ def main():
 
     import hydra
     from stac_mjx.path_utils import register_custom_resolvers, convert_dict_to_path
-    from jarvis_jax.cse.mesh_assets import load_canonical
+    from jarvis_jax.mesh.mesh_assets import load_canonical
     register_custom_resolvers()
     with hydra.initialize_config_dir(config_dir=a.stac_config_dir, version_base=None):
         cfg = hydra.compose(config_name="config", overrides=list(a.overrides) + [

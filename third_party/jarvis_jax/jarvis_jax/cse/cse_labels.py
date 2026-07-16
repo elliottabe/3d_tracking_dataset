@@ -34,7 +34,7 @@ import numpy as np
 import mujoco
 
 from jarvis_jax.geometry.reprojection_tool import ReprojectionTool
-from jarvis_jax.cse.mesh_assets import load_canonical, repose_vertices
+from jarvis_jax.mesh.mesh_assets import load_canonical, repose_vertices
 
 
 # --------------------------------------------------------------------------- #
@@ -185,7 +185,7 @@ def project_labels(bout_h5, stac_ik_h5, calib_root, rec, model_xml, mesh_npz,
                    out_npz, M=200):
     """Project M canonical vertices into every camera per frameset -> aux labels."""
     import h5py
-    from jarvis_jax.cse.mesh_assets import load_canonical, repose_vertices
+    from jarvis_jax.mesh.mesh_assets import load_canonical, repose_vertices
 
     with h5py.File(bout_h5, "r") as f:
         s = float(f.attrs["scale"])

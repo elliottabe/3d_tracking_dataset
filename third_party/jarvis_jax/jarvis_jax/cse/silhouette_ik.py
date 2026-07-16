@@ -56,7 +56,7 @@ def make_fk_repose(anat):
 
 def _selftest(model_xml, mesh_npz):
     import numpy as np, jax, jax.numpy as jnp, mujoco
-    from jarvis_jax.cse.mesh_assets import load_canonical, repose_vertices
+    from jarvis_jax.mesh.mesh_assets import load_canonical, repose_vertices
     anat = load_anatomy(model_xml, mesh_npz)
     print(f"loaded anatomy: nq={anat['nq']} nverts={len(anat['vlocal'])} "
           f"nfaces={len(anat['faces'])} fps={sorted(anat['fps'], key=str)}")
