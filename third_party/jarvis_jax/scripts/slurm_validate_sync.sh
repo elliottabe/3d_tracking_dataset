@@ -31,5 +31,5 @@ cd /mmfs1/gscratch/portia/eabe/Research/MyRepos/3d_tracking_dataset/third_party/
 python -u scripts/sam3_masks.py \
     sam3.session_dir="$REC" \
     sam3.out="$REC/Predictions_3D_sync_validate" \
-    sam3.bout_ids=1,2 sam3.reuse_masks=false sam3.num_animals=2 \
+    sam3.bout_ids=1 sam3.reuse_masks=false sam3.num_animals=2 \
     sam3.overlay=false sam3.sam3_compile=false
