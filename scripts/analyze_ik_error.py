@@ -241,10 +241,17 @@ def _mj_model_for_condition(cfg, morph: bool, seg_entries):
     morph Stac.__init__ applies when cfg.model.SEGMENT_SCALES is set
     (condition A) -- built independently here (not reused from Stac) because
     we need our own mjx model for the ike.marker_jacobian/FK verification."""
-    if not morph or not seg_entries:
-        return mujoco.MjModel.from_xml_path(str(cfg.model.MJCF_PATH))
     from stac_mjx import rescale
+    if not morph or not seg_entries:
+        spec = mujoco.MjSpec.from_file(str(cfg.model.MJCF_PATH))
+        rescale.dm_scale_spec(spec, float(cfg.model.SCALE_FACTOR))
+        return spec.compile()
     spec = mujoco.MjSpec.from_file(str(cfg.model.MJCF_PATH))
+    # Global scale FIRST, matching stac_mjx.Stac._create_body_sites (applied
+    # unconditionally, before rescale_per_segment) -- see stac-mjx/stac_mjx/
+    # stac.py:239. Currently a no-op in every anatomy config (SCALE_FACTOR=1),
+    # but kept so this driver stays correct if SCALE_FACTOR is ever changed.
+    rescale.dm_scale_spec(spec, float(cfg.model.SCALE_FACTOR))
     seg_list = [{"geom_body": e.get("geom_body", ""), "length_body": e.get("length_body", ""),
                 "scale": float(e["scale"]),
                 "scale_sites_on_body": e.get("scale_sites_on_body", "")}
@@ -322,7 +329,14 @@ def _condition_analysis(cfg, kp3d_sub, conf3d_sub, kp_names, *, morph, out_dir, 
 
     kinds = _dof_kinds_from_model(mj_model)
     factor = np.array([_unit_factor(k, scale, mocap_scale) for k in kinds])
-    transfer_nat = transfers * factor[None, :]
+    # `transfer` is dqpos per one MODEL-LENGTH-UNIT of marker noise; std/bias
+    # are already expressed in natural qpos units via `factor` alone (their
+    # Sigma2_model input is built in mm, see sigma_kp_model above -- correct
+    # as-is). To report transfer honestly as "per mm" it additionally needs
+    # the input-side mm->model-units factor (scale * MOCAP_SCALE_FACTOR),
+    # the SAME scale/mocap_scale used to build sigma_kp_model / residual_mm
+    # above, so the whole thing reads as natural-qpos-unit per mm of 3D error.
+    transfer_nat = transfers * factor[None, :] * (float(scale) * mocap_scale)
     std_nat = stds * factor[None, :]
     bias_nat = implied_bias_mat * factor[None, :]
 
@@ -399,6 +413,8 @@ def _build_report(resA, resB, kp_names):
     q1 = dict(
         transfer_median=A["transfer_median"].tolist(),
         transfer_p95=A["transfer_p95"].tolist(),
+        transfer_units="deg (hinge/root_quat) or mm (root_trans) of qpos change "
+                       "PER MM of isotropic 3D marker noise",
         std_median=A["std_median"].tolist(),
         std_p95=A["std_p95"].tolist(),
         cond_number_median=A["cond_number_median"],
@@ -455,7 +471,7 @@ def _plot_report(resA, resB, png_path):
     fig, axes = plt.subplots(2, 1, figsize=(max(10, 0.18 * len(uniq)), 8), sharex=True)
     x = np.arange(len(uniq))
     axes[0].bar(x, joint_transfer, color="#4c72b0")
-    axes[0].set_ylabel("Q1: median qpos transfer\n(deg or mm / unit marker noise)")
+    axes[0].set_ylabel("Q1: median qpos transfer\n(deg or mm / mm marker noise)")
     axes[0].set_title("IK error quantification: per-joint sensitivity + morph delta")
     axes[1].bar(x, joint_delta, color="#c44e52")
     axes[1].set_ylabel("Q2: |morph - nomorph|\nqpos delta (median, deg/mm)")
