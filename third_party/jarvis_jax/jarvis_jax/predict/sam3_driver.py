@@ -94,6 +94,92 @@ def append_cameras_to_npz(npz_path, cameras):
         zf.writestr("cameras.npy", buf.getvalue())
 
 
+def append_sync_stamp_to_npz(npz_path, plan):
+    """Append a `sync` member recording which sync plan produced these masks, so a later
+    run can detect masks made on a desynced (or no-plan) timeline. Zip-append (cheap),
+    mirroring append_cameras_to_npz. No-op when plan is None."""
+    if plan is None:
+        return
+    import io
+    import zipfile
+
+    import numpy as np
+
+    stamp = np.array([str(plan.status), str(int(plan.delta_ns)), "1"])  # status, delta_ns, applied
+    buf = io.BytesIO()
+    np.save(buf, stamp, allow_pickle=False)
+    with zipfile.ZipFile(npz_path, "a", zipfile.ZIP_STORED) as z:
+        if "sync.npy" not in z.namelist():
+            z.writestr("sync.npy", buf.getvalue())
+
+
+def _read_sync_stamp(npz_path):
+    import numpy as np
+
+    with np.load(npz_path, allow_pickle=False) as z:
+        if "sync" not in z.files:
+            return None
+        s = z["sync"]
+        return dict(plan_status=str(s[0]), delta_ns=int(s[1]))
+
+
+def masks_are_stale(npz_path, plan):
+    """True when the recording needs realignment (plan status trim/reindex) but the npz
+    lacks a matching sync stamp. Clean/None plans are never stale (byte-identical path)."""
+    if plan is None or plan.status == "clean":
+        return False
+    st = _read_sync_stamp(npz_path)
+    if st is None:
+        return True
+    return not (st["plan_status"] == plan.status and st["delta_ns"] == int(plan.delta_ns))
+
+
+def ensure_sync_plan(session_dir):
+    """Generate <session_dir>/sync_plan.json from Cam*_meta.csv if absent; return the
+    loaded SyncPlan (or None when there is no meta.csv). Logs status. When no meta.csv,
+    runs a warn-only cross-camera decoded-frame-count check (needs cv2)."""
+    import glob
+    import json as _json
+
+    from jarvis_jax.predict.frame_sync import analyze_recording
+    from jarvis_jax.predict.synced_reader import load_plan
+
+    sp = os.path.join(str(session_dir), "sync_plan.json")
+    metas = glob.glob(os.path.join(str(session_dir), "Cam*_meta.csv"))
+    if not metas:
+        print(f"[sync] {session_dir}: no Cam*_meta.csv -> positional fallback")
+        _warn_decoded_count_mismatch(session_dir)
+        return None
+    if not os.path.exists(sp):
+        plan = analyze_recording(str(session_dir))
+        with open(sp, "w") as f:
+            _json.dump({k: v for k, v in plan.items() if not k.startswith("_")}, f,
+                       separators=(",", ":"))
+        print(f"[sync] {session_dir}: wrote plan status={plan['status']} "
+              f"predict_len={plan['predict_len']} first_drop_slot={plan['first_drop_slot']}")
+    return load_plan(session_dir)
+
+
+def _warn_decoded_count_mismatch(session_dir):
+    """Best-effort: warn if mp4 decoded frame counts differ across cameras (a drop we
+    cannot correct without meta.csv). Needs cv2; silently skips if unavailable."""
+    try:
+        import glob
+
+        import cv2
+
+        counts = {}
+        for mp4 in sorted(glob.glob(os.path.join(str(session_dir), "Cam*.mp4"))):
+            cap = cv2.VideoCapture(mp4)
+            counts[os.path.basename(mp4)] = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            cap.release()
+        if counts and len(set(counts.values())) > 1:
+            print(f"[sync] WARNING {session_dir}: mp4 frame counts differ across cameras "
+                  f"{counts} and there is no meta.csv to realign -- 3D may be desynced.")
+    except Exception:
+        pass
+
+
 def bout_stats(loaded_masks, num_animals: int) -> dict:
     """Summary stats from a LoadedBoutMasks-like object (.valid (A,C,F))."""
     import numpy as np
@@ -762,6 +848,8 @@ def run_sam3_masks(*, project, session_dir, bouts_csv, out, num_animals=2,
     video_paths = video_paths_for(session_dir, list(repro_tool.cameras))
     os.makedirs(out, exist_ok=True)
 
+    sync_plan = ensure_sync_plan(session_dir)
+
     tracker = None
     tracker_load_time = None
     per_bout = []
@@ -772,7 +860,7 @@ def run_sam3_masks(*, project, session_dir, bouts_csv, out, num_animals=2,
         npz_path = os.path.join(bout_out, pmod.MASKS_FILENAME)
         t0 = time.time()
 
-        if reuse_masks and os.path.isfile(npz_path):
+        if reuse_masks and os.path.isfile(npz_path) and not masks_are_stale(npz_path, sync_plan):
             lm = pmod.LoadedBoutMasks(npz_path)
             print(f"[sam3] bout {b['bout_idx']}: reusing existing {npz_path}")
         else:
@@ -794,8 +882,14 @@ def run_sam3_masks(*, project, session_dir, bouts_csv, out, num_animals=2,
                           else "[sam3] WARNING: lowmem requested but no SAM3 "
                                "module exposed offload_output_to_cpu_for_eval")
 
+            positions_per_cam = None
+            if sync_plan is not None:
+                from jarvis_jax.predict.synced_reader import slot_positions
+                positions_per_cam = [slot_positions(sync_plan, nm, b["start"], b["n"])[0]
+                                     for nm in list(repro_tool.cameras)]
             bm = tracker.process_bout(
-                video_paths, b["start"], b["n"], num_animals=num_animals)
+                video_paths, b["start"], b["n"], num_animals=num_animals,
+                positions_per_cam=positions_per_cam)
             # SAM3's predictors enter a process-wide bf16 autocast
             # (self.bf16_context.__enter__() with no matching __exit__), so it
             # stays active after process_bout() returns. That leaks into the
@@ -839,6 +933,7 @@ def run_sam3_masks(*, project, session_dir, bouts_csv, out, num_animals=2,
             # the pipeline. video_paths (built above from repro_tool.cameras)
             # is the same order the packed masks' C axis is in.
             append_cameras_to_npz(npz_path, list(repro_tool.cameras))
+            append_sync_stamp_to_npz(npz_path, sync_plan)
             if suspect_cams:
                 _append_suspect_cameras_to_npz(npz_path, suspect_cams)
                 print(f"[sam3] bout {b['bout_idx']}: flagged suspect camera(s) "
