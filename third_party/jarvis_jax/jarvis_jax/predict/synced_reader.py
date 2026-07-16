@@ -21,6 +21,8 @@ def slot_positions(plan, cam_name, start_slot, T):
     start_slot+i), None where the camera dropped it. plan None => positional."""
     if plan is None:
         return [int(start_slot + i) for i in range(T)], [True] * T
+    if cam_name not in plan.cams:
+        raise ValueError(f"camera {cam_name!r} not in sync plan (have {sorted(plan.cams)})")
     cam = plan.cams[cam_name]
     positions, present = [], []
     for i in range(T):
@@ -75,8 +77,21 @@ def read_window(session_dir, cameras, plan, start_slot, T):
         caps.append(cv2.VideoCapture(os.path.join(str(session_dir), f"{c}.mp4")))
         p, pr = slot_positions(plan, c, start_slot, T)
         poss.append(p); prss.append(pr); cursors.append(None)
-    # frame shape from the first readable frame
+    # frame shape from the first capture that actually opened -- determined up front so
+    # every yielded `out` is always a real (C,H,W,3) array, never None (see module docstring).
     H = W = None
+    for cap in caps:
+        if cap.isOpened():
+            h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            if h > 0 and w > 0:
+                H, W = h, w
+                break
+    if H is None or W is None:
+        for cap in caps:
+            cap.release()
+        raise FileNotFoundError(
+            f"no readable camera videos in {session_dir} for cameras {list(cameras)}")
     try:
         for i in range(T):
             frames, present = [], []
@@ -91,14 +106,12 @@ def read_window(session_dir, cameras, plan, start_slot, T):
                     frames.append(None); present.append(False)
                 else:
                     fr = cv2.cvtColor(fr, cv2.COLOR_BGR2RGB)
-                    H, W = fr.shape[0], fr.shape[1]
                     frames.append(fr); present.append(True)
-            # materialize, filling absent cams with black once H,W known
-            out = np.zeros((len(cameras), H, W, 3), np.uint8) if H else None
-            if out is not None:
-                for ci, fr in enumerate(frames):
-                    if fr is not None:
-                        out[ci] = fr
+            # materialize; H,W are fixed up front, so this is always a real array
+            out = np.zeros((len(cameras), H, W, 3), np.uint8)
+            for ci, fr in enumerate(frames):
+                if fr is not None:
+                    out[ci] = fr
             yield out, np.asarray(present, bool)
     finally:
         for cap in caps:
