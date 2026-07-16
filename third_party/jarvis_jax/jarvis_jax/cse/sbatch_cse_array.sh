@@ -44,7 +44,7 @@ python -u -m jarvis_jax.cse.run_stac_bout \
     --stac-config-dir "$STAC_CFG" \
     --overrides paths=hyak anatomy=v1 dataset=
 
-python -u -m jarvis_jax.cse.cse_labels project \
+python -u -m jarvis_jax.densepose.cse_labels project \
     --bout "$BOUT" --stac-ik "$WORK/${REC}/Fruitfly_ik_v1_cse.h5" \
     --calib-root "$ROOT/calib_params" --rec "$REC" \
     --model-xml "$XML" --mesh "$MESH" \

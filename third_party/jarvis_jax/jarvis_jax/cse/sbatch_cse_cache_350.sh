@@ -36,7 +36,7 @@ CACHE=$WORK/cache_350
 cd "$PKG"
 python -u -c "import jax; print('jax devices:', jax.device_count())"
 for SPLIT in train val; do
-  python -u -m jarvis_jax.cse.build_cache_cse \
+  python -u -m jarvis_jax.densepose.build_cache_cse \
     --root "$ROOT" --split $SPLIT --aux "$WORK/cse_labels_${SPLIT}_M300.npz" \
     --vitpose-ckpt "$VIT" --mesh "$MESH" --cache-dir "$CACHE" --num-joints 350 --batch 4
 done

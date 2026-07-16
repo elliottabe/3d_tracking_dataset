@@ -82,8 +82,8 @@ def main():
     from jarvis_jax.sharding import data_parallel_mesh, replicate
     from jarvis_jax.train.train import TrainConfig, make_optimizer, make_train_step, eval_mpjpe
     from jarvis_jax.train.checkpoint import make_manager, save_step, restore_latest
-    from jarvis_jax.cse.cse_dataset import CSEImageDataset
-    from jarvis_jax.cse.warm_start import warm_start_from_v3
+    from jarvis_jax.densepose.cse_dataset import CSEImageDataset
+    from jarvis_jax.densepose.warm_start import warm_start_from_v3
 
     n_dev = jax.device_count()
     print("jax devices:", n_dev)
@@ -108,8 +108,8 @@ def main():
 
     # aug: flip ON iff --flip-p>0, using the dense (50+M) L/R involution.
     if a.flip_p > 0.0:
-        from jarvis_jax.cse.dense_lr_swap import build_dense_lr_swap
-        from jarvis_jax.cse.cse_labels import model_kp_order  # 50 canonical STAC names
+        from jarvis_jax.densepose.dense_lr_swap import build_dense_lr_swap
+        from jarvis_jax.densepose.cse_labels import model_kp_order  # 50 canonical STAC names
         base_names = model_kp_order(a.base_names)
         M = a.num_joints - 50
         lr_swap = build_dense_lr_swap(a.mesh_npz, f"fps_{M}", base_names)

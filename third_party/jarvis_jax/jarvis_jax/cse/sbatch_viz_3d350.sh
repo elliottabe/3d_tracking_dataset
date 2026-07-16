@@ -28,7 +28,7 @@ WORK=/gscratch/portia/eabe/data/Johnson_lab/cse_work
 MESH=/gscratch/portia/eabe/Research/MyRepos/fruitfly_body_models/fruitfly_cse/fly_v1_collision_canonical_wings.npz
 
 cd "$PKG"
-python -u -m jarvis_jax.cse.viz_3d_cache \
+python -u -m jarvis_jax.densepose.viz_3d_cache \
     --cache-dir "$WORK/cache_350" \
     --ckpt-dir "$RUNS/cse_v2v350/ckpt" \
     --mesh "$MESH" --num-joints 350 --n-kp 50 --n 6 --sharpen 3.0 \

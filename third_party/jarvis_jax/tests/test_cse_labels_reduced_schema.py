@@ -17,7 +17,7 @@ _HAVE = all(os.path.exists(p) for p in (AMP_COCO, XML, ANATOMY))
 def test_reorder_index_intersection_no_keyerror():
     """The core blocker: _reorder_index must be fed a dst intersected with src,
     so an absent canonical name never triggers pos[n] KeyError."""
-    from jarvis_jax.cse.cse_labels import _reorder_index
+    from jarvis_jax.densepose.cse_labels import _reorder_index
     src = ["A", "B", "D"]                 # recording (missing C)
     dst_full = ["A", "B", "C", "D"]       # model order
     # intersecting first is the required pattern:
@@ -31,7 +31,7 @@ def test_reorder_index_intersection_no_keyerror():
 
 @pytest.mark.skipif(not _HAVE, reason="amputee coco / model / anatomy not present")
 def test_build_bout_amputee_writes_44_kp_names(tmp_path):
-    from jarvis_jax.cse.cse_labels import build_bout
+    from jarvis_jax.densepose.cse_labels import build_bout
     out = str(tmp_path / f"{AMP_REC}_bout.h5")
     p, s = build_bout(AMP_COCO, AMP_CALIB, AMP_REC, ANATOMY, XML, out)
     assert os.path.exists(p)

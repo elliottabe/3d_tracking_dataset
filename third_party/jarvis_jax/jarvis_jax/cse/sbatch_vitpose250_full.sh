@@ -32,7 +32,7 @@ V3=/gscratch/portia/eabe/data/Johnson_lab/jax_vitpose_runs/v3_8gpu_20260620/fina
 
 cd "$PKG"
 python -u -c "import jax; print('jax devices:', jax.device_count())"
-python -u -m jarvis_jax.cse.train_keypoints_cse_full \
+python -u -m jarvis_jax.densepose.train_keypoints_cse_full \
     --root "$ROOT" \
     --aux-train "$WORK/cse_labels_train_M200.npz" \
     --aux-val   "$WORK/cse_labels_val_M200.npz" \

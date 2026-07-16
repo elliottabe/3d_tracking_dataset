@@ -40,7 +40,7 @@ def _eval_arm(ckpt, ds, batch, num_joints, dilate, gate_decode, in_size=448):
     from jarvis_jax.data.device import normalize_image
     from jarvis_jax.data.v3 import batches
     from jarvis_jax.eval.mpjpe import heatmaps_to_keypoints, mpjpe
-    from jarvis_jax.cse.gating import gate_heatmaps
+    from jarvis_jax.densepose.gating import gate_heatmaps
     import jax
 
     m = ViTPose(ViTPoseConfig(num_keypoints=num_joints), rngs=nnx.Rngs(0))
@@ -163,7 +163,7 @@ def main():
     ap.add_argument("--viz-dir", default=None, help="overlay dir (default: <out-dir>/viz)")
     a = ap.parse_args()
 
-    from jarvis_jax.cse.cse_dataset import CSEImageDataset
+    from jarvis_jax.densepose.cse_dataset import CSEImageDataset
     ds = CSEImageDataset(a.root, "val", a.aux_val)
     summary = {}
     for arm, ckpt in (("ungated_ckpt", a.ungated_ckpt), ("gated_ckpt", a.gated_ckpt)):

@@ -31,7 +31,7 @@ unset LD_PRELOAD
 
 # --- Stage B: build bout (CPU; Task-3 reduced-schema patch REQUIRED) ---
 unset LD_LIBRARY_PATH
-python -m jarvis_jax.cse.cse_labels build-bout \
+python -m jarvis_jax.densepose.cse_labels build-bout \
   --coco "$COND/annotations/instances_${SPLIT}.json" \
   --calib-root "$COND/calib_params" --rec "$REC" \
   --anatomy "$ANATOMY" --model-xml "$XML" \

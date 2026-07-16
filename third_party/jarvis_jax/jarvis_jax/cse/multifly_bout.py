@@ -31,7 +31,7 @@ import numpy as np
 import mujoco
 
 from jarvis_jax.geometry.reprojection_tool import ReprojectionTool
-from jarvis_jax.cse.cse_labels import (
+from jarvis_jax.densepose.cse_labels import (
     model_kp_order, model_rest_keypoints, umeyama_scale, _reorder_index,
 )
 

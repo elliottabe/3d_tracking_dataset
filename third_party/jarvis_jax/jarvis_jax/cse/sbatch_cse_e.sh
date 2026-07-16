@@ -44,19 +44,19 @@ python -u -m jarvis_jax.cse.promote_ckpt \
 common="--vitpose-ckpt $VIT --v2v-ckpt $V2V --num-joints 250 --batch 4 --sharpen 3.0"
 
 # 1. Full-dataset dense-pose predictions (the deployment output)
-python -u -m jarvis_jax.cse.predict_full --root "$ROOT" --split train --aux "$WORK/cse_labels_train_M200.npz" --out "$PRED/pred_train.npz" $common
-python -u -m jarvis_jax.cse.predict_full --root "$ROOT" --split val   --aux "$WORK/cse_labels_val_M200.npz"   --out "$PRED/pred_val.npz"   $common
+python -u -m jarvis_jax.densepose.predict_full --root "$ROOT" --split train --aux "$WORK/cse_labels_train_M200.npz" --out "$PRED/pred_train.npz" $common
+python -u -m jarvis_jax.densepose.predict_full --root "$ROOT" --split val   --aux "$WORK/cse_labels_val_M200.npz"   --out "$PRED/pred_val.npz"   $common
 
 # 2. E metrics: 3-D accuracy + multi-view consistency (val)
-python -u -m jarvis_jax.cse.eval_e --pred "$PRED/pred_val.npz"
+python -u -m jarvis_jax.densepose.eval_e --pred "$PRED/pred_val.npz"
 
 # 3. Real-world IK robustness: predict the robustness recording, then kp vs dense(PREDICTED)
-python -u -m jarvis_jax.cse.predict_full --root "$ROOT" --split val --aux "$WORK/cse_labels_val_M200.npz" \
+python -u -m jarvis_jax.densepose.predict_full --root "$ROOT" --split val --aux "$WORK/cse_labels_val_M200.npz" \
     --recordings $REC --out "$PRED/pred_${REC}.npz" $common
 for OCC in 0.0 0.3 0.5; do
-  python -u -m jarvis_jax.cse.stac_dense --bout "$WORK/${REC}_bout.h5" --labels "$WORK/$REC/cse_labels_M200.npz" \
+  python -u -m jarvis_jax.densepose.stac_dense --bout "$WORK/${REC}_bout.h5" --labels "$WORK/$REC/cse_labels_M200.npz" \
     --mesh "$MESH" --stac-config-dir "$STAC_CFG" --out-dir "$DPRED" --mode kp --M 200 --occlude-frac $OCC
-  python -u -m jarvis_jax.cse.stac_dense --bout "$WORK/${REC}_bout.h5" --labels "$WORK/$REC/cse_labels_M200.npz" \
+  python -u -m jarvis_jax.densepose.stac_dense --bout "$WORK/${REC}_bout.h5" --labels "$WORK/$REC/cse_labels_M200.npz" \
     --mesh "$MESH" --stac-config-dir "$STAC_CFG" --out-dir "$DPRED" --mode dense --M 200 --occlude-frac $OCC \
     --pred-npz "$PRED/pred_${REC}.npz"
 done

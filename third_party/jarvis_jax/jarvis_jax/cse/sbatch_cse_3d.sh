@@ -34,12 +34,12 @@ RUN=/gscratch/portia/eabe/data/Johnson_lab/jax_vitpose_runs/cse_v2v250
 
 cd "$PKG"
 for SPLIT in train val; do
-  python -u -m jarvis_jax.cse.build_cache_cse \
+  python -u -m jarvis_jax.densepose.build_cache_cse \
     --root "$ROOT" --split $SPLIT --aux "$WORK/cse_labels_${SPLIT}_M200.npz" \
     --vitpose-ckpt "$VIT" --mesh "$MESH" --cache-dir "$CACHE" --num-joints 250 --batch 8
 done
 
-python -u -m jarvis_jax.cse.train_v2v_cse \
+python -u -m jarvis_jax.densepose.train_v2v_cse \
   --cache-dir "$CACHE" --out "$RUN/final" --ckpt-dir "$RUN/ckpt" \
   --steps 20000 --batch 16 --laplacian-weight 0.05 --sharpen 3.0
 echo "C3 DONE"

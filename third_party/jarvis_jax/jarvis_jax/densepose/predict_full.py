@@ -39,7 +39,7 @@ def main():
     from jarvis_jax.hybridnet.model import HybridNet3D, soft_argmax_3d
     from jarvis_jax.hybridnet.reproject import reproject_heatmaps
     from jarvis_jax.eval.mpjpe import heatmaps_to_keypoints
-    from jarvis_jax.cse.cse_dataset import CSEFramesetDataset
+    from jarvis_jax.densepose.cse_dataset import CSEFramesetDataset
     from jarvis_jax.data.v3_3d import frameset_batches
 
     J = a.num_joints
@@ -61,7 +61,7 @@ def main():
         # V2VNet graph needs ~33 GiB and OOMs even at batch 1.
         hm = np.asarray(hyb.predict_heatmaps(crops))              # (b,nc,224,224,J)
         if a.gate_dilate > 0:
-            from jarvis_jax.cse.gating import gate_heatmaps
+            from jarvis_jax.densepose.gating import gate_heatmaps
             mask448 = jnp.asarray(crops[..., 3]).reshape(b * nc, crops.shape[2], crops.shape[3])
             hm = np.asarray(gate_heatmaps(
                 jnp.asarray(hm).reshape(b * nc, 224, 224, J), mask448, a.gate_dilate)

@@ -34,7 +34,7 @@ RUN=/gscratch/portia/eabe/data/Johnson_lab/jax_vitpose_runs/cse_v2v350
 
 cd "$PKG"
 python -u -c "import jax; print('jax devices:', jax.device_count())"
-python -u -m jarvis_jax.cse.train_v2v_cse \
+python -u -m jarvis_jax.densepose.train_v2v_cse \
   --cache-dir "$CACHE" --out "$RUN/final" --ckpt-dir "$RUN/ckpt" \
   --steps 20000 --batch 32 --laplacian-weight 0.05 --sharpen 3.0
 echo "V2V350 DONE"

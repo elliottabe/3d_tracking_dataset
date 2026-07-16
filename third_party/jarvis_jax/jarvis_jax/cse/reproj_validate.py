@@ -36,7 +36,7 @@ def main():
     from jarvis_jax.train.checkpoint import make_manager, restore_latest
     from jarvis_jax.train.train_3d_cached import make_eval_step_jitted, make_v2v_optimizer, CachedConfig
     from jarvis_jax.geometry.reprojection_tool import ReprojectionTool
-    from jarvis_jax.cse.cse_dataset import CSEFramesetDataset
+    from jarvis_jax.densepose.cse_dataset import CSEFramesetDataset
 
     J, nkp = a.num_joints, a.n_kp
     mz = np.load(a.mesh, allow_pickle=True); nv = J - nkp

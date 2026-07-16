@@ -20,7 +20,7 @@ _HAVE_MESH = os.path.exists(MESH)
 
 @pytest.mark.skipif(not _HAVE_MESH, reason="canonical mesh not present")
 def test_dense_swap_is_involution_full_length():
-    from jarvis_jax.cse.dense_lr_swap import build_dense_lr_swap
+    from jarvis_jax.densepose.dense_lr_swap import build_dense_lr_swap
     swap = build_dense_lr_swap(MESH, "fps_300", BASE_50)
     assert swap.shape == (50 + 300,)
     assert swap.dtype == np.int32
@@ -34,7 +34,7 @@ def test_dense_swap_is_involution_full_length():
 
 @pytest.mark.skipif(not _HAVE_MESH, reason="canonical mesh not present")
 def test_named_kp_left_maps_to_right():
-    from jarvis_jax.cse.dense_lr_swap import build_dense_lr_swap
+    from jarvis_jax.densepose.dense_lr_swap import build_dense_lr_swap
     swap = build_dense_lr_swap(MESH, "fps_300", BASE_50)
     i_L = BASE_50.index("WingL_V12"); i_R = BASE_50.index("WingR_V12")
     assert swap[i_L] == i_R and swap[i_R] == i_L
@@ -45,7 +45,7 @@ def test_named_kp_left_maps_to_right():
 
 @pytest.mark.skipif(not _HAVE_MESH, reason="canonical mesh not present")
 def test_left_wing_vertex_maps_to_a_right_wing_vertex():
-    from jarvis_jax.cse.dense_lr_swap import build_dense_lr_swap
+    from jarvis_jax.densepose.dense_lr_swap import build_dense_lr_swap
     z = np.load(MESH, allow_pickle=True)
     fps = z["fps_300"]; seg = z["vertex_segment"][fps]   # per-fps segment id
     swap = build_dense_lr_swap(MESH, "fps_300", BASE_50)
@@ -79,7 +79,7 @@ def test_no_lateral_dense_vertex_self_maps():
     midline_tol=0.02 for the assertion only) so this test exercises the actual
     pairing logic rather than merely the new keyword argument's presence.
     """
-    from jarvis_jax.cse.dense_lr_swap import build_dense_lr_swap, _MIRROR_AXIS
+    from jarvis_jax.densepose.dense_lr_swap import build_dense_lr_swap, _MIRROR_AXIS
 
     midline_tol = 0.02
     swap = build_dense_lr_swap(MESH, "fps_300", BASE_50)
@@ -113,7 +113,7 @@ def test_no_lateral_dense_vertex_self_maps():
 def test_flipping_a_synthetic_example_swaps_L_and_R():
     """End-to-end: apply the dense swap the way flip_batch does (kp[:, swap]) and
     confirm a synthetic labeled example with distinct L/R coords swaps correctly."""
-    from jarvis_jax.cse.dense_lr_swap import build_dense_lr_swap
+    from jarvis_jax.densepose.dense_lr_swap import build_dense_lr_swap
     swap = build_dense_lr_swap(MESH, "fps_300", BASE_50)
     J = 50 + 300
     kp = np.arange(J * 2).reshape(J, 2).astype(np.float32)  # unique per-channel coords

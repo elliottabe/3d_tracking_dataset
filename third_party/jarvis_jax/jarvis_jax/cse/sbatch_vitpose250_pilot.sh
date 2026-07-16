@@ -28,7 +28,7 @@ WORK=/gscratch/portia/eabe/data/Johnson_lab/cse_work
 RUN=/gscratch/portia/eabe/data/Johnson_lab/jax_vitpose_runs/cse_vit250_pilot
 
 cd "$PKG"
-python -u -m jarvis_jax.cse.train_keypoints_cse \
+python -u -m jarvis_jax.densepose.train_keypoints_cse \
     --root "$ROOT" \
     --aux-train "$WORK/cse_labels_train_M200.npz" \
     --aux-val   "$WORK/cse_labels_val_M200.npz" \

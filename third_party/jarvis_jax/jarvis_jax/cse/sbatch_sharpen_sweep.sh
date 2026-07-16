@@ -30,7 +30,7 @@ MESH=/gscratch/portia/eabe/Research/MyRepos/fruitfly_body_models/fruitfly_cse/fl
 
 cd "$PKG"
 for S in 1 3 6 10 16 24; do
-  python -u -m jarvis_jax.cse.viz_3d_cache \
+  python -u -m jarvis_jax.densepose.viz_3d_cache \
     --cache-dir "$WORK/cache_350" --ckpt-dir "$RUNS/cse_v2v350/ckpt" \
     --mesh "$MESH" --num-joints 350 --n-kp 50 --n 6 --sharpen $S \
     --out "$WORK/viz/v2v350_3d_s${S}.png" 2>/dev/null | grep -E "restored|wrote"

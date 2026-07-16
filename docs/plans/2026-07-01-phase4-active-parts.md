@@ -564,7 +564,7 @@ _HAVE = all(os.path.exists(p) for p in (AMP_COCO, XML, ANATOMY))
 def test_reorder_index_intersection_no_keyerror():
     """The core blocker: _reorder_index must be fed a dst intersected with src,
     so an absent canonical name never triggers pos[n] KeyError."""
-    from jarvis_jax.cse.cse_labels import _reorder_index
+    from jarvis_jax.densepose.cse_labels import _reorder_index
     src = ["A", "B", "D"]                 # recording (missing C)
     dst_full = ["A", "B", "C", "D"]       # model order
     # intersecting first is the required pattern:
@@ -578,7 +578,7 @@ def test_reorder_index_intersection_no_keyerror():
 
 @pytest.mark.skipif(not _HAVE, reason="amputee coco / model / anatomy not present")
 def test_build_bout_amputee_writes_44_kp_names(tmp_path):
-    from jarvis_jax.cse.cse_labels import build_bout
+    from jarvis_jax.densepose.cse_labels import build_bout
     out = str(tmp_path / f"{AMP_REC}_bout.h5")
     p, s = build_bout(AMP_COCO, AMP_CALIB, AMP_REC, ANATOMY, XML, out)
     assert os.path.exists(p)
@@ -652,7 +652,7 @@ Then run a full-schema regression to prove the normal path is unchanged (this is
 
 ```bash
 cd third_party/jarvis_jax && JAX_PLATFORMS=cpu OMP_NUM_THREADS=4 python -c "
-from jarvis_jax.cse.cse_labels import build_bout
+from jarvis_jax.densepose.cse_labels import build_bout
 import h5py
 p, s = build_bout(
   '/gscratch/portia/eabe/data/Johnson_lab/red_data/red_data_unified_V3/annotations/instances_val.json',
@@ -1026,7 +1026,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 - Test: `third_party/jarvis_jax/tests/test_active_parts_realdata.py` **(new)** — `assert_dataprep_artifacts_exist(...)` helper + a `skipif`-gated existence test (NOT the heavy generation).
 
 **Interfaces:**
-- Consumes: `JARVIS-HybridNet/tools/sam3_label_masks.py` CLI (`--data-root`, `--splits`, `--confidence`, `--qc-thresh`, `--resolution`; out defaults to `<data-root>/sam3_masks/<split>/<rec>/<cam>/Frame_*.npz`); `python -m jarvis_jax.cse.cse_labels build-bout` (Task-3-patched); `python -m jarvis_jax.cse.run_stac_bout` (existing).
+- Consumes: `JARVIS-HybridNet/tools/sam3_label_masks.py` CLI (`--data-root`, `--splits`, `--confidence`, `--qc-thresh`, `--resolution`; out defaults to `<data-root>/sam3_masks/<split>/<rec>/<cam>/Frame_*.npz`); `python -m jarvis_jax.densepose.cse_labels build-bout` (Task-3-patched); `python -m jarvis_jax.cse.run_stac_bout` (existing).
 - Produces (artifacts on disk, PER CONDITION, using the TRAIN split for a larger sample):
   - `<COND>/sam3_masks/train/<rec>/<Cam*>/Frame_*.npz`
   - `<COND>/cse_work/<rec>_bout.h5` (Task-3 reduced schema: 44/47 kp_names)
@@ -1064,7 +1064,7 @@ unset LD_PRELOAD
 
 # --- Stage B: build bout (CPU; Task-3 reduced-schema patch REQUIRED) ---
 unset LD_LIBRARY_PATH
-python -m jarvis_jax.cse.cse_labels build-bout \
+python -m jarvis_jax.densepose.cse_labels build-bout \
   --coco "$COND/annotations/instances_${SPLIT}.json" \
   --calib-root "$COND/calib_params" --rec "$REC" \
   --anatomy "$ANATOMY" --model-xml "$XML" \

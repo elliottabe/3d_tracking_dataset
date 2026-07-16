@@ -41,7 +41,7 @@ def main():
     from jarvis_jax.models.vitpose import ViTPose
     from jarvis_jax.hybridnet.v2vnet import V2VNet
     from jarvis_jax.hybridnet.model import HybridNet3D
-    from jarvis_jax.cse.cse_dataset import (CSEFramesetDataset,
+    from jarvis_jax.densepose.cse_dataset import (CSEFramesetDataset,
                                             augmented_keypoint_names, vertex_edges)
 
     print("jax devices:", jax.device_count())

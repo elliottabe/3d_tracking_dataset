@@ -5,7 +5,7 @@ trains and the dense vertex heatmaps localize.  Backbone is MAE-initialised;
 augmentation is disabled (flip needs a 250-joint L/R map — a full-run refinement).
 The full run will add v3-checkpoint warm-start of the first 50 channels + flip aug.
 
-    python -m jarvis_jax.cse.train_keypoints_cse \
+    python -m jarvis_jax.densepose.train_keypoints_cse \
         --root <V3> --aux-train <..._train_M200.npz> --aux-val <..._val_M200.npz> \
         --out <run>/final --ckpt-dir <run>/ckpt --steps 2000 --batch 16
 """
@@ -42,7 +42,7 @@ def main():
     from jarvis_jax.convert.build_checkpoint import build
     from jarvis_jax.data.v3 import batches
     from jarvis_jax.train.train import TrainConfig, make_optimizer, make_train_step, eval_mpjpe
-    from jarvis_jax.cse.cse_dataset import CSEImageDataset
+    from jarvis_jax.densepose.cse_dataset import CSEImageDataset
 
     print("jax devices:", jax.device_count())
     cfg = ViTPoseConfig(num_keypoints=a.num_joints)

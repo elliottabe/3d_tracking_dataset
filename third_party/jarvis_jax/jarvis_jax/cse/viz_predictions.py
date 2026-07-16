@@ -34,7 +34,7 @@ def main():
     from jarvis_jax.models.vitpose import ViTPose
     from jarvis_jax.data.device import normalize_image
     from jarvis_jax.eval.mpjpe import heatmaps_to_keypoints
-    from jarvis_jax.cse.cse_dataset import CSEImageDataset
+    from jarvis_jax.densepose.cse_dataset import CSEImageDataset
 
     cfg = ViTPoseConfig(num_keypoints=a.num_joints); m = ViTPose(cfg, rngs=nnx.Rngs(0))
     ckpt_step = None

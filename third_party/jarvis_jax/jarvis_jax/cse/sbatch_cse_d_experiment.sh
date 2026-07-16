@@ -35,7 +35,7 @@ OUT=$WORK/d_experiment/$REC
 cd "$PKG"
 for OCC in 0.0 0.3 0.5; do
   for MODE in kp dense; do
-    python -u -m jarvis_jax.cse.stac_dense \
+    python -u -m jarvis_jax.densepose.stac_dense \
       --bout "$WORK/${REC}_bout.h5" --labels "$WORK/$REC/cse_labels_M200.npz" \
       --mesh "$MESH" --stac-config-dir "$STAC_CFG" --out-dir "$OUT" \
       --mode $MODE --M 200 --occlude-frac $OCC

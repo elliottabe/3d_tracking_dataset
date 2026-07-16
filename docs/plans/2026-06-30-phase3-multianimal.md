@@ -559,7 +559,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 - Test: `third_party/jarvis_jax/tests/test_multifly_bout.py`
 
 **Interfaces:**
-- Consumes: Task 2 `link_recording` output type `dict[str, dict[int, dict[int, int]]]`; `jarvis_jax.cse.cse_labels` helpers `model_kp_order(anatomy_yaml) -> list[str]`, `_reorder_index(src_names, dst_names) -> np.ndarray`, `model_rest_keypoints(model, kp_names) -> (K,3)`, `umeyama_scale(data_pts, model_pts, valid) -> float`; `ReprojectionTool.reconstruct_point`; `mujoco.MjModel.from_xml_path`.
+- Consumes: Task 2 `link_recording` output type `dict[str, dict[int, dict[int, int]]]`; `jarvis_jax.densepose.cse_labels` helpers `model_kp_order(anatomy_yaml) -> list[str]`, `_reorder_index(src_names, dst_names) -> np.ndarray`, `model_rest_keypoints(model, kp_names) -> (K,3)`, `umeyama_scale(data_pts, model_pts, valid) -> float`; `ReprojectionTool.reconstruct_point`; `mujoco.MjModel.from_xml_path`.
 - Produces:
   - `build_fly_bout(coco_path: str, calib_dir: str, recording: str, identity_map: dict, fly_id: int, anatomy_yaml: str, model_xml: str, out_h5: str, *, split: str = "val") -> tuple[str, float]` — for each frameset in `identity_map`, gather THIS `fly_id`'s per-camera annotation (via `identity_map[fs_key][fly_id]`), triangulate all 50 keypoints in model order (≥2 visible cameras), scale to model cm via the recording's Umeyama scale, and write a bout h5 with the EXACT `cse_labels.build_bout` schema: datasets `keypoints (T,K,3) f32`, `kp_names (K,) S20`, `vis (T,K) bool`, `fs_keys (T,) S64`, `fs_imgids (T,n_cam) int64`; attrs `scale`, `recording`. Returns `(out_h5, scale)`. Framesets where this fly has `<2` cameras with visible keypoints are skipped (dropped from `T`).
 
@@ -673,7 +673,7 @@ import numpy as np
 import mujoco
 
 from jarvis_jax.geometry.reprojection_tool import ReprojectionTool
-from jarvis_jax.cse.cse_labels import (
+from jarvis_jax.densepose.cse_labels import (
     model_kp_order, model_rest_keypoints, umeyama_scale, _reorder_index,
 )
 
