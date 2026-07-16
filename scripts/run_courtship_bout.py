@@ -639,14 +639,26 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
                     kp_t = kp3d[t]
                     kp_ok = np.isfinite(kp_t).all(-1)
                     kp2d_by_frame_overlay.append(project_points(cam_mats[ci], kp_t[kp_ok]))
-                def _frames_rgb(cam=cam):
+                import cv2
+                _cap = cv2.VideoCapture(
+                    os.path.join(str(cfg.recording.session_dir), f"{cam}.mp4"))
+                H = int(_cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                W = int(_cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                _cap.release()
+                if H <= 0 or W <= 0:
+                    H, W = 1080, 1920  # last-resort fallback; normally valid
+
+                def _frames_rgb(cam=cam, H=H, W=W):
                     # read_one_cam yields (frame_rgb (H,W,3)|None, present); a dropped
                     # slot (frame None) still needs a placeholder frame so
                     # write_camera_video's frame-count bookkeeping stays in lockstep
                     # with mesh2d_by_frame/kp2d_by_frame_overlay (one entry per T).
+                    # The placeholder must match the real (H,W) -- imageio's ffmpeg
+                    # writer raises "All images in a movie should have same size"
+                    # if any yielded frame's shape differs from the first.
                     for _fr, _present in read_one_cam(
                             cfg.recording.session_dir, cam, sync_plan, start, T):
-                        yield _fr if _fr is not None else np.zeros((1, 1, 3), np.uint8)
+                        yield _fr if _fr is not None else np.zeros((H, W, 3), np.uint8)
 
                 def _write(tmp, mesh2d_by_frame=mesh2d_by_frame,
                           kp2d_by_frame_overlay=kp2d_by_frame_overlay):
