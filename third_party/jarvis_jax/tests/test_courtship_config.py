@@ -47,7 +47,7 @@ def test_courtship_pipeline_fully_resolves(monkeypatch):
     courtship_pipeline defined until this fix. paths.save_dir also calls the
     custom `multirun_save_dir` resolver, which is registered as an import side
     effect of `stac_mjx` (via stac_mjx/path_utils.py) — exactly what happens in
-    the real pipeline, since jarvis_jax.cse.courtship_stac does `import
+    the real pipeline, since jarvis_jax.tracking.stac does `import
     stac_mjx` before ever calling stac_mjx.run_stac.
     """
     monkeypatch.setenv("USER", "eabe")

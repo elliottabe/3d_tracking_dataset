@@ -23,7 +23,7 @@ ckpt* partitions are preemptible, so the JAX array (and the single-job
 precompute step) are submitted with `--requeue`. Every array task writes to a
 deterministic `<outputs.out>/bouts/bout_<idx:05d>/fly<f>/` derived from the
 (fixed) array task id, so a preempt+requeue lands in the same directory and
-`jarvis_jax.cse.courtship_resume` skips already-completed stages (see
+`jarvis_jax.tracking.resume` skips already-completed stages (see
 `scripts/run_courtship_bout.py`). Re-running this submitter after a partial
 array failure is safe: SAM3 (`reuse_masks=true`) and every bout stage are
 idempotent, so only unfinished work is redone.
@@ -175,7 +175,7 @@ def build_precompute_script(
 
     Runs run_courtship_bout.py restricted to `bout_id` (both flies) -- a real
     discovered bout id, since bouts are 1-based and non-contiguous (there is
-    no bout_00000). Stages A-E are stage-checkpointed (jarvis_jax.cse.
+    no bout_00000). Stages A-E are stage-checkpointed (jarvis_jax.tracking.
     courtship_resume), so this both seeds offsets.h5
     (which every array task reads read-only) AND fully finishes that bout --
     the JAX array's task for `bout_id` then finds it already DONE and skips
@@ -284,7 +284,7 @@ def build_aggregate_script(
     dependency: str = "",
 ) -> str:
     """Cheap CPU-only job: merge every bout/fly qc.json into a session
-    dashboard (jarvis_jax.cse.courtship_qc.aggregate_session_qc).
+    dashboard (jarvis_jax.tracking.session_qc.aggregate_session_qc).
 
     The aggregation logic is written to <run_dir>/aggregate_qc.py via a
     quote-delimited heredoc (`<<'PYEOF'`, so bash performs zero variable/
@@ -301,7 +301,7 @@ def build_aggregate_script(
     agg_py = (
         "import glob, sys\n"
         f"sys.path.insert(0, {str(PKG_DIR)!r})\n"
-        "from jarvis_jax.cse.courtship_qc import aggregate_session_qc\n"
+        "from jarvis_jax.tracking.session_qc import aggregate_session_qc\n"
         f"paths = sorted(glob.glob({out_root!r} + '/bouts/bout_*/fly*/qc.json'))\n"
         f"summ = aggregate_session_qc(paths, {out_root!r} + '/qc/session_qc.json',\n"
         f"                            plot_dir={out_root!r} + '/qc/dashboard')\n"

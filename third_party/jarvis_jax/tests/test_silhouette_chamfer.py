@@ -2,7 +2,7 @@
 import jax
 import jax.numpy as jnp
 import numpy as np
-from jarvis_jax.cse.silhouette_chamfer import chamfer_residual
+from jarvis_jax.tracking.silhouette_chamfer import chamfer_residual
 
 
 def test_known_geometry_hardmin_value():

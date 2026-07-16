@@ -28,9 +28,9 @@ def test_no_silhouette_matches_jaxls_batch_solver():
     """SilhouetteJaxlsBatchSolver with no silhouette/containment kwargs (all
     defaults) must reproduce JaxlsBatchSolver's trajectory to tight tolerance;
     no coverage/containment cost should be added."""
-    from jarvis_jax.cse.silhouette_ik_solve import build_solver_inputs
+    from jarvis_jax.tracking.silhouette_ik_solve import build_solver_inputs
     from stac_mjx.stac_core_jaxls import JaxlsBatchSolver
-    from jarvis_jax.cse.silhouette_joint_ik import SilhouetteJaxlsBatchSolver
+    from jarvis_jax.tracking.silhouette_joint_ik import SilhouetteJaxlsBatchSolver
 
     inp = build_solver_inputs(IK, XML)
     sl = slice(0, 6)
@@ -57,11 +57,11 @@ def test_no_silhouette_matches_jaxls_batch_solver():
 def test_silhouette_weight_moves_qpos_toward_boundary():
     """A coverage target far outside the projected mesh, with weight>0, must
     change qpos relative to the weight=0 solve (the coverage factor is live)."""
-    from jarvis_jax.cse.silhouette_ik_solve import build_solver_inputs
-    from jarvis_jax.cse.silhouette_ik import load_anatomy, make_fk_repose
-    from jarvis_jax.cse.silhouette_dof import build_appendage_dof_mask
-    from jarvis_jax.cse.silhouette_targets import silhouette_fk_indices
-    from jarvis_jax.cse.silhouette_joint_ik import SilhouetteJaxlsBatchSolver
+    from jarvis_jax.tracking.silhouette_ik_solve import build_solver_inputs
+    from jarvis_jax.tracking.silhouette_ik import load_anatomy, make_fk_repose
+    from jarvis_jax.tracking.silhouette_dof import build_appendage_dof_mask
+    from jarvis_jax.tracking.silhouette_targets import silhouette_fk_indices
+    from jarvis_jax.tracking.silhouette_joint_ik import SilhouetteJaxlsBatchSolver
     import mujoco
 
     inp = build_solver_inputs(IK, XML)

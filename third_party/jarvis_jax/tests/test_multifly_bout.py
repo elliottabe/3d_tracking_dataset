@@ -4,8 +4,8 @@ import h5py
 import numpy as np
 import pytest
 
-from jarvis_jax.cse.multifly_bout import build_fly_bout
-from jarvis_jax.cse.identity_link import link_recording
+from jarvis_jax.tracking.multifly_bout import build_fly_bout
+from jarvis_jax.tracking.identity_link import link_recording
 
 ROOT = "/gscratch/portia/eabe/data/Johnson_lab/red_data/red_data_unified_V3"
 REC = "2026_04_07_11_33_33"

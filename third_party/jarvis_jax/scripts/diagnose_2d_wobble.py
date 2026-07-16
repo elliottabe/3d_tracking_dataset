@@ -27,8 +27,8 @@ if _REPO not in sys.path:
     sys.path.insert(0, _REPO)
 from scripts.run_courtship_bout import (                       # noqa: E402
     bout_start_frame, open_video_captures, all_cams_frames)
-from jarvis_jax.cse.courtship_bout_masks import load_bout_masks     # noqa: E402
-from jarvis_jax.cse.courtship_predict_2d import load_detector      # noqa: E402
+from jarvis_jax.tracking.bout_masks import load_bout_masks     # noqa: E402
+from jarvis_jax.tracking.predict_2d import load_detector      # noqa: E402
 from jarvis_jax.predict.session_frameset import build_frameset     # noqa: E402
 from jarvis_jax.geometry.reprojection_tool import ReprojectionTool  # noqa: E402
 from jarvis_jax.data.device import normalize_image                 # noqa: E402

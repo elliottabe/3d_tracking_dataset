@@ -1,6 +1,6 @@
 import numpy as np
-from jarvis_jax.cse.silhouette_sdf import _mask_bbox, _mask_to_sdf_crop
-import jarvis_jax.cse.silhouette_sdf as sdfmod
+from jarvis_jax.tracking.silhouette_sdf import _mask_bbox, _mask_to_sdf_crop
+import jarvis_jax.tracking.silhouette_sdf as sdfmod
 
 
 def test_mask_bbox_expands_by_margin():

@@ -12,7 +12,7 @@ def test_silhouette_fk_indices_are_full_array_space_not_fps_relative():
     (0..61665), not fps-relative (0..299). Regression guard mirroring
     _wing_fk_indices' fps[idx] bridge: fps-relative indices would (a) all be
     < 300 and (b) select the wrong vertices."""
-    from jarvis_jax.cse.silhouette_targets import silhouette_fk_indices
+    from jarvis_jax.tracking.silhouette_targets import silhouette_fk_indices
     z = np.load(MESH, allow_pickle=True)
     n_verts = z["vertices_local"].shape[0]      # 61666
     fps300 = z["fps_300"]
@@ -31,7 +31,7 @@ def test_silhouette_fk_indices_index_geoms_correctly():
     """Indexing vertex_geom (a FULL-array (61666,) map) with the returned
     indices must be in-bounds and select real geoms -- a fps-relative index
     set would index the first 300 rows only (a different, wrong selection)."""
-    from jarvis_jax.cse.silhouette_targets import silhouette_fk_indices
+    from jarvis_jax.tracking.silhouette_targets import silhouette_fk_indices
     z = np.load(MESH, allow_pickle=True)
     vgeom = z["vertex_geom"]                      # (61666,)
     idx = silhouette_fk_indices(MESH, subset="fps_300")

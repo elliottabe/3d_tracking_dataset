@@ -22,13 +22,13 @@ HEADLESS_47 = [n for n in FULL_50 if n not in ("Antenna_Base", "EyeL", "EyeR")]
 
 
 def test_canonical_kp_names_match_stac_order():
-    from jarvis_jax.cse.active_parts import CANONICAL_KP_NAMES
+    from jarvis_jax.tracking.active_parts import CANONICAL_KP_NAMES
     assert CANONICAL_KP_NAMES == FULL_50
     assert len(CANONICAL_KP_NAMES) == 50
 
 
 def test_part_table_shape_and_names():
-    from jarvis_jax.cse.active_parts import PART_TABLE
+    from jarvis_jax.tracking.active_parts import PART_TABLE
     assert set(PART_TABLE) == {"head", "wing_left", "wing_right",
                                "legT1L", "legT1R", "legT2L", "legT2R", "legT3L", "legT3R"}
     # head has kps but NO joints (rigid weld) and its own mesh segs.
@@ -49,7 +49,7 @@ def test_part_table_shape_and_names():
 
 
 def test_derive_active_parts_amputee_headless_full():
-    from jarvis_jax.cse.active_parts import derive_active_parts
+    from jarvis_jax.tracking.active_parts import derive_active_parts
     amp = derive_active_parts(AMPUTEE_44)
     assert amp["off"] == ["legT1R"]
     assert "legT1R" not in amp["on"] and "head" in amp["on"]
@@ -63,7 +63,7 @@ def test_derive_active_parts_amputee_headless_full():
 
 
 def test_derive_active_parts_override():
-    from jarvis_jax.cse.active_parts import derive_active_parts
+    from jarvis_jax.tracking.active_parts import derive_active_parts
     d = derive_active_parts(FULL_50, override=["wing_left"])
     assert d["off"] == ["wing_left"]
     with pytest.raises(ValueError):
@@ -75,7 +75,7 @@ _HAVE_MODEL = os.path.exists(XML) and os.path.exists(MESH)
 
 @pytest.mark.skipif(not _HAVE_MODEL, reason="V1 model / mesh not present")
 def test_build_active_mask_amputee_locks_t1r_38_48():
-    from jarvis_jax.cse.active_parts import build_active_mask, derive_active_parts
+    from jarvis_jax.tracking.active_parts import build_active_mask, derive_active_parts
     off = derive_active_parts(AMPUTEE_44)["off"]         # ["legT1R"]
     mask = build_active_mask(AMPUTEE_44, XML, MESH, off)
     # T1R hinges are qpos 38..48 inclusive (11 DOF).
@@ -97,7 +97,7 @@ def test_build_active_mask_amputee_locks_t1r_38_48():
 
 @pytest.mark.skipif(not _HAVE_MODEL, reason="V1 model / mesh not present")
 def test_build_active_mask_headless_no_joints_but_geoms_excluded():
-    from jarvis_jax.cse.active_parts import build_active_mask, derive_active_parts
+    from jarvis_jax.tracking.active_parts import build_active_mask, derive_active_parts
     off = derive_active_parts(HEADLESS_47)["off"]        # ["head"]
     mask = build_active_mask(HEADLESS_47, XML, MESH, off)
     # head has NO joints -> nothing locked.
@@ -112,7 +112,7 @@ def test_build_active_mask_headless_no_joints_but_geoms_excluded():
 
 @pytest.mark.skipif(not _HAVE_MODEL, reason="V1 model / mesh not present")
 def test_build_active_mask_full_schema_is_identity():
-    from jarvis_jax.cse.active_parts import build_active_mask
+    from jarvis_jax.tracking.active_parts import build_active_mask
     mask = build_active_mask(FULL_50, XML, MESH, [])
     assert mask["qs_to_opt_mask"].all()
     assert mask["locked_qpos_idx"].size == 0
@@ -124,7 +124,7 @@ def test_build_active_mask_full_schema_is_identity():
 def test_build_active_mask_zeroes_present_off_markers_via_override():
     # SIMULATED case: full 50-name schema but legT1R toggled off by override ->
     # its distal markers ARE present, so their kps_to_opt coords must be zeroed.
-    from jarvis_jax.cse.active_parts import build_active_mask, CANONICAL_KP_NAMES
+    from jarvis_jax.tracking.active_parts import build_active_mask, CANONICAL_KP_NAMES
     mask = build_active_mask(FULL_50, XML, MESH, ["legT1R"])
     for nm in ("T1R_Tro", "T1R_FeTi", "T1R_TiTa", "T1R_TaT1", "T1R_TaT3", "T1R_TaTip"):
         j = FULL_50.index(nm)
@@ -135,7 +135,7 @@ def test_build_active_mask_zeroes_present_off_markers_via_override():
 
 
 def test_clamp_locked_qpos_pins_to_rest():
-    from jarvis_jax.cse.active_parts import clamp_locked_qpos
+    from jarvis_jax.tracking.active_parts import clamp_locked_qpos
     mask = {"locked_qpos_idx": np.array([38, 39, 48], np.int32),
             "rest_qpos": np.zeros(93)}
     q = np.random.default_rng(0).normal(size=(5, 93))
@@ -148,7 +148,7 @@ def test_clamp_locked_qpos_pins_to_rest():
 
 @pytest.mark.skipif(not _HAVE_MODEL, reason="V1 model / mesh not present")
 def test_excluded_fps_indices_match_seg_ids():
-    from jarvis_jax.cse.active_parts import build_active_mask, excluded_fps_indices, derive_active_parts
+    from jarvis_jax.tracking.active_parts import build_active_mask, excluded_fps_indices, derive_active_parts
     off = derive_active_parts(HEADLESS_47)["off"]        # ["head"]
     mask = build_active_mask(HEADLESS_47, XML, MESH, off)
     fps_ex = excluded_fps_indices(mask, MESH)
@@ -165,7 +165,7 @@ def test_excluded_fps_indices_match_seg_ids():
 
 @pytest.mark.skipif(not _HAVE_MODEL, reason="V1 model / mesh not present")
 def test_wing_side_vertices_ignores_excluded_segs():
-    from jarvis_jax.cse.silhouette_landmarks import wing_side_vertices
+    from jarvis_jax.tracking.silhouette_landmarks import wing_side_vertices
     base = wing_side_vertices(MESH)
     # excluding a LEG's segs must not change the WING tip/prox selection
     # (wings and that leg are disjoint) -> defensive no-op for wings.
@@ -180,7 +180,7 @@ def test_wing_side_vertices_ignores_excluded_segs():
 
 
 def test_apply_active_mask_to_inputs_gates_weights_and_dofs():
-    from jarvis_jax.cse.active_parts import apply_active_mask_to_inputs
+    from jarvis_jax.tracking.active_parts import apply_active_mask_to_inputs
     inp = {"kps_to_opt": np.ones(6, np.float32), "qs_to_opt": np.ones(4, bool),
            "kp_data": np.ones((3, 2, 3), np.float32)}
     mask = {"kps_to_opt_mask": np.array([1, 1, 1, 0, 0, 0], np.float32),

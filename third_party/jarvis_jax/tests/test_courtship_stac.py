@@ -1,6 +1,6 @@
 import numpy as np
 from omegaconf import OmegaConf
-import jarvis_jax.cse.courtship_stac as cst
+import jarvis_jax.tracking.stac as cst
 
 
 def _cfg():

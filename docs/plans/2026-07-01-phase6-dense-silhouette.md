@@ -76,7 +76,7 @@ Mesh npz keys (verified): `vertices_local`(61666,3), `vertex_geom`(61666,), `fps
 ```python
 # tests/test_silhouette_boundary.py
 import numpy as np
-from jarvis_jax.cse.silhouette_boundary import mask_boundary_pixels, sample_boundary_points
+from jarvis_jax.tracking.silhouette_boundary import mask_boundary_pixels, sample_boundary_points
 
 
 def test_boundary_pixels_of_a_solid_square():
@@ -126,7 +126,7 @@ def test_sample_boundary_points_deterministic():
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `cd third_party/jarvis_jax && JAX_PLATFORMS=cpu OMP_NUM_THREADS=4 python -m pytest tests/test_silhouette_boundary.py -v`
-Expected: FAIL — `ModuleNotFoundError: No module named 'jarvis_jax.cse.silhouette_boundary'`.
+Expected: FAIL — `ModuleNotFoundError: No module named 'jarvis_jax.tracking.silhouette_boundary'`.
 
 - [ ] **Step 3: Write minimal implementation**
 
@@ -238,7 +238,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 import jax
 import jax.numpy as jnp
 import numpy as np
-from jarvis_jax.cse.silhouette_chamfer import chamfer_residual
+from jarvis_jax.tracking.silhouette_chamfer import chamfer_residual
 
 
 def test_known_geometry_hardmin_value():
@@ -327,7 +327,7 @@ def test_chunking_is_result_invariant_and_bounds_memory():
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `cd third_party/jarvis_jax && JAX_PLATFORMS=cpu OMP_NUM_THREADS=4 python -m pytest tests/test_silhouette_chamfer.py -v`
-Expected: FAIL — `ModuleNotFoundError: No module named 'jarvis_jax.cse.silhouette_chamfer'`.
+Expected: FAIL — `ModuleNotFoundError: No module named 'jarvis_jax.tracking.silhouette_chamfer'`.
 
 - [ ] **Step 3: Write minimal implementation**
 
@@ -461,7 +461,7 @@ MESH = "/gscratch/portia/eabe/Research/MyRepos/fruitfly_body_models/fruitfly_cse
 
 @pytest.mark.skipif(not __import__("os").path.exists(XML), reason="fly model not present")
 def test_silhouette_cost_residual_shape_and_finite():
-    from jarvis_jax.cse.silhouette_ik import load_anatomy, make_fk_repose
+    from jarvis_jax.tracking.silhouette_ik import load_anatomy, make_fk_repose
     from stac_mjx.stac_silhouette_jaxls import (
         make_silhouette_cost, SIL_PER_CAM, pack_sil_value,
     )
@@ -559,7 +559,7 @@ import jax
 import jax.numpy as jnp
 import jaxls
 
-from jarvis_jax.cse.silhouette_chamfer import chamfer_residual
+from jarvis_jax.tracking.silhouette_chamfer import chamfer_residual
 
 
 def SIL_PER_CAM(n_pts: int) -> int:
@@ -691,7 +691,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 - Consumes:
   - `make_silhouette_cost(...)`, `SIL_PER_CAM`, `pack_sil_value` from Task 3.
   - `stac_core_jaxls.JaxlsBatchSolver` (only imported by the TEST, to compare outputs; the solver module itself is frozen).
-  - `jarvis_jax.cse.silhouette_ik.make_fk_repose` (the vertex FK for the factory).
+  - `jarvis_jax.tracking.silhouette_ik.make_fk_repose` (the vertex FK for the factory).
 - Produces:
   - `SilhouetteJaxlsBatchSolver(n_iter=50, linear_solver="auto", lambda_initial=1.0, smooth_weight=0.0, use_se3_root=True, beta=8.0, huber_delta=0.0)` with method
     `solve_trajectory(q_init, mjx_model, mjx_data_template, kp_data, qs_to_opt, kps_to_opt, lb, ub, site_idxs, q_reg_weights, *, fk_repose=None, vert_indices=None, sil_data=None, silhouette_weight=0.0) -> jnp.ndarray (T,nq)`.
@@ -731,7 +731,7 @@ def test_stac_core_jaxls_is_byte_identical():
 def test_no_silhouette_matches_jaxls_batch_solver():
     """SilhouetteJaxlsBatchSolver with silhouette_weight=0 (no sil_data) must
     reproduce JaxlsBatchSolver's trajectory to tight tolerance."""
-    from jarvis_jax.cse.silhouette_ik_solve import build_solver_inputs
+    from jarvis_jax.tracking.silhouette_ik_solve import build_solver_inputs
     from stac_mjx.stac_core_jaxls import JaxlsBatchSolver
     from stac_mjx.stac_silhouette_jaxls import SilhouetteJaxlsBatchSolver
 
@@ -762,8 +762,8 @@ def test_no_silhouette_matches_jaxls_batch_solver():
 def test_silhouette_weight_moves_qpos_toward_boundary():
     """A silhouette target pulling a wing vertex outward, with weight>0, must
     change qpos relative to the weight=0 solve (the joint factor is live)."""
-    from jarvis_jax.cse.silhouette_ik_solve import build_solver_inputs
-    from jarvis_jax.cse.silhouette_ik import load_anatomy, make_fk_repose
+    from jarvis_jax.tracking.silhouette_ik_solve import build_solver_inputs
+    from jarvis_jax.tracking.silhouette_ik import load_anatomy, make_fk_repose
     from stac_mjx.stac_silhouette_jaxls import (
         SilhouetteJaxlsBatchSolver, pack_sil_value, SIL_PER_CAM,
     )
@@ -1034,11 +1034,11 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ```python
 # tests/test_silhouette_targets.py
 import numpy as np
-from jarvis_jax.cse.silhouette_targets import build_silhouette_targets
+from jarvis_jax.tracking.silhouette_targets import build_silhouette_targets
 
 
 def test_build_targets_shapes_and_nan_for_missing(monkeypatch):
-    from jarvis_jax.cse import silhouette_targets as st
+    from jarvis_jax.tracking import silhouette_targets as st
     from stac_mjx.stac_silhouette_jaxls import SIL_PER_CAM, unpack_sil_value
     import jax.numpy as jnp
 
@@ -1094,7 +1094,7 @@ def test_build_targets_shapes_and_nan_for_missing(monkeypatch):
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `cd third_party/jarvis_jax && JAX_PLATFORMS=cpu OMP_NUM_THREADS=4 python -m pytest tests/test_silhouette_targets.py -v`
-Expected: FAIL — `ModuleNotFoundError: No module named 'jarvis_jax.cse.silhouette_targets'`.
+Expected: FAIL — `ModuleNotFoundError: No module named 'jarvis_jax.tracking.silhouette_targets'`.
 
 - [ ] **Step 3: Write minimal implementation**
 
@@ -1113,8 +1113,8 @@ import os
 import numpy as np
 
 from jarvis_jax.geometry.reprojection_tool import ReprojectionTool
-from jarvis_jax.cse.silhouette_boundary import sample_boundary_points
-from jarvis_jax.cse.silhouette_ik_solve import (
+from jarvis_jax.tracking.silhouette_boundary import sample_boundary_points
+from jarvis_jax.tracking.silhouette_ik_solve import (
     _cam2img_for_frame, _ann_for_image, _load_sam_mask,
 )
 from stac_mjx.stac_silhouette_jaxls import SIL_PER_CAM, pack_sil_value
@@ -1230,7 +1230,7 @@ def test_silhouette_fk_indices_are_full_array_space_not_fps_relative():
     (0..61665), not fps-relative (0..299). Regression guard mirroring
     _wing_fk_indices' fps[idx] bridge: fps-relative indices would (a) all be
     < 300 and (b) select the wrong vertices."""
-    from jarvis_jax.cse.silhouette_targets import silhouette_fk_indices
+    from jarvis_jax.tracking.silhouette_targets import silhouette_fk_indices
     z = np.load(MESH, allow_pickle=True)
     n_verts = z["vertices_local"].shape[0]      # 61666
     fps300 = z["fps_300"]
@@ -1249,7 +1249,7 @@ def test_silhouette_fk_indices_index_geoms_correctly():
     """Indexing vertex_geom (a FULL-array (61666,) map) with the returned
     indices must be in-bounds and select real geoms -- a fps-relative index
     set would index the first 300 rows only (a different, wrong selection)."""
-    from jarvis_jax.cse.silhouette_targets import silhouette_fk_indices
+    from jarvis_jax.tracking.silhouette_targets import silhouette_fk_indices
     z = np.load(MESH, allow_pickle=True)
     vgeom = z["vertex_geom"]                      # (61666,)
     idx = silhouette_fk_indices(MESH, subset="fps_300")
@@ -1349,7 +1349,7 @@ import pytest
 
 
 def test_iou_of_projected_verts_known_overlap():
-    from jarvis_jax.cse.run_silhouette_polish import iou_of_projected_verts
+    from jarvis_jax.tracking.run_silhouette_polish import iou_of_projected_verts
     # ref mask: filled 10x10 square in a 20x20 image.
     ref = np.zeros((20, 20), dtype=bool); ref[5:15, 5:15] = True
     # projected verts exactly filling the same square -> IoU == 1.
@@ -1365,7 +1365,7 @@ def test_iou_of_projected_verts_known_overlap():
 
 
 def test_iou_ignores_out_of_bounds_verts():
-    from jarvis_jax.cse.run_silhouette_polish import iou_of_projected_verts
+    from jarvis_jax.tracking.run_silhouette_polish import iou_of_projected_verts
     ref = np.zeros((10, 10), dtype=bool); ref[2:8, 2:8] = True
     verts = np.array([[100.0, 100.0], [-5.0, -5.0], [4.0, 4.0]])  # 2 OOB, 1 inside
     iou = iou_of_projected_verts(verts, (10, 10), ref)
@@ -1375,7 +1375,7 @@ def test_iou_ignores_out_of_bounds_verts():
 def test_soft_iou_of_verts_higher_when_verts_fill_mask():
     """Eval-only soft-IoU (baseline-comparable): verts densely filling the mask
     give a higher soft-IoU than verts sitting outside it. Bounded in [0,1]."""
-    from jarvis_jax.cse.run_silhouette_polish import soft_iou_of_verts
+    from jarvis_jax.tracking.run_silhouette_polish import soft_iou_of_verts
     mask = np.zeros((30, 30), dtype=bool); mask[8:22, 8:22] = True
     yy, xx = np.mgrid[8:22, 8:22]
     inside = np.stack([xx.ravel(), yy.ravel()], axis=1).astype(np.float64)  # (x,y)
@@ -1389,7 +1389,7 @@ def test_soft_iou_of_verts_higher_when_verts_fill_mask():
 
 
 def test_run_polish_is_importable_and_has_cli():
-    import jarvis_jax.cse.run_silhouette_polish as m
+    import jarvis_jax.tracking.run_silhouette_polish as m
     assert hasattr(m, "run_polish")
     assert hasattr(m, "main")
     assert callable(m.run_polish)
@@ -1402,7 +1402,7 @@ IK = "/gscratch/portia/eabe/data/Johnson_lab/cse_work/2026_03_18_15_31_22/Fruitf
 def test_run_polish_report_keys_smoke(tmp_path):
     """Tiny 2-frame smoke (CPU) exercising the report assembly. The scientific
     magnitude comes from the coordinator GPU run, not this test."""
-    from jarvis_jax.cse.run_silhouette_polish import run_polish
+    from jarvis_jax.tracking.run_silhouette_polish import run_polish
     XML = "/gscratch/portia/eabe/Research/MyRepos/fruitfly_body_models/fruitfly_v1/fruitfly_v1_free.xml"
     MESH = "/gscratch/portia/eabe/Research/MyRepos/fruitfly_body_models/fruitfly_cse/fly_v1_collision_canonical_wings.npz"
     ROOT = "/gscratch/portia/eabe/data/Johnson_lab/red_data/red_data_unified_V3"
@@ -1421,7 +1421,7 @@ def test_run_polish_report_keys_smoke(tmp_path):
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `cd third_party/jarvis_jax && JAX_PLATFORMS=cpu OMP_NUM_THREADS=4 python -m pytest tests/test_run_silhouette_polish.py -v`
-Expected: FAIL — `ModuleNotFoundError: No module named 'jarvis_jax.cse.run_silhouette_polish'`.
+Expected: FAIL — `ModuleNotFoundError: No module named 'jarvis_jax.tracking.run_silhouette_polish'`.
 
 - [ ] **Step 3: Write minimal implementation**
 
@@ -1515,13 +1515,13 @@ def run_polish(
     import jax.numpy as jnp
     import stac_mjx.io_dict_to_hdf5 as ioh5
     from jarvis_jax.geometry.reprojection_tool import ReprojectionTool
-    from jarvis_jax.cse.silhouette_ik import load_anatomy, make_fk_repose
-    from jarvis_jax.cse.silhouette_ik_solve import (
+    from jarvis_jax.tracking.silhouette_ik import load_anatomy, make_fk_repose
+    from jarvis_jax.tracking.silhouette_ik_solve import (
         build_solver_inputs, _umeyama, _model_to_mm, _triangulate_kp_mm,
         _cam2img_for_frame, _ann_for_image, _load_sam_mask,
         _DEFAULT_REFINED_CALIB_DIR, _DEFAULT_FACTORY_CALIB_DIR,
     )
-    from jarvis_jax.cse.silhouette_targets import (
+    from jarvis_jax.tracking.silhouette_targets import (
         build_silhouette_targets, silhouette_fk_indices,
     )
     from stac_mjx.stac_silhouette_jaxls import SilhouetteJaxlsBatchSolver
@@ -1708,7 +1708,7 @@ On a gpu-l40s node (coordinator runs this; subagents orphan on long GPU jobs):
 ```bash
 source ~/.bashrc && micromamba activate 3d_tracking && unset LD_LIBRARY_PATH
 cd /mmfs1/gscratch/portia/eabe/Research/MyRepos/3d_tracking_dataset/third_party/jarvis_jax
-XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 python -m jarvis_jax.cse.run_silhouette_polish \
+XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 python -m jarvis_jax.tracking.run_silhouette_polish \
   --ik-h5 /gscratch/portia/eabe/data/Johnson_lab/cse_work/2026_03_18_15_31_22/Fruitfly_ik_v1_cse.h5 \
   --xml   /gscratch/portia/eabe/Research/MyRepos/fruitfly_body_models/fruitfly_v1/fruitfly_v1_free.xml \
   --mesh  /gscratch/portia/eabe/Research/MyRepos/fruitfly_body_models/fruitfly_cse/fly_v1_collision_canonical_wings.npz \

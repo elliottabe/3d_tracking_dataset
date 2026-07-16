@@ -57,11 +57,11 @@ from omegaconf import OmegaConf
 
 import stac_mjx.io_dict_to_hdf5 as ioh5
 from jarvis_jax.geometry.reprojection_tool import ReprojectionTool
-from jarvis_jax.cse.courtship_bout_masks import load_bout_masks
-from jarvis_jax.cse.courtship_pseudolabel import (
+from jarvis_jax.tracking.bout_masks import load_bout_masks
+from jarvis_jax.tracking.courtship_pseudolabel import (
     reproject_sites, gate_pseudolabels, records_for_bout, GateCfg)
-from jarvis_jax.cse.build_pseudolabel_dataset import PseudoLabelWriter
-from jarvis_jax.cse.finetune_detector import finetune
+from jarvis_jax.tracking.build_pseudolabel_dataset import PseudoLabelWriter
+from jarvis_jax.tracking.finetune_detector import finetune
 from jarvis_jax.predict.sam3_driver import parse_bouts, session_tag_for
 
 import sys

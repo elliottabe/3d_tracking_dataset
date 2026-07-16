@@ -1,6 +1,6 @@
 import numpy as np
-from jarvis_jax.cse.affine_camera import factor_affine, reconstruct_affine, project_affine
-from jarvis_jax.cse.silhouette_landmarks import wing_side_vertices, mask_wing_tip_2d, triangulate_wing_tips
+from jarvis_jax.tracking.affine_camera import factor_affine, reconstruct_affine, project_affine
+from jarvis_jax.tracking.silhouette_landmarks import wing_side_vertices, mask_wing_tip_2d, triangulate_wing_tips
 
 MESH = "/gscratch/portia/eabe/Research/MyRepos/fruitfly_body_models/fruitfly_cse/fly_v1_collision_canonical_wings.npz"
 P_REAL = np.array([[8.1001,0.0074869,-0.031773,-2.828],[0.0093308,-8.0788,-0.17912,462.78],[0,0,0,1.0]])

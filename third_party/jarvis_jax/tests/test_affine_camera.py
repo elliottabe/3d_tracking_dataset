@@ -1,5 +1,5 @@
 import numpy as np
-from jarvis_jax.cse.affine_camera import factor_affine, reconstruct_affine
+from jarvis_jax.tracking.affine_camera import factor_affine, reconstruct_affine
 
 # A real telecentric calibration matrix (Cam2012630, 2026_03_18_15_31_22).
 P_REAL = np.array([
@@ -30,7 +30,7 @@ def test_factor_K2_upper_triangular_positive_diag():
 def test_project_affine_matches_reprojection_tool(tmp_path):
     import cv2
     from jarvis_jax.geometry.reprojection_tool import ReprojectionTool
-    from jarvis_jax.cse.affine_camera import project_affine
+    from jarvis_jax.tracking.affine_camera import project_affine
     # Write P_REAL as a one-camera calib dir and compare projections.
     d = tmp_path / "calib"; d.mkdir()
     fs = cv2.FileStorage(str(d / "Cam0001.yaml"), cv2.FILE_STORAGE_WRITE)
@@ -44,7 +44,7 @@ def test_project_affine_matches_reprojection_tool(tmp_path):
 
 def test_project_from_params_matches_project_affine():
     import jax.numpy as jnp
-    from jarvis_jax.cse.affine_camera import factor_affine, project_affine, project_from_params
+    from jarvis_jax.tracking.affine_camera import factor_affine, project_affine, project_from_params
     K2, R, t = factor_affine(P_REAL)
     X = np.array([[1.5, -0.7, 12.0], [0.2, 0.3, 9.0]])
     uv_np = project_affine(P_REAL, X)                                   # (2,2)

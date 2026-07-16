@@ -63,7 +63,7 @@ def append_cameras_to_npz(npz_path, cameras):
     """Append a `cameras` (C,) name-string array to an already-written
     sam3_masks.npz, WITHOUT reopening/recompressing the (often 50-500 MB)
     packed mask arrays -- this is what makes every future mask file
-    self-identifying (see jarvis_jax.cse.courtship_bout_masks.load_bout_masks
+    self-identifying (see jarvis_jax.tracking.bout_masks.load_bout_masks
     / detect_camera_order, written to guard against the camera-axis-scramble
     bug: the packed masks' C axis previously carried NO identifying metadata).
 

@@ -13,7 +13,7 @@
 - Package is top-level `viz/`, importable as `viz.core.*` / `viz.views.*`, runnable as `python -m viz <subcommand> …`.
 - The core is pipeline-agnostic: pure geometry + cv2/matplotlib + artifact loaders. NO pipeline-specific logic in `viz/core/`; pipeline specifics live in `viz/views/`.
 - Reprojection uses the ReprojectionTool convention verbatim: `ph = [pts,1] (N,4); proj = ph @ M (N,3); uv = proj[:,:2]/proj[:,2:3]` where `M` is the `(4,3)` camera matrix. Do NOT reinvent it — this matches `scripts/run_courtship_bout.py::project_points`.
-- Reuse, don't reimplement: camera matrices via `jarvis_jax.geometry.reprojection_tool.ReprojectionTool(calib_dir).camera_matrices` `(num_cam,4,3)`; SAM masks via `jarvis_jax.cse.courtship_bout_masks.load_bout_masks(npz_path, fly, expected_cameras=...)`.
+- Reuse, don't reimplement: camera matrices via `jarvis_jax.geometry.reprojection_tool.ReprojectionTool(calib_dir).camera_matrices` `(num_cam,4,3)`; SAM masks via `jarvis_jax.tracking.bout_masks.load_bout_masks(npz_path, fly, expected_cameras=...)`.
 - Every core module is unit-tested; views are smoke-tested only (produce an output file without error), matching how the pipeline treats heavy renders.
 - Run pytest from repo root: `cd /gscratch/portia/eabe/Research/MyRepos/3d_tracking_dataset && OMP_NUM_THREADS=4 JAX_PLATFORMS=cpu python -m pytest viz/tests/ -q`. (JAX_PLATFORMS=cpu keeps core/io tests off the GPU; the `fit-check` smoke needs a GPU and is skipped when none is present.)
 - Reference implementations (source for the promoted views) live in `docs/plans/viz-reference/*.py` (preserved from the debugging session; see its README). Treat them as behavior references to rewrite on the core, not files to copy verbatim.
@@ -319,7 +319,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"`
   - `load_outputs(run_root, bout, fly) -> dict` with `kp3d_mm (T,K,3)`, `mesh_mm (T,M,3)`, `kp_names (list)` (via `stac_mjx.io_dict_to_hdf5.load`)
   - `load_kp2d(run_root, bout, fly) -> tuple(kp2d (T,C,K,2), conf (T,C,K))`
   - `load_kp3d(run_root, bout, fly) -> tuple(kp3d (T,K,3), conf3d (T,K))`
-  - `load_masks(predictions_dir, bout, fly, cameras) -> dict` (wraps `jarvis_jax.cse.courtship_bout_masks.load_bout_masks`, `expected_cameras=cameras`)
+  - `load_masks(predictions_dir, bout, fly, cameras) -> dict` (wraps `jarvis_jax.tracking.bout_masks.load_bout_masks`, `expected_cameras=cameras`)
   - `read_frame(video_path, frame_idx) -> np.ndarray (H,W,3) BGR` and `read_frames(session_dir, cameras, start, count) -> generator of (C,H,W,3) RGB` (thin wrappers over cv2.VideoCapture; mirror `scripts/run_courtship_bout.py::open_video_captures/all_cams_frames`)
 
 - [ ] **Step 1: Write failing tests** (use a tiny synthetic outputs.h5 + kp2d.npz written in the test):
@@ -355,7 +355,7 @@ import os
 import numpy as np
 import cv2
 import stac_mjx.io_dict_to_hdf5 as ioh5
-from jarvis_jax.cse.courtship_bout_masks import load_bout_masks
+from jarvis_jax.tracking.bout_masks import load_bout_masks
 
 def fly_dir(run_root, bout, fly):
     return os.path.join(run_root, "bouts", f"bout_{int(bout):05d}", f"fly{int(fly)}")

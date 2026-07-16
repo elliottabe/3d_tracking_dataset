@@ -39,7 +39,7 @@ preprocessing:
   input_filename: 'preprocessed_bout_${anatomy.name}_${dataset.name}.h5'
 
 # Trunk-marker Procrustes body-size scale applied to keypoints before STAC (see
-# jarvis_jax.cse.courtship_scale). Without it, raw triangulated keypoints are
+# jarvis_jax.tracking.scale). Without it, raw triangulated keypoints are
 # ~78x the MuJoCo model's rest-pose scale, which makes the STAC jaxls LM-batch
 # Jacobian catastrophically ill-conditioned and the solve stalls. Mirrors
 # configs/preprocessing/default.yaml's `scaling` block (trunk path); inline
@@ -51,7 +51,7 @@ scaling:
   robust_stat: median      # 'median' | 'mean'
   robust: none             # 'huber' | 'none'
 
-# Pre-STAC keypoint smoothing / outlier rejection (jarvis_jax.cse.courtship_filter
+# Pre-STAC keypoint smoothing / outlier rejection (jarvis_jax.tracking.filter
 # -> utils.keypoint_filter.filter_keypoints), applied to the triangulated kp3d
 # before scale/offsets/STAC. Distal leg tips occasionally mistriangulate and jump
 # many mm; STAC then bends the leg to chase the outlier -> jittery/curling IK legs.

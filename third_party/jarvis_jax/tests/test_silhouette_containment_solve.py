@@ -5,7 +5,7 @@ import jaxls
 import jaxlie
 import pytest
 
-from jarvis_jax.cse.silhouette_joint_ik import make_containment_cost
+from jarvis_jax.tracking.silhouette_joint_ik import make_containment_cost
 
 XML = "/gscratch/portia/eabe/Research/MyRepos/fruitfly_body_models/fruitfly_v1/fruitfly_v1_free.xml"
 MESH = "/gscratch/portia/eabe/Research/MyRepos/fruitfly_body_models/fruitfly_cse/fly_v1_visual_canonical_wings.npz"
@@ -14,8 +14,8 @@ skip = pytest.mark.skipif(not (os.path.exists(XML) and os.path.exists(MESH)), re
 
 @skip
 def test_containment_cost_residual_shape_and_finite():
-    from jarvis_jax.cse.silhouette_ik import load_anatomy, make_fk_repose
-    from jarvis_jax.cse.silhouette_dof import build_appendage_dof_mask, appendage_vertex_indices
+    from jarvis_jax.tracking.silhouette_ik import load_anatomy, make_fk_repose
+    from jarvis_jax.tracking.silhouette_dof import build_appendage_dof_mask, appendage_vertex_indices
     import mujoco
     anat = load_anatomy(XML, MESH); fk = make_fk_repose(anat)
     m = mujoco.MjModel.from_xml_path(XML)
@@ -63,10 +63,10 @@ def test_containment_cost_residual_shape_and_finite():
 def test_containment_baseline_reproduces_and_moves_qpos():
     # containment_weight=0 -> identical to no-silhouette; weight>0 with an
     # all-"outside" SDF must move qpos (appendage DOFs) away from init.
-    from jarvis_jax.cse.silhouette_ik_solve import build_solver_inputs
-    from jarvis_jax.cse.silhouette_ik import load_anatomy, make_fk_repose
-    from jarvis_jax.cse.silhouette_dof import build_appendage_dof_mask, appendage_vertex_indices
-    from jarvis_jax.cse.silhouette_joint_ik import SilhouetteJaxlsBatchSolver
+    from jarvis_jax.tracking.silhouette_ik_solve import build_solver_inputs
+    from jarvis_jax.tracking.silhouette_ik import load_anatomy, make_fk_repose
+    from jarvis_jax.tracking.silhouette_dof import build_appendage_dof_mask, appendage_vertex_indices
+    from jarvis_jax.tracking.silhouette_joint_ik import SilhouetteJaxlsBatchSolver
     import mujoco
     IK = "/gscratch/portia/eabe/data/Johnson_lab/cse_work/2026_03_18_15_31_22/Fruitfly_ik_v1_cse.h5"
     if not os.path.exists(IK):

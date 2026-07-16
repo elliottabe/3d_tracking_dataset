@@ -1,5 +1,5 @@
 import numpy as np
-from jarvis_jax.cse.courtship_bout_masks import unpack_one, load_bout_masks
+from jarvis_jax.tracking.bout_masks import unpack_one, load_bout_masks
 
 
 def _synth_npz(tmp_path):

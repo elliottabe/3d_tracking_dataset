@@ -4,7 +4,7 @@ was never recorded and may not match the calibration -- the courtship SAM3
 camera-order-scramble bug (triangulating the stored per-camera mask
 centroids under the identity mapping gave 46px reprojection residual; the
 correct permutation gave 6.8px -- see
-jarvis_jax.cse.courtship_bout_masks.detect_camera_order).
+jarvis_jax.tracking.bout_masks.detect_camera_order).
 
 For each bout under --predictions-dir, this GEOMETRICALLY DETECTS the true
 per-camera order of the stored masks (brute-force permutation search against
@@ -35,7 +35,7 @@ import re
 import numpy as np
 
 from jarvis_jax.geometry.reprojection_tool import ReprojectionTool
-from jarvis_jax.cse.courtship_bout_masks import detect_camera_order
+from jarvis_jax.tracking.bout_masks import detect_camera_order
 
 
 def bout_dirs(predictions_dir: str) -> list[int]:

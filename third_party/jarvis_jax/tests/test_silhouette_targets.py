@@ -1,5 +1,5 @@
 import numpy as np
-import jarvis_jax.cse.silhouette_targets as tgt
+import jarvis_jax.tracking.silhouette_targets as tgt
 
 
 class _FakeCam:

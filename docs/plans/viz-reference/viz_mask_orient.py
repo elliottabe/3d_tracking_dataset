@@ -10,7 +10,7 @@ with initialize_config_dir(version_base=None, config_dir="/gscratch/portia/eabe/
 sys.path.insert(0, "/gscratch/portia/eabe/Research/MyRepos/3d_tracking_dataset")
 import stac_mjx.io_dict_to_hdf5 as ioh5
 from jarvis_jax.geometry.reprojection_tool import ReprojectionTool
-from jarvis_jax.cse.courtship_bout_masks import load_bout_masks
+from jarvis_jax.tracking.bout_masks import load_bout_masks
 from scripts.run_courtship_bout import project_points, bout_start_frame
 
 bout = int(sys.argv[1]) if len(sys.argv) > 1 else 1

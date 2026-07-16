@@ -10,7 +10,7 @@ For a bout index and each fly (``range(cfg.recording.num_animals)``), runs:
   E  FK outputs.h5 + qc.json + qc_perframe.npz + per-camera reprojection overlay videos
 
 Every artifact is written atomically (tmp -> os.replace) and every stage is
-skipped when its artifact already exists (see jarvis_jax.cse.courtship_resume),
+skipped when its artifact already exists (see jarvis_jax.tracking.resume),
 so a preempted/resumed run picks up where it left off. A ``DONE`` marker per
 ``<run_root>/bouts/bout_<idx:05d>/fly<f>/`` gates re-processing an already
 completed bout/fly.
@@ -32,19 +32,19 @@ import numpy as np
 import hydra
 from omegaconf import DictConfig, OmegaConf
 
-from jarvis_jax.cse.courtship_resume import (
+from jarvis_jax.tracking.resume import (
     atomic_save_npz, atomic_save_json, stage_done, mark_done, bout_complete)
-from jarvis_jax.cse.courtship_bout_masks import load_bout_masks, check_bout_camera_order
-from jarvis_jax.cse.courtship_predict_2d import (
+from jarvis_jax.tracking.bout_masks import load_bout_masks, check_bout_camera_order
+from jarvis_jax.tracking.predict_2d import (
     load_detector, predict_bout_2d, reorder_detector_to_model)
-from jarvis_jax.cse.courtship_triangulate import triangulate_keypoints
-from jarvis_jax.cse.courtship_filter import filter_bout_kp3d
-from jarvis_jax.cse.courtship_scale import compute_trunk_scale
-from jarvis_jax.cse.courtship_stac import fit_offsets_once, ik_only_bout
-from jarvis_jax.cse.courtship_polish import polish_bout
-from jarvis_jax.cse.outputs import build_fly_outputs
-from jarvis_jax.cse.qc import qc_report
-from jarvis_jax.cse.reproj_video import write_camera_video
+from jarvis_jax.tracking.triangulate import triangulate_keypoints
+from jarvis_jax.tracking.filter import filter_bout_kp3d
+from jarvis_jax.tracking.scale import compute_trunk_scale
+from jarvis_jax.tracking.stac import fit_offsets_once, ik_only_bout
+from jarvis_jax.tracking.polish import polish_bout
+from jarvis_jax.tracking.outputs import build_fly_outputs
+from jarvis_jax.tracking.qc import qc_report
+from jarvis_jax.tracking.reproj_video import write_camera_video
 from jarvis_jax.predict.sam3_driver import parse_bouts, session_tag_for, masks_are_stale
 from jarvis_jax.predict.synced_reader import load_plan, read_window, read_one_cam
 
@@ -164,15 +164,15 @@ def high_confidence_sample(kp3d, max_frames=None):
 def _import_segment_calibration():
     """Import the segment-calibration entry points, adding the repo root to
     sys.path if the pipeline's cwd/PYTHONPATH didn't already expose `utils`
-    (mirrors jarvis_jax.cse.courtship_filter._filter_keypoints)."""
+    (mirrors jarvis_jax.tracking.filter._filter_keypoints)."""
     try:
-        from jarvis_jax.cse.courtship_segment_fit import optimize_segment_scales
+        from jarvis_jax.tracking.segment_fit import optimize_segment_scales
         from utils.segment_calibration import build_segment_map
     except ImportError:
         repo = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
         if repo not in sys.path:
             sys.path.insert(0, repo)
-        from jarvis_jax.cse.courtship_segment_fit import optimize_segment_scales
+        from jarvis_jax.tracking.segment_fit import optimize_segment_scales
         from utils.segment_calibration import build_segment_map
     return optimize_segment_scales, build_segment_map
 
@@ -187,7 +187,7 @@ def compute_segment_scales(cfg, kp3d, kp_names, scale, run_root):
     (so the real run_root/offsets.h5 is untouched and, crucially, so the temp
     fit sees NO SEGMENT_SCALES), reads the resulting qpos + kp_data (model
     units) from that stac_ik.h5, runs the Adam-on-MJX differentiable M-step
-    (jarvis_jax.cse.courtship_segment_fit.optimize_segment_scales), and returns a
+    (jarvis_jax.tracking.segment_fit.optimize_segment_scales), and returns a
     JSON-serializable list of per-segment scale entries ready for
     cfg.model.SEGMENT_SCALES / stac_mjx.rescale.rescale_per_segment.
     """
@@ -306,7 +306,7 @@ def _backfill_qc_perframe(cfg, bout_idx: int, fly: int, bout_dir: str) -> None:
 
     import stac_mjx.io_dict_to_hdf5 as ioh5
     from jarvis_jax.geometry.reprojection_tool import ReprojectionTool
-    from jarvis_jax.cse.qc_perframe import per_frame_qc
+    from jarvis_jax.tracking.qc_perframe import per_frame_qc
 
     predictions_dir = str(cfg.recording.predictions_dir)
     bout_npz = os.path.join(predictions_dir, f"bout_{bout_idx:05d}", "sam3_masks.npz")
@@ -449,7 +449,7 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
         # Default-off; validated via the 2D-wobble diagnostic. Wings are kept raw.
         _kf = cfg.detector.get("kp2d_filter", None)
         if _kf is not None and bool(_kf.get("enabled", False)):
-            from jarvis_jax.cse.kp2d_oneeuro import filter_kp2d_oneeuro
+            from jarvis_jax.tracking.kp2d_oneeuro import filter_kp2d_oneeuro
             kp2d = filter_kp2d_oneeuro(
                 kp2d, conf, list(cfg.model.KP_NAMES),
                 conf_thresh=float(cfg.detector.conf_thresh),
@@ -489,7 +489,7 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
 
     # -- scale.json: trunk Procrustes body-size scale, computed ONCE (shared
     #    across all bouts/flies, since body size is constant per fly) from
-    #    whichever bout/fly gets there first -- see jarvis_jax.cse.courtship_scale.
+    #    whichever bout/fly gets there first -- see jarvis_jax.tracking.scale.
     #    Without this, raw triangulated keypoints are ~78x the MuJoCo model's
     #    rest-pose scale, which stalls the STAC jaxls LM-batch solve.
     scale_path = os.path.join(run_root, "scale.json")
@@ -601,7 +601,7 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
         #    reproj, n_cams, one row per frame -- next to qc.json. Reuses the
         #    same *_by_frame locals built for qc_report above.
         if not stage_done(qc_perframe_path):
-            from jarvis_jax.cse.qc_perframe import per_frame_qc
+            from jarvis_jax.tracking.qc_perframe import per_frame_qc
             pf = per_frame_qc(rt, mesh_by_frame=mesh_by_frame, kp3d_by_frame=kp3d_by_frame,
                               kp2d_by_frame=kp2d_by_frame, vis_by_frame=vis_by_frame,
                               masks_by_frame=masks_by_frame)

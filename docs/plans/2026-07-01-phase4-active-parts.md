@@ -120,13 +120,13 @@ HEADLESS_47 = [n for n in FULL_50 if n not in ("Antenna_Base", "EyeL", "EyeR")]
 
 
 def test_canonical_kp_names_match_stac_order():
-    from jarvis_jax.cse.active_parts import CANONICAL_KP_NAMES
+    from jarvis_jax.tracking.active_parts import CANONICAL_KP_NAMES
     assert CANONICAL_KP_NAMES == FULL_50
     assert len(CANONICAL_KP_NAMES) == 50
 
 
 def test_part_table_shape_and_names():
-    from jarvis_jax.cse.active_parts import PART_TABLE
+    from jarvis_jax.tracking.active_parts import PART_TABLE
     assert set(PART_TABLE) == {"head", "wing_left", "wing_right",
                                "legT1L", "legT1R", "legT2L", "legT2R", "legT3L", "legT3R"}
     # head has kps but NO joints (rigid weld) and its own mesh segs.
@@ -147,7 +147,7 @@ def test_part_table_shape_and_names():
 
 
 def test_derive_active_parts_amputee_headless_full():
-    from jarvis_jax.cse.active_parts import derive_active_parts
+    from jarvis_jax.tracking.active_parts import derive_active_parts
     amp = derive_active_parts(AMPUTEE_44)
     assert amp["off"] == ["legT1R"]
     assert "legT1R" not in amp["on"] and "head" in amp["on"]
@@ -161,7 +161,7 @@ def test_derive_active_parts_amputee_headless_full():
 
 
 def test_derive_active_parts_override():
-    from jarvis_jax.cse.active_parts import derive_active_parts
+    from jarvis_jax.tracking.active_parts import derive_active_parts
     d = derive_active_parts(FULL_50, override=["wing_left"])
     assert d["off"] == ["wing_left"]
     with pytest.raises(ValueError):
@@ -171,7 +171,7 @@ def test_derive_active_parts_override():
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `cd third_party/jarvis_jax && JAX_PLATFORMS=cpu OMP_NUM_THREADS=4 python -m pytest tests/test_active_parts.py -v`
-Expected: FAIL with `ModuleNotFoundError: No module named 'jarvis_jax.cse.active_parts'`.
+Expected: FAIL with `ModuleNotFoundError: No module named 'jarvis_jax.tracking.active_parts'`.
 
 - [ ] **Step 3: Write minimal implementation**
 
@@ -322,7 +322,7 @@ _HAVE_MODEL = os.path.exists(XML) and os.path.exists(MESH)
 
 @pytest.mark.skipif(not _HAVE_MODEL, reason="V1 model / mesh not present")
 def test_build_active_mask_amputee_locks_t1r_38_48():
-    from jarvis_jax.cse.active_parts import build_active_mask, derive_active_parts
+    from jarvis_jax.tracking.active_parts import build_active_mask, derive_active_parts
     off = derive_active_parts(AMPUTEE_44)["off"]         # ["legT1R"]
     mask = build_active_mask(AMPUTEE_44, XML, MESH, off)
     # T1R hinges are qpos 38..48 inclusive (11 DOF).
@@ -344,7 +344,7 @@ def test_build_active_mask_amputee_locks_t1r_38_48():
 
 @pytest.mark.skipif(not _HAVE_MODEL, reason="V1 model / mesh not present")
 def test_build_active_mask_headless_no_joints_but_geoms_excluded():
-    from jarvis_jax.cse.active_parts import build_active_mask, derive_active_parts
+    from jarvis_jax.tracking.active_parts import build_active_mask, derive_active_parts
     off = derive_active_parts(HEADLESS_47)["off"]        # ["head"]
     mask = build_active_mask(HEADLESS_47, XML, MESH, off)
     # head has NO joints -> nothing locked.
@@ -359,7 +359,7 @@ def test_build_active_mask_headless_no_joints_but_geoms_excluded():
 
 @pytest.mark.skipif(not _HAVE_MODEL, reason="V1 model / mesh not present")
 def test_build_active_mask_full_schema_is_identity():
-    from jarvis_jax.cse.active_parts import build_active_mask
+    from jarvis_jax.tracking.active_parts import build_active_mask
     mask = build_active_mask(FULL_50, XML, MESH, [])
     assert mask["qs_to_opt_mask"].all()
     assert mask["locked_qpos_idx"].size == 0
@@ -371,7 +371,7 @@ def test_build_active_mask_full_schema_is_identity():
 def test_build_active_mask_zeroes_present_off_markers_via_override():
     # SIMULATED case: full 50-name schema but legT1R toggled off by override ->
     # its distal markers ARE present, so their kps_to_opt coords must be zeroed.
-    from jarvis_jax.cse.active_parts import build_active_mask, CANONICAL_KP_NAMES
+    from jarvis_jax.tracking.active_parts import build_active_mask, CANONICAL_KP_NAMES
     mask = build_active_mask(FULL_50, XML, MESH, ["legT1R"])
     for nm in ("T1R_Tro", "T1R_FeTi", "T1R_TiTa", "T1R_TaT1", "T1R_TaT3", "T1R_TaTip"):
         j = FULL_50.index(nm)
@@ -382,7 +382,7 @@ def test_build_active_mask_zeroes_present_off_markers_via_override():
 
 
 def test_clamp_locked_qpos_pins_to_rest():
-    from jarvis_jax.cse.active_parts import clamp_locked_qpos
+    from jarvis_jax.tracking.active_parts import clamp_locked_qpos
     mask = {"locked_qpos_idx": np.array([38, 39, 48], np.int32),
             "rest_qpos": np.zeros(93)}
     q = np.random.default_rng(0).normal(size=(5, 93))
@@ -394,7 +394,7 @@ def test_clamp_locked_qpos_pins_to_rest():
 
 
 def test_apply_active_mask_to_inputs_gates_weights_and_dofs():
-    from jarvis_jax.cse.active_parts import apply_active_mask_to_inputs
+    from jarvis_jax.tracking.active_parts import apply_active_mask_to_inputs
     inp = {"kps_to_opt": np.ones(6, np.float32), "qs_to_opt": np.ones(4, bool),
            "kp_data": np.ones((3, 2, 3), np.float32)}
     mask = {"kps_to_opt_mask": np.array([1, 1, 1, 0, 0, 0], np.float32),
@@ -705,9 +705,9 @@ Add to `third_party/jarvis_jax/tests/test_silhouette_ik_solve.py`:
 
 ```python
 def test_stac_wing_idx_name_based_full_and_shifted():
-    from jarvis_jax.cse.silhouette_ik_solve import _stac_wing_idx, _COCO_KEYPOINT_NAMES
+    from jarvis_jax.tracking.silhouette_ik_solve import _stac_wing_idx, _COCO_KEYPOINT_NAMES
     # full STAC order: WingL_V12=6, WingL_V13=7, WingR_V12=8, WingR_V13=9.
-    from jarvis_jax.cse.active_parts import CANONICAL_KP_NAMES
+    from jarvis_jax.tracking.active_parts import CANONICAL_KP_NAMES
     idx = _stac_wing_idx(CANONICAL_KP_NAMES)
     assert idx == {"left": (6, 7), "right": (8, 9)}
     # headless-like: drop Antenna_Base/EyeL/EyeR -> wings shift to 3,4,5,6.
@@ -718,8 +718,8 @@ def test_stac_wing_idx_name_based_full_and_shifted():
 
 def test_withhold_wing_kp_name_based_shifted_order():
     import numpy as np
-    from jarvis_jax.cse.silhouette_ik_solve import _withhold_wing_kp
-    from jarvis_jax.cse.active_parts import CANONICAL_KP_NAMES
+    from jarvis_jax.tracking.silhouette_ik_solve import _withhold_wing_kp
+    from jarvis_jax.tracking.active_parts import CANONICAL_KP_NAMES
     hl = [n for n in CANONICAL_KP_NAMES if n not in ("Antenna_Base", "EyeL", "EyeR")]
     kp = np.ones((3, len(hl), 3))
     out = _withhold_wing_kp(kp, hl)
@@ -733,8 +733,8 @@ def test_augment_wing_markers_writes_shifted_indices_under_headless_order():
     """Regression: the coco-slot bridge must fill the SHIFTED STAC wing indices
     (3,4,5,6) under a headless-like kp order, not the full-schema 6,7,8,9."""
     import numpy as np
-    from jarvis_jax.cse.silhouette_ik_solve import _augment_wing_markers_stac_order
-    from jarvis_jax.cse.active_parts import CANONICAL_KP_NAMES
+    from jarvis_jax.tracking.silhouette_ik_solve import _augment_wing_markers_stac_order
+    from jarvis_jax.tracking.active_parts import CANONICAL_KP_NAMES
     hl = [n for n in CANONICAL_KP_NAMES if n not in ("Antenna_Base", "EyeL", "EyeR")]
     T = 2
     kp = np.full((T, len(hl), 3), np.nan)         # all missing -> only_missing fills
@@ -795,7 +795,7 @@ Thread `active_parts` through `run_single_fly` (signature line ~683 add `active_
 
 ```python
     # --- Phase 4: active-parts mask (headless / amputation) ---
-    from jarvis_jax.cse.active_parts import (
+    from jarvis_jax.tracking.active_parts import (
         derive_active_parts, build_active_mask, apply_active_mask_to_inputs, clamp_locked_qpos)
     kp_names_stac = list(inputs["kp_names"])
     if active_parts is None:
@@ -858,7 +858,7 @@ def test_simulated_no_phantom_t1r_off_on_normal_recording(tmp_path):
       (1) solved off-leg joints (qpos 38..48) stay at rest across ALL frames;
       (2) present-marker reproj_px is within eps of the unmasked run (the mask
           does not perturb the rest of the fly)."""
-    from jarvis_jax.cse.silhouette_ik_solve import run_single_fly
+    from jarvis_jax.tracking.silhouette_ik_solve import run_single_fly
     common = dict(ik_h5=NORM_IK, model_xml=XML, mesh_npz=MESH, root=ROOT,
                   split="val", use_silhouette=False, max_frames=8, n_iter=40,
                   out_dir=str(tmp_path))
@@ -925,7 +925,7 @@ Add to `third_party/jarvis_jax/tests/test_active_parts.py`:
 ```python
 @pytest.mark.skipif(not _HAVE_MODEL, reason="V1 model / mesh not present")
 def test_excluded_fps_indices_match_seg_ids():
-    from jarvis_jax.cse.active_parts import build_active_mask, excluded_fps_indices, derive_active_parts
+    from jarvis_jax.tracking.active_parts import build_active_mask, excluded_fps_indices, derive_active_parts
     off = derive_active_parts(HEADLESS_47)["off"]        # ["head"]
     mask = build_active_mask(HEADLESS_47, XML, MESH, off)
     fps_ex = excluded_fps_indices(mask, MESH)
@@ -942,7 +942,7 @@ def test_excluded_fps_indices_match_seg_ids():
 
 @pytest.mark.skipif(not _HAVE_MODEL, reason="V1 model / mesh not present")
 def test_wing_side_vertices_ignores_excluded_segs():
-    from jarvis_jax.cse.silhouette_landmarks import wing_side_vertices
+    from jarvis_jax.tracking.silhouette_landmarks import wing_side_vertices
     base = wing_side_vertices(MESH)
     # excluding a LEG's segs must not change the WING tip/prox selection
     # (wings and that leg are disjoint) -> defensive no-op for wings.
@@ -1026,7 +1026,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 - Test: `third_party/jarvis_jax/tests/test_active_parts_realdata.py` **(new)** — `assert_dataprep_artifacts_exist(...)` helper + a `skipif`-gated existence test (NOT the heavy generation).
 
 **Interfaces:**
-- Consumes: `JARVIS-HybridNet/tools/sam3_label_masks.py` CLI (`--data-root`, `--splits`, `--confidence`, `--qc-thresh`, `--resolution`; out defaults to `<data-root>/sam3_masks/<split>/<rec>/<cam>/Frame_*.npz`); `python -m jarvis_jax.densepose.cse_labels build-bout` (Task-3-patched); `python -m jarvis_jax.cse.run_stac_bout` (existing).
+- Consumes: `JARVIS-HybridNet/tools/sam3_label_masks.py` CLI (`--data-root`, `--splits`, `--confidence`, `--qc-thresh`, `--resolution`; out defaults to `<data-root>/sam3_masks/<split>/<rec>/<cam>/Frame_*.npz`); `python -m jarvis_jax.densepose.cse_labels build-bout` (Task-3-patched); `python -m jarvis_jax.tracking.run_stac_bout` (existing).
 - Produces (artifacts on disk, PER CONDITION, using the TRAIN split for a larger sample):
   - `<COND>/sam3_masks/train/<rec>/<Cam*>/Frame_*.npz`
   - `<COND>/cse_work/<rec>_bout.h5` (Task-3 reduced schema: 44/47 kp_names)
@@ -1071,7 +1071,7 @@ python -m jarvis_jax.densepose.cse_labels build-bout \
   --out "$WORK/${REC}_bout.h5"
 
 # --- Stage C: STAC solve (JAX; LD_LIBRARY_PATH MUST be unset) ---
-python -m jarvis_jax.cse.run_stac_bout \
+python -m jarvis_jax.tracking.run_stac_bout \
   --bout "$WORK/${REC}_bout.h5" \
   --out "$WORK/${REC}/Fruitfly_ik_v1_cse.h5" \
   --stac-config-dir "$STAC_CFG" \
@@ -1203,7 +1203,7 @@ def test_run_active_parts_ik_per_frame(cond, rec, expect_off, locked, tmp_path):
       - the missing part is not hallucinated (locked qpos == rest)."""
     if not _ik_ready(cond, rec):
         pytest.skip(f"run T6 dataprep for {os.path.basename(cond)} first")
-    from jarvis_jax.cse.run_active_parts_ik import run_active_parts_ik
+    from jarvis_jax.tracking.run_active_parts_ik import run_active_parts_ik
     out = run_active_parts_ik(
         rec, cond_root=cond, model_xml=XML, mesh_npz=MESH, split=SPLIT,
         use_silhouette=True, max_frames=0, n_iter=50, out_dir=str(tmp_path))
@@ -1227,7 +1227,7 @@ def test_run_active_parts_ik_per_frame(cond, rec, expect_off, locked, tmp_path):
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `cd third_party/jarvis_jax && JAX_PLATFORMS=cpu OMP_NUM_THREADS=4 python -m pytest tests/test_active_parts_realdata.py::test_run_active_parts_ik_per_frame -v`
-Expected: FAIL with `ModuleNotFoundError: No module named 'jarvis_jax.cse.run_active_parts_ik'` (if the T6 artifacts exist) or SKIP (if not yet generated). Either confirms the test is wired; the import failure is the RED we drive.
+Expected: FAIL with `ModuleNotFoundError: No module named 'jarvis_jax.tracking.run_active_parts_ik'` (if the T6 artifacts exist) or SKIP (if not yet generated). Either confirms the test is wired; the import failure is the RED we drive.
 
 - [ ] **Step 3: Write minimal implementation**
 
@@ -1248,8 +1248,8 @@ from __future__ import annotations
 import json
 import os
 
-from jarvis_jax.cse.active_parts import derive_active_parts
-from jarvis_jax.cse.silhouette_ik_solve import run_single_fly
+from jarvis_jax.tracking.active_parts import derive_active_parts
+from jarvis_jax.tracking.silhouette_ik_solve import run_single_fly
 
 
 def run_active_parts_ik(recording, *, cond_root, model_xml, mesh_npz, split="train",

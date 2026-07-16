@@ -50,7 +50,7 @@ Create `third_party/jarvis_jax/tests/test_affine_camera.py`:
 
 ```python
 import numpy as np
-from jarvis_jax.cse.affine_camera import factor_affine, reconstruct_affine
+from jarvis_jax.tracking.affine_camera import factor_affine, reconstruct_affine
 
 # A real telecentric calibration matrix (Cam2012630, 2026_03_18_15_31_22).
 P_REAL = np.array([
@@ -81,7 +81,7 @@ def test_factor_K2_upper_triangular_positive_diag():
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `cd third_party/jarvis_jax && JAX_PLATFORMS=cpu OMP_NUM_THREADS=4 python -m pytest tests/test_affine_camera.py -v`
-Expected: FAIL with `ModuleNotFoundError: No module named 'jarvis_jax.cse.affine_camera'`.
+Expected: FAIL with `ModuleNotFoundError: No module named 'jarvis_jax.tracking.affine_camera'`.
 
 - [ ] **Step 3: Write minimal implementation**
 
@@ -165,7 +165,7 @@ Append to `third_party/jarvis_jax/tests/test_affine_camera.py`:
 def test_project_affine_matches_reprojection_tool(tmp_path):
     import cv2
     from jarvis_jax.geometry.reprojection_tool import ReprojectionTool
-    from jarvis_jax.cse.affine_camera import project_affine
+    from jarvis_jax.tracking.affine_camera import project_affine
     # Write P_REAL as a one-camera calib dir and compare projections.
     d = tmp_path / "calib"; d.mkdir()
     fs = cv2.FileStorage(str(d / "Cam0001.yaml"), cv2.FILE_STORAGE_WRITE)
@@ -179,7 +179,7 @@ def test_project_affine_matches_reprojection_tool(tmp_path):
 
 def test_project_from_params_matches_project_affine():
     import jax.numpy as jnp
-    from jarvis_jax.cse.affine_camera import factor_affine, project_affine, project_from_params
+    from jarvis_jax.tracking.affine_camera import factor_affine, project_affine, project_from_params
     K2, R, t = factor_affine(P_REAL)
     X = np.array([[1.5, -0.7, 12.0], [0.2, 0.3, 9.0]])
     uv_np = project_affine(P_REAL, X)                                   # (2,2)
@@ -244,8 +244,8 @@ Create `third_party/jarvis_jax/tests/test_bundle_adjust.py`:
 
 ```python
 import numpy as np
-from jarvis_jax.cse.affine_camera import reconstruct_affine, factor_affine, project_affine
-from jarvis_jax.cse.bundle_adjust import assemble_observations, initial_points
+from jarvis_jax.tracking.affine_camera import reconstruct_affine, factor_affine, project_affine
+from jarvis_jax.tracking.bundle_adjust import assemble_observations, initial_points
 
 P_REAL = np.array([
     [8.1001, 0.0074869, -0.031773, -2.828],
@@ -280,7 +280,7 @@ def test_assemble_and_triangulate_recovers_points():
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `cd third_party/jarvis_jax && JAX_PLATFORMS=cpu OMP_NUM_THREADS=4 python -m pytest tests/test_bundle_adjust.py -v`
-Expected: FAIL with `ModuleNotFoundError: No module named 'jarvis_jax.cse.bundle_adjust'`.
+Expected: FAIL with `ModuleNotFoundError: No module named 'jarvis_jax.tracking.bundle_adjust'`.
 
 - [ ] **Step 3: Write minimal implementation**
 
@@ -379,7 +379,7 @@ Append to `third_party/jarvis_jax/tests/test_bundle_adjust.py`:
 
 ```python
 def test_solve_recovers_perturbed_cameras():
-    from jarvis_jax.cse.bundle_adjust import solve_bundle_adjust, mean_reproj_error, initial_points
+    from jarvis_jax.tracking.bundle_adjust import solve_bundle_adjust, mean_reproj_error, initial_points
     true_cams = _two_cam_rig()
     rng = np.random.default_rng(1)
     pts = rng.uniform([-3, -3, 8], [3, 3, 14], size=(40, 3))
@@ -413,7 +413,7 @@ Append to `third_party/jarvis_jax/jarvis_jax/cse/bundle_adjust.py`:
 
 ```python
 def mean_reproj_error(obs: Observations, cam_mats, points) -> float:
-    from jarvis_jax.cse.affine_camera import project_affine
+    from jarvis_jax.tracking.affine_camera import project_affine
     points = np.asarray(points)
     errs = []
     for c, pid, uv in zip(obs.cam_idx, obs.point_idx, obs.uv):
@@ -427,7 +427,7 @@ def solve_bundle_adjust(obs: Observations, cam_mats, *, refine="pose",
                         k_prior=1e4, n_iter=80):
     """Affine-camera bundle adjustment via jaxls LM. See module docstring."""
     import jax, jax.numpy as jnp, jaxls, jaxlie
-    from jarvis_jax.cse.affine_camera import factor_affine, reconstruct_affine, project_from_params
+    from jarvis_jax.tracking.affine_camera import factor_affine, reconstruct_affine, project_from_params
 
     C, n_pts = obs.n_cams, obs.n_points
     K2_0 = np.zeros((C, 2, 2)); R_0 = np.zeros((C, 3, 3)); t_0 = np.zeros((C, 2))
@@ -533,7 +533,7 @@ Append to `third_party/jarvis_jax/tests/test_bundle_adjust.py`:
 
 ```python
 def test_refine_reverts_when_no_improvement():
-    from jarvis_jax.cse.bundle_adjust import refine_calibration
+    from jarvis_jax.tracking.bundle_adjust import refine_calibration
     # Perfect data + perfect cameras: BA cannot improve -> must return factory cams.
     cams = _two_cam_rig()
     rng = np.random.default_rng(2)
@@ -605,7 +605,7 @@ Append this complete test to `third_party/jarvis_jax/tests/test_bundle_adjust.py
 ```python
 def test_load_kp2d_orders_cameras_like_reprojection_tool(tmp_path):
     import json, cv2
-    from jarvis_jax.cse.run_bundle_adjust import load_kp2d_from_coco
+    from jarvis_jax.tracking.run_bundle_adjust import load_kp2d_from_coco
     root = tmp_path; rec = "RECX"
     (root / "annotations").mkdir(parents=True)
     (root / "calib_params" / rec).mkdir(parents=True)
@@ -634,7 +634,7 @@ def test_load_kp2d_orders_cameras_like_reprojection_tool(tmp_path):
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `cd third_party/jarvis_jax && JAX_PLATFORMS=cpu OMP_NUM_THREADS=4 python -m pytest tests/test_bundle_adjust.py -k orders_cameras -v`
-Expected: FAIL with `ModuleNotFoundError: No module named 'jarvis_jax.cse.run_bundle_adjust'`.
+Expected: FAIL with `ModuleNotFoundError: No module named 'jarvis_jax.tracking.run_bundle_adjust'`.
 
 - [ ] **Step 3: Write minimal implementation**
 
@@ -643,7 +643,7 @@ Create `third_party/jarvis_jax/jarvis_jax/cse/run_bundle_adjust.py`:
 ```python
 """CLI: per-recording affine-camera bundle adjustment from coco keypoints.
 
-    python -m jarvis_jax.cse.run_bundle_adjust \
+    python -m jarvis_jax.tracking.run_bundle_adjust \
         --root /.../red_data_unified_V3 --recording 2026_03_18_15_31_22 --split val \
         --calib-out /.../calib_refined/2026_03_18_15_31_22 \
         --report-out /.../calib_refined/2026_03_18_15_31_22/ba_report.json \
@@ -654,7 +654,7 @@ import argparse, json, os
 import numpy as np
 import cv2
 from jarvis_jax.geometry.reprojection_tool import ReprojectionTool
-from jarvis_jax.cse.bundle_adjust import assemble_observations, refine_calibration
+from jarvis_jax.tracking.bundle_adjust import assemble_observations, refine_calibration
 
 
 def load_kp2d_from_coco(root, split, recording, max_frames=0):
@@ -729,7 +729,7 @@ Run (after `micromamba activate 3d_tracking && unset LD_LIBRARY_PATH`):
 
 ```bash
 cd third_party/jarvis_jax
-python -m jarvis_jax.cse.run_bundle_adjust \
+python -m jarvis_jax.tracking.run_bundle_adjust \
   --root /gscratch/portia/eabe/data/Johnson_lab/red_data/red_data_unified_V3 \
   --recording 2026_03_18_15_31_22 --split val \
   --calib-out /gscratch/portia/eabe/data/Johnson_lab/cse_work/calib_refined/2026_03_18_15_31_22 \

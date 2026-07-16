@@ -1,7 +1,7 @@
 import numpy as np
 import jax.numpy as jnp
 import pytest
-from jarvis_jax.cse.courtship_predict_2d import (
+from jarvis_jax.tracking.predict_2d import (
     peaks_and_conf, detector_to_model_perm, reorder_detector_to_model)
 from jarvis_jax.geometry.center3d import centroids_to_fullpx
 

@@ -238,7 +238,7 @@ Create `third_party/jarvis_jax/tests/test_courtship_bout_masks.py`:
 
 ```python
 import numpy as np
-from jarvis_jax.cse.courtship_bout_masks import unpack_one, load_bout_masks
+from jarvis_jax.tracking.bout_masks import unpack_one, load_bout_masks
 
 
 def _synth_npz(tmp_path):
@@ -342,7 +342,7 @@ Create `third_party/jarvis_jax/tests/test_courtship_triangulate.py`:
 
 ```python
 import numpy as np
-from jarvis_jax.cse.courtship_triangulate import triangulate_keypoints
+from jarvis_jax.tracking.triangulate import triangulate_keypoints
 
 
 def _cam(P):  # P is (3,4); center3d expects (4,3)=P.T
@@ -454,7 +454,7 @@ Create `third_party/jarvis_jax/tests/test_courtship_predict_2d.py`:
 ```python
 import numpy as np
 import jax.numpy as jnp
-from jarvis_jax.cse.courtship_predict_2d import peaks_and_conf
+from jarvis_jax.tracking.predict_2d import peaks_and_conf
 from jarvis_jax.geometry.center3d import centroids_to_fullpx
 
 
@@ -581,7 +581,7 @@ Run on the GPU node:
 ```bash
 cd third_party/jarvis_jax && OMP_NUM_THREADS=4 python -c "
 import numpy as np
-from jarvis_jax.cse.courtship_predict_2d import load_detector, _forward
+from jarvis_jax.tracking.predict_2d import load_detector, _forward
 vit = load_detector('/gscratch/portia/eabe/data/Johnson_lab/jax_vitpose_runs/v3_kp_maskaware/final')
 k,c = _forward(vit, np.zeros((2,448,448,4), np.uint8))
 print('kp', np.asarray(k).shape, 'conf', np.asarray(c).shape)"
@@ -619,7 +619,7 @@ Create `third_party/jarvis_jax/tests/test_courtship_stac.py`:
 ```python
 import numpy as np
 from omegaconf import OmegaConf
-import jarvis_jax.cse.courtship_stac as cst
+import jarvis_jax.tracking.stac as cst
 
 
 def _cfg():
@@ -822,7 +822,7 @@ Create `third_party/jarvis_jax/tests/test_courtship_polish.py`:
 
 ```python
 import numpy as np
-from jarvis_jax.cse.courtship_polish import courtship_targets_from_masks
+from jarvis_jax.tracking.polish import courtship_targets_from_masks
 
 
 def test_targets_from_masks_shapes_and_present():
@@ -864,13 +864,13 @@ import jax.numpy as jnp
 from scipy import ndimage
 
 import stac_mjx.utils as stac_utils
-from jarvis_jax.cse.silhouette_ik import load_anatomy, make_fk_repose
-from jarvis_jax.cse.silhouette_ik_solve import build_solver_inputs, _umeyama
-from jarvis_jax.cse.silhouette_dof import appendage_vertex_indices, build_appendage_dof_mask
-from jarvis_jax.cse.silhouette_targets import silhouette_fk_indices
-from jarvis_jax.cse.silhouette_sdf import _mask_bbox, _mask_to_sdf_crop, _BIG
-from jarvis_jax.cse.silhouette_boundary import sample_boundary_points
-from jarvis_jax.cse.silhouette_joint_ik import SilhouetteJaxlsBatchSolver
+from jarvis_jax.tracking.silhouette_ik import load_anatomy, make_fk_repose
+from jarvis_jax.tracking.silhouette_ik_solve import build_solver_inputs, _umeyama
+from jarvis_jax.tracking.silhouette_dof import appendage_vertex_indices, build_appendage_dof_mask
+from jarvis_jax.tracking.silhouette_targets import silhouette_fk_indices
+from jarvis_jax.tracking.silhouette_sdf import _mask_bbox, _mask_to_sdf_crop, _BIG
+from jarvis_jax.tracking.silhouette_boundary import sample_boundary_points
+from jarvis_jax.tracking.silhouette_joint_ik import SilhouetteJaxlsBatchSolver
 
 
 def courtship_targets_from_masks(masks, present, cam_affine, *, erode_px, n_points,
@@ -969,7 +969,7 @@ def polish_bout(stac_h5, cfg, kp3d_mm, kp3d_conf, masks_dict, calib_dir):
 - [ ] **Step 4: Run the targets test (CPU) + confirm imports**
 
 Run: `cd third_party/jarvis_jax && JAX_PLATFORMS=cpu python -m pytest tests/test_courtship_polish.py -v`
-Expected: 1 passed. Also `JAX_PLATFORMS=cpu python -c "import jarvis_jax.cse.courtship_polish"` → no error.
+Expected: 1 passed. Also `JAX_PLATFORMS=cpu python -c "import jarvis_jax.tracking.polish"` → no error.
 
 - [ ] **Step 5: Commit**
 
@@ -999,7 +999,7 @@ Create `third_party/jarvis_jax/tests/test_courtship_qc.py`:
 ```python
 import json
 import numpy as np
-from jarvis_jax.cse.courtship_qc import aggregate_session_qc
+from jarvis_jax.tracking.session_qc import aggregate_session_qc
 
 
 def _bout_qc(p, iou, reproj, n):
@@ -1118,7 +1118,7 @@ Create `third_party/jarvis_jax/tests/test_courtship_resume.py`:
 
 ```python
 import os, numpy as np
-from jarvis_jax.cse.courtship_resume import (atomic_save_npz, atomic_save_json,
+from jarvis_jax.tracking.resume import (atomic_save_npz, atomic_save_json,
                                              stage_done, mark_done, bout_complete)
 
 

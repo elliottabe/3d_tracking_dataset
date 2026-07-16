@@ -1,6 +1,6 @@
 import json
 import numpy as np
-from jarvis_jax.cse.courtship_qc import aggregate_session_qc
+from jarvis_jax.tracking.session_qc import aggregate_session_qc
 
 
 def _bout_qc(p, iou, reproj, n):

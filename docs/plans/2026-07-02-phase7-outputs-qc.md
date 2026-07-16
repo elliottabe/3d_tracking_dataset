@@ -22,10 +22,10 @@
 - `stac_mjx.io_dict_to_hdf5.save(filename, dic, compression='gzip', compression_opts=5, chunked_datasets=None)` and `.load(filename, ASLIST=False, enable_jax=False, auto_convert_lists=True)` — nested-dict h5 write/read.
 - `stac_mjx.io.load_stac_data(ik_h5) -> (config, stac_data)`; `stac_data` has `.qpos`, `.kp_data`, `.marker_sites`, `.kp_names`, `.names_qpos`, `.offsets`. (Used inside `build_solver_inputs`; we also read `marker_sites` directly via `io_dict_to_hdf5.load(ik_h5)["marker_sites"]` as `run_single_fly` does.)
 - `stac_mjx.utils`: `kinematics(mjx_model, data)`, `com_pos(mjx_model, data)`, `get_site_xpos(data, site_idxs) -> (n_site,3)`.
-- `jarvis_jax.cse.silhouette_ik.load_anatomy(model_xml, mesh_npz) -> dict(m, mx, dx, vlocal, vgeom, faces, fps, seg_names, seg_ids, vertex_segment, nq, qpos0)`.
-- `jarvis_jax.cse.silhouette_ik.make_fk_repose(anat) -> fk_repose(qpos, scale=1.0, indices=None) -> (K,3)` MODEL-frame world verts (jitted; `indices` selects into the FULL vertex array).
-- `jarvis_jax.cse.silhouette_ik_solve`: `build_solver_inputs(ik_h5, model_xml) -> dict(mjx_model, mjx_data, q_init(T,nq), kp_data(T,n_kp,3), kps_to_opt, qs_to_opt, lb, ub, site_idxs(n_kp,), q_reg_weights, kp_names)`; `_umeyama(src,dst)->(s,R,t)` (dst=s*(R@src.T).T+t); `_model_to_mm(pts,s,R,t)`; `_mm_to_model(pts,s,R,t)`; `_triangulate_kp_mm(rt, ik_kpnames, coco_kpnames, cam2img, id2ann_multi, ann_id_by_image=None) -> (kp_mm(n,3), valid(n,) bool)`; `_cam2img_for_frame(fs_imgids_row, id2file, cam_names) -> {cam_idx:image_id}`; `_ann_for_image(id2ann_multi, image_id, ann_id_by_image=None) -> ann|None`; `_load_sam_mask(root, split, file_name, ann_id) -> mask(H,W) bool | None`.
-- `jarvis_jax.cse.run_silhouette_polish.iou_of_projected_verts(verts2d, mask_shape, ref_mask) -> float` (hard); `soft_iou_of_verts(verts2d, mask, *, sigma=1.3, splat_k=2) -> float` (soft, eval-only).
+- `jarvis_jax.tracking.silhouette_ik.load_anatomy(model_xml, mesh_npz) -> dict(m, mx, dx, vlocal, vgeom, faces, fps, seg_names, seg_ids, vertex_segment, nq, qpos0)`.
+- `jarvis_jax.tracking.silhouette_ik.make_fk_repose(anat) -> fk_repose(qpos, scale=1.0, indices=None) -> (K,3)` MODEL-frame world verts (jitted; `indices` selects into the FULL vertex array).
+- `jarvis_jax.tracking.silhouette_ik_solve`: `build_solver_inputs(ik_h5, model_xml) -> dict(mjx_model, mjx_data, q_init(T,nq), kp_data(T,n_kp,3), kps_to_opt, qs_to_opt, lb, ub, site_idxs(n_kp,), q_reg_weights, kp_names)`; `_umeyama(src,dst)->(s,R,t)` (dst=s*(R@src.T).T+t); `_model_to_mm(pts,s,R,t)`; `_mm_to_model(pts,s,R,t)`; `_triangulate_kp_mm(rt, ik_kpnames, coco_kpnames, cam2img, id2ann_multi, ann_id_by_image=None) -> (kp_mm(n,3), valid(n,) bool)`; `_cam2img_for_frame(fs_imgids_row, id2file, cam_names) -> {cam_idx:image_id}`; `_ann_for_image(id2ann_multi, image_id, ann_id_by_image=None) -> ann|None`; `_load_sam_mask(root, split, file_name, ann_id) -> mask(H,W) bool | None`.
+- `jarvis_jax.tracking.run_silhouette_polish.iou_of_projected_verts(verts2d, mask_shape, ref_mask) -> float` (hard); `soft_iou_of_verts(verts2d, mask, *, sigma=1.3, splat_k=2) -> float` (soft, eval-only).
 - `jarvis_jax.geometry.reprojection_tool.ReprojectionTool(calib_dir)`: `.cameras` (dict name->Camera), `.num_cameras`, `._camera_list[c].cameraMatrix` (3,4 DLT), `.reproject_point(X_mm) -> (n_cam,2)` (DLT + perspective divide — the correct reporting projection), `.reconstruct_point(points2d(n_cam,2), cams_to_use=None) -> X_mm(3,)`.
 - `imageio.get_writer(path, fps=FPS)` context manager; `video.append_data(frame_uint8)` (mirror `stac-mjx/stac_mjx/stac.py:735,745` — do NOT import stac's helper; use imageio directly).
 - Scenario qpos outputs (CONSUME, do not change): single & active-parts write `{out_dir}/{recording}_qpos.npz` (key `qpos` (T,nq)); multifly writes per fly `{out_dir}/fly{fid}/{recording}_qpos.npz`.
@@ -73,7 +73,7 @@ import pytest
 
 
 def test_mesh_subset_indices_full_and_named():
-    from jarvis_jax.cse import outputs
+    from jarvis_jax.tracking import outputs
     fake_anat = {"fps": {500: np.arange(0, 61666, 123, dtype=np.int64)[:500]},
                  "vlocal": np.zeros((61666, 3), np.float32)}
     idx = outputs.mesh_subset_indices(fake_anat, subset="fps_500")
@@ -85,7 +85,7 @@ def test_mesh_subset_indices_full_and_named():
 
 
 def test_write_outputs_h5_roundtrip(tmp_path):
-    from jarvis_jax.cse import outputs
+    from jarvis_jax.tracking import outputs
     import stac_mjx.io_dict_to_hdf5 as ioh5
     T, nq, K, nkp = 3, 93, 5, 50
     qpos = np.random.default_rng(0).normal(size=(T, nq)).astype(np.float32)
@@ -111,7 +111,7 @@ def test_write_outputs_h5_roundtrip(tmp_path):
 
 
 def test_fk_mesh_world_mm_applies_bridge_and_nan(tmp_path):
-    from jarvis_jax.cse import outputs
+    from jarvis_jax.tracking import outputs
     # fk stub: identity model verts independent of qpos (K fixed points)
     K = 4
     base = np.array([[0., 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1]], np.float32)
@@ -134,7 +134,7 @@ def test_fk_mesh_world_mm_applies_bridge_and_nan(tmp_path):
 - [ ] **Step 2: Run tests to verify they fail**
 
 Run: `cd third_party/jarvis_jax && JAX_PLATFORMS=cpu OMP_NUM_THREADS=4 python -m pytest tests/test_outputs.py -q`
-Expected: FAIL with `ModuleNotFoundError: No module named 'jarvis_jax.cse.outputs'`
+Expected: FAIL with `ModuleNotFoundError: No module named 'jarvis_jax.tracking.outputs'`
 
 - [ ] **Step 3: Write minimal implementation**
 
@@ -257,7 +257,7 @@ Add to `tests/test_outputs.py`:
 def test_build_fly_outputs_derives_root_scale(monkeypatch, tmp_path):
     """build_fly_outputs must set root_se3 = qpos[:, :7] and scale from the
     per-frame bridge s (nan where bridge is None), and write the h5."""
-    from jarvis_jax.cse import outputs
+    from jarvis_jax.tracking import outputs
     import stac_mjx.io_dict_to_hdf5 as ioh5
     T, nq, nkp, K = 3, 93, 50, 4
 
@@ -291,19 +291,19 @@ def test_build_fly_outputs_derives_root_scale(monkeypatch, tmp_path):
 - [ ] **Step 6: Run to verify the new test fails**
 
 Run: `cd third_party/jarvis_jax && JAX_PLATFORMS=cpu OMP_NUM_THREADS=4 python -m pytest tests/test_outputs.py::test_build_fly_outputs_derives_root_scale -q`
-Expected: FAIL with `AttributeError: module 'jarvis_jax.cse.outputs' has no attribute 'build_fly_outputs'`
+Expected: FAIL with `AttributeError: module 'jarvis_jax.tracking.outputs' has no attribute 'build_fly_outputs'`
 
 - [ ] **Step 7: Implement `build_fly_outputs` + helper**
 
 Append to `jarvis_jax/cse/outputs.py`:
 
 ```python
-from jarvis_jax.cse.silhouette_ik import load_anatomy, make_fk_repose
+from jarvis_jax.tracking.silhouette_ik import load_anatomy, make_fk_repose
 
 
 def _load_solver_bits(ik_h5, model_xml):
     """Return (mjx_model, mjx_data, site_idxs, kp_names) from build_solver_inputs."""
-    from jarvis_jax.cse.silhouette_ik_solve import build_solver_inputs
+    from jarvis_jax.tracking.silhouette_ik_solve import build_solver_inputs
     inp = build_solver_inputs(ik_h5, model_xml)
     return inp["mjx_model"], inp["mjx_data"], inp["site_idxs"], list(inp["kp_names"])
 
@@ -417,7 +417,7 @@ class _FakeRT:
 
 
 def test_per_camera_reproj_error_zero_on_consistent():
-    from jarvis_jax.cse.qc import per_camera_reproj_error
+    from jarvis_jax.tracking.qc import per_camera_reproj_error
     rt = _FakeRT()
     kp3d = np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
     kp2d = {0: np.array([[1., 2.], [4., 5.]]),   # (x,y)
@@ -429,7 +429,7 @@ def test_per_camera_reproj_error_zero_on_consistent():
 
 
 def test_per_camera_reproj_error_offset():
-    from jarvis_jax.cse.qc import per_camera_reproj_error
+    from jarvis_jax.tracking.qc import per_camera_reproj_error
     rt = _FakeRT()
     kp3d = np.array([[0.0, 0.0, 0.0]])
     kp2d = {0: np.array([[3.0, 4.0]])}   # true proj is (0,0); err = 5
@@ -439,7 +439,7 @@ def test_per_camera_reproj_error_offset():
 
 
 def test_loo_reproj_near_zero_when_consistent():
-    from jarvis_jax.cse.qc import loo_reproj
+    from jarvis_jax.tracking.qc import loo_reproj
     rt = _FakeRT()
     # one keypoint at (1,2,3); its two 2-D obs are the exact projections.
     kp2d = {0: np.array([[1., 2.]]), 1: np.array([[1., 3.]])}
@@ -451,7 +451,7 @@ def test_loo_reproj_near_zero_when_consistent():
 
 
 def test_loo_reproj_three_cams_consistent():
-    from jarvis_jax.cse.qc import loo_reproj
+    from jarvis_jax.tracking.qc import loo_reproj
 
     class _RT3(_FakeRT):
         def __init__(s):
@@ -475,7 +475,7 @@ def test_loo_reproj_three_cams_consistent():
 
 
 def test_qc_report_bundles_keys():
-    from jarvis_jax.cse.qc import qc_report
+    from jarvis_jax.tracking.qc import qc_report
     rt = _FakeRT()
     kp3d_by_frame = [np.array([[1., 2., 3.]])]
     mesh_by_frame = [np.zeros((0, 3))]              # no mesh -> empty iou
@@ -493,7 +493,7 @@ def test_qc_report_bundles_keys():
 - [ ] **Step 2: Run tests to verify they fail**
 
 Run: `cd third_party/jarvis_jax && JAX_PLATFORMS=cpu OMP_NUM_THREADS=4 python -m pytest tests/test_qc.py -q`
-Expected: FAIL with `ModuleNotFoundError: No module named 'jarvis_jax.cse.qc'`
+Expected: FAIL with `ModuleNotFoundError: No module named 'jarvis_jax.tracking.qc'`
 
 - [ ] **Step 3: Write minimal implementation**
 
@@ -573,7 +573,7 @@ def loo_reproj(rt, kp2d_by_cam, vis_by_cam):
 
 def silhouette_iou_report(rt, mesh_mm, masks_by_cam):
     """Hard+soft IoU of the projected posed mesh subset vs SAM masks, per cam."""
-    from jarvis_jax.cse.run_silhouette_polish import (
+    from jarvis_jax.tracking.run_silhouette_polish import (
         iou_of_projected_verts, soft_iou_of_verts)
     mesh_mm = np.asarray(mesh_mm, float)
     hard, soft = {}, {}
@@ -676,7 +676,7 @@ import pytest
 
 
 def test_draw_overlay_frame_returns_uint8_same_size():
-    from jarvis_jax.cse.reproj_video import draw_overlay_frame
+    from jarvis_jax.tracking.reproj_video import draw_overlay_frame
     raw = np.zeros((32, 40, 3), np.uint8)
     mesh2d = np.array([[5.0, 5.0], [10.0, 8.0], [20.0, 15.0]])
     kp2d = np.array([[6.0, 6.0], [25.0, 20.0]])
@@ -689,7 +689,7 @@ def test_draw_overlay_frame_returns_uint8_same_size():
 
 def test_write_camera_video_streams_and_counts(tmp_path):
     import imageio
-    from jarvis_jax.cse.reproj_video import write_camera_video
+    from jarvis_jax.tracking.reproj_video import write_camera_video
     T = 2
     frames = [np.zeros((32, 40, 3), np.uint8) for _ in range(T)]
     mesh2d = [np.array([[5.0, 5.0], [10.0, 8.0]]) for _ in range(T)]
@@ -708,7 +708,7 @@ def test_write_camera_video_streams_and_counts(tmp_path):
 - [ ] **Step 2: Run tests to verify they fail**
 
 Run: `cd third_party/jarvis_jax && JAX_PLATFORMS=cpu OMP_NUM_THREADS=4 python -m pytest tests/test_reproj_video.py -q`
-Expected: FAIL with `ModuleNotFoundError: No module named 'jarvis_jax.cse.reproj_video'`
+Expected: FAIL with `ModuleNotFoundError: No module named 'jarvis_jax.tracking.reproj_video'`
 
 - [ ] **Step 3: Write minimal implementation**
 
@@ -819,14 +819,14 @@ import pytest
 
 
 def test_module_importable_and_has_cli():
-    import jarvis_jax.cse.run_outputs_qc as m
+    import jarvis_jax.tracking.run_outputs_qc as m
     assert hasattr(m, "run_outputs_qc") and callable(m.run_outputs_qc)
     assert hasattr(m, "main") and callable(m.main)
     assert hasattr(m, "resolve_calib_dir") and callable(m.resolve_calib_dir)
 
 
 def test_resolve_calib_dir_prefers_refined(tmp_path):
-    from jarvis_jax.cse.run_outputs_qc import resolve_calib_dir
+    from jarvis_jax.tracking.run_outputs_qc import resolve_calib_dir
     rec = "2026_03_18_15_31_22"
     root = tmp_path / "root"
     cse = tmp_path / "cse_work"
@@ -843,7 +843,7 @@ def test_resolve_calib_dir_prefers_refined(tmp_path):
 
 
 def test_resolve_calib_dir_raises_when_missing(tmp_path):
-    from jarvis_jax.cse.run_outputs_qc import resolve_calib_dir
+    from jarvis_jax.tracking.run_outputs_qc import resolve_calib_dir
     with pytest.raises(FileNotFoundError):
         resolve_calib_dir("nope", root=str(tmp_path / "r"), cse_work_dir=str(tmp_path / "c"))
 ```
@@ -851,7 +851,7 @@ def test_resolve_calib_dir_raises_when_missing(tmp_path):
 - [ ] **Step 2: Run tests to verify they fail**
 
 Run: `cd third_party/jarvis_jax && JAX_PLATFORMS=cpu OMP_NUM_THREADS=4 python -m pytest tests/test_run_outputs_qc.py -q`
-Expected: FAIL with `ModuleNotFoundError: No module named 'jarvis_jax.cse.run_outputs_qc'`
+Expected: FAIL with `ModuleNotFoundError: No module named 'jarvis_jax.tracking.run_outputs_qc'`
 
 - [ ] **Step 3: Write minimal implementation**
 
@@ -900,7 +900,7 @@ def compute_bridges(recording, *, ik_h5, model_xml, root, split, calib_dir,
     """Per-frame model->mm Umeyama bridges, exactly as run_single_fly."""
     import stac_mjx.io_dict_to_hdf5 as ioh5
     from jarvis_jax.geometry.reprojection_tool import ReprojectionTool
-    from jarvis_jax.cse.silhouette_ik_solve import (
+    from jarvis_jax.tracking.silhouette_ik_solve import (
         build_solver_inputs, _umeyama, _triangulate_kp_mm, _cam2img_for_frame)
 
     inputs = build_solver_inputs(ik_h5, model_xml)
@@ -929,7 +929,7 @@ def gather_qc_frame_inputs(recording, *, root, split, calib_dir, fs_imgids, T,
                            ik_kpnames, ann_id_by_image=None):
     """Per-frame QC inputs aligned to ik_kpnames order: kp2d/vis/masks by cam."""
     from jarvis_jax.geometry.reprojection_tool import ReprojectionTool
-    from jarvis_jax.cse.silhouette_ik_solve import (
+    from jarvis_jax.tracking.silhouette_ik_solve import (
         _cam2img_for_frame, _ann_for_image, _load_sam_mask)
 
     rt = ReprojectionTool(calib_dir)
@@ -971,10 +971,10 @@ def run_outputs_qc(recording, *, ik_h5, model_xml, mesh_npz, root, split="val",
     import h5py
     import stac_mjx.io_dict_to_hdf5 as ioh5
     from jarvis_jax.geometry.reprojection_tool import ReprojectionTool
-    from jarvis_jax.cse.silhouette_ik import load_anatomy, make_fk_repose
-    from jarvis_jax.cse import outputs as outmod
-    from jarvis_jax.cse import qc as qcmod
-    from jarvis_jax.cse.silhouette_ik_solve import build_solver_inputs
+    from jarvis_jax.tracking.silhouette_ik import load_anatomy, make_fk_repose
+    from jarvis_jax.tracking import outputs as outmod
+    from jarvis_jax.tracking import qc as qcmod
+    from jarvis_jax.tracking.silhouette_ik_solve import build_solver_inputs
 
     if calib_dir is None:
         calib_dir = resolve_calib_dir(recording, root=root, cse_work_dir=cse_work_dir)
@@ -1023,11 +1023,11 @@ def run_outputs_qc(recording, *, ik_h5, model_xml, mesh_npz, root, split="val",
 
     videos = []
     if make_video:
-        from jarvis_jax.cse.reproj_video import write_camera_video
+        from jarvis_jax.tracking.reproj_video import write_camera_video
         import matplotlib.image as mpimg
         cam_names = list(rt.cameras.keys())
         _coco, id2file, _m = _load_coco(root, split)
-        from jarvis_jax.cse.silhouette_ik_solve import _cam2img_for_frame
+        from jarvis_jax.tracking.silhouette_ik_solve import _cam2img_for_frame
         for c, cam in enumerate(cam_names):
             # per-frame raw path + projected mesh/kp for this camera
             def _frames():
@@ -1111,7 +1111,7 @@ def test_run_outputs_qc_smoke_keys(tmp_path):
     """Tiny 2-frame real-data smoke (coordinator GPU): asserts the output h5
     keys + QC json keys exist. NOT a scientific magnitude check."""
     import stac_mjx.io_dict_to_hdf5 as ioh5
-    from jarvis_jax.cse.run_outputs_qc import run_outputs_qc
+    from jarvis_jax.tracking.run_outputs_qc import run_outputs_qc
     rep = run_outputs_qc(
         "2026_03_18_15_31_22", ik_h5=IK, model_xml=XML, mesh_npz=MESH, root=ROOT,
         split="val", cse_work_dir=CSE, out_dir=str(tmp_path), mesh_subset="fps_500",
@@ -1160,7 +1160,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 **Files:** none (operational). This task is the heavy deploy the coordinator runs on one representative recording per scenario; subagents must NOT run these (they orphan on long GPU jobs).
 
 **Interfaces:**
-- Consumes: `run_outputs_qc.run_outputs_qc` / its CLI `python -m jarvis_jax.cse.run_outputs_qc`.
+- Consumes: `run_outputs_qc.run_outputs_qc` / its CLI `python -m jarvis_jax.tracking.run_outputs_qc`.
 - Produces: per scenario, `{out_dir}/{rec}_outputs.h5`, `{out_dir}/{rec}_qc.json`, and (with `--make-video`) `{out_dir}/{rec}_{cam}_reproj.mp4`.
 
 - [ ] **Step 1: Discover a representative recording per scenario (coordinator)**
@@ -1184,7 +1184,7 @@ Expected: both paths listed (no "No such file").
 source ~/.bashrc && micromamba activate 3d_tracking && unset LD_LIBRARY_PATH
 cd /mmfs1/gscratch/portia/eabe/Research/MyRepos/3d_tracking_dataset/third_party/jarvis_jax
 REC=2026_03_18_15_31_22
-XLA_PYTHON_CLIENT_PREALLOCATE=false python -m jarvis_jax.cse.run_outputs_qc \
+XLA_PYTHON_CLIENT_PREALLOCATE=false python -m jarvis_jax.tracking.run_outputs_qc \
   --recording $REC \
   --ik-h5 /gscratch/portia/eabe/data/Johnson_lab/cse_work/$REC/Fruitfly_ik_v1_cse.h5 \
   --qpos-npz /gscratch/portia/eabe/data/Johnson_lab/cse_work/$REC/${REC}_qpos.npz \
@@ -1207,7 +1207,7 @@ source ~/.bashrc && micromamba activate 3d_tracking && unset LD_LIBRARY_PATH
 cd /mmfs1/gscratch/portia/eabe/Research/MyRepos/3d_tracking_dataset/third_party/jarvis_jax
 REC=<courtship_rec>; COND_ROOT=/gscratch/portia/eabe/data/Johnson_lab/merge_courtship_V3
 for FID in 0 1; do
-  XLA_PYTHON_CLIENT_PREALLOCATE=false python -m jarvis_jax.cse.run_outputs_qc \
+  XLA_PYTHON_CLIENT_PREALLOCATE=false python -m jarvis_jax.tracking.run_outputs_qc \
     --recording $REC \
     --ik-h5 $COND_ROOT/cse_work/$REC/fly$FID/Fruitfly_ik_v1_cse.h5 \
     --qpos-npz $COND_ROOT/cse_work/$REC/fly$FID/${REC}_qpos.npz \
@@ -1227,7 +1227,7 @@ Expected: two per-fly output h5 + qc json. NOTE: the multi-fly `ann_id_by_image`
 source ~/.bashrc && micromamba activate 3d_tracking && unset LD_LIBRARY_PATH
 cd /mmfs1/gscratch/portia/eabe/Research/MyRepos/3d_tracking_dataset/third_party/jarvis_jax
 REC=<amputation_rec>; COND_ROOT=/gscratch/portia/eabe/data/Johnson_lab/amputation
-XLA_PYTHON_CLIENT_PREALLOCATE=false python -m jarvis_jax.cse.run_outputs_qc \
+XLA_PYTHON_CLIENT_PREALLOCATE=false python -m jarvis_jax.tracking.run_outputs_qc \
   --recording $REC \
   --ik-h5 $COND_ROOT/cse_work/$REC/Fruitfly_ik_v1_cse.h5 \
   --qpos-npz $COND_ROOT/cse_work/$REC/${REC}_qpos.npz \

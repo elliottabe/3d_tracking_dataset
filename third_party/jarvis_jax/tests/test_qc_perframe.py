@@ -1,6 +1,6 @@
 # tests/test_qc_perframe.py
 import numpy as np, pytest
-from jarvis_jax.cse.qc_perframe import per_frame_qc
+from jarvis_jax.tracking.qc_perframe import per_frame_qc
 
 
 class FakeRT:

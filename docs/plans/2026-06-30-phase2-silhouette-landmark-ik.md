@@ -11,7 +11,7 @@
 ## Global Constraints
 
 - **3-D observation model** (spec decision 7): triangulate observations to 3-D, fit model markers to 3-D. The silhouette wing-tip is a triangulated 3-D marker target — NOT a 2-D reprojection term. No dense-pose head, no dense-silhouette 2-D factor (later phases).
-- **Affine/telecentric cameras** (spec decision 8): 3×4 DLT, 3rd row `[0,0,0,1]`, no perspective divide; triangulation is affine. Use `jarvis_jax.geometry.reprojection_tool` + `jarvis_jax.cse.affine_camera`.
+- **Affine/telecentric cameras** (spec decision 8): 3×4 DLT, 3rd row `[0,0,0,1]`, no perspective divide; triangulation is affine. Use `jarvis_jax.geometry.reprojection_tool` + `jarvis_jax.tracking.affine_camera`.
 - **Reuse, don't fork:** the IK backbone is `stac_mjx.stac_core_jaxls.JaxlsBatchSolver.solve_trajectory` — do NOT modify it. The wing-tip extractor productionizes `jarvis_jax/cse/demo_wingtip_triangulation.py`. Calibration comes from Phase-1 `run_bundle_adjust` refined output (fall back to factory if none).
 - **Approach A** (user decision): silhouette tips override the existing wing markers' `kp_data` + raise their `kps_to_opt` weight; no model/site edits.
 - **Wing marker keypoint indices (verbatim, coco order):** `WingL_V12`=7, `WingL_V13`=8 → left wing tip; `WingR_V12`=29, `WingR_V13`=30 → right wing tip. `WingL_base`=6, `WingR_base`=28 (hinge, unchanged).
@@ -39,7 +39,7 @@ Test prefix for every pytest command: `cd third_party/jarvis_jax && JAX_PLATFORM
 - Test: `third_party/jarvis_jax/tests/test_silhouette_landmarks.py`
 
 **Interfaces:**
-- Consumes: `jarvis_jax.cse.affine_camera.project_affine`, `reconstruct_affine`, `factor_affine`; `ReprojectionTool`.
+- Consumes: `jarvis_jax.tracking.affine_camera.project_affine`, `reconstruct_affine`, `factor_affine`; `ReprojectionTool`.
 - Produces:
   - `wing_side_vertices(mesh_npz) -> {"left": {"tip": int, "prox": int}, "right": {...}}` — fps-subset indices of each wing's tip (max distance from thorax centroid) and proximal vertex (min distance), computed from the canonical mesh (same logic as the POC).
   - `mask_wing_tip_2d(mask, prox2d, tip2d, corridor=12.0) -> np.ndarray(2,) | None` — the farthest mask pixel along the `prox2d→tip2d` axis within a perpendicular `corridor`, or None if <3 corridor pixels (folded/occluded).
@@ -51,8 +51,8 @@ Create `third_party/jarvis_jax/tests/test_silhouette_landmarks.py`:
 
 ```python
 import numpy as np
-from jarvis_jax.cse.affine_camera import factor_affine, reconstruct_affine, project_affine
-from jarvis_jax.cse.silhouette_landmarks import wing_side_vertices, mask_wing_tip_2d, triangulate_wing_tips
+from jarvis_jax.tracking.affine_camera import factor_affine, reconstruct_affine, project_affine
+from jarvis_jax.tracking.silhouette_landmarks import wing_side_vertices, mask_wing_tip_2d, triangulate_wing_tips
 
 MESH = "/gscratch/portia/eabe/Research/MyRepos/fruitfly_body_models/fruitfly_cse/fly_v1_collision_canonical_wings.npz"
 P_REAL = np.array([[8.1001,0.0074869,-0.031773,-2.828],[0.0093308,-8.0788,-0.17912,462.78],[0,0,0,1.0]])
@@ -100,7 +100,7 @@ def test_triangulate_wing_tips_recovers_known_tip():
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `cd third_party/jarvis_jax && JAX_PLATFORMS=cpu OMP_NUM_THREADS=4 python -m pytest tests/test_silhouette_landmarks.py -v`
-Expected: FAIL with `ModuleNotFoundError: No module named 'jarvis_jax.cse.silhouette_landmarks'`.
+Expected: FAIL with `ModuleNotFoundError: No module named 'jarvis_jax.tracking.silhouette_landmarks'`.
 
 - [ ] **Step 3: Write minimal implementation**
 
@@ -115,7 +115,7 @@ tips into one 3-D point. Cameras are telecentric (affine). Confidence = #cameras
 """
 from __future__ import annotations
 import numpy as np
-from jarvis_jax.cse.affine_camera import project_affine
+from jarvis_jax.tracking.affine_camera import project_affine
 
 
 def wing_side_vertices(mesh_npz):
@@ -209,7 +209,7 @@ Create `third_party/jarvis_jax/tests/test_marker_augment.py`:
 
 ```python
 import numpy as np
-from jarvis_jax.cse.marker_augment import augment_wing_markers, WING_MARKER_IDS
+from jarvis_jax.tracking.marker_augment import augment_wing_markers, WING_MARKER_IDS
 
 
 def test_augment_overrides_wing_markers_and_boosts_weight():
@@ -247,7 +247,7 @@ def test_min_cams_gate():
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `cd third_party/jarvis_jax && JAX_PLATFORMS=cpu OMP_NUM_THREADS=4 python -m pytest tests/test_marker_augment.py -v`
-Expected: FAIL with `ModuleNotFoundError: No module named 'jarvis_jax.cse.marker_augment'`.
+Expected: FAIL with `ModuleNotFoundError: No module named 'jarvis_jax.tracking.marker_augment'`.
 
 - [ ] **Step 3: Write minimal implementation**
 
@@ -320,7 +320,7 @@ Create `third_party/jarvis_jax/tests/test_silhouette_ik_solve.py`:
 
 ```python
 import os, numpy as np, pytest
-from jarvis_jax.cse.silhouette_ik_solve import build_solver_inputs, solve_ik
+from jarvis_jax.tracking.silhouette_ik_solve import build_solver_inputs, solve_ik
 
 IK = "/gscratch/portia/eabe/data/Johnson_lab/cse_work/2026_03_18_15_31_22/Fruitfly_ik_v1_cse.h5"
 XML = "/gscratch/portia/eabe/Research/MyRepos/fruitfly_body_models/fruitfly_v1/fruitfly_v1_free.xml"
@@ -351,7 +351,7 @@ def test_solve_ik_does_not_worsen_fit_on_slice():
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `cd third_party/jarvis_jax && JAX_PLATFORMS=cpu OMP_NUM_THREADS=4 python -m pytest tests/test_silhouette_ik_solve.py -v`
-Expected: FAIL with `ModuleNotFoundError: No module named 'jarvis_jax.cse.silhouette_ik_solve'`.
+Expected: FAIL with `ModuleNotFoundError: No module named 'jarvis_jax.tracking.silhouette_ik_solve'`.
 
 - [ ] **Step 3: Write minimal implementation**
 

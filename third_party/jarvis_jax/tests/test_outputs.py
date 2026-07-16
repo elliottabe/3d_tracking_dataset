@@ -5,7 +5,7 @@ import pytest
 
 
 def test_mesh_subset_indices_full_and_named():
-    from jarvis_jax.cse import outputs
+    from jarvis_jax.tracking import outputs
     fake_anat = {"fps": {500: np.arange(0, 61666, 123, dtype=np.int64)[:500]},
                  "vlocal": np.zeros((61666, 3), np.float32)}
     idx = outputs.mesh_subset_indices(fake_anat, subset="fps_500")
@@ -22,7 +22,7 @@ def test_mesh_subset_indices_wing_union_and_dedup():
     fps_500 alone lands only ~4/500 verts on the thin wing membranes, so wings
     are invisible in overlays without the wing set; the '+' union fixes that.
     """
-    from jarvis_jax.cse import outputs
+    from jarvis_jax.tracking import outputs
     fake_anat = {"fps": {500: np.array([0, 5, 10, 27000], np.int64),
                          "wing": np.array([27000, 27406, 61138], np.int64)},
                  "vlocal": np.zeros((61666, 3), np.float32)}
@@ -40,7 +40,7 @@ def test_mesh_subset_indices_wing_union_and_dedup():
 
 
 def test_write_outputs_h5_roundtrip(tmp_path):
-    from jarvis_jax.cse import outputs
+    from jarvis_jax.tracking import outputs
     import stac_mjx.io_dict_to_hdf5 as ioh5
     T, nq, K, nkp = 3, 93, 5, 50
     qpos = np.random.default_rng(0).normal(size=(T, nq)).astype(np.float32)
@@ -66,7 +66,7 @@ def test_write_outputs_h5_roundtrip(tmp_path):
 
 
 def test_fk_mesh_world_mm_applies_bridge_and_nan(tmp_path):
-    from jarvis_jax.cse import outputs
+    from jarvis_jax.tracking import outputs
     # fk stub: identity model verts independent of qpos (K fixed points)
     K = 4
     base = np.array([[0., 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1]], np.float32)
@@ -89,7 +89,7 @@ def test_fk_mesh_world_mm_applies_bridge_and_nan(tmp_path):
 def test_build_fly_outputs_derives_root_scale(monkeypatch, tmp_path):
     """build_fly_outputs must set root_se3 = qpos[:, :7] and scale from the
     per-frame bridge s (nan where bridge is None), and write the h5."""
-    from jarvis_jax.cse import outputs
+    from jarvis_jax.tracking import outputs
     import stac_mjx.io_dict_to_hdf5 as ioh5
     T, nq, nkp, K = 3, 93, 50, 4
 
