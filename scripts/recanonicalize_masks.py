@@ -28,7 +28,7 @@ import sys
 import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "third_party/jarvis_jax"))
-from jarvis_jax.predict.sam3_driver import sex_male_by_size
+from jarvis_jax.predict.sam3_driver import sex_male_by_size, _append_sex_meta_to_npz
 
 
 def _bm_from_arrays(packed, valid, W, *, vote_frames=40):
@@ -78,16 +78,19 @@ def recanonicalize_npz(npz_path, *, male_slot=1, pct=75, min_pairs=6, min_cams=2
     if dry_run:
         return res
 
-    # write only when something changes (swap) or sex_meta is new/updated
     if status == "swapped":
-        keys["packed"] = packed[::-1]              # 2-elem reverse view -> [1,0]
+        # fly axis changes -> full atomic rewrite (2-elem reverse view -> [1,0])
+        keys["packed"] = packed[::-1]
         keys["valid"] = valid[::-1]
         keys["centroids"] = centroids[::-1]
-    keys["sex_meta"] = np.array(json.dumps(sex_meta))
-
-    tmp = npz_path + ".recanon.tmp.npz"
-    np.savez_compressed(tmp, **keys)
-    os.replace(tmp, npz_path)
+        keys["sex_meta"] = np.array(json.dumps(sex_meta))
+        tmp = npz_path + ".recanon.tmp.npz"
+        np.savez_compressed(tmp, **keys)
+        os.replace(tmp, npz_path)
+    else:
+        # kept / ambiguous: arrays unchanged -> cheap zip-append of sex_meta only
+        # (reuses the driver's overwrite-safe helper; no 0.8 GB recompress)
+        _append_sex_meta_to_npz(npz_path, sex_meta)
     return res
 
 
