@@ -443,6 +443,51 @@ def _fly_area_timeseries(bm, num_animals, max_samples=200):
     return np.where(acnt > 0, asum / np.maximum(acnt, 1), np.nan)
 
 
+def sex_male_by_size(bm, num_animals, *, pct=75, min_pairs=6, min_cams=2):
+    """Return (male_idx | None, info). The MALE is the fly with the LARGER
+    silhouette, compared per-camera at the SAME scale (mask-area `pct`-percentile
+    over frames where BOTH flies are present) and majority-voted across cameras.
+    Wing extension enlarges the male's mask; a multi-view vote is robust to
+    per-view mask error. Independent per bout. See
+    docs/superpowers/specs/2026-07-17-mask-area-vote-sexing-design.md."""
+    import numpy as np
+    if num_animals != 2:
+        return None, {}
+    votes, margins = [], []
+    for cam in range(bm.num_cameras):
+        idm = bm.identity_map[cam]
+        if not idm:
+            continue
+        a0, a1 = [], []
+        for f in range(bm.num_frames):
+            frame = bm.masks[cam][f]
+            if not frame:
+                continue
+            per = {}
+            for oid, data in frame.items():
+                fi = idm.get(int(oid))
+                if fi is None or fi >= num_animals:
+                    continue
+                per[fi] = per.get(fi, 0.0) + float(data["mask"].sum())
+            if 0 in per and 1 in per:                 # same-scale pair this frame
+                a0.append(per[0]); a1.append(per[1])
+        if len(a0) < min_pairs:
+            continue
+        p0 = float(np.percentile(a0, pct)); p1 = float(np.percentile(a1, pct))
+        votes.append(1 if p0 > p1 else -1)
+        denom = p0 + p1
+        margins.append(abs(p0 - p1) / denom if denom > 0 else 0.0)
+    if len(votes) < min_cams:
+        return None, {"method": "mask_area_vote", "n_cameras": len(votes),
+                      "agreement": None, "margin": None, "pct": pct}
+    s = int(np.sum(votes))
+    male = 0 if s > 0 else 1                           # larger silhouette = male
+    return male, {"method": "mask_area_vote", "male_detected_slot": male,
+                  "agreement": round(abs(s) / len(votes), 3),
+                  "margin": round(float(np.mean(margins)), 3),
+                  "n_cameras": len(votes), "pct": pct}
+
+
 def sex_male_by_song(bm, num_animals, *, score_ratio_thr=2.0, min_frames=20,
                      min_cv=0.012):
     """Return (male_idx | None, info). The MALE is the fly whose projected mask
