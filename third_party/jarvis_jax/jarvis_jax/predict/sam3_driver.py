@@ -410,38 +410,18 @@ def _write_mask_overlay(out, bout_idx, *, session_dir, start_frame,
 
 
 # ---------------------------------------------------------------------------
-# Sex canonicalization by wing SONG (courtship, 2 flies).
+# Sex canonicalization by multi-view mask AREA (courtship, 2 flies).
 #
-# Total mask area is an unreliable sex cue: female D. melanogaster are ~15-20%
-# larger AT REST, but a courting male's unilateral wing extension (song) inflates
-# his projected area, so a per-bout area ratio flips depending on whether he
-# sings -- and SAM3 tracks each bout independently, so which physical fly is
-# fly0/fly1 is arbitrary per bout. Instead use the SONG signal: the singing
-# male's projected mask area FLUCTUATES UPWARD over the bout (wing-extension
-# episodes) while the female's stays steady. This canonicalizes the male to a
-# fixed slot per bout (no cross-bout identity linking needed) and flags bouts
-# with no clear song as ambiguous.
+# SAM3 tracks each bout independently, so which physical fly is fly0/fly1 is
+# arbitrary per bout. The MALE has the LARGER silhouette (a courting male's
+# unilateral wing-extension song inflates his projected area on top of his
+# base size); comparing per-camera mask-area percentiles over frames where
+# BOTH flies are present and majority-voting across cameras is robust to
+# per-view mask error. (A prior per-fly area-fluctuation/"song CV" signal was
+# empirically unreliable and has been removed.) This canonicalizes the male to
+# a fixed slot per bout (no cross-bout identity linking needed) and flags
+# bouts with insufficient camera agreement as ambiguous.
 # ---------------------------------------------------------------------------
-
-def _fly_area_timeseries(bm, num_animals, max_samples=200):
-    """(A,T) mean mask-pixel area per fly per frame (over valid cameras); NaN
-    where a fly has no mask that frame."""
-    import numpy as np
-    C, T = bm.num_cameras, bm.num_frames
-    step = max(1, T // max_samples)
-    asum = np.zeros((num_animals, T)); acnt = np.zeros((num_animals, T))
-    for cam in range(C):
-        idm = bm.identity_map[cam]
-        if not idm:
-            continue
-        for f in range(0, T, step):
-            for oid, data in bm.masks[cam][f].items():
-                fi = idm.get(int(oid))
-                if fi is None or fi >= num_animals:
-                    continue
-                asum[fi, f] += float(data["mask"].sum()); acnt[fi, f] += 1
-    return np.where(acnt > 0, asum / np.maximum(acnt, 1), np.nan)
-
 
 def sex_male_by_size(bm, num_animals, *, pct=75, min_pairs=6, min_cams=2):
     """Return (male_idx | None, info). The MALE is the fly with the LARGER
@@ -488,36 +468,10 @@ def sex_male_by_size(bm, num_animals, *, pct=75, min_pairs=6, min_cams=2):
                   "n_cameras": len(votes), "pct": pct}
 
 
-def sex_male_by_song(bm, num_animals, *, score_ratio_thr=2.0, min_frames=20,
-                     min_cv=0.012):
-    """Return (male_idx | None, info). The MALE is the fly whose projected mask
-    area FLUCTUATES most over the bout -- coefficient of variation std/mean --
-    since unilateral wing-extension song episodes raise his area while the
-    female's stays steady. None (ambiguous) when the two flies' CVs are within
-    `score_ratio_thr`, or neither exceeds `min_cv` (no clear song this bout)."""
-    import numpy as np
-    if num_animals != 2:
-        return None, {}
-    ts = _fly_area_timeseries(bm, num_animals)
-    cv = []
-    for a in range(num_animals):
-        x = ts[a][np.isfinite(ts[a])]
-        cv.append(float(np.std(x) / max(np.mean(x), 1.0)) if x.size >= min_frames else np.nan)
-    cv = np.array(cv)
-    info = {"song_cv": [None if not np.isfinite(s) else round(s, 4) for s in cv]}
-    if not np.isfinite(cv).all() or min(cv) <= 0:
-        return None, info
-    ratio = float(max(cv) / min(cv))
-    info["ratio"] = round(ratio, 2)
-    if max(cv) < min_cv or ratio < score_ratio_thr:
-        return None, info                                # no clear song -> ambiguous
-    return int(np.argmax(cv)), info
-
-
-def canonicalize_male_fly(bm, num_animals, *, male_slot=1, score_ratio_thr=1.8):
-    """Swap identity_map so the song-identified MALE is fly `male_slot`
-    (default 1). Returns (status, info): 'swapped' / 'kept' / 'ambiguous'."""
-    male, info = sex_male_by_song(bm, num_animals, score_ratio_thr=score_ratio_thr)
+def canonicalize_male_fly(bm, num_animals, *, male_slot=1):
+    """Swap identity_map so the size-identified MALE is fly `male_slot` (default 1).
+    Returns (status, info): 'swapped' / 'kept' / 'ambiguous'."""
+    male, info = sex_male_by_size(bm, num_animals)
     if male is None:
         return "ambiguous", info
     if male != male_slot:
@@ -555,7 +509,8 @@ def _append_suspect_cameras_to_npz(npz_path, suspect_cameras):
 def _append_sex_meta_to_npz(npz_path, sex_meta):
     """Append a `sex_meta` (0-d JSON-string array) to a sam3_masks.npz recording
     how the male/female slots were assigned: {male_slot, status ('kept'/'swapped'
-    /'ambiguous'), song_cv, ratio}. Lets downstream QC surface ambiguous bouts.
+    /'ambiguous'), method, male_detected_slot, agreement, margin, n_cameras,
+    pct}. Lets downstream QC surface ambiguous bouts.
     Overwrites any existing entry (re-run friendly)."""
     import io
     import json
@@ -962,17 +917,19 @@ def run_sam3_masks(*, project, session_dir, bouts_csv, out, num_animals=2,
             # r[cam].numpy() raise "unsupported ScalarType BFloat16". Force fp32.
             with torch.autocast(device_type="cuda", enabled=False):
                 bm.assign_identities(repro_tool, num_animals=num_animals)
-            # Sex canonicalization (courtship, 2 flies): assign_identities'
-            # area-based sex cue is unreliable (a singing male's wing extension
-            # inflates his area, flipping the ratio per bout, and SAM3 tracks
-            # each bout independently). Override it with the wing-SONG signal so
-            # the male is consistently fly `male_slot` (=1); ambiguous when no
-            # clear song. This is the authoritative sex step.
+            # Sex canonicalization (courtship, 2 flies): SAM3 tracks each bout
+            # independently, so assign_identities' fly0/fly1 slot assignment is
+            # arbitrary per bout. Override it with the multi-view mask-area
+            # vote (larger silhouette = male) so the male is consistently fly
+            # `male_slot` (=1); ambiguous when camera agreement is insufficient.
+            # This is the authoritative sex step.
             sex_status, sex_info = "n/a", {}
             if num_animals == 2:
                 sex_status, sex_info = canonicalize_male_fly(bm, num_animals, male_slot=1)
                 print(f"[sex] bout {b['bout_idx']}: {sex_status} "
-                      f"(male=fly1; cv={sex_info.get('song_cv')} ratio={sex_info.get('ratio')})")
+                      f"(male=fly1; detected_slot={sex_info.get('male_detected_slot')} "
+                      f"agreement={sex_info.get('agreement')} margin={sex_info.get('margin')} "
+                      f"n_cams={sex_info.get('n_cameras')})")
             # Self-repair: if a camera's masks are a geometric outlier (SAM3
             # locked onto a reflection/shadow/wrong blob), re-segment it with a
             # box prompt at the fly reprojected from the good cameras; keep only

@@ -68,3 +68,33 @@ def test_min_pairs_gate_returns_none():
 def test_num_animals_not_two():
     bm = _bm([(90, 50)] * 7)
     assert sex_male_by_size(bm, 3) == (None, {})
+
+
+from jarvis_jax.predict.sam3_driver import canonicalize_male_fly
+
+
+def test_canonicalize_swaps_when_male_slot0():
+    bm = _bm([(90, 50)] * 7)                    # fly0 (slot0) larger => male
+    status, info = canonicalize_male_fly(bm, 2, male_slot=1)
+    assert status == "swapped"
+    assert info["male_detected_slot"] == 0
+    assert bm.identity_map[0][10] == 1 and bm.identity_map[0][20] == 0   # oids remapped
+
+
+def test_canonicalize_kept_when_male_slot1():
+    bm = _bm([(50, 90)] * 7)                    # fly1 larger => already male=slot1
+    status, info = canonicalize_male_fly(bm, 2, male_slot=1)
+    assert status == "kept"
+    assert bm.identity_map[0][10] == 0 and bm.identity_map[0][20] == 1   # unchanged
+
+
+def test_canonicalize_ambiguous_when_insufficient():
+    bm = _bm([(90, 50)] + [(None, 50)] * 6)     # 1 usable cam < min_cams
+    status, _ = canonicalize_male_fly(bm, 2, male_slot=1)
+    assert status == "ambiguous"
+
+
+def test_sex_male_by_song_removed():
+    import jarvis_jax.predict.sam3_driver as d
+    assert not hasattr(d, "sex_male_by_song")
+    assert not hasattr(d, "_fly_area_timeseries")
