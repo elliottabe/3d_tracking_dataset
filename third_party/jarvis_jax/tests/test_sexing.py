@@ -64,3 +64,83 @@ def test_sex_decision_weak_with_mask_fallback():
 def test_sex_decision_weak_no_mask_unknown():
     d = sexing.sex_bout_from_pose(0.15, 0.16, mask_sex_meta=None)
     assert d["male_fly"] is None and d["confidence"] == "unknown" and d["method"] == "unresolved"
+
+
+import json
+import os
+
+
+def _write_bout(bout_dir, male_fly, T=200):
+    """Create bout_dir/fly0,fly1 each with kp3d.npz (male fly has oscillating wing)
+    plus an 'orig_flyN' marker file so tests can tell which physical dir moved."""
+    for fly in (0, 1):
+        d = os.path.join(bout_dir, f"fly{fly}")
+        os.makedirs(d)
+        osc = 40 if fly == male_fly else 1
+        kp, c = _make(T, wing_osc=osc)
+        np.savez(os.path.join(d, "kp3d.npz"), kp3d=kp, conf3d=c)
+        open(os.path.join(d, f"orig_fly{fly}"), "w").close()
+    return bout_dir
+
+
+def test_canonicalize_swaps_male_to_fly1(tmp_path):
+    bd = _write_bout(str(tmp_path / "bout"), male_fly=0)     # male currently fly0
+    res = sexing.canonicalize_bout(bd, KP)
+    assert res["applied_swap"] is True
+    assert res["male_fly"] == 1 and res["original_male_fly"] == 0
+    assert os.path.exists(os.path.join(bd, "fly1", "orig_fly0"))   # was fly0, now fly1
+    assert os.path.exists(os.path.join(bd, "fly0", "orig_fly1"))
+    assert json.load(open(os.path.join(bd, "sex.json")))["male_fly"] == 1
+
+
+def test_canonicalize_no_swap_when_male_already_fly1(tmp_path):
+    bd = _write_bout(str(tmp_path / "bout"), male_fly=1)
+    res = sexing.canonicalize_bout(bd, KP)
+    assert res["applied_swap"] is False and res["male_fly"] == 1
+    assert os.path.exists(os.path.join(bd, "fly1", "orig_fly1"))
+
+
+def test_canonicalize_idempotent(tmp_path):
+    bd = _write_bout(str(tmp_path / "bout"), male_fly=0)
+    sexing.canonicalize_bout(bd, KP)                 # swaps
+    res2 = sexing.canonicalize_bout(bd, KP)          # male now fly1 -> no-op
+    assert res2["applied_swap"] is False and res2["male_fly"] == 1
+
+
+def test_canonicalize_dry_run_moves_nothing(tmp_path):
+    bd = _write_bout(str(tmp_path / "bout"), male_fly=0)
+    res = sexing.canonicalize_bout(bd, KP, dry_run=True)
+    assert res["applied_swap"] is True and res["original_male_fly"] == 0
+    assert os.path.exists(os.path.join(bd, "fly0", "orig_fly0"))    # NOT moved
+    assert not os.path.exists(os.path.join(bd, "sex.json"))         # NOT written
+
+
+def test_canonicalize_missing_kp3d_unknown(tmp_path):
+    bd = _write_bout(str(tmp_path / "bout"), male_fly=0)
+    os.remove(os.path.join(bd, "fly1", "kp3d.npz"))
+    res = sexing.canonicalize_bout(bd, KP)
+    assert res["confidence"] == "unknown" and res["applied_swap"] is False
+
+
+def test_swap_recovers_partial_after_step1(tmp_path):
+    bd = _write_bout(str(tmp_path / "bout"), male_fly=1)
+    f0 = os.path.join(bd, "fly0")
+    tmp = os.path.join(bd, ".fly_swap_tmp")
+    os.rename(f0, tmp)                    # simulate crash after step 1 (fly0->tmp done)
+    sexing._swap_fly_dirs(bd)            # recover + complete
+    assert os.path.exists(os.path.join(bd, "fly0", "orig_fly1"))
+    assert os.path.exists(os.path.join(bd, "fly1", "orig_fly0"))
+    assert not os.path.exists(tmp)
+
+
+def test_swap_recovers_partial_after_step2(tmp_path):
+    bd = _write_bout(str(tmp_path / "bout"), male_fly=1)
+    f0 = os.path.join(bd, "fly0")
+    f1 = os.path.join(bd, "fly1")
+    tmp = os.path.join(bd, ".fly_swap_tmp")
+    os.rename(f0, tmp)                    # step 1: fly0 -> tmp
+    os.rename(f1, f0)                     # step 2: fly1 -> fly0  (fly1 now missing)
+    sexing._swap_fly_dirs(bd)            # recover: tmp -> fly1
+    assert os.path.exists(os.path.join(bd, "fly1", "orig_fly0"))
+    assert os.path.exists(os.path.join(bd, "fly0", "orig_fly1"))
+    assert not os.path.exists(tmp)
