@@ -7,13 +7,14 @@ real pass performs the swaps and writes sex.json per bout.
   python scripts/canonicalize_session_sex.py recording=session0
 """
 import glob
+import json
 import os
 from collections import Counter
 
 import hydra
 from omegaconf import DictConfig, OmegaConf
 
-from jarvis_jax.tracking.sexing import canonicalize_bout, read_sex_meta
+from jarvis_jax.tracking.sexing import canonicalize_bout, read_sex_meta, _swap_fly_dirs
 
 # Register the `basename` OmegaConf resolver used by configs/outputs/default.yaml
 # (out = .../${recording.name}/${basename:${recording.session_dir}}/pose). Same
@@ -24,11 +25,51 @@ OmegaConf.register_new_resolver(
     "basename", lambda p: os.path.basename(os.path.normpath(str(p))), replace=True)
 
 
+def apply_manual_labels(run_root, labels, *, dry_run=False, male_slot=1):
+    """Canonicalize male -> fly{male_slot} from explicit per-bout labels (current
+    on-disk fly order). `labels` maps bout int -> male fly int. Idempotent: skips a
+    bout whose sex.json is already method='manual'. Returns a list of result dicts."""
+    import glob
+    out = []
+    for bd in sorted(glob.glob(os.path.join(run_root, "bouts", "bout_*"))):
+        bi = int(os.path.basename(bd).split("_")[1])
+        if bi not in labels:
+            continue
+        sj = os.path.join(bd, "sex.json")
+        if os.path.exists(sj):
+            try:
+                if json.load(open(sj)).get("method") == "manual":
+                    print(f"bout {bi}: already manual, skip"); continue
+            except (ValueError, OSError):
+                pass
+        male_cur = int(labels[bi])
+        swap = male_cur != male_slot
+        if swap and not dry_run:
+            _swap_fly_dirs(bd)
+        res = dict(male_fly=male_slot, original_male_fly=male_cur, applied_swap=swap,
+                   confidence="user", method="manual", note="manual labels")
+        if not dry_run:
+            with open(sj, "w") as f:
+                json.dump(res, f, indent=2)
+        print(f"bout {bi}: male_current=fly{male_cur} -> swap={swap} -> male=fly{male_slot}")
+        out.append(res)
+    return out
+
+
 @hydra.main(version_base=None, config_path="../configs", config_name="pipeline")
 def main(cfg: DictConfig):
     run_root = str(cfg.outputs.out)
     predictions_dir = str(cfg.recording.predictions_dir)
     dry = bool(cfg.get("dry_run", False))
+
+    labels_path = cfg.get("labels", None)
+    if labels_path:
+        raw = json.load(open(str(labels_path)))
+        labels = {int(k): int(v) for k, v in raw.items()}
+        print(f"[canonicalize] manual labels from {labels_path} (dry_run={dry})")
+        apply_manual_labels(run_root, labels, dry_run=dry)
+        return
+
     sx = cfg.get("sexing", {}) or {}
     kp_names = list(cfg.model.KP_NAMES)
 
