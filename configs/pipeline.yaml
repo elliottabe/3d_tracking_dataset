@@ -51,6 +51,16 @@ scaling:
   robust_stat: median      # 'median' | 'mean'
   robust: none             # 'huber' | 'none'
 
+# Fly sexing + identity canonicalization (jarvis_jax.tracking.sexing). After both
+# flies of a courtship bout are processed, the male (larger wing-song CV) is
+# canonicalized to fly1 by physically swapping the fly dirs; a per-bout sex.json
+# records the decision + confidence. num_animals==1 (free-running) skips this.
+sexing:
+  ratio_thr: 1.5      # min CV ratio (max/min) to trust the pose signal
+  high_ratio: 2.5     # CV ratio at/above which confidence is 'high' (else 'medium')
+  conf_min: 0.2       # per-keypoint confidence gate for a valid splay frame
+  min_frames: 20      # min valid frames or wing_song_cv returns nan
+
 # Pre-STAC keypoint smoothing / outlier rejection (jarvis_jax.tracking.filter
 # -> utils.keypoint_filter.filter_keypoints), applied to the triangulated kp3d
 # before scale/offsets/STAC. Distal leg tips occasionally mistriangulate and jump

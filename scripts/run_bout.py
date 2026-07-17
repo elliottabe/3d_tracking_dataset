@@ -748,13 +748,36 @@ def _log_gpu_env():
         print(f"[gpu-check] jax.devices() failed: {e}", flush=True)
 
 
+def _canonicalize_bout_sex(cfg, bout_idx: int):
+    """After both flies of a courtship bout are written, canonicalize male -> fly1."""
+    from jarvis_jax.tracking.sexing import canonicalize_bout, read_sex_meta
+    run_root = str(cfg.outputs.out)
+    bout_dir = os.path.join(run_root, "bouts", f"bout_{bout_idx:05d}")
+    mask_npz = os.path.join(str(cfg.recording.predictions_dir),
+                            f"bout_{bout_idx:05d}", "sam3_masks.npz")
+    sx = cfg.get("sexing", {}) or {}
+    res = canonicalize_bout(
+        bout_dir, list(cfg.model.KP_NAMES),
+        mask_sex_meta=read_sex_meta(mask_npz),
+        ratio_thr=float(sx.get("ratio_thr", 1.5)),
+        high_ratio=float(sx.get("high_ratio", 2.5)),
+        conf_min=float(sx.get("conf_min", 0.2)),
+        min_frames=int(sx.get("min_frames", 20)))
+    print(f"[sexing] bout {bout_idx}: male=fly{res['male_fly']} conf={res['confidence']} "
+          f"method={res['method']} swap={res['applied_swap']}")
+    return res
+
+
 def main_from_cfg(cfg: DictConfig):
     _log_gpu_env()
     bout_ids = resolve_bout_ids(cfg)
+    n_anim = int(cfg.recording.num_animals)
     print(f"[courtship] processing {len(bout_ids)} bout(s): {bout_ids}")
     for bout_idx in bout_ids:
-        for fly in range(int(cfg.recording.num_animals)):
+        for fly in range(n_anim):
             process_bout_fly(cfg, bout_idx, fly)
+        if n_anim == 2:
+            _canonicalize_bout_sex(cfg, bout_idx)
 
 
 @hydra.main(version_base=None, config_path="../configs", config_name="pipeline")
