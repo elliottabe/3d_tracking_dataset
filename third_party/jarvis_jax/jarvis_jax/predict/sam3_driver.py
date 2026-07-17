@@ -428,7 +428,9 @@ def sex_male_by_size(bm, num_animals, *, pct=75, min_pairs=6, min_cams=2):
     silhouette, compared per-camera at the SAME scale (mask-area `pct`-percentile
     over frames where BOTH flies are present) and majority-voted across cameras.
     Wing extension enlarges the male's mask; a multi-view vote is robust to
-    per-view mask error. Independent per bout. See
+    per-view mask error. Independent per bout. `agreement` in the returned info is
+    the normalized vote margin |sum(votes)| / n_cameras (1.0 = unanimous, 0.0 =
+    even split), NOT a fraction of cameras. See
     docs/superpowers/specs/2026-07-17-mask-area-vote-sexing-design.md."""
     import numpy as np
     if num_animals != 2:

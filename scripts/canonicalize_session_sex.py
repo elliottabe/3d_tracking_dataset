@@ -29,7 +29,6 @@ def apply_manual_labels(run_root, labels, *, dry_run=False, male_slot=1):
     """Canonicalize male -> fly{male_slot} from explicit per-bout labels (current
     on-disk fly order). `labels` maps bout int -> male fly int. Idempotent: skips a
     bout whose sex.json is already method='manual'. Returns a list of result dicts."""
-    import glob
     out = []
     for bd in sorted(glob.glob(os.path.join(run_root, "bouts", "bout_*"))):
         bi = int(os.path.basename(bd).split("_")[1])

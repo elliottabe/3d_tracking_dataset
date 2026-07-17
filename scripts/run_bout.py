@@ -796,8 +796,10 @@ def main_from_cfg(cfg: DictConfig):
         # jarvis_jax.predict.sam3_driver.canonicalize_male_fly), which packs masks
         # in canonical order so pose fly0/fly1 already has male=fly1. The old
         # pose-level wing-CV sexing (_canonicalize_bout_sex) was unreliable and is
-        # no longer auto-invoked; it and jarvis_jax/tracking/sexing.py remain for
-        # manual overrides (scripts/canonicalize_session_sex.py --labels).
+        # no longer auto-invoked. Manual identity overrides go through
+        # scripts/canonicalize_session_sex.py --labels (apply_manual_labels ->
+        # jarvis_jax.tracking.sexing._swap_fly_dirs), NOT _canonicalize_bout_sex,
+        # which is retained only for ad-hoc/debug use.
 
 
 @hydra.main(version_base=None, config_path="../configs", config_name="pipeline")
