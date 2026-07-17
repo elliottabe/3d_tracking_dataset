@@ -303,6 +303,21 @@ def _backfill_qc_perframe(cfg, bout_idx: int, fly: int, bout_dir: str) -> None:
         return
     if not (stage_done(outputs_h5_path) and stage_done(kp2d_path)):
         return
+    # Fly-sexing (jarvis_jax.tracking.sexing) may have physically swapped this
+    # bout's fly0/fly1 dirs, decoupling the dir INDEX from its SAM3 mask SLOT.
+    # This best-effort backfill reads masks by dir index (load_bout_masks(.., fly)),
+    # so on a canonicalized bout it would pair this dir's pose with the OTHER
+    # fly's masks and write a mismatched qc_perframe.npz. The per-run sex.json
+    # flag can't reconstruct the cumulative mapping across reruns, so for any
+    # sexing-managed bout (sex.json present in the parent bout dir) we skip the
+    # backfill rather than risk corrupting per-frame QC (which feeds pseudo-label
+    # training). New bouts always get qc_perframe from Stage E, so this only
+    # skips rare legacy+canonicalized bouts -- the pre-feature status quo (the
+    # pseudo-label driver already skips any fly-dir lacking qc_perframe.npz).
+    if os.path.exists(os.path.join(os.path.dirname(bout_dir), "sex.json")):
+        print(f"[courtship] bout {bout_idx} fly{fly}: skipping qc_perframe backfill "
+              f"(sexing-managed bout; dir<->mask-slot mapping not guaranteed)")
+        return
 
     import stac_mjx.io_dict_to_hdf5 as ioh5
     from jarvis_jax.geometry.reprojection_tool import ReprojectionTool
@@ -763,7 +778,8 @@ def _canonicalize_bout_sex(cfg, bout_idx: int):
         high_ratio=float(sx.get("high_ratio", 2.5)),
         conf_min=float(sx.get("conf_min", 0.2)),
         min_frames=int(sx.get("min_frames", 20)))
-    print(f"[sexing] bout {bout_idx}: male=fly{res['male_fly']} conf={res['confidence']} "
+    male_label = "fly?" if res["male_fly"] is None else f"fly{res['male_fly']}"
+    print(f"[sexing] bout {bout_idx}: male={male_label} conf={res['confidence']} "
           f"method={res['method']} swap={res['applied_swap']}")
     return res
 
