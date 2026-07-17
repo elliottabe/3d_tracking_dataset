@@ -6,13 +6,14 @@
 #
 #   SESSION=<session_dir> sbatch scripts/slurm_recanonicalize_masks.sh
 #SBATCH --job-name=recanon
-#SBATCH --partition=compute
-#SBATCH --account=portia
+#SBATCH --partition=ckpt
+#SBATCH --account=ckpt-portia
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
 #SBATCH --time=02:00:00
+#SBATCH --requeue
 #SBATCH -o ./OutFiles/slurm-%A.out
 
 set -x
