@@ -792,8 +792,12 @@ def main_from_cfg(cfg: DictConfig):
     for bout_idx in bout_ids:
         for fly in range(n_anim):
             process_bout_fly(cfg, bout_idx, fly)
-        if n_anim == 2:
-            _canonicalize_bout_sex(cfg, bout_idx)
+        # Fly sexing is now done authoritatively at SAM3 step-0 (mask-area vote in
+        # jarvis_jax.predict.sam3_driver.canonicalize_male_fly), which packs masks
+        # in canonical order so pose fly0/fly1 already has male=fly1. The old
+        # pose-level wing-CV sexing (_canonicalize_bout_sex) was unreliable and is
+        # no longer auto-invoked; it and jarvis_jax/tracking/sexing.py remain for
+        # manual overrides (scripts/canonicalize_session_sex.py --labels).
 
 
 @hydra.main(version_base=None, config_path="../configs", config_name="pipeline")
