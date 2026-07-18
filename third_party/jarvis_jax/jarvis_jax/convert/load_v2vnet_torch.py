@@ -23,20 +23,26 @@ never assigns anything into ``.norm.scale``/``.norm.bias``, the freshly
 constructed module's default-initialized norm params already reproduce
 ``affine=False`` -- no explicit action is required beyond *not* loading them.
 
-Weight-layout conversions (verified with a synthetic forward-parity probe,
-see Task-4 report -- max abs diff 0.0 against ``torch.nn.ConvTranspose3d``):
+Weight-layout conversions (verified with a synthetic forward-parity probe --
+max abs diff 0.0 against ``torch.nn.ConvTranspose3d``/``torch.nn.Conv3d``):
   * ``Conv3d`` weight ``(out, in, kD, kH, kW)`` -> NNX ``(kD, kH, kW, in, out)``
-    via ``transpose(2, 3, 4, 1, 0)``.
+    via ``transpose(2, 3, 4, 1, 0)`` -- permutation only, no flip.
   * ``ConvTranspose3d`` weight ``(in, out, kD, kH, kW)`` -> NNX
-    ``(kD, kH, kW, out, in)`` -- via the SAME ``transpose(2, 3, 4, 1, 0)``
-    permutation (only the semantic labels of axes 0/1 differ between the two
-    weight layouts, not the required permutation), used together with
-    ``nnx.ConvTranspose(..., transpose_kernel=True)`` in
-    ``V2VNet.Upsample3DBlock`` (see fix + rationale in
-    ``jarvis_jax/hybridnet/v2vnet.py``): the JAX default
-    ``transpose_kernel=False`` reproduces a *different* op (the "true"
-    mathematical transpose of cross-correlation) than PyTorch's
-    ``ConvTranspose3d`` (adjoint of a flipped-kernel convolution).
+    ``(kD, kH, kW, in, out)`` needs a *different* transform, NOT the same
+    permutation as Conv3d: ``transpose(2, 3, 4, 0, 1)`` (move spatial axes to
+    front, keep (in, out) order -- note axes 0/1 are NOT swapped, unlike the
+    Conv3d case) followed by a spatial flip on the three leading axes,
+    ``np.flip(w, axis=(0, 1, 2))``. This is required because PyTorch's
+    ``ConvTranspose3d`` is the adjoint of a flipped-kernel convolution, not of
+    cross-correlation, and the runtime module ``V2VNet.Upsample3DBlock`` uses
+    plain ``nnx.ConvTranspose(..., transpose_kernel=False)`` (unmodified --
+    see ``jarvis_jax/hybridnet/v2vnet.py``; a shared-runtime-module
+    ``transpose_kernel=True`` patch was tried and reverted, since it broke
+    restoring pre-existing JAX-native Orbax checkpoints whose ConvTranspose3d
+    kernels were saved under the ``transpose_kernel=False`` shape convention
+    -- see Task-4 review). Permute-only (no flip) reproduces a *different* op
+    (max abs diff ~1.2 on a synthetic in!=out probe); permute-then-flip
+    matches PyTorch's ``ConvTranspose3d`` to floating-point exactness.
 """
 from __future__ import annotations
 
@@ -48,16 +54,35 @@ from jarvis_jax.hybridnet.v2vnet import V2VNet
 
 
 def _conv3d_w(state_dict: dict, key: str) -> np.ndarray:
-    """Permute a Conv3d/ConvTranspose3d weight for NNX.
+    """Permute a plain Conv3d weight ``(out,in,kD,kH,kW)`` -> NNX ``(kD,kH,kW,in,out)``.
 
-    Works for both layouts because the permutation ``(2,3,4,1,0)`` moves the
-    3 spatial axes to the front and swaps the remaining two -- exactly what's
-    needed whether axes (0,1) are (out,in) [Conv3d] or (in,out)
-    [ConvTranspose3d]; see module docstring.
+    Do NOT reuse for ConvTranspose3d -- that layout needs a different
+    transform (permute + spatial flip), see ``_conv_transpose3d_w`` and the
+    module docstring.
     """
     w = state_dict[key]
     w = w.detach().cpu().numpy() if hasattr(w, "detach") else np.asarray(w)
     return np.transpose(w, (2, 3, 4, 1, 0))
+
+
+def _conv_transpose3d_w(state_dict: dict, key: str) -> np.ndarray:
+    """Convert a ConvTranspose3d weight ``(in,out,kD,kH,kW)`` for NNX.
+
+    Target NNX layer is plain ``nnx.ConvTranspose(..., transpose_kernel=False)``
+    (the unmodified/reverted ``Upsample3DBlock``), which expects kernel shape
+    ``(kD,kH,kW,in,out)``. Unlike the plain-Conv3d case, this is NOT the same
+    permutation as ``_conv3d_w`` -- axes 0/1 (in,out) are NOT swapped, only
+    moved after the spatial axes: ``transpose(2,3,4,0,1)``. That alone is
+    insufficient; PyTorch's ``ConvTranspose3d`` is the adjoint of a
+    flipped-kernel convolution, so the three (now-leading) spatial axes must
+    also be flipped: ``np.flip(w, axis=(0,1,2))``. Verified empirically
+    against ``torch.nn.ConvTranspose3d`` with in!=out channels: max abs diff
+    0.0 with permute+flip vs ~1.2 with permute-only. See module docstring.
+    """
+    w = state_dict[key]
+    w = w.detach().cpu().numpy() if hasattr(w, "detach") else np.asarray(w)
+    w = np.transpose(w, (2, 3, 4, 0, 1))
+    return np.flip(w, axis=(0, 1, 2)).copy()
 
 
 def _bias(state_dict: dict, key: str) -> np.ndarray:
@@ -78,7 +103,7 @@ def _load_res3d(block, state_dict: dict, prefix: str) -> None:
 
 
 def _load_upsample3d(block, state_dict: dict, prefix: str) -> None:
-    block.deconv.kernel.value = _conv3d_w(state_dict, prefix + ".block.0.weight")
+    block.deconv.kernel.value = _conv_transpose3d_w(state_dict, prefix + ".block.0.weight")
     block.deconv.bias.value = _bias(state_dict, prefix + ".block.0.bias")
 
 

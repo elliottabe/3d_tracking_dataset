@@ -95,24 +95,11 @@ class Upsample3DBlock(nnx.Module):
         assert kernel_size == 2
         assert stride == 2
         # padding='VALID' (no padding) with kernel=2, stride=2 → exact ×2 upsample
-        #
-        # transpose_kernel=True is REQUIRED for PyTorch parity (verified
-        # empirically in Task 4, jarvis_jax/convert/load_v2vnet_torch.py):
-        # PyTorch's ConvTranspose3d is the adjoint of a flipped-kernel
-        # convolution, not of cross-correlation, so nnx.ConvTranspose's
-        # default transpose_kernel=False (raw/un-flipped kernel, "true"
-        # mathematical transpose of Conv) reproduces a *different* op
-        # (max abs diff ~0.77 on a random 2^3/stride-2 probe). With
-        # transpose_kernel=True (kernel shape (kD,kH,kW,out,in), internal
-        # spatial flip) the JAX op matches torch's ConvTranspose3d to
-        # floating-point exactness (max abs diff 0.0) -- same reasoning as
-        # ``EfficientTrack.deconv1`` (see efficienttrack.py docstring).
         self.deconv = nnx.ConvTranspose(
             in_planes, out_planes,
             kernel_size=(2, 2, 2),
             strides=(2, 2, 2),
             padding='VALID',
-            transpose_kernel=True,
             kernel_init=nnx.initializers.normal(0.001),
             bias_init=nnx.initializers.zeros,
             rngs=rngs,
