@@ -19,8 +19,12 @@ FIX = os.path.join(
 @pytest.mark.skipif(not os.path.exists(FIX), reason="run export_efficienttrack_fixture.py first")
 def test_fixture_has_expected_keys():
     z = np.load(FIX, allow_pickle=True)
-    for k in ["input_nchw", "feat_p3", "feat_p4", "feat_p5", "res1", "res2", "num_joints"]:
+    for k in ["input_nchw", "feat_p3", "feat_p4", "feat_p5", "res1", "res2", "num_joints",
+              "in_channels"]:
         assert k in z, f"missing {k}"
+    # unified_V3_masked weights are 4-channel (RGB + SAM3 mask baked into the front-end)
+    assert int(z["in_channels"]) == 4, int(z["in_channels"])
+    assert z["input_nchw"].shape[1] == 4, z["input_nchw"].shape
     assert z["res2"].shape[-2:] == (224, 224), z["res2"].shape
     assert z["feat_p3"].shape[1] == 24, z["feat_p3"].shape
     assert z["feat_p4"].shape[1] == 48, z["feat_p4"].shape

@@ -29,6 +29,8 @@ def main():
     ap.add_argument("--weights", required=True, help="EfficientTrack-large_final.pth")
     ap.add_argument("--jarvis-root", default="third_party/JARVIS-HybridNet")
     ap.add_argument("--num-joints", type=int, default=50)
+    ap.add_argument("--in-channels", type=int, default=4,
+                    help="input channels; unified_V3_masked weights are 4 (RGB+mask)")
     ap.add_argument("--image-size", type=int, default=448)
     ap.add_argument("--out", required=True)
     ap.add_argument("--seed", type=int, default=0)
@@ -43,7 +45,8 @@ def main():
         MODEL_SIZE = "large"
         NUM_JOINTS = a.num_joints
 
-    net = EfficientTrackBackbone(Cfg(), model_size="large", output_channels=a.num_joints)
+    net = EfficientTrackBackbone(Cfg(), model_size="large", output_channels=a.num_joints,
+                                 in_channels=a.in_channels)
     state_dict = torch.load(a.weights, map_location="cpu")
     net.load_state_dict(state_dict, strict=True)
     net.eval()
@@ -60,7 +63,7 @@ def main():
     handle = net.backbone_net.register_forward_hook(_hook)
 
     torch.manual_seed(a.seed)
-    x = torch.rand(2, 3, a.image_size, a.image_size)  # fixed seed, eval mode
+    x = torch.rand(2, a.in_channels, a.image_size, a.image_size)  # fixed seed, eval mode
     with torch.no_grad():
         res1, res2 = net(x)
     handle.remove()
@@ -77,6 +80,7 @@ def main():
         "res2": res2.detach().cpu().numpy(),
         "num_joints": np.int64(a.num_joints),
         "image_size": np.int64(a.image_size),
+        "in_channels": np.int64(a.in_channels),
     }
     for k, v in net.state_dict().items():
         out[f"w::{k}"] = v.detach().cpu().numpy()
