@@ -144,6 +144,19 @@ _W1_NAMES = ("p6_w1", "p5_w1", "p4_w1", "p3_w1")
 _W2_NAMES = ("p4_w2", "p5_w2", "p6_w2", "p7_w2")
 
 
+def _w2_init_len(name: str) -> int:
+    """p7_w2 only ever combines 2 terms (w[0]*p7_in + w[1]*maxpool(p6_out) --
+    see both ``__call__`` methods below); the PyTorch checkpoint stores it as
+    a 2-element tensor (verified: ``w::bifpn.{i}.p7_w2`` shape (2,) in the
+    EfficientTrack-large fixture, vs. (3,) for p4_w2/p5_w2/p6_w2). Declaring
+    the un-loaded default at the wrong length (3) is harmless for the direct
+    npz-loading path (``load_efficienttrack_from_npz`` overwrites ``.value``
+    in place, shape and all) but breaks the Orbax eval_shape/restore round
+    trip (Task 4), whose abstract target reflects this __init__-declared
+    shape."""
+    return 2 if name == "p7_w2" else 3
+
+
 class BiFPNFirstJAX(nnx.Module):
     """First BiFPN cell: projects P3/P4/P5 to ``num_channels`` and derives P6/P7."""
 
@@ -163,7 +176,7 @@ class BiFPNFirstJAX(nnx.Module):
         for name in _W1_NAMES:
             setattr(self, name, nnx.Param(jnp.ones((2,))))
         for name in _W2_NAMES:
-            setattr(self, name, nnx.Param(jnp.ones((3,))))
+            setattr(self, name, nnx.Param(jnp.ones((_w2_init_len(name),))))
 
     def __call__(self, inputs):
         p3, p4, p5 = inputs
@@ -216,7 +229,7 @@ class BiFPNJAX(nnx.Module):
         for name in _W1_NAMES:
             setattr(self, name, nnx.Param(jnp.ones((2,))))
         for name in _W2_NAMES:
-            setattr(self, name, nnx.Param(jnp.ones((3,))))
+            setattr(self, name, nnx.Param(jnp.ones((_w2_init_len(name),))))
 
     def __call__(self, inputs):
         p3_in, p4_in, p5_in, p6_in, p7_in = inputs
