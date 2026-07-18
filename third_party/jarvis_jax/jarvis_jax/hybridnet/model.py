@@ -125,13 +125,18 @@ def soft_argmax_3d(
 # ---------------------------------------------------------------------------
 
 class HybridNet3D(nnx.Module):
-    """End-to-end 3-D pose model: frozen ViTPose front-end + trainable V2VNet.
+    """End-to-end 3-D pose model: frozen 2-D front-end + trainable V2VNet.
+
+    The 2-D front-end is pluggable: either ``ViTPose`` (the original,
+    4-channel RGB+mask front-end) or ``EfficientTrack`` (the PyTorch
+    ``HybridNetBackbone``'s faithful 3-channel RGB front-end). Both expose a
+    ``(crops) -> (N, 224, 224, J)`` contract once flattened over cameras.
 
     Architecture (forward data flow)::
 
-        crops (B, num_cam, 448, 448, 4) uint8
-            → normalize_image (vmapped over cameras)
-            → ViTPose (frozen, use_running_average=True)
+        crops (B, num_cam, 448, 448, C) [uint8 for ViTPose, float for EfficientTrack]
+            → [ViTPose only] normalize_image (vmapped over cameras)
+            → front_end (frozen, use_running_average=True where applicable)
             → heatmaps (B, num_cam, 224, 224, J)
             → pad to 226×226
             → transpose to (B, num_cam, J, 226, 226)
@@ -143,51 +148,80 @@ class HybridNet3D(nnx.Module):
             → add center3D → points3D world (B, J, 3)
 
     Args:
-        vitpose: A ``ViTPose`` module (frozen; run in eval mode).
+        front_end: A 2-D keypoint module -- ``ViTPose`` (frozen; normalized
+            RGB+mask input) or ``EfficientTrack`` (frozen; raw RGB input, no
+            ImageNet normalization -- matches PyTorch ``HybridNetBackbone``,
+            which feeds ``effTrack`` un-normalized images). Run in eval mode.
         v2vnet:  A ``V2VNet`` module (trainable).
-        cfg:     A ``ViTPoseConfig`` (provides ``num_keypoints``).
+        cfg:     A config object (provides ``num_keypoints``, optional ``sharpen``).
     """
 
-    def __init__(self, vitpose, v2vnet, cfg):
-        self.vitpose = vitpose
+    def __init__(self, front_end, v2vnet, cfg):
+        self.front_end = front_end
         self.v2vnet = v2vnet
         self.cfg = cfg
         # soft-argmax sharpening exponent (center-bias fix); read from cfg if
         # present, else 1.0 (original behavior). See soft_argmax_3d / sweep diag.
         self.sharpen = float(getattr(cfg, "sharpen", 1.0))
+        # ViTPose is the only front-end that expects ImageNet-normalized
+        # input (RGB channels normalized + mask channel passed through raw);
+        # every other front-end (e.g. EfficientTrack) matches the PyTorch
+        # HybridNetBackbone reference, which feeds effTrack RAW images (no
+        # normalization at all -- see export_hybridnet_fixture.py, whose
+        # `imgs_nchw` are raw `torch.rand` in [0, 1)).
+        from jarvis_jax.models.vitpose import ViTPose  # local: no cycle risk, avoids import at module load if unused
+        self._is_vitpose = isinstance(front_end, ViTPose)
+
+    @property
+    def vitpose(self):
+        """Backward-compat alias for the pre-refactor ``vitpose`` attribute
+        name (e.g. ``model.vitpose.decoder...`` in existing tests/scripts).
+        Returns whatever front-end was actually passed in -- callers that use
+        this alias are expected to have constructed the model with a ViTPose
+        front-end, as before."""
+        return self.front_end
 
     def predict_heatmaps(
         self,
-        crops4_u8: jnp.ndarray,          # (B, num_cam, 448, 448, 4) uint8
+        crops_u8: jnp.ndarray,            # (B, num_cam, 448, 448, C)
     ) -> jnp.ndarray:                     # (B, num_cam, 224, 224, J)
-        """Run ViTPose (frozen/eval) over all cameras to produce 2-D heatmaps.
+        """Run the frozen 2-D front-end over all cameras to produce heatmaps.
 
-        The front-end is run with ``use_running_average=True`` (eval mode) since
-        ViTPose is frozen.  vmap is applied over the camera axis (dim 1) inside
-        the batch dimension.
+        The front-end is run in eval mode (frozen). For ViTPose, images are
+        first ImageNet-normalized via ``normalize_image`` (byte-identical to
+        the pre-refactor behavior); for any other front-end (e.g.
+        EfficientTrack), crops are passed through as float32 with NO
+        normalization, matching the PyTorch ``HybridNetBackbone`` reference.
 
         Args:
-            crops4_u8: ``(B, num_cam, 448, 448, 4)`` uint8 RGBA crops.
+            crops_u8: ``(B, num_cam, 448, 448, C)`` crops -- uint8 RGBA for
+                ViTPose, float RGB for EfficientTrack.
 
         Returns:
             ``(B, num_cam, 224, 224, J)`` float32 heatmap logits.
         """
-        B = crops4_u8.shape[0]
-        num_cam = crops4_u8.shape[1]
+        B = crops_u8.shape[0]
+        num_cam = crops_u8.shape[1]
+        H, W, C = crops_u8.shape[2], crops_u8.shape[3], crops_u8.shape[4]
 
         # Flatten (B, num_cam) → (B*num_cam,), process, unflatten
-        crops_flat = crops4_u8.reshape(B * num_cam, 448, 448, 4)
-        # Normalize each image
-        imgs_float = jax.vmap(normalize_image)(crops_flat)   # (B*num_cam, 448, 448, 4)
-        # Run ViTPose in eval/frozen mode
-        hm_flat = self.vitpose(imgs_float, use_running_average=True)  # (B*num_cam, 224, 224, J)
+        crops_flat = crops_u8.reshape(B * num_cam, H, W, C)
+        if self._is_vitpose:
+            # Normalize each image, then run ViTPose in eval/frozen mode.
+            imgs_float = jax.vmap(normalize_image)(crops_flat)   # (B*num_cam, H, W, C)
+            hm_flat = self.front_end(imgs_float, use_running_average=True)  # (B*num_cam, 224, 224, J)
+        else:
+            # Non-ViTPose front-ends (e.g. EfficientTrack) consume raw crops
+            # directly -- no normalization (PyTorch HybridNetBackbone parity).
+            imgs_float = crops_flat.astype(jnp.float32)
+            hm_flat = self.front_end.predict_heatmaps(imgs_float)  # (B*num_cam, 224, 224, J)
         # Unflatten back to (B, num_cam, 224, 224, J)
         J = hm_flat.shape[-1]
         return hm_flat.reshape(B, num_cam, 224, 224, J)
 
     def reproject_volume(
         self,
-        crops4_u8: jnp.ndarray,          # (B, num_cam, 448, 448, 4) uint8
+        crops_u8: jnp.ndarray,           # (B, num_cam, 448, 448, C)
         center3D: jnp.ndarray,           # (B, 3)
         centerHM: jnp.ndarray,           # (B, num_cam, 2)
         cameraMatrices: jnp.ndarray,     # (B, num_cam, 4, 3)
@@ -201,7 +235,8 @@ class HybridNet3D(nnx.Module):
         applied by ``__call__``.
 
         Args:
-            crops4_u8:       ``(B, num_cam, 448, 448, 4)`` uint8 RGBA crops.
+            crops_u8:        ``(B, num_cam, 448, 448, C)`` crops (uint8 RGBA for ViTPose,
+                             float RGB for EfficientTrack).
             center3D:        ``(B, 3)``  3-D bounding-box centre (world coords).
             centerHM:        ``(B, num_cam, 2)``  2-D crop centre per camera.
             cameraMatrices:  ``(B, num_cam, 4, 3)``  DLT projection matrices.
@@ -216,7 +251,7 @@ class HybridNet3D(nnx.Module):
         # (grid_size=48, grid_spacing=1, heatmap_size=226, pad=(1,1,1,1)).
 
         # 1. 2-D heatmaps: (B, num_cam, 224, 224, J) — ViTPose is always frozen/eval
-        hm = self.predict_heatmaps(crops4_u8)      # (B, num_cam, 224, 224, J)
+        hm = self.predict_heatmaps(crops_u8)      # (B, num_cam, 224, 224, J)
 
         # 2. Pad 224 → 226 (1 pixel each side on H and W).
         #    PyTorch: F.pad(heatmaps_batch, [1,1,1,1], 'constant', 0.)
@@ -246,7 +281,7 @@ class HybridNet3D(nnx.Module):
 
     def __call__(
         self,
-        crops4_u8: jnp.ndarray,          # (B, num_cam, 448, 448, 4) uint8
+        crops_u8: jnp.ndarray,           # (B, num_cam, 448, 448, C)
         center3D: jnp.ndarray,           # (B, 3)
         centerHM: jnp.ndarray,           # (B, num_cam, 2)
         cameraMatrices: jnp.ndarray,     # (B, num_cam, 4, 3)
@@ -256,7 +291,8 @@ class HybridNet3D(nnx.Module):
         """Full 3-D pose prediction forward pass.
 
         Args:
-            crops4_u8:       ``(B, num_cam, 448, 448, 4)`` uint8 RGBA crops.
+            crops_u8:        ``(B, num_cam, 448, 448, C)`` crops (uint8 RGBA for ViTPose,
+                             float RGB for EfficientTrack).
             center3D:        ``(B, 3)``  3-D bounding-box centre (world coords).
             centerHM:        ``(B, num_cam, 2)``  2-D crop centre per camera.
             cameraMatrices:  ``(B, num_cam, 4, 3)``  DLT projection matrices.
@@ -272,7 +308,7 @@ class HybridNet3D(nnx.Module):
         # (grid_size=48, grid_spacing=1, heatmap_size=226, pad=(1,1,1,1)) in sync.
 
         # 1–5. ViTPose → pad 224→226 → reproject → /255: (B, J, 48, 48, 48)
-        vol3d = self.reproject_volume(crops4_u8, center3D, centerHM, cameraMatrices)
+        vol3d = self.reproject_volume(crops_u8, center3D, centerHM, cameraMatrices)
 
         # 6. Transpose to (B, D, H, W, J) = (B, 48, 48, 48, J) for V2VNet
         vol3d = jnp.transpose(vol3d, (0, 2, 3, 4, 1))   # (B, 48, 48, 48, J)
