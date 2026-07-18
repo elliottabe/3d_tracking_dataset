@@ -264,6 +264,9 @@ class EfficientTrack(nnx.Module):
     """
 
     def __init__(self, *, num_joints: int = 50, in_channels: int = 4,
+                 # 4 = JARVIS unified_V3_masked "large"-config convention
+                 # (RGB + SAM3 mask channel); upstream PyTorch reference
+                 # defaults to 3 (RGB only).
                  rngs: nnx.Rngs):
         self.num_joints = num_joints
         self.fpn_num_filters = 160
