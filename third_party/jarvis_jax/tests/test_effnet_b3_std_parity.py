@@ -2,8 +2,12 @@
 (ImageNet weights), golden fixture from
 jarvis_jax/convert/export_effnet_b3_imagenet_fixture.py.
 
-P3=feat_3 (48,56,56), P4=feat_5 (136,28,28), P5=feat_7 (384,14,14) for a
-448x448 input (see the fixture export script's printed stride/channel table).
+P3=feat_2 (32,112,112), P4=feat_3 (48,56,56), P5=feat_5 (136,28,28) for a
+448x448 input -- the /4,/8,/16 taps EfficientTrack's FPN needs (matching the
+InstanceNorm backbone's tap strides so the head's x2 deconv from P3 lands on
+224x224), NOT the /8,/16,/32 taps (feat_3/feat_5/feat_7) a naive "last three
+stages" reading would suggest (see the fixture export script's printed
+stride/channel table).
 """
 import os
 
@@ -32,7 +36,7 @@ def test_effnet_b3_std_taps_match_torchvision():
     # atol=2e-3; float32 accumulation across ~26 MBConv blocks + 7 BatchNorms
     # of rescaling does not require a looser bound here).
     print()
-    for got, key, expect_c in [(p3, "feat_3", 48), (p4, "feat_5", 136), (p5, "feat_7", 384)]:
+    for got, key, expect_c in [(p3, "feat_2", 32), (p4, "feat_3", 48), (p5, "feat_5", 136)]:
         ref = np.transpose(z[key], (0, 2, 3, 1))  # NCHW -> NHWC
         assert got.shape == ref.shape, (key, got.shape, ref.shape)
         assert got.shape[-1] == expect_c, (key, got.shape)

@@ -1,21 +1,28 @@
 """Train a 2D KeypointDetect model on red_data_unified_V3 (JAX, data-parallel).
 
-Drives ViTPose (default) OR EfficientTrack (EfficientNet-b3 + BiFPN) through
-the identical train loop (make_optimizer/make_train_step/eval_mpjpe), so the
-two architectures can be compared head-to-head -- see `model_node.get("arch",
-...)` in `main_from_cfg`. ViTPose does a full fine-tune from the
-MAE-pretrained backbone with a lower backbone LR (see
-TrainConfig.backbone_lr_mult); EfficientTrack has no such checkpoint here and
-always starts from random init. Everything trains, so the 4th (SAM-mask)
-patch-embed channel learns. End-to-end localization evidence comes from a real
-run of this script (the synthetic overfit gate was dropped as flaky — see
-tests/test_train_step.py).
+Drives ViTPose (default), EfficientTrack (EfficientNet-b3 + BiFPN, InstanceNorm,
+random-init), OR EfficientTrack-BN (same BiFPN+head, but a STANDARD BatchNorm
+EfficientNet-b3 backbone warm-started from ImageNet) through the identical
+train loop (make_optimizer/make_train_step/eval_mpjpe), so the architectures
+can be compared head-to-head -- see `model_node.get("arch", ...)` in
+`main_from_cfg`. ViTPose does a full fine-tune from the MAE-pretrained
+backbone with a lower backbone LR (see TrainConfig.backbone_lr_mult);
+EfficientTrack has no such checkpoint here and always starts from random init;
+EfficientTrack-BN's backbone IS pretrained (ImageNet) so it uses the same
+lower-LR backbone treatment via `.backbone` path-matching, while its BiFPN+head
+still train from scratch like EfficientTrack's. Everything trains, so the 4th
+(SAM-mask) input channel (patch-embed for ViTPose, stem conv for the
+EfficientNet variants) learns from its zero-init no-op start. End-to-end
+localization evidence comes from a real run of this script (the synthetic
+overfit gate was dropped as flaky — see tests/test_train_step.py).
 
 CLI (Hydra; see configs/):
     python -m jarvis_jax.scripts.train_keypoints \\
         run_id=myrun train=vit2d model=vitpose paths=hyak
     python -m jarvis_jax.scripts.train_keypoints \\
         run_id=myrun train=vit2d model=efficienttrack paths=hyak
+    python -m jarvis_jax.scripts.train_keypoints \\
+        run_id=myrun train=vit2d model=efficienttrack_bn paths=hyak
 """
 import json
 import os
@@ -32,7 +39,7 @@ from flax import nnx
 
 from jarvis_jax.config import ViTPoseConfig
 from jarvis_jax.models.vitpose import ViTPose
-from jarvis_jax.models.efficienttrack import EfficientTrack
+from jarvis_jax.models.efficienttrack import EfficientTrack, build_efficienttrack_bn_imagenet
 from jarvis_jax.convert.build_checkpoint import build
 from jarvis_jax.data.prefetch import prefetch
 from jarvis_jax.data.v3 import V3Dataset, batches
@@ -44,6 +51,12 @@ from jarvis_jax.data.augment import build_lr_swap, AugParams
 from jarvis_jax.train.checkpoint import make_manager, save_step, restore_latest
 
 DEFAULT_MAE_NPZ = "/gscratch/portia/eabe/data/Johnson_lab/mae_vitb.npz"
+# Committed torchvision efficientnet_b3 ImageNet fixture (see
+# jarvis_jax/models/effnet_b3_std.py / convert/export_effnet_b3_imagenet_fixture.py),
+# resolved relative to the package so it works from any checkout.
+DEFAULT_EFFNET_B3_IMAGENET_NPZ = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "convert", "fixtures", "effnet_b3_imagenet.npz")
 
 
 def _epochs(ds, batch_size, base_seed, weights=None, num_workers=8):
@@ -58,6 +71,7 @@ def _epochs(ds, batch_size, base_seed, weights=None, num_workers=8):
 
 def run_training(root, *, out_dir, mae_npz=DEFAULT_MAE_NPZ, tcfg=None,
                  vitpose_cfg=None, aug_params=None, arch="vitpose",
+                 effnet_b3_imagenet_npz=None,
                  val_recording="2026_05_27_11_56_05",
                  log_every=50, eval_every=500, smoke=False,
                  ckpt_dir=None, save_every=500, oversample=None, num_workers=8):
@@ -81,6 +95,17 @@ def run_training(root, *, out_dir, mae_npz=DEFAULT_MAE_NPZ, tcfg=None,
         # backbone/head LR split (_param_labels) applies unchanged.
         model = EfficientTrack(num_joints=cfg.num_keypoints, in_channels=cfg.in_ch,
                                rngs=nnx.Rngs(tcfg.seed))
+    elif arch == "efficienttrack_bn":
+        # EfficientTrack-BN: same BiFPN+head as `efficienttrack`, but driven by
+        # the STANDARD (BatchNorm) EfficientNet-b3 backbone warm-started from
+        # ImageNet -- gives the EfficientNet side of the ViT-vs-EfficientNet
+        # comparison a pretrained init too (unlike plain `efficienttrack`,
+        # always random-init). `.backbone` is still the LR-split path
+        # `_param_labels` matches on, unchanged.
+        npz_path = effnet_b3_imagenet_npz or DEFAULT_EFFNET_B3_IMAGENET_NPZ
+        model = build_efficienttrack_bn_imagenet(
+            cfg.num_keypoints, npz_path, in_channels=cfg.in_ch,
+            rngs=nnx.Rngs(tcfg.seed))
     elif mae_npz and os.path.exists(mae_npz):
         model = build(mae_npz, cfg)          # MAE-pretrained backbone
     else:
@@ -188,9 +213,14 @@ def main_from_cfg(cfg):
         from omegaconf import OmegaConf
         oversample = OmegaConf.to_container(cfg.sampling, resolve=True)
     run_dir = run_dir_for(cfg)
-    # EfficientTrack has no MAE-pretrained checkpoint in this pipeline -- never
-    # attempt to load one for it.
-    mae_npz = cfg.paths.mae_npz if arch != "efficienttrack" else None
+    # EfficientTrack / EfficientTrack-BN have no MAE-pretrained checkpoint in
+    # this pipeline -- never attempt to load one for either.
+    mae_npz = cfg.paths.mae_npz if arch not in ("efficienttrack", "efficienttrack_bn") else None
+    # EfficientTrack-BN's ImageNet fixture path is configurable via
+    # model.effnet_b3_imagenet_npz (see configs/model/efficienttrack_bn.yaml);
+    # None -> run_training's committed-fixture default.
+    effnet_b3_imagenet_npz = (
+        model_node.get("effnet_b3_imagenet_npz", None) if arch == "efficienttrack_bn" else None)
     return run_training(
         cfg.paths.data_root,
         out_dir=os.path.join(run_dir, "final"),
@@ -199,6 +229,7 @@ def main_from_cfg(cfg):
         vitpose_cfg=vitpose_cfg,
         aug_params=aug_params,
         arch=arch,
+        effnet_b3_imagenet_npz=effnet_b3_imagenet_npz,
         smoke=bool(cfg.train.get("smoke", False)),
         ckpt_dir=os.path.join(run_dir, "ckpt"),
         save_every=cfg.train.save_every,

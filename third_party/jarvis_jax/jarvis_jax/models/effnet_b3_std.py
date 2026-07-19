@@ -28,9 +28,13 @@ which for b3 resolves to the concrete per-stage config baked into
 ``_STAGE_CFG`` below (stem out=40; stage out channels 24,32,48,96,136,232,384;
 block counts 2,3,3,5,5,6,2). ``features[i]`` for ``i`` in 1..7 is stage ``i``;
 ``features[0]`` is the stem, ``features[8]`` is the final 1x1 head conv
-(1536-ch) -- NOT used here (we only need the /8, /16, /32 taps for the FPN,
-which land at the *end* of stages 3, 5, 7 respectively: P3=48ch/56x56,
-P4=136ch/28x28, P5=384ch/14x14, for a 448x448 input).
+(1536-ch) -- NOT used here (we need the /4, /8, /16 taps for the EfficientTrack
+FPN -- matching the InstanceNorm backbone's tap strides -- which land at the
+*end* of stages 2, 3, 5 respectively: P3=32ch/112x112 (/4), P4=48ch/56x56
+(/8), P5=136ch/28x28 (/16), for a 448x448 input. NOT the /8,/16,/32 taps
+(stages 3,5,7 -> 48,136,384) that a naive "last three stages" reading would
+suggest: the EfficientTrack head deconvs x2 from P3, so P3 must be /4 (112)
+to reach the required 224x224 heatmap output, not /8 (56).
 
 Per-block structure (``MBConv.block`` in torchvision, a plain
 ``nn.Sequential``):
@@ -99,8 +103,11 @@ _STAGE_CFG = [
 
 _STEM_OUT = 40
 # 1-based stage index (matching torchvision's `features.<i>`) whose LAST
-# block's output is a P3/P4/P5 FPN tap.
-_TAP_STAGE = {3: "p3", 5: "p4", 7: "p5"}
+# block's output is a P3/P4/P5 FPN tap. P3/P4/P5 = /4,/8,/16 strides (stages
+# 2,3,5 -> 32,48,136 channels), matching the InstanceNorm EfficientTrack
+# backbone's tap strides so the head's x2 deconv from P3 (/4) lands on
+# 224x224 for a 448x448 input -- NOT stages 3,5,7 (/8,/16,/32).
+_TAP_STAGE = {2: "p3", 3: "p4", 5: "p5"}
 
 
 def _pad_same(k: int) -> int:
@@ -195,7 +202,7 @@ class MBConvStd(nnx.Module):
 
 class EfficientNetB3Std(nnx.Module):
     """Standard (torchvision) EfficientNet-b3 backbone, truncated to the
-    (P3, P4, P5) FPN taps (/8, /16, /32 strides; channels 48, 136, 384).
+    (P3, P4, P5) FPN taps (/4, /8, /16 strides; channels 32, 48, 136).
 
     Supports ``in_channels`` != 3 (e.g. 4, for a later SAM3-mask-aware
     variant) by simply sizing the stem conv's input dimension accordingly;
@@ -273,7 +280,19 @@ def load_b3std_from_npz(module: EfficientNetB3Std, z) -> EfficientNetB3Std:
     never allocates) was assigned, to catch silent naming-mismatch misses."""
     assigned: set[str] = set()
 
-    module.stem_conv.kernel.value = jnp.asarray(_conv_w(z, "w::features.0.0.weight"))
+    # Stem conv: torchvision kernel is (3,3,3,stem_out). ``module`` may have
+    # been sized for a different ``in_channels`` (e.g. 4, RGB + SAM3 mask
+    # channel) -- any extra input channel(s) are zero-initialized so a zero
+    # 4th channel is exactly a no-op at init, mirroring the ViT MAE 3->4
+    # patch-embed inflation (see convert/load_weights.py). No-op when
+    # ``in_channels == 3`` (the parity-test default): the branch is skipped.
+    w = _conv_w(z, "w::features.0.0.weight")  # (3,3,3,stem_out)
+    want_in = module.stem_conv.kernel.value.shape[2]
+    if want_in != w.shape[2]:
+        w_inflated = np.zeros((w.shape[0], w.shape[1], want_in, w.shape[3]), dtype=w.dtype)
+        w_inflated[:, :, : w.shape[2], :] = w
+        w = w_inflated
+    module.stem_conv.kernel.value = jnp.asarray(w)
     assigned.add("w::features.0.0.weight")
     _assign_bn(module.stem_bn, z, "w::features.0.1", assigned)
 

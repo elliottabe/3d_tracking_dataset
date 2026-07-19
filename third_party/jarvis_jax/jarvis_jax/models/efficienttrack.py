@@ -50,6 +50,7 @@ from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import flax.linen as linen_fn
 from flax import nnx
 
@@ -58,6 +59,10 @@ from jarvis_jax.models.efficientnet import (
     _conv_w,
     instance_norm,
     load_backbone_from_npz,
+)
+from jarvis_jax.models.effnet_b3_std import (
+    EfficientNetB3Std,
+    load_b3std_from_npz,
 )
 
 
@@ -79,6 +84,26 @@ def _softplus_norm(w: jnp.ndarray, eps: float = 1e-4) -> jnp.ndarray:
 def _upsample_nearest(x: jnp.ndarray, factor: int) -> jnp.ndarray:
     n, h, w, c = x.shape
     return jax.image.resize(x, (n, h * factor, w * factor, c), method="nearest")
+
+
+def _upsample_to(x: jnp.ndarray, ref: jnp.ndarray) -> jnp.ndarray:
+    """Nearest-neighbor resize of ``x``'s spatial dims to match ``ref``'s.
+
+    Used ONLY for the p7_in -> p6-level upsample inside BiFPN(_first): with
+    the InstanceNorm EfficientNetB3 backbone, P5's spatial size is always even
+    at every level down to P7 (e.g. 28 -> p6=14 -> p7=7 -> upsample x2 -> 14,
+    an exact match for p6_in, identical to ``_upsample_nearest(x, 2)``: this
+    call is a byte-identical no-op for that path). The standard-stride
+    EfficientNetB3Std backbone (EfficientTrackBN) has a smaller P5 (true /32
+    stride, e.g. 14 for a 448 input), so p6=7 is ODD and p7=maxpool(7)=3
+    (``_maxpool2``'s VALID padding floor-divides, dropping the trailing row/
+    col) -- a fixed factor-2 upsample of p7 (3 -> 6) would then mismatch p6
+    (7). Resizing to p6_in's actual shape (rather than assuming a clean
+    doubling) fixes this the same way for both backbones, since jax.image
+    .resize(..., method="nearest") to an explicit output shape that happens to
+    be exactly 2x the input is identical to the fixed-factor call."""
+    n, h, w, c = ref.shape
+    return jax.image.resize(x, (n, h, w, c), method="nearest")
 
 
 def _maxpool2(x: jnp.ndarray) -> jnp.ndarray:
@@ -188,7 +213,7 @@ class BiFPNFirstJAX(nnx.Module):
         p5_in = self.p5_down_channel(p5)
 
         w = _relu_norm(self.p6_w1.value)
-        p6_up = self.conv6_up(nnx.silu(w[0] * p6_in + w[1] * _upsample_nearest(p7_in, 2)))
+        p6_up = self.conv6_up(nnx.silu(w[0] * p6_in + w[1] * _upsample_to(p7_in, p6_in)))
 
         w = _relu_norm(self.p5_w1.value)
         p5_up = self.conv5_up(nnx.silu(w[0] * p5_in + w[1] * _upsample_nearest(p6_up, 2)))
@@ -235,7 +260,7 @@ class BiFPNJAX(nnx.Module):
         p3_in, p4_in, p5_in, p6_in, p7_in = inputs
 
         w = _relu_norm(self.p6_w1.value)
-        p6_up = self.conv6_up(nnx.silu(w[0] * p6_in + w[1] * _upsample_nearest(p7_in, 2)))
+        p6_up = self.conv6_up(nnx.silu(w[0] * p6_in + w[1] * _upsample_to(p7_in, p6_in)))
 
         w = _relu_norm(self.p5_w1.value)
         p5_up = self.conv5_up(nnx.silu(w[0] * p5_in + w[1] * _upsample_nearest(p6_up, 2)))
@@ -402,5 +427,122 @@ def load_efficienttrack_from_npz(module: EfficientTrack, z) -> EfficientTrack:
     module.weights_cat.value = jnp.asarray(z["w::weights_cat"])
     module.deconv1.kernel.value = jnp.asarray(_conv_w(z, "w::deconv1.weight"))
     module.final_conv1.kernel.value = jnp.asarray(_conv_w(z, "w::final_conv1.weight"))
+    return module
+
+
+# ---------------------------------------------------------------------------
+# EfficientTrack-BN: standard (BatchNorm) ImageNet-pretrainable EfficientNet-b3
+# backbone variant, for a fair ViT-vs-EfficientNet keypoint-backbone
+# comparison (unlike plain EfficientTrack above, which has no pretrained
+# checkpoint in this pipeline and is always random-init).
+# ---------------------------------------------------------------------------
+class EfficientTrackBN(nnx.Module):
+    """EfficientTrack driven by ``EfficientNetB3Std`` (the standard torchvision
+    BatchNorm EfficientNet-b3, ImageNet-pretrainable) instead of the JARVIS
+    ``EfficientNetB3`` (InstanceNorm, always random-init). The BiFPN(_first) +
+    detection head are IDENTICAL to ``EfficientTrack`` (same InstanceNorm
+    building blocks, always freshly initialized) -- only the backbone and its
+    channel-projection ``conv_channel_coef`` differ:
+
+    ================  ===================  ==========================
+    variant           backbone norm         conv_channel_coef (P3,P4,P5)
+    ================  ===================  ==========================
+    EfficientTrack     InstanceNorm          (24, 48, 120)
+    EfficientTrackBN   BatchNorm (ImageNet)  (32, 48, 136)
+    ================  ===================  ==========================
+
+    ``__call__``/``forward_both`` thread ``use_running_average`` straight into
+    the BN backbone (training: batch stats + running-stat update; eval:
+    running stats) -- unlike ``EfficientTrack.__call__``, where the flag is a
+    accepted-but-ignored no-op (InstanceNorm has no running-average state).
+    """
+
+    def __init__(self, *, num_joints: int = 50, in_channels: int = 4,
+                 rngs: nnx.Rngs):
+        self.num_joints = num_joints
+        self.fpn_num_filters = 160
+        self.fpn_cell_repeats = 6
+        self.final_layer_sizes = 160
+        # EfficientNetB3Std's P3/P4/P5 tap channels at /4,/8,/16 strides (see
+        # effnet_b3_std.py module docstring) -- NOT the InstanceNorm
+        # backbone's (24,48,120), and NOT the /8,/16,/32 taps (48,136,384)
+        # that a naive "last three stages" reading would suggest (that would
+        # make P3 land at /8=112->56, breaking the head's x2 deconv to 224).
+        self.conv_channel_coef = (32, 48, 136)
+
+        self.backbone = EfficientNetB3Std(in_channels=in_channels, rngs=rngs)
+
+        cells = [BiFPNFirstJAX(self.fpn_num_filters, self.conv_channel_coef, rngs=rngs)]
+        cells += [BiFPNJAX(self.fpn_num_filters, rngs=rngs)
+                  for _ in range(1, self.fpn_cell_repeats)]
+        self.bifpn = nnx.List(cells)
+
+        self.weights_cat = nnx.Param(jnp.ones((3,)))
+        self.first_conv = SeparableConvBlockJAX(
+            self.fpn_num_filters, self.final_layer_sizes, norm=True,
+            activation=False, rngs=rngs)
+
+        self.deconv1 = nnx.ConvTranspose(
+            self.final_layer_sizes, num_joints, kernel_size=(4, 4), strides=(2, 2),
+            padding=((2, 2), (2, 2)), use_bias=False, transpose_kernel=True,
+            rngs=rngs,
+        )
+        self.final_conv1 = nnx.Conv(
+            self.final_layer_sizes, num_joints, kernel_size=(3, 3), strides=(1, 1),
+            padding=((1, 1), (1, 1)), use_bias=False, rngs=rngs,
+        )
+
+    def forward_both(self, x: jnp.ndarray, *, use_running_average: bool):
+        features = self.backbone(x, use_running_average=use_running_average)
+        for cell in self.bifpn:
+            features = cell(features)
+
+        x3 = _upsample_nearest(features[2], 4)
+        x2 = _upsample_nearest(features[1], 2)
+        w = _softplus_norm(self.weights_cat.value)
+        x1 = w[0] * features[0] + w[1] * x2 + w[2] * x3
+
+        pre = self.first_conv(x1)
+        res2 = self.deconv1(pre)
+        res1 = self.final_conv1(pre)
+        return res1, res2
+
+    def __call__(self, x: jnp.ndarray, *, use_running_average: bool = False) -> jnp.ndarray:
+        """Unlike ``EfficientTrack.__call__``, ``use_running_average`` is NOT
+        a no-op here: it is threaded into the BatchNorm backbone (training:
+        batch stats computed + running mean/var updated in place;
+        eval/inference: running stats used directly)."""
+        _, res2 = self.forward_both(x, use_running_average=use_running_average)
+        return res2
+
+    def predict_heatmaps(self, crops_nhwc: jnp.ndarray,
+                         *, use_running_average: bool = True) -> jnp.ndarray:
+        """Front-end contract identical to ``EfficientTrack.predict_heatmaps``
+        (accepts/returns arbitrary leading batch dims), but defaults to
+        ``use_running_average=True`` since this is the inference entry point
+        and the BN backbone's running stats -- not the current batch's -- are
+        what should be used at predict time."""
+        *lead, H, W, C = crops_nhwc.shape
+        flat = crops_nhwc.reshape((-1, H, W, C))
+        out = self(flat, use_running_average=use_running_average)
+        J = out.shape[-1]
+        return out.reshape((*lead, out.shape[1], out.shape[2], J))
+
+
+def build_efficienttrack_bn_imagenet(num_joints: int, npz_path: str, *,
+                                     in_channels: int = 4,
+                                     rngs: nnx.Rngs) -> EfficientTrackBN:
+    """Factory: build an ``EfficientTrackBN`` with the backbone warm-started
+    from ImageNet (``load_b3std_from_npz`` on the torchvision ``efficientnet_b3``
+    fixture npz at ``npz_path``) and the stem conv zero-inflated 3->``in_channels``
+    (mirrors the ViT MAE 3->4 patch-embed inflation, see
+    ``convert/load_weights.py``: a zero mask channel is a no-op at init). The
+    BiFPN + detection head are left at their fresh ``nnx.Rngs`` init (there is
+    no pretrained checkpoint for them in this pipeline -- they always train
+    from scratch, same as plain ``EfficientTrack``)."""
+    model = EfficientTrackBN(num_joints=num_joints, in_channels=in_channels, rngs=rngs)
+    z = np.load(npz_path)
+    load_b3std_from_npz(model.backbone, z)
+    return model
 
     return module

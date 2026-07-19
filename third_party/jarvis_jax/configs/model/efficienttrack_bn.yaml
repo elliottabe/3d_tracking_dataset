@@ -1,0 +1,17 @@
+# @package model
+# EfficientTrack-BN: EfficientTrack's BiFPN + deconv head (InstanceNorm,
+# always trained fresh -- identical to model/efficienttrack.yaml) driven by
+# the STANDARD (BatchNorm) ImageNet-pretrainable EfficientNet-b3 backbone
+# (EfficientNetB3Std) instead of the JARVIS InstanceNorm EfficientNetB3 --
+# gives the EfficientNet side of the ViT-vs-EfficientNet comparison a
+# pretrained warm start too. Trained through the SAME 2D keypoint loop
+# (train_keypoints.main_from_cfg); `arch` is the selector it reads.
+arch: efficienttrack_bn
+in_ch: 4
+num_keypoints: 50
+heatmap_size: 224
+# Optional override of the committed ImageNet-pretrained torchvision
+# efficientnet_b3 fixture npz (see jarvis_jax/models/effnet_b3_std.py
+# load_b3std_from_npz). null -> train_keypoints.DEFAULT_EFFNET_B3_IMAGENET_NPZ
+# (the committed fixture at jarvis_jax/convert/fixtures/effnet_b3_imagenet.npz).
+effnet_b3_imagenet_npz: null
