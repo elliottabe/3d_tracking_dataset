@@ -148,6 +148,52 @@ def soft_gate(
     return volume * gate[:, None]
 
 
+def apply_carve_gate(
+    vol: jnp.ndarray,               # (B, J, G, G, G)
+    masks: jnp.ndarray,             # (B, num_cam, heatmap_size, heatmap_size)
+    center3D: jnp.ndarray,          # (B, 3)
+    centerHM: jnp.ndarray,          # (B, num_cam, 2)
+    cameraMatrices: jnp.ndarray,    # (B, num_cam, 4, 3)
+    *,
+    temperature: float,
+    floor: float,
+    grid_size: int = 48,
+    heatmap_size: int = 226,
+) -> jnp.ndarray:
+    """Apply the SAM3 'carve' fusion gate to a pre-V2VNet volume.
+
+    This is the single source of truth for the ``fusion_mode == 'carve'``
+    gate: builds the cross-camera mask consistency volume via
+    `mask_consistency_volume` and attenuates ``vol`` with `soft_gate`. It is
+    called identically by all three carve call sites in the codebase --
+    inference (``HybridNet3D.__call__`` and ``predict.infer_3d.step_vol``)
+    and training (``train.train_3d.loss_fn``) -- so the gate math lives in
+    exactly one place. Callers remain responsible for their own
+    ``fusion_mode == 'carve' and masks is not None`` guard; this function
+    unconditionally applies the gate.
+
+    Args:
+        vol: ``(B, J, grid_size, grid_size, grid_size)`` pre-V2VNet volume
+            (e.g. the ``/255``-normalized reprojected heatmap volume).
+        masks: ``(B, num_cam, heatmap_size, heatmap_size)`` per-camera
+            silhouette masks, aligned to the padded heatmap size.
+        center3D, centerHM, cameraMatrices: see `mask_consistency_volume`.
+        temperature, floor: `soft_gate` parameters (typically
+            ``model.gate_temperature`` / ``model.gate_floor``).
+        grid_size: cube side length (default 48, matches HybridNet3D).
+        heatmap_size: spatial size of each input mask (default 226, the
+            padded heatmap size ``reproject_volume`` reprojects at).
+
+    Returns:
+        ``(B, J, grid_size, grid_size, grid_size)`` gated volume.
+    """
+    consistency = mask_consistency_volume(
+        masks, center3D, centerHM, cameraMatrices,
+        grid_size=grid_size, heatmap_size=heatmap_size,
+    )
+    return soft_gate(vol, consistency, temperature=temperature, floor=floor)
+
+
 def mask_input_crops(
     crops_nhwc: jnp.ndarray,  # (B, num_cam, H, W, C)
     masks: jnp.ndarray,       # (B, num_cam, H, W)

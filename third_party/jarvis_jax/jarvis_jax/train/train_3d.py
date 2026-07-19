@@ -47,7 +47,7 @@ from jarvis_jax.config import ViTPoseConfig
 from jarvis_jax.convert.build_checkpoint import load_vitpose
 from jarvis_jax.data.v3_3d import V3FramesetDataset, frameset_batches
 from jarvis_jax.eval.mpjpe_3d import mpjpe_3d
-from jarvis_jax.hybridnet.mask_fuse import mask_consistency_volume, soft_gate
+from jarvis_jax.hybridnet.mask_fuse import apply_carve_gate
 from jarvis_jax.hybridnet.model import HybridNet3D, soft_argmax_3d
 from jarvis_jax.hybridnet.reproject import reproject_heatmaps
 from jarvis_jax.hybridnet.v2vnet import V2VNet
@@ -249,13 +249,9 @@ def make_train_step_3d(
         # provided; fusion_mode=='none' (or no masks) never reaches this
         # branch -- the byte-identical regression guard.
         if model.fusion_mode == "carve" and masks is not None:
-            consistency = mask_consistency_volume(
-                masks, center3D, centerHM, cameraMatrices,
-                grid_size=48, heatmap_size=226,
-            )  # (B, 48, 48, 48)
-            vol3d = soft_gate(vol3d, consistency,
-                               temperature=model.gate_temperature,
-                               floor=model.gate_floor)
+            vol3d = apply_carve_gate(vol3d, masks, center3D, centerHM, cameraMatrices,
+                                      temperature=model.gate_temperature,
+                                      floor=model.gate_floor)
 
         vol3d = jnp.transpose(vol3d, (0, 2, 3, 4, 1)) # (B, 48, 48, 48, J)
         vol3d = model.v2vnet(vol3d, use_running_average=False)

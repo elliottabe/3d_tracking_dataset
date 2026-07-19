@@ -17,7 +17,7 @@ from flax import nnx
 
 from jarvis_jax.config import ViTPoseConfig
 from jarvis_jax.convert.build_checkpoint import load_vitpose
-from jarvis_jax.hybridnet.mask_fuse import mask_consistency_volume, soft_gate
+from jarvis_jax.hybridnet.mask_fuse import apply_carve_gate
 from jarvis_jax.hybridnet.model import HybridNet3D
 from jarvis_jax.hybridnet.v2vnet import V2VNet
 from jarvis_jax.sharding import data_parallel_mesh, replicate, shard_batch
@@ -73,10 +73,15 @@ def load_inference_model(vitpose_ckpt, v2v_final_dir, *, sharpen=3.0, num_keypoi
         vitpose_ckpt: Path to the Orbax ViTPose checkpoint directory. Only
             used when ``front_end='vitpose'`` (the default); ignored (may be
             ``None``) when ``front_end='efficienttrack'``.
-        v2v_final_dir: Path to the Orbax V2VNet checkpoint directory (or a
-            ``.pth`` HybridNet checkpoint, auto-converted). Same directory
-            works for either front-end -- the V2VNet weights are independent
-            of which 2-D front-end feeds them.
+        v2v_final_dir: Path to the Orbax V2VNet checkpoint directory. The
+            V2VNet weights are independent of which 2-D front-end feeds
+            them, so the same directory works for either ``front_end``.
+            ``.pth`` HybridNet-checkpoint auto-conversion is only wired up
+            for the ``front_end='efficienttrack'`` branch (via
+            ``convert_v2vnet_pth``, see ``_maybe_convert_pth``); when
+            ``front_end='vitpose'`` this must already be an Orbax
+            checkpoint directory -- no ``.pth`` conversion is performed on
+            that path (Orbax state is restored directly).
         sharpen: Soft-argmax sharpening exponent (default 3.0, center-bias fix).
         num_keypoints: Number of keypoints (default 50).
         front_end: ``'vitpose'`` (default, byte-identical to the pre-existing
@@ -174,13 +179,9 @@ def _make_steps():
         # is replicated here to keep parity). fusion_mode=='none' never
         # reaches this branch regardless of masks (byte-identical guard).
         if model.fusion_mode == "carve" and masks is not None:
-            consistency = mask_consistency_volume(
-                masks, center3D, centerHM, cameraMatrices,
-                grid_size=48, heatmap_size=226,
-            )
-            vol3d = soft_gate(vol3d, consistency,
-                               temperature=model.gate_temperature,
-                               floor=model.gate_floor)
+            vol3d = apply_carve_gate(vol3d, masks, center3D, centerHM, cameraMatrices,
+                                      temperature=model.gate_temperature,
+                                      floor=model.gate_floor)
         return vol3d
 
     @nnx.jit

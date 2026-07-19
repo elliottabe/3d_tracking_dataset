@@ -111,7 +111,7 @@ def test_points3d_match_pytorch(tmp_path):
     # axis-order, scale, or center3D-offset bug would collapse this far below
     # 1, and would already be visible in the isolated EfficientTrack heatmap
     # check (corr=1.00000000) cited above.
-    assert corr > 0.9999, f"correlation {corr:.8f} -- suspect wiring bug"
+    assert corr > 0.99999, f"correlation {corr:.8f} -- suspect wiring bug"
     assert abs(signed_mean) < 0.1, f"signed mean {signed_mean:.4e} (systematic bias?)"
     # Measured 0.084 (mean_abs) / 0.344 (max_abs); bounds set with headroom
     # above the measured, amplified-but-non-buggy noise floor (see docstring).

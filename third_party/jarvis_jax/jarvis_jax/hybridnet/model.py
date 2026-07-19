@@ -31,9 +31,8 @@ from flax import nnx
 
 from jarvis_jax.data.device import normalize_image
 from jarvis_jax.hybridnet.mask_fuse import (
-    mask_consistency_volume,
+    apply_carve_gate,
     mask_input_crops,
-    soft_gate,
 )
 from jarvis_jax.hybridnet.reproject import reproject_heatmaps
 
@@ -261,7 +260,7 @@ class HybridNet3D(nnx.Module):
     ) -> jnp.ndarray:                    # (B, J, 48, 48, 48)
         """Compute the reprojected 3-D volume — the exact intermediate cached by the trainer.
 
-        Runs the frozen ViTPose front-end, pads heatmaps 224→226, and reprojects
+        Runs the frozen 2-D front-end, pads heatmaps 224→226, and reprojects
         into a ``(B, J, 48, 48, 48)`` volume (the pre-v2vNet, channels-first layout).
         This is the value that the cached trainer precomputes and stores; the
         remaining ``transpose → v2vNet → softplus → soft_argmax_3d`` steps are
@@ -376,13 +375,9 @@ class HybridNet3D(nnx.Module):
         # this branch, so no gate/consistency volume is ever built for it
         # (byte-identical regression guard).
         if self.fusion_mode == "carve" and masks is not None:
-            consistency = mask_consistency_volume(
-                masks, center3D, centerHM, cameraMatrices,
-                grid_size=48, heatmap_size=226,
-            )  # (B, 48, 48, 48)
-            vol3d = soft_gate(vol3d, consistency,
-                               temperature=self.gate_temperature,
-                               floor=self.gate_floor)
+            vol3d = apply_carve_gate(vol3d, masks, center3D, centerHM, cameraMatrices,
+                                      temperature=self.gate_temperature,
+                                      floor=self.gate_floor)
 
         # 6. Transpose to (B, D, H, W, J) = (B, 48, 48, 48, J) for V2VNet
         vol3d = jnp.transpose(vol3d, (0, 2, 3, 4, 1))   # (B, 48, 48, 48, J)
