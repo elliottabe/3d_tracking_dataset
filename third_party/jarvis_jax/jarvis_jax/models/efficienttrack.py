@@ -327,7 +327,13 @@ class EfficientTrack(nnx.Module):
         res1 = self.final_conv1(pre)
         return res1, res2
 
-    def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
+    def __call__(self, x: jnp.ndarray, *, use_running_average: bool = False) -> jnp.ndarray:
+        """``use_running_average`` is accepted (and ignored) only so this model
+        satisfies the 2D trainer's generic model contract
+        (``model(img, use_running_average=...)``, see train/train.py). It is a
+        no-op here: EfficientTrack has no dropout / batch-stats layers --
+        InstanceNorm (see ``instance_norm``) is computed per-example from the
+        current activations, so there is no running-average state to switch."""
         _, res2 = self.forward_both(x)
         return res2
 

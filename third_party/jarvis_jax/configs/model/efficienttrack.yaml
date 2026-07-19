@@ -1,0 +1,12 @@
+# @package model
+# EfficientTrack (EfficientNet-b3 backbone + BiFPN + deconv head), the
+# EfficientNet-family counterpart to model/vitpose.yaml -- trained through the
+# SAME 2D keypoint loop (see train_keypoints.main_from_cfg) for a
+# ViT-vs-EfficientNet comparison. `arch` is the selector main_from_cfg reads
+# (model_node.get("arch", "vitpose")); everything else mirrors vitpose.yaml's
+# generic model metadata (num_keypoints/in_ch/heatmap_size) -- the ViT-only
+# fields (img_size/patch/embed_dim/...) are simply unused for this arch.
+arch: efficienttrack
+in_ch: 4
+num_keypoints: 50
+heatmap_size: 224

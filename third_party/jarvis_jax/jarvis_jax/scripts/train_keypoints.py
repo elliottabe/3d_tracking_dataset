@@ -1,7 +1,12 @@
-"""Train ViTPose KeypointDetect on red_data_unified_V3 (JAX, data-parallel).
+"""Train a 2D KeypointDetect model on red_data_unified_V3 (JAX, data-parallel).
 
-Full fine-tune from the MAE-pretrained backbone with a lower backbone LR
-(see TrainConfig.backbone_lr_mult). Everything trains, so the 4th (SAM-mask)
+Drives ViTPose (default) OR EfficientTrack (EfficientNet-b3 + BiFPN) through
+the identical train loop (make_optimizer/make_train_step/eval_mpjpe), so the
+two architectures can be compared head-to-head -- see `model_node.get("arch",
+...)` in `main_from_cfg`. ViTPose does a full fine-tune from the
+MAE-pretrained backbone with a lower backbone LR (see
+TrainConfig.backbone_lr_mult); EfficientTrack has no such checkpoint here and
+always starts from random init. Everything trains, so the 4th (SAM-mask)
 patch-embed channel learns. End-to-end localization evidence comes from a real
 run of this script (the synthetic overfit gate was dropped as flaky — see
 tests/test_train_step.py).
@@ -9,6 +14,8 @@ tests/test_train_step.py).
 CLI (Hydra; see configs/):
     python -m jarvis_jax.scripts.train_keypoints \\
         run_id=myrun train=vit2d model=vitpose paths=hyak
+    python -m jarvis_jax.scripts.train_keypoints \\
+        run_id=myrun train=vit2d model=efficienttrack paths=hyak
 """
 import json
 import os
@@ -25,6 +32,7 @@ from flax import nnx
 
 from jarvis_jax.config import ViTPoseConfig
 from jarvis_jax.models.vitpose import ViTPose
+from jarvis_jax.models.efficienttrack import EfficientTrack
 from jarvis_jax.convert.build_checkpoint import build
 from jarvis_jax.data.prefetch import prefetch
 from jarvis_jax.data.v3 import V3Dataset, batches
@@ -49,7 +57,7 @@ def _epochs(ds, batch_size, base_seed, weights=None):
 
 
 def run_training(root, *, out_dir, mae_npz=DEFAULT_MAE_NPZ, tcfg=None,
-                 vitpose_cfg=None, aug_params=None,
+                 vitpose_cfg=None, aug_params=None, arch="vitpose",
                  val_recording="2026_05_27_11_56_05",
                  log_every=50, eval_every=500, smoke=False,
                  ckpt_dir=None, save_every=500, oversample=None):
@@ -66,7 +74,14 @@ def run_training(root, *, out_dir, mae_npz=DEFAULT_MAE_NPZ, tcfg=None,
             f"batch_size ({tcfg.batch_size}) must be divisible by the JAX device "
             f"count ({n_dev}) for data-parallel sharding.")
 
-    if mae_npz and os.path.exists(mae_npz):
+    if arch == "efficienttrack":
+        # EfficientTrack (EfficientNet-b3 + BiFPN) has no MAE-style pretrained
+        # checkpoint in this pipeline -- it is always randomly initialised.
+        # It still exposes a `.backbone` submodule, so `make_optimizer`'s
+        # backbone/head LR split (_param_labels) applies unchanged.
+        model = EfficientTrack(num_joints=cfg.num_keypoints, in_channels=cfg.in_ch,
+                               rngs=nnx.Rngs(tcfg.seed))
+    elif mae_npz and os.path.exists(mae_npz):
         model = build(mae_npz, cfg)          # MAE-pretrained backbone
     else:
         print(f"WARNING: MAE npz not found ({mae_npz}); using RANDOM init "
@@ -157,6 +172,13 @@ def main_from_cfg(cfg):
     # Build ViTPoseConfig robustly: works whether model=vitpose (flat cfg.model.*)
     # OR model=hybridnet (ViT nested at cfg.model.vitpose).
     model_node = cfg.model.get("vitpose", cfg.model)
+    # Model-selection: `arch` picks the detector architecture trained through
+    # this SAME loop (ViT-vs-EfficientNet comparison). Absent (e.g. existing
+    # model=vitpose / model=hybridnet configs never set it) -> "vitpose",
+    # so the ViTPose path is byte-for-byte unchanged. ViTPoseConfig doubles as
+    # the generic "model metadata" container (num_keypoints/in_ch/heatmap_size)
+    # for both archs; EfficientTrack simply ignores the ViT-only fields.
+    arch = model_node.get("arch", "vitpose")
     vitpose_cfg = build_dataclass(ViTPoseConfig, model_node)
     aug_params = build_dataclass(AugParams, cfg.aug)
     # Optional weighted oversampling of an under-represented (sex, behavior) class.
@@ -165,13 +187,17 @@ def main_from_cfg(cfg):
         from omegaconf import OmegaConf
         oversample = OmegaConf.to_container(cfg.sampling, resolve=True)
     run_dir = run_dir_for(cfg)
+    # EfficientTrack has no MAE-pretrained checkpoint in this pipeline -- never
+    # attempt to load one for it.
+    mae_npz = cfg.paths.mae_npz if arch != "efficienttrack" else None
     return run_training(
         cfg.paths.data_root,
         out_dir=os.path.join(run_dir, "final"),
-        mae_npz=cfg.paths.mae_npz,
+        mae_npz=mae_npz,
         tcfg=tcfg,
         vitpose_cfg=vitpose_cfg,
         aug_params=aug_params,
+        arch=arch,
         smoke=bool(cfg.train.get("smoke", False)),
         ckpt_dir=os.path.join(run_dir, "ckpt"),
         save_every=cfg.train.save_every,
