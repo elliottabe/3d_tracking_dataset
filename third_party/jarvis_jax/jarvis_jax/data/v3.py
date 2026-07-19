@@ -2,6 +2,7 @@
 448 uint8 crops and (50,2) heatmap-coord keypoints."""
 import json
 import os
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 from PIL import Image
@@ -101,13 +102,21 @@ class V3Dataset:
         return img4, kp_xy.astype(np.float32), vis
 
 
-def batches(ds, batch_size, *, shuffle=True, seed=0, drop_last=True, weights=None):
+def batches(ds, batch_size, *, shuffle=True, seed=0, drop_last=True, weights=None,
+            num_workers: int = 8):
     """Yield (imgs, kps, viss) batches over the dataset for one epoch.
 
     weights: optional (n,) sum-normalised per-annotation sampling probabilities
     (e.g. from ds.sampling_weights). When given, one epoch draws n indices WITH
     REPLACEMENT from `weights` (oversampling the rare class); when None, a plain
-    uniform shuffle (each annotation once)."""
+    uniform shuffle (each annotation once).
+
+    num_workers: when > 1, per-batch samples (ds[j] -- JPEG decode + mask npz
+    load, both GIL-releasing) are fetched concurrently via a thread pool that is
+    created once for the whole epoch and reused across batches. Order of results
+    within a batch always matches `sel` (index selection is untouched), so
+    batches are byte-identical to the serial (num_workers<=1) path for the same
+    seed. When num_workers <= 1, falls back to the original serial fetch."""
     n = len(ds)
     rng = np.random.default_rng(seed)
     if weights is not None:
@@ -117,7 +126,15 @@ def batches(ds, batch_size, *, shuffle=True, seed=0, drop_last=True, weights=Non
     else:
         idx = np.arange(n)
     stop = (n // batch_size) * batch_size if drop_last else n
-    for s in range(0, stop, batch_size):
-        sel = idx[s:s + batch_size]
-        imgs, kps, viss = zip(*(ds[int(j)] for j in sel))
-        yield (np.stack(imgs), np.stack(kps), np.stack(viss))
+
+    if num_workers is not None and num_workers > 1:
+        with ThreadPoolExecutor(max_workers=num_workers) as executor:
+            for s in range(0, stop, batch_size):
+                sel = idx[s:s + batch_size]
+                imgs, kps, viss = zip(*executor.map(lambda j: ds[int(j)], sel))
+                yield (np.stack(imgs), np.stack(kps), np.stack(viss))
+    else:
+        for s in range(0, stop, batch_size):
+            sel = idx[s:s + batch_size]
+            imgs, kps, viss = zip(*(ds[int(j)] for j in sel))
+            yield (np.stack(imgs), np.stack(kps), np.stack(viss))

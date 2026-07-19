@@ -46,13 +46,13 @@ from jarvis_jax.train.checkpoint import make_manager, save_step, restore_latest
 DEFAULT_MAE_NPZ = "/gscratch/portia/eabe/data/Johnson_lab/mae_vitb.npz"
 
 
-def _epochs(ds, batch_size, base_seed, weights=None):
+def _epochs(ds, batch_size, base_seed, weights=None, num_workers=8):
     """Infinite stream of batches, reshuffled each epoch (or weighted-resampled
     each epoch when `weights` is given)."""
     epoch = 0
     while True:
         yield from batches(ds, batch_size, shuffle=True, seed=base_seed + epoch,
-                           weights=weights)
+                           weights=weights, num_workers=num_workers)
         epoch += 1
 
 
@@ -60,7 +60,7 @@ def run_training(root, *, out_dir, mae_npz=DEFAULT_MAE_NPZ, tcfg=None,
                  vitpose_cfg=None, aug_params=None, arch="vitpose",
                  val_recording="2026_05_27_11_56_05",
                  log_every=50, eval_every=500, smoke=False,
-                 ckpt_dir=None, save_every=500, oversample=None):
+                 ckpt_dir=None, save_every=500, oversample=None, num_workers=8):
     cfg = vitpose_cfg if vitpose_cfg is not None else ViTPoseConfig()
     tcfg = tcfg or TrainConfig()
     if smoke:
@@ -134,7 +134,8 @@ def run_training(root, *, out_dir, mae_npz=DEFAULT_MAE_NPZ, tcfg=None,
         print(f"weighted sampling: {n_tgt}/{len(train_ds)} anns match "
               f"(sex={oversample.get('sex')}, behavior={oversample.get('behavior')}) "
               f"@ {oversample['factor']}x -> ~{100*weights[weights>weights.min()].sum():.1f}% of samples")
-    host_stream = _epochs(train_ds, tcfg.batch_size, tcfg.seed, weights=weights)
+    host_stream = _epochs(train_ds, tcfg.batch_size, tcfg.seed, weights=weights,
+                         num_workers=num_workers)
     dev_stream = prefetch(host_stream, mesh, depth=2)
 
     final_loss = 0.0
@@ -203,6 +204,7 @@ def main_from_cfg(cfg):
         save_every=cfg.train.save_every,
         eval_every=cfg.train.get("eval_every", 500),
         oversample=oversample,
+        num_workers=cfg.train.get("num_workers", 8),
     )
 
 

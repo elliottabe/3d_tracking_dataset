@@ -14,3 +14,4 @@ lr_scaling: sqrt
 save_every: 1000
 eval_every: 2000    # mid-training val MPJPE cadence; the loop also always evals once at the end
 smoke: false
+num_workers: 8      # thread-pool workers for the data-loading `batches()` sample fetch (JPEG decode + mask npz load); GPU was data-starved at num_workers=1
