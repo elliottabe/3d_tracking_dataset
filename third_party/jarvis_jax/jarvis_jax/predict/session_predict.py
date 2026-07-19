@@ -141,7 +141,10 @@ def _read_frame(caps, frame_idx):
 
 def run_predict_session(*, session_dir, masks_dir, out, project, jarvis_root,
                         v2v_final, vitpose_ckpt, sharpen, num_animals=2, batch=8,
-                        bout_ids=None, limit=0, data_root=None, num_keypoints=50):
+                        bout_ids=None, limit=0, data_root=None, num_keypoints=50,
+                        front_end="vitpose", fusion_mode="none",
+                        gate_temperature=1.0, gate_floor=0.0,
+                        efficienttrack_ckpt=None):
     """Orchestrate 3-D inference for all requested bouts in one session.
 
     Reads D2 SAM3 masks from *masks_dir*, opens per-camera videos from
@@ -181,6 +184,18 @@ def run_predict_session(*, session_dir, masks_dir, out, project, jarvis_root,
     data_root : str or None
         Root of the V3 dataset used to retrieve ``keypoint_names``.  Falls back
         to the hardcoded training-data path when None.
+    front_end : str
+        2-D keypoint front-end passed to :func:`load_inference_model`:
+        ``'vitpose'`` (default, unchanged production path) or
+        ``'efficienttrack'`` (opt-in, requires ``efficienttrack_ckpt``). See
+        task-9-brief.md -- this is a parallel, opt-in path; the production
+        default stays ViTPose.
+    fusion_mode, gate_temperature, gate_floor : SAM3 mask-fusion params
+        forwarded to :func:`load_inference_model` (default 'none'/1.0/0.0 --
+        byte-identical to the pre-fusion path).
+    efficienttrack_ckpt : str or None
+        Orbax EfficientTrack checkpoint dir (or ``.pth`` to auto-convert).
+        Required when ``front_end='efficienttrack'``.
 
     Returns
     -------
@@ -208,9 +223,14 @@ def run_predict_session(*, session_dir, masks_dir, out, project, jarvis_root,
     elif num_keypoints < len(joint_names):
         joint_names = joint_names[:num_keypoints]
 
-    # Load frozen ViTPose + V2VNet inference model, replicated across devices.
+    # Load frozen 2-D front-end + V2VNet inference model, replicated across
+    # devices. front_end='vitpose' (default) is the unchanged production path.
     model = load_inference_model(vitpose_ckpt, v2v_final, sharpen=sharpen,
-                                 num_keypoints=num_keypoints)
+                                 num_keypoints=num_keypoints,
+                                 front_end=front_end, fusion_mode=fusion_mode,
+                                 gate_temperature=gate_temperature,
+                                 gate_floor=gate_floor,
+                                 efficienttrack_ckpt=efficienttrack_ckpt)
     nd = jax.device_count()
 
     # Open one VideoCapture per camera (sequential read within each bout).
