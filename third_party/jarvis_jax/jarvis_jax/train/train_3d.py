@@ -1,12 +1,29 @@
-"""3D HybridNet training: frozen ViTPose front-end + trainable v2vNet.
+"""3D HybridNet training: pluggable 2-D front-end (ViTPose/EfficientTrack) +
+trainable v2vNet, with two training ``mode``s (mirrors the PyTorch reference
+``jarvis/hybridnet/hybridnet.py::train``'s ``all``/``3D_only`` modes):
 
-Only the v2vNet sub-module is optimised (ViTPose weights are frozen):
-  1. stop_gradient is applied to the per-camera heatmaps produced by ViTPose
-     before they flow into the reprojection / v2vNet path — so no gradient
-     ever reaches the 86M-param frozen backbone.
-  2. The optimizer is built with a path-based wrt-filter that selects ONLY
-     nnx.Param variables inside the ``model.v2vnet`` subtree, so AdamW never
-     updates any ViTPose parameter.
+  * ``mode='3D_only'`` (default, current/original behaviour) — only the
+    v2vNet sub-module is optimised; the front-end is frozen:
+      1. ``stop_gradient`` is applied to the per-camera heatmaps produced by
+         the front-end before they flow into the reprojection / v2vNet path
+         — so no gradient ever reaches the (possibly 86M-param) frozen
+         front-end.
+      2. The optimizer is built with a path-based wrt-filter that selects
+         ONLY ``nnx.Param`` variables inside the ``model.v2vnet`` subtree, so
+         AdamW never updates any front-end parameter.
+  * ``mode='all'`` — trains the front-end too (e.g. EfficientTrack): no
+    ``stop_gradient`` boundary, and the optimizer's wrt-filter selects every
+    ``nnx.Param`` in the model (front-end + v2vNet). For a frozen front-end
+    (e.g. a pretrained ViTPose you don't want to fine-tune) keep
+    ``mode='3D_only'``.
+
+Both modes optionally consume SAM3 ``masks`` (Task 6/7 mask-fusion): if the
+batch provides a ``"masks"`` key and the model's ``cfg.fusion_mode`` is not
+``'none'``, masks are threaded into the front-end (``fusion_mode='input_mask'``)
+and/or the post-reprojection volume gate (``fusion_mode='carve'``), mirroring
+``HybridNet3D.__call__``. When no masks are given, or ``fusion_mode='none'``,
+behaviour is byte-identical to the pre-fusion training path (regression
+guard).
 
 CLI (Hydra; see configs/):
     python -m jarvis_jax.train.train_3d run_id=myrun train=inline3d \\
@@ -30,6 +47,7 @@ from jarvis_jax.config import ViTPoseConfig
 from jarvis_jax.convert.build_checkpoint import load_vitpose
 from jarvis_jax.data.v3_3d import V3FramesetDataset, frameset_batches
 from jarvis_jax.eval.mpjpe_3d import mpjpe_3d
+from jarvis_jax.hybridnet.mask_fuse import mask_consistency_volume, soft_gate
 from jarvis_jax.hybridnet.model import HybridNet3D, soft_argmax_3d
 from jarvis_jax.hybridnet.reproject import reproject_heatmaps
 from jarvis_jax.hybridnet.v2vnet import V2VNet
@@ -57,6 +75,7 @@ class HybridNetConfig:
     laplacian_weight: float = 0.0  # OFF by default; enable via --laplacian-weight
     sigma: float = 2.0
     seed: int = 0
+    mode: str = "3D_only"  # '3D_only' (freeze front-end, current/default behavior) or 'all'
 
 
 # ---------------------------------------------------------------------------
@@ -73,16 +92,50 @@ def _is_v2vnet_param(path, var):
     return isinstance(var, nnx.Param) and len(path) > 0 and path[0] == "v2vnet"
 
 
+_VALID_MODES = ("3D_only", "all")
+
+
+def _check_mode(mode: str) -> str:
+    if mode not in _VALID_MODES:
+        raise ValueError(f"mode must be one of {_VALID_MODES}, got {mode!r}")
+    return mode
+
+
+def _wrt_filter(mode: str):
+    """Optimizer/diff wrt-filter for *mode*.
+
+    - '3D_only' (default/original behaviour): only v2vnet Params
+      (``_is_v2vnet_param``) — the front-end (ViTPose/EfficientTrack/...) is
+      frozen.
+    - 'all': every ``nnx.Param`` in the model, i.e. the front-end trains too.
+      Uses the plain ``nnx.Param`` filter (same convention as
+      ``train.py::make_optimizer``) rather than a bespoke all-true predicate.
+    """
+    _check_mode(mode)
+    return _is_v2vnet_param if mode == "3D_only" else nnx.Param
+
+
 # ---------------------------------------------------------------------------
 # Optimizer
 # ---------------------------------------------------------------------------
 
-def make_v2v_optimizer(model: HybridNet3D, cfg: HybridNetConfig) -> nnx.Optimizer:
-    """AdamW + warmup-cosine schedule, updating ONLY the v2vNet params.
+def make_v2v_optimizer(
+    model: HybridNet3D,
+    cfg: HybridNetConfig,
+    *,
+    mode: str = "3D_only",
+) -> nnx.Optimizer:
+    """AdamW + warmup-cosine schedule.
 
-    The wrt-filter ``_is_v2vnet_param`` restricts the optimizer state to the
-    v2vnet subtree, so ViTPose parameters are never touched by AdamW regardless
-    of the computed gradients.
+    Args:
+        mode: '3D_only' (default) restricts the optimizer state to the
+            v2vnet subtree via the ``_is_v2vnet_param`` wrt-filter, so
+            front-end parameters (ViTPose/EfficientTrack/...) are never
+            touched by AdamW regardless of the computed gradients — the
+            original/current behaviour, unchanged. 'all' trains every
+            ``nnx.Param`` in the model (front-end included) — use this to
+            fine-tune a trainable front-end (e.g. EfficientTrack) jointly
+            with v2vNet.
     """
     decay_steps = max(cfg.total_steps, cfg.warmup_steps + 1)
     sched = optax.warmup_cosine_decay_schedule(
@@ -93,7 +146,7 @@ def make_v2v_optimizer(model: HybridNet3D, cfg: HybridNetConfig) -> nnx.Optimize
         end_value=0.0,
     )
     tx = optax.adamw(sched, weight_decay=cfg.weight_decay)
-    return nnx.Optimizer(model, tx, wrt=_is_v2vnet_param)
+    return nnx.Optimizer(model, tx, wrt=_wrt_filter(mode))
 
 
 # ---------------------------------------------------------------------------
@@ -107,15 +160,30 @@ def make_train_step_3d(
     grid_spacing: int = 1,
     roi_cube: int = 48,
     sigma: float = 2.0,
+    mode: str = "3D_only",
 ):
     """Return an nnx.jit-compiled train step for 3D HybridNet.
 
     The step:
-      1. Runs HybridNet3D.__call__ but applies stop_gradient to the ViTPose
-         heatmaps via a custom forward path.
+      1. Runs the front-end (ViTPose/EfficientTrack/...) via
+         ``model.predict_heatmaps``. In ``mode='3D_only'`` (default),
+         stop_gradient is applied right after so no gradient reaches the
+         frozen front-end; in ``mode='all'`` no stop_gradient is applied, so
+         the front-end trains too.
       2. Computes loss = heatmap3d_mse + laplacian_weight * graph_laplacian.
-      3. Differentiates wrt ONLY the v2vnet Params (``_is_v2vnet_param`` filter).
-      4. Updates the optimizer (which also only tracks v2vnet Params).
+      3. Differentiates wrt the v2vnet Params only ('3D_only') or every
+         Param in the model ('all') — see ``_wrt_filter``.
+      4. Updates the optimizer (built with the matching wrt-filter, see
+         ``make_v2v_optimizer``).
+
+    Fusion-awareness (Task 7): if the batch provides a ``"masks"`` key (via
+    ``step(model, optimizer, batch)`` with ``batch["masks"]`` present) and the
+    model's ``cfg.fusion_mode`` is not ``'none'``, masks are threaded into
+    ``model.predict_heatmaps`` (consulted only for ``fusion_mode='input_mask'``)
+    and into a post-reprojection consistency-volume gate (only for
+    ``fusion_mode='carve'``), mirroring ``HybridNet3D.__call__`` exactly. When
+    no ``"masks"`` key is present, or ``fusion_mode=='none'``, this is a no-op
+    and the forward is byte-identical to the pre-fusion training path.
 
     Args:
         laplacian_weight: Weight for the graph-Laplacian bone-shape term.
@@ -124,10 +192,16 @@ def make_train_step_3d(
         grid_spacing: World units per grid step (default 1).
         roi_cube:     Full cube side-length in world units (default 48).
         sigma:        Gaussian sigma in grid units for the 3D heatmap target.
+        mode:         '3D_only' (default, freeze front-end) or 'all' (train
+                      front-end + v2vNet). See module docstring.
 
     Returns:
-        step(model, optimizer, batch_dict) -> scalar loss
+        step(model, optimizer, batch_dict) -> scalar loss. ``batch_dict`` may
+        optionally include a ``"masks"`` key (see fusion-awareness above).
     """
+    _check_mode(mode)
+    freeze_front_end = mode == "3D_only"
+    wrt = _wrt_filter(mode)
     lw = float(laplacian_weight)
     ei_jnp = jnp.asarray(ei)
     ej_jnp = jnp.asarray(ej)
@@ -140,12 +214,19 @@ def make_train_step_3d(
         cameraMatrices,
         kp3d,
         vis,
+        masks,
     ):
-        # Run ViTPose (frozen, eval mode) and immediately stop gradient.
-        # This prevents any gradient from flowing back through the 86M-param
-        # ViTPose front-end while still using its heatmaps as input to v2vNet.
-        hm = model.predict_heatmaps(crops4_u8)         # (B, nc, 224, 224, J)
-        hm = jax.lax.stop_gradient(hm)                 # << freeze boundary
+        # Run the front-end (ViTPose/EfficientTrack/...). `masks` is threaded
+        # through unconditionally; predict_heatmaps only actually reads it
+        # when model.fusion_mode == 'input_mask' (else it's ignored, even
+        # when None) -- see HybridNet3D.predict_heatmaps.
+        hm = model.predict_heatmaps(crops4_u8, masks=masks)  # (B, nc, 224, 224, J)
+        if freeze_front_end:
+            # << freeze boundary: prevents any gradient from flowing back
+            # through the (possibly 86M-param) frozen front-end while still
+            # using its heatmaps as input to v2vNet. Skipped entirely in
+            # mode='all', so the front-end trains.
+            hm = jax.lax.stop_gradient(hm)
 
         # Pad 224 → 226 and transpose to (B, nc, J, 226, 226) for reprojection
         hm = jnp.pad(hm, [(0, 0), (0, 0), (1, 1), (1, 1), (0, 0)])
@@ -153,13 +234,29 @@ def make_train_step_3d(
 
         # Reproject → V2VNet → soft-argmax (via the v2vnet sub-path)
         # NOTE: this is a parallel forward path to HybridNet3D.__call__ in model.py,
-        # inserting stop_gradient after ViTPose. Keep grid/pad/transpose constants
-        # (grid_size=48, grid_spacing=1, heatmap_size=226, pad=(1,1,1,1)) in sync.
+        # inserting stop_gradient after the front-end (mode='3D_only' only). Keep
+        # grid/pad/transpose constants (grid_size=48, grid_spacing=1,
+        # heatmap_size=226, pad=(1,1,1,1)) in sync.
         vol3d = reproject_heatmaps(
             hm, center3D, centerHM, cameraMatrices,
             grid_size=48, grid_spacing=1, heatmap_size=226,
         )                                               # (B, J, 48, 48, 48)
         vol3d = vol3d / 255.0
+
+        # 'carve' fusion (Task 6/7): gate the pre-V2VNet volume by cross-camera
+        # SAM3 mask consistency -- mirrors HybridNet3D.__call__ step 5b exactly.
+        # Only constructed when fusion_mode=='carve' AND masks were actually
+        # provided; fusion_mode=='none' (or no masks) never reaches this
+        # branch -- the byte-identical regression guard.
+        if model.fusion_mode == "carve" and masks is not None:
+            consistency = mask_consistency_volume(
+                masks, center3D, centerHM, cameraMatrices,
+                grid_size=48, heatmap_size=226,
+            )  # (B, 48, 48, 48)
+            vol3d = soft_gate(vol3d, consistency,
+                               temperature=model.gate_temperature,
+                               floor=model.gate_floor)
+
         vol3d = jnp.transpose(vol3d, (0, 2, 3, 4, 1)) # (B, 48, 48, 48, J)
         vol3d = model.v2vnet(vol3d, use_running_average=False)
         vol3d = jnp.transpose(vol3d, (0, 4, 1, 2, 3)) # (B, J, 24, 24, 24)
@@ -187,11 +284,12 @@ def make_train_step_3d(
         cameraMatrices = batch["cameraMatrices"]
         kp3d = batch["kp3d"]
         vis = batch["vis"]
+        masks = batch.get("masks")  # optional (Task 6/7 SAM3 mask fusion)
 
         loss, grads = nnx.value_and_grad(
             loss_fn,
-            argnums=DiffState(0, _is_v2vnet_param),
-        )(model, crops4_u8, center3D, centerHM, cameraMatrices, kp3d, vis)
+            argnums=DiffState(0, wrt),
+        )(model, crops4_u8, center3D, centerHM, cameraMatrices, kp3d, vis, masks)
         optimizer.update(model, grads)
         return loss
 
@@ -335,8 +433,8 @@ def run_training_3d(
     v2vnet = V2VNet(cfg.num_keypoints, cfg.num_keypoints, rngs=nnx.Rngs(tcfg.seed))
     model = HybridNet3D(vitpose, v2vnet, cfg)
 
-    # --- Optimizer (v2vnet params only) ---
-    opt = make_v2v_optimizer(model, tcfg)
+    # --- Optimizer (v2vnet params only in '3D_only'; all params in 'all') ---
+    opt = make_v2v_optimizer(model, tcfg, mode=tcfg.mode)
 
     # --- CheckpointManager for auto-resume ---
     mngr = make_manager(ckpt_dir) if ckpt_dir else None
@@ -367,6 +465,7 @@ def run_training_3d(
         laplacian_weight=tcfg.laplacian_weight,
         ei=ei, ej=ej,
         grid_spacing=1, roi_cube=48, sigma=tcfg.sigma,
+        mode=tcfg.mode,
     )
 
     # --- Prefetched batch stream ---
