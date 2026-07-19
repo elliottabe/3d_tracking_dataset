@@ -332,8 +332,25 @@ class EfficientTrack(nnx.Module):
         return res2
 
     def predict_heatmaps(self, crops_nhwc: jnp.ndarray) -> jnp.ndarray:
-        """Front-end contract identical to ViTPose's: (N,224,224,J) heatmaps."""
-        return self(crops_nhwc)
+        """Front-end contract: accepts (*lead, H, W, C) and returns
+        (*lead, 224, 224, J) -- any number of leading batch dims (e.g. plain
+        ``(N, H, W, C)`` or ``(B, num_cam, H, W, C)``).
+
+        The network body (``forward_both``/``__call__``) hard-assumes exactly
+        rank-4 NHWC input (``_upsample_nearest`` unpacks ``n, h, w, c =
+        x.shape``; ``instance_norm`` reduces over hardcoded axes ``(1, 2)``),
+        so any extra leading dims are flattened into one batch axis here and
+        restored on the way out -- identical math to a caller doing this
+        flatten/unflatten itself (Task 7: this lets ``HybridNet3D`` pass
+        un-flattened ``(B, num_cam, H, W, C)`` crops straight through, e.g.
+        for per-camera crop-level mask fusion, with zero numerical change for
+        existing rank-4 callers, where this flatten/unflatten is a no-op).
+        """
+        *lead, H, W, C = crops_nhwc.shape
+        flat = crops_nhwc.reshape((-1, H, W, C))
+        out = self(flat)
+        J = out.shape[-1]
+        return out.reshape((*lead, out.shape[1], out.shape[2], J))
 
 
 # ---------------------------------------------------------------------------

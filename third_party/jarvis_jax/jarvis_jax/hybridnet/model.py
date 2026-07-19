@@ -30,6 +30,11 @@ import jax.numpy as jnp
 from flax import nnx
 
 from jarvis_jax.data.device import normalize_image
+from jarvis_jax.hybridnet.mask_fuse import (
+    mask_consistency_volume,
+    mask_input_crops,
+    soft_gate,
+)
 from jarvis_jax.hybridnet.reproject import reproject_heatmaps
 
 
@@ -153,7 +158,12 @@ class HybridNet3D(nnx.Module):
             ImageNet normalization -- matches PyTorch ``HybridNetBackbone``,
             which feeds ``effTrack`` un-normalized images). Run in eval mode.
         v2vnet:  A ``V2VNet`` module (trainable).
-        cfg:     A config object (provides ``num_keypoints``, optional ``sharpen``).
+        cfg:     A config object (provides ``num_keypoints``, optional
+            ``sharpen``, and optional SAM3 mask-fusion fields ``fusion_mode``
+            ('none'/'carve'/'input_mask'), ``gate_temperature``, ``gate_floor``
+            -- all read via ``getattr`` with backward-compatible defaults, so
+            any bare cfg object works unchanged; see ``__call__``'s ``masks``
+            arg and ``jarvis_jax.hybridnet.mask_fuse``).
     """
 
     def __init__(self, front_end, v2vnet, cfg):
@@ -163,6 +173,14 @@ class HybridNet3D(nnx.Module):
         # soft-argmax sharpening exponent (center-bias fix); read from cfg if
         # present, else 1.0 (original behavior). See soft_argmax_3d / sweep diag.
         self.sharpen = float(getattr(cfg, "sharpen", 1.0))
+        # SAM3 mask-fusion hook (Task 7). 'none' (default) never touches
+        # masks -- the forward is byte-identical to the pre-fusion path.
+        # 'carve': gate the pre-V2VNet volume by cross-camera mask consistency.
+        # 'input_mask': zero background pixels in the crops before the 2-D
+        # front-end. See mask_fuse.py for the underlying ops.
+        self.fusion_mode = str(getattr(cfg, "fusion_mode", "none"))
+        self.gate_temperature = float(getattr(cfg, "gate_temperature", 1.0))
+        self.gate_floor = float(getattr(cfg, "gate_floor", 0.0))
         # ViTPose is the only front-end that expects ImageNet-normalized
         # input (RGB channels normalized + mask channel passed through raw);
         # every other front-end (e.g. EfficientTrack) matches the PyTorch
@@ -184,6 +202,7 @@ class HybridNet3D(nnx.Module):
     def predict_heatmaps(
         self,
         crops_u8: jnp.ndarray,            # (B, num_cam, 448, 448, C)
+        masks: jnp.ndarray | None = None,  # (B, num_cam, H, W) crop-resolution, 'input_mask' only
     ) -> jnp.ndarray:                     # (B, num_cam, 224, 224, J)
         """Run the frozen 2-D front-end over all cameras to produce heatmaps.
 
@@ -196,28 +215,41 @@ class HybridNet3D(nnx.Module):
         Args:
             crops_u8: ``(B, num_cam, 448, 448, C)`` crops -- uint8 RGBA for
                 ViTPose, float RGB for EfficientTrack.
+            masks: ``(B, num_cam, H, W)`` per-camera silhouette masks at
+                *crop* resolution (matching ``crops_u8``'s H, W -- NOT the
+                226 padded heatmap size used by ``fusion_mode='carve'``).
+                Only consulted when ``self.fusion_mode == 'input_mask'``;
+                ignored (not even read) otherwise, including when ``None``.
 
         Returns:
             ``(B, num_cam, 224, 224, J)`` float32 heatmap logits.
         """
-        B = crops_u8.shape[0]
-        num_cam = crops_u8.shape[1]
-        H, W, C = crops_u8.shape[2], crops_u8.shape[3], crops_u8.shape[4]
+        # Option B (Task 6/7): zero background pixels before the front-end.
+        # Gated on fusion_mode so 'none'/'carve' never touch crops_u8 here --
+        # this is the byte-identical guard for fusion_mode='none'.
+        if self.fusion_mode == "input_mask" and masks is not None:
+            crops_u8 = mask_input_crops(crops_u8, masks)
 
-        # Flatten (B, num_cam) → (B*num_cam,), process, unflatten
-        crops_flat = crops_u8.reshape(B * num_cam, H, W, C)
         if self._is_vitpose:
+            B = crops_u8.shape[0]
+            num_cam = crops_u8.shape[1]
+            H, W, C = crops_u8.shape[2], crops_u8.shape[3], crops_u8.shape[4]
+            # Flatten (B, num_cam) → (B*num_cam,), process, unflatten.
+            crops_flat = crops_u8.reshape(B * num_cam, H, W, C)
             # Normalize each image, then run ViTPose in eval/frozen mode.
             imgs_float = jax.vmap(normalize_image)(crops_flat)   # (B*num_cam, H, W, C)
             hm_flat = self.front_end(imgs_float, use_running_average=True)  # (B*num_cam, 224, 224, J)
-        else:
-            # Non-ViTPose front-ends (e.g. EfficientTrack) consume raw crops
-            # directly -- no normalization (PyTorch HybridNetBackbone parity).
-            imgs_float = crops_flat.astype(jnp.float32)
-            hm_flat = self.front_end.predict_heatmaps(imgs_float)  # (B*num_cam, 224, 224, J)
-        # Unflatten back to (B, num_cam, 224, 224, J)
-        J = hm_flat.shape[-1]
-        return hm_flat.reshape(B, num_cam, 224, 224, J)
+            J = hm_flat.shape[-1]
+            return hm_flat.reshape(B, num_cam, 224, 224, J)
+
+        # Non-ViTPose front-ends (e.g. EfficientTrack) consume raw crops
+        # directly -- no normalization (PyTorch HybridNetBackbone parity).
+        # Pass the un-flattened (B, num_cam, H, W, C) tensor straight through:
+        # EfficientTrack.predict_heatmaps flattens/unflattens the leading
+        # batch dims itself (see its docstring), so this is exactly the same
+        # math as the old model.py-side manual flatten -- just relocated.
+        imgs_float = crops_u8.astype(jnp.float32)
+        return self.front_end.predict_heatmaps(imgs_float)  # (B, num_cam, 224, 224, J)
 
     def reproject_volume(
         self,
@@ -225,6 +257,7 @@ class HybridNet3D(nnx.Module):
         center3D: jnp.ndarray,           # (B, 3)
         centerHM: jnp.ndarray,           # (B, num_cam, 2)
         cameraMatrices: jnp.ndarray,     # (B, num_cam, 4, 3)
+        masks: jnp.ndarray | None = None,  # (B, num_cam, H, W) crop-res, 'input_mask' only
     ) -> jnp.ndarray:                    # (B, J, 48, 48, 48)
         """Compute the reprojected 3-D volume — the exact intermediate cached by the trainer.
 
@@ -240,6 +273,12 @@ class HybridNet3D(nnx.Module):
             center3D:        ``(B, 3)``  3-D bounding-box centre (world coords).
             centerHM:        ``(B, num_cam, 2)``  2-D crop centre per camera.
             cameraMatrices:  ``(B, num_cam, 4, 3)``  DLT projection matrices.
+            masks:           ``(B, num_cam, H, W)`` crop-resolution masks, only
+                             consulted (via ``predict_heatmaps``) when
+                             ``self.fusion_mode == 'input_mask'``. This is a
+                             DIFFERENT resolution than the 226-sized masks used
+                             by ``fusion_mode='carve'`` (applied in ``__call__``,
+                             not here) -- see class/``predict_heatmaps`` docs.
 
         Returns:
             ``(B, J, 48, 48, 48)``  reprojected volume in ``(B, J, D, H, W)``
@@ -251,7 +290,7 @@ class HybridNet3D(nnx.Module):
         # (grid_size=48, grid_spacing=1, heatmap_size=226, pad=(1,1,1,1)).
 
         # 1. 2-D heatmaps: (B, num_cam, 224, 224, J) — ViTPose is always frozen/eval
-        hm = self.predict_heatmaps(crops_u8)      # (B, num_cam, 224, 224, J)
+        hm = self.predict_heatmaps(crops_u8, masks=masks)      # (B, num_cam, 224, 224, J)
 
         # 2. Pad 224 → 226 (1 pixel each side on H and W).
         #    PyTorch: F.pad(heatmaps_batch, [1,1,1,1], 'constant', 0.)
@@ -286,6 +325,7 @@ class HybridNet3D(nnx.Module):
         centerHM: jnp.ndarray,           # (B, num_cam, 2)
         cameraMatrices: jnp.ndarray,     # (B, num_cam, 4, 3)
         *,
+        masks: jnp.ndarray | None = None,
         use_running_average: bool = False,
     ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
         """Full 3-D pose prediction forward pass.
@@ -296,6 +336,22 @@ class HybridNet3D(nnx.Module):
             center3D:        ``(B, 3)``  3-D bounding-box centre (world coords).
             centerHM:        ``(B, num_cam, 2)``  2-D crop centre per camera.
             cameraMatrices:  ``(B, num_cam, 4, 3)``  DLT projection matrices.
+            masks:           Optional SAM3 per-camera silhouette masks; ignored
+                             entirely unless ``self.fusion_mode`` consults them
+                             (never even read when ``fusion_mode == 'none'`` --
+                             the byte-identical regression guard). Expected
+                             shape depends on ``self.fusion_mode``:
+                               - ``'carve'``:      ``(B, num_cam, 226, 226)``
+                                 (the padded heatmap size ``reproject_volume``
+                                 reprojects at).
+                               - ``'input_mask'``: ``(B, num_cam, H, W)``
+                                 matching ``crops_u8``'s crop resolution
+                                 (e.g. 448×448) -- applied before the 2-D
+                                 front-end. See ``predict_heatmaps``.
+                             The two modes use different resolutions and are
+                             mutually exclusive per call (``fusion_mode``
+                             selects which one, if either, ``masks`` is read
+                             as).
             use_running_average: Passed to V2VNet (controls dropout).
 
         Returns:
@@ -308,7 +364,25 @@ class HybridNet3D(nnx.Module):
         # (grid_size=48, grid_spacing=1, heatmap_size=226, pad=(1,1,1,1)) in sync.
 
         # 1–5. ViTPose → pad 224→226 → reproject → /255: (B, J, 48, 48, 48)
-        vol3d = self.reproject_volume(crops_u8, center3D, centerHM, cameraMatrices)
+        # `masks` is threaded through unconditionally; predict_heatmaps only
+        # actually reads it when fusion_mode=='input_mask', so this is a no-op
+        # for 'none'/'carve' regardless of whether masks is provided.
+        vol3d = self.reproject_volume(crops_u8, center3D, centerHM, cameraMatrices,
+                                       masks=masks)
+
+        # 5b. 'carve': gate the pre-V2VNet volume by cross-camera SAM3 mask
+        # consistency (Task 6). Only constructed when fusion_mode=='carve' AND
+        # masks were actually provided -- fusion_mode=='none' never reaches
+        # this branch, so no gate/consistency volume is ever built for it
+        # (byte-identical regression guard).
+        if self.fusion_mode == "carve" and masks is not None:
+            consistency = mask_consistency_volume(
+                masks, center3D, centerHM, cameraMatrices,
+                grid_size=48, heatmap_size=226,
+            )  # (B, 48, 48, 48)
+            vol3d = soft_gate(vol3d, consistency,
+                               temperature=self.gate_temperature,
+                               floor=self.gate_floor)
 
         # 6. Transpose to (B, D, H, W, J) = (B, 48, 48, 48, J) for V2VNet
         vol3d = jnp.transpose(vol3d, (0, 2, 3, 4, 1))   # (B, 48, 48, 48, J)
