@@ -201,6 +201,7 @@ def main_from_cfg(cfg):
         smoke=bool(cfg.train.get("smoke", False)),
         ckpt_dir=os.path.join(run_dir, "ckpt"),
         save_every=cfg.train.save_every,
+        eval_every=cfg.train.get("eval_every", 500),
         oversample=oversample,
     )
 

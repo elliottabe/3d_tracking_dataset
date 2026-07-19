@@ -12,4 +12,5 @@ seed: 0
 base_batch: 64
 lr_scaling: sqrt
 save_every: 1000
+eval_every: 2000    # mid-training val MPJPE cadence; the loop also always evals once at the end
 smoke: false

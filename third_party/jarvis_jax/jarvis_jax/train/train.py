@@ -99,6 +99,11 @@ def make_train_step(mask_weight, aug_params=None, lr_swap=None, heatmap_size=224
     return step
 
 
+@nnx.jit
+def _eval_forward(model, img):
+    return model(img, use_running_average=True)
+
+
 def eval_mpjpe(model, ds, batch_size, *, in_size=448):
     """Average MPJPE over the dataset (single device). GT keypoints are the true
     annotation coords (kp_xy scaled to in_size), not a decode of GT heatmaps."""
@@ -109,7 +114,7 @@ def eval_mpjpe(model, ds, batch_size, *, in_size=448):
     for img4_u8, kp_xy, vis in batches(ds, batch_size, shuffle=False,
                                        drop_last=False):
         img = normalize_image(jnp.asarray(img4_u8))
-        pred = model(img, use_running_average=True)
+        pred = _eval_forward(model, img)
         pk = heatmaps_to_keypoints(pred, in_size=in_size)
         gk = jnp.asarray(kp_xy) * scale
         n = int(vis.sum())
