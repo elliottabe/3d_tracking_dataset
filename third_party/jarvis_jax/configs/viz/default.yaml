@@ -1,6 +1,14 @@
 # @package viz
 run1: ''
 run2: ''
+# Optional: separate reprojected-volume caches for run1/run2 when comparing
+# two different front-end -> V2VNet arms (e.g. ViTPose vs EfficientTrack).
+# Empty string falls back to paths.cache_dir (legacy single-cache behavior).
+cache_dir1: ''
+cache_dir2: ''
+# Cosmetic legend/title labels for run1/run2 (default keeps old "run1"/"run2").
+label1: 'run1'
+label2: 'run2'
 sharpen1: 1.0
 sharpen2: 3.0
 n_framesets: 4
