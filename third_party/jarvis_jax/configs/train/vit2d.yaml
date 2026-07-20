@@ -15,3 +15,14 @@ save_every: 1000
 eval_every: 2000    # mid-training val MPJPE cadence; the loop also always evals once at the end
 smoke: false
 num_workers: 8      # thread-pool workers for the data-loading `batches()` sample fetch (JPEG decode + mask npz load); GPU was data-starved at num_workers=1
+# Warm-start fine-tune: path to a FINISHED run's `final/` model checkpoint
+# dir (Orbax StandardCheckpointer.save layout -- what run_training writes at
+# the end of training). '' (default) = off. When set, run_training loads
+# ONLY the model weights from that dir into the freshly-built model (same
+# arch/shape required), then proceeds with a FRESH optimizer + step 0 in
+# THIS run's own (new) run_id/ckpt_dir -- it does NOT resume the source run's
+# optimizer/step/LR-schedule position. Distinct from Orbax ckpt_dir resume
+# (this run's OWN ckpt_dir, used to survive SLURM preempt+requeue of THIS
+# fine-tune) -- resume beats warm_start on requeue; warm_start only seeds the
+# very first launch.
+warm_start: ''

@@ -23,6 +23,14 @@ CLI (Hydra; see configs/):
         run_id=myrun train=vit2d model=efficienttrack paths=hyak
     python -m jarvis_jax.scripts.train_keypoints \\
         run_id=myrun train=vit2d model=efficienttrack_bn paths=hyak
+
+Warm-start fine-tune (fresh optimizer/step, NEW run_id/out-dir, seeded ONLY
+from another finished run's `final/` weights -- see `train.warm_start` /
+``run_training``'s warm_start handling; distinct from the Orbax
+`ckpt_dir`-based resume, which continues the SAME run's optimizer+step):
+    python -m jarvis_jax.scripts.train_keypoints \\
+        run_id=ft_run train=vit2d model=efficienttrack_bn paths=hyak \\
+        train.warm_start=/path/to/source_run/final train.lr=3e-5
 """
 import json
 import os
@@ -49,7 +57,9 @@ from jarvis_jax.train.train import (
     TrainConfig, make_optimizer, make_train_step, eval_mpjpe,
 )
 from jarvis_jax.data.augment import build_lr_swap, AugParams
-from jarvis_jax.train.checkpoint import make_manager, save_step, restore_latest
+from jarvis_jax.train.checkpoint import (
+    make_manager, save_step, restore_latest, warm_start_restore,
+)
 
 DEFAULT_MAE_NPZ = "/gscratch/portia/eabe/data/Johnson_lab/mae_vitb.npz"
 # Committed torchvision efficientnet_b3 ImageNet fixture (see
@@ -104,7 +114,8 @@ def run_training(root, *, out_dir, mae_npz=DEFAULT_MAE_NPZ, tcfg=None,
                  effnet_b3_imagenet_npz=None,
                  val_recording="2026_05_27_11_56_05",
                  log_every=50, eval_every=500, smoke=False,
-                 ckpt_dir=None, save_every=500, oversample=None, num_workers=8):
+                 ckpt_dir=None, save_every=500, oversample=None, num_workers=8,
+                 warm_start=None):
     cfg = vitpose_cfg if vitpose_cfg is not None else ViTPoseConfig()
     tcfg = tcfg or TrainConfig()
     if smoke:
@@ -142,6 +153,26 @@ def run_training(root, *, out_dir, mae_npz=DEFAULT_MAE_NPZ, tcfg=None,
         print(f"WARNING: MAE npz not found ({mae_npz}); using RANDOM init "
               f"(real training should use MAE init).")
         model = ViTPose(cfg, rngs=nnx.Rngs(tcfg.seed))
+
+    if warm_start:
+        # WARM-START fine-tune: overwrite the just-built model's weights from
+        # a FINISHED run's `final/` dir (e.g. et2d_bn_imagenet/final), then
+        # fall through to a FRESH optimizer + step 0 below -- this is a NEW
+        # run (new run_id/out_dir/ckpt_dir), not a resume of the source run.
+        # For arch=efficienttrack_bn the ImageNet init just performed above is
+        # therefore wasted (but harmless) work -- this restore fully
+        # overwrites it (backbone conv + BN running stats + BiFPN + head,
+        # i.e. every leaf `nnx.split` captures).
+        _norm_before = float(sum(
+            jnp.sum(jnp.abs(x)) for x in jax.tree_util.tree_leaves(nnx.split(model)[1])))
+        model = warm_start_restore(model, warm_start)
+        _norm_after = float(sum(
+            jnp.sum(jnp.abs(x)) for x in jax.tree_util.tree_leaves(nnx.split(model)[1])))
+        assert _norm_after != _norm_before, (
+            f"warm_start restore from {warm_start!r} left the model's weights "
+            "unchanged (shape mismatch against the source checkpoint, or a "
+            "no-op restore) -- refusing to silently fine-tune from the wrong init")
+        print(f"[warm-start] loaded weights from {warm_start}; fresh optimizer + step 0")
 
     opt = make_optimizer(model, tcfg)
 
@@ -270,6 +301,12 @@ def main_from_cfg(cfg):
     # None -> run_training's committed-fixture default.
     effnet_b3_imagenet_npz = (
         model_node.get("effnet_b3_imagenet_npz", None) if arch == "efficienttrack_bn" else None)
+    # Warm-start fine-tune: load ONLY the model weights from a finished run's
+    # `final/` dir (train.warm_start, configs/train/vit2d.yaml -- default ''
+    # = off), then train with a FRESH optimizer/step count in THIS (new)
+    # run's own run_dir/ckpt_dir -- see run_training's warm_start handling.
+    # '' -> None so run_training's `if warm_start:` is unambiguously off.
+    warm_start = cfg.train.get("warm_start", "") or None
     return run_training(
         cfg.paths.data_root,
         out_dir=os.path.join(run_dir, "final"),
@@ -285,6 +322,7 @@ def main_from_cfg(cfg):
         eval_every=cfg.train.get("eval_every", 500),
         oversample=oversample,
         num_workers=cfg.train.get("num_workers", 8),
+        warm_start=warm_start,
     )
 
 

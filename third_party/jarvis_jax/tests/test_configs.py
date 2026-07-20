@@ -154,6 +154,26 @@ def test_vit2d_main_from_cfg_maps_config(monkeypatch):
     assert captured["root"] == cfg.paths.data_root
     assert captured["out_dir"].endswith("vit_unittest/final")
     assert captured["vitpose_cfg"].num_keypoints == 50
+    assert captured["warm_start"] is None   # train.warm_start default '' -> None (off)
+
+
+def test_vit2d_main_from_cfg_maps_warm_start(monkeypatch):
+    """train.warm_start=<final dir> is threaded through to run_training's
+    `warm_start` kwarg unchanged (run_training itself does the restore+fresh-
+    optimizer wiring -- see tests/test_warm_start.py for that mechanism)."""
+    import importlib.util, os
+    path = os.path.join(CONFIG_DIR, "..", "jarvis_jax", "scripts", "train_keypoints.py")
+    spec = importlib.util.spec_from_file_location("train_keypoints", os.path.abspath(path))
+    mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+    captured = {}
+    monkeypatch.setattr(mod, "run_training",
+                        lambda root, **kw: captured.update(root=root, **kw))
+    cfg = _compose(["paths=hyak", "model=efficienttrack_bn", "train=vit2d",
+                    "run_id=ft_unittest", "train.total_steps=7",
+                    "train.warm_start=/some/run/final"])
+    mod.main_from_cfg(cfg)
+    assert captured["warm_start"] == "/some/run/final"
+    assert captured["out_dir"].endswith("ft_unittest/final")   # NEW run dir, not the source's
 
 
 def test_viz_main_from_cfg_maps_config(monkeypatch):
