@@ -47,12 +47,22 @@ def draw_overlay_frame(raw_rgb, mesh2d, kp2d, *, contour=None):
 
 
 def write_camera_video(out_path, *, frames_rgb_iter, mesh2d_by_frame,
-                       kp2d_by_frame, contour_by_frame=None, fps=30):
-    """Stream overlay frames to an mp4 via imageio (one frame in memory)."""
+                       kp2d_by_frame, contour_by_frame=None, fps=30,
+                       codec="libx264", pixelformat="yuv420p",
+                       macro_block_size=16):
+    """Stream overlay frames to an mp4 via imageio (one frame in memory).
+
+    ``codec``/``pixelformat`` are passed through explicitly (imageio's
+    ffmpeg plugin already defaults to libx264/yuv420p, but pinning them here
+    guarantees VS-Code/most-players playback regardless of imageio version
+    or installed ffmpeg build -- see render_bout_reproj.py, the first real
+    caller that needs this guarantee)."""
     import os
     import imageio
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
-    with imageio.get_writer(out_path, fps=fps) as video:
+    with imageio.get_writer(out_path, fps=fps, codec=codec,
+                            pixelformat=pixelformat,
+                            macro_block_size=macro_block_size) as video:
         for t, raw in enumerate(frames_rgb_iter):
             contour = None if contour_by_frame is None else contour_by_frame[t]
             frame = draw_overlay_frame(raw, mesh2d_by_frame[t], kp2d_by_frame[t],
