@@ -1,13 +1,17 @@
 """Batched, sharded JAX 3D inference.
 
 Default front-end/fusion is the production path: frozen ViTPose + run4
-v2vNet, fusion_mode='none'. A second, opt-in front-end (EfficientTrack, the
-faithful JAX port of the PyTorch HybridNetBackbone's 2-D backbone) can be
-selected via ``load_inference_model(..., front_end='efficienttrack', ...)``
-for parallel benchmarking -- see task-9-brief.md. Both front-ends feed the
-SAME ``HybridNet3D`` reproject -> V2VNet -> soft-argmax 3-D fusion; there is
-no separate DLT triangulation path in this codebase (the "vitpose_dlt" name
-used in early planning docs was inaccurate).
+v2vNet, fusion_mode='none'. Two opt-in front-ends are also selectable:
+``front_end='efficienttrack'`` (the faithful, 3-channel JAX port of the
+PyTorch HybridNetBackbone's 2-D backbone, for parallel benchmarking -- see
+task-9-brief.md) and ``front_end='efficienttrack_bn'`` (our production
+4-channel ``EfficientTrackBN`` detector -- BatchNorm EfficientNet-b3 backbone,
+trained on ``normalize_image``d RGB+mask input by the 2-D trainer; this is
+the courtship-bout inference detector, restored + normalized the same way as
+``scripts/precompute_repro_cache.py::_build_front_end``). All three
+front-ends feed the SAME ``HybridNet3D`` reproject -> V2VNet -> soft-argmax
+3-D fusion; there is no separate DLT triangulation path in this codebase (the
+"vitpose_dlt" name used in early planning docs was inaccurate).
 """
 import jax
 import jax.numpy as jnp
@@ -23,7 +27,7 @@ from jarvis_jax.hybridnet.v2vnet import V2VNet
 from jarvis_jax.sharding import data_parallel_mesh, replicate, shard_batch
 from jarvis_jax.geometry.center3d import estimate_center3d_from_masks
 
-_FRONT_ENDS = ("vitpose", "efficienttrack")
+_FRONT_ENDS = ("vitpose", "efficienttrack", "efficienttrack_bn")
 
 
 class _Cfg:
@@ -34,14 +38,23 @@ class _Cfg:
     so passing them here is purely additive: any existing caller that built
     this object with just ``(num_keypoints, sharpen)`` still gets the
     byte-identical 'none' fusion behavior.
+
+    ``normalize_frontend`` mirrors the flag ``HybridNet3D.__init__`` accepts
+    directly -- it is NOT read by ``HybridNet3D`` via ``getattr`` on ``cfg``
+    (see below, where it is passed as an explicit constructor kwarg instead);
+    it lives here purely so ``load_inference_model`` has one place to carry
+    it alongside the other per-arm knobs. Default False keeps the vitpose/
+    plain-efficienttrack branches byte-identical.
     """
     def __init__(self, num_keypoints, sharpen, *, fusion_mode="none",
-                 gate_temperature=1.0, gate_floor=0.0):
+                 gate_temperature=1.0, gate_floor=0.0,
+                 normalize_frontend=False):
         self.num_keypoints = num_keypoints
         self.sharpen = sharpen
         self.fusion_mode = fusion_mode
         self.gate_temperature = gate_temperature
         self.gate_floor = gate_floor
+        self.normalize_frontend = normalize_frontend
 
 
 def _maybe_convert_pth(ckpt, *, kind, num_keypoints):
@@ -85,17 +98,27 @@ def load_inference_model(vitpose_ckpt, v2v_final_dir, *, sharpen=3.0, num_keypoi
         sharpen: Soft-argmax sharpening exponent (default 3.0, center-bias fix).
         num_keypoints: Number of keypoints (default 50).
         front_end: ``'vitpose'`` (default, byte-identical to the pre-existing
-            behavior) or ``'efficienttrack'`` (opt-in: the faithful JAX port
+            behavior), ``'efficienttrack'`` (opt-in: the faithful JAX port
             of the PyTorch HybridNetBackbone's 2-D backbone, loaded from
-            ``efficienttrack_ckpt``). See task-9-brief.md.
+            ``efficienttrack_ckpt``, 3-channel RGB-only -- see task-9-brief.md),
+            or ``'efficienttrack_bn'`` (our production 4-channel
+            ``EfficientTrackBN`` detector, trained on ``normalize_image``d
+            RGB+mask input via the 2-D trainer -- see
+            ``scripts/precompute_repro_cache.py::_build_front_end`` for the
+            matching restore + normalization pattern this branch mirrors).
         fusion_mode: SAM3 mask-fusion mode forwarded to ``HybridNet3D``
             ('none'/'carve'/'input_mask'); default 'none' never touches masks
             (byte-identical guard). See :func:`predict_batch`'s ``masks`` arg.
         gate_temperature, gate_floor: ``fusion_mode='carve'`` gate params.
-        efficienttrack_ckpt: Path to the Orbax EfficientTrack checkpoint
-            directory (or a ``.pth`` HybridNet checkpoint, auto-converted via
-            ``convert_efficienttrack_pth`` with ``strip_prefix="effTrack."``).
-            Required when ``front_end='efficienttrack'``.
+        efficienttrack_ckpt: Path to the Orbax EfficientTrack(BN) checkpoint
+            directory. For ``front_end='efficienttrack'`` this may also be a
+            ``.pth`` HybridNet checkpoint, auto-converted via
+            ``convert_efficienttrack_pth`` with ``strip_prefix="effTrack."``.
+            For ``front_end='efficienttrack_bn'`` this must already be an
+            Orbax "final" dir (e.g.
+            ``.../jax_efficienttrack_runs/et2d_bn_hardmine_ft/final``) --
+            no ``.pth`` conversion is performed on that path. Required when
+            ``front_end`` is ``'efficienttrack'`` or ``'efficienttrack_bn'``.
 
     Returns:
         A :class:`~jarvis_jax.hybridnet.model.HybridNet3D` with params replicated
@@ -106,6 +129,7 @@ def load_inference_model(vitpose_ckpt, v2v_final_dir, *, sharpen=3.0, num_keypoi
         raise ValueError(f"front_end must be one of {_FRONT_ENDS}, got {front_end!r}")
 
     frontend_channels = None  # None => predict_batch passes crops through unsliced
+    normalize_frontend = False  # only 'efficienttrack_bn' opts into this
 
     if front_end == "vitpose":
         # --- Exactly the pre-existing construction path (byte-identical). ---
@@ -120,7 +144,7 @@ def load_inference_model(vitpose_ckpt, v2v_final_dir, *, sharpen=3.0, num_keypoi
         except TypeError:
             state = ckptr.restore(v2v_final_dir, args=ocp.args.StandardRestore(state))
         v2v = nnx.merge(gdef, state)
-    else:
+    elif front_end == "efficienttrack":
         # --- Opt-in EfficientTrack front-end (Task 9). ---
         if efficienttrack_ckpt is None:
             raise ValueError(
@@ -139,11 +163,40 @@ def load_inference_model(vitpose_ckpt, v2v_final_dir, *, sharpen=3.0, num_keypoi
         front = load_efficienttrack_ckpt(et_dir, num_joints=num_keypoints, in_channels=3)
         v2v = load_v2vnet_ckpt(v2v_dir, num_keypoints, num_keypoints)
         frontend_channels = 3
+    else:
+        # --- front_end == "efficienttrack_bn": our production 4-channel
+        # detector (EfficientTrackBN), trained by the 2-D trainer's loss_fn
+        # (`img = normalize_image(img4_u8)` before calling the model -- see
+        # scripts/precompute_repro_cache.py's module docstring / _build_front_end,
+        # whose restore + normalize_frontend=True pattern this mirrors
+        # exactly). Unlike plain 'efficienttrack', this front-end consumes
+        # the FULL 4-channel (RGB + SAM3 mask) crop -- frontend_channels
+        # stays None so predict_batch does NOT slice the mask channel away.
+        if efficienttrack_ckpt is None:
+            raise ValueError(
+                "front_end='efficienttrack_bn' requires efficienttrack_ckpt "
+                "(an Orbax 'final' checkpoint dir, e.g. "
+                ".../jax_efficienttrack_runs/et2d_bn_hardmine_ft/final)")
+        from jarvis_jax.convert.load_v2vnet_torch import load_v2vnet_ckpt
+        from jarvis_jax.scripts.eval_keypoints_2d import restore_model
+
+        vit_cfg = ViTPoseConfig(num_keypoints=num_keypoints)  # doubles as the
+        # generic num_keypoints/in_ch container restore_model expects (same
+        # convention as eval_keypoints_2d.py / precompute_repro_cache.py);
+        # in_ch defaults to 4, matching EfficientTrackBN's 4-channel input.
+        front = restore_model(efficienttrack_ckpt, "efficienttrack_bn", vit_cfg)
+
+        v2v_dir = _maybe_convert_pth(v2v_final_dir, kind="v2vnet",
+                                      num_keypoints=num_keypoints)
+        v2v = load_v2vnet_ckpt(v2v_dir, num_keypoints, num_keypoints)
+        normalize_frontend = True
 
     model = HybridNet3D(front, v2v, _Cfg(num_keypoints, sharpen,
                                           fusion_mode=fusion_mode,
                                           gate_temperature=gate_temperature,
-                                          gate_floor=gate_floor))
+                                          gate_floor=gate_floor,
+                                          normalize_frontend=normalize_frontend),
+                         normalize_frontend=normalize_frontend)
 
     # Replicate params across the mesh so sharded-batch jit steps work.
     mesh = data_parallel_mesh()

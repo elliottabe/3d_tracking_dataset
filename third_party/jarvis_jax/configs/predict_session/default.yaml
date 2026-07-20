@@ -10,3 +10,6 @@ num_keypoints: 250   # 50 keypoints + 200 canonical vertices (dense pose); 50 fo
 batch: 8
 bout_ids: ''       # '' = all (from manifest); else comma-separated bout_idx
 limit: 0
+front_end: vitpose        # vitpose (default, unchanged) | efficienttrack | efficienttrack_bn
+efficienttrack_ckpt: ''   # Orbax EfficientTrack(BN) 'final' dir; required for the two non-vitpose front_end values
+fusion_mode: none         # none (default, byte-identical) | carve | input_mask
