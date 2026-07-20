@@ -1,0 +1,20 @@
+# @package sampling
+# Error-weighted resampling for hard-example mining. `weights_file` points at
+# a per-annotation TRAIN-split MPJPE npz produced by
+# jarvis_jax/scripts/mine_hard_frames.py (same split + dataset order as
+# V3Dataset(root, "train") -- train_keypoints.run_training asserts
+# len(error) == len(train_ds) and fails loudly on a stale/mismatched file).
+#
+# Weighting formula (see train_keypoints.error_weights):
+#   r      = error / median(error[finite])            # relative-to-typical error
+#   r      = clip(nan_to_num(r, nan=1.0), 0, error_cap) # NaN -> neutral; cap the tail
+#   weight = 1.0 + error_alpha * r                      # every weight > 0 -> nothing forgotten
+#   weight = weight / sum(weight)                        # sum-normalised sampling prob
+#
+# Mutually exclusive with the category (sex/behavior/factor) oversampling
+# path (configs/sampling/female_courtship.yaml) -- if weights_file is set, it
+# takes priority (run_training logs which path won). sex/behavior/factor are
+# intentionally absent here.
+weights_file: ''
+error_alpha: 4.0
+error_cap: 8.0

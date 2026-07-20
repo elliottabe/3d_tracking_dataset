@@ -1,0 +1,20 @@
+# @package aug
+# Heavier augmentation preset for hard-example fine-tuning (pair with
+# sampling=hard_error): error-weighted resampling repeats the same hard
+# frames many times per epoch, so a stronger aug diversifies those repeats
+# instead of letting the model memorise them. Same knobs as configs/aug/
+# default.yaml, all increased; flip_p unchanged.
+enabled: true
+rot_deg: 45          # +/- rotation degrees (default.yaml: 30)
+scale_min: 0.7        # (default.yaml: 0.8)
+scale_max: 1.4        # (default.yaml: 1.25)
+translate_frac: 0.15  # +/- fraction of the crop (default.yaml: 0.1)
+flip_p: 0.5           # horizontal flip probability (with L/R keypoint swap) -- unchanged
+cutout_n: 3           # number of erased boxes (default.yaml: 2)
+cutout_frac: 0.3      # box side as a fraction of the crop (default.yaml: 0.25)
+brightness: 0.3       # (default.yaml: 0.2)
+contrast: 0.3         # (default.yaml: 0.2)
+gamma: 0.3            # (default.yaml: 0.2)
+blur_max: 0.7         # max lerp toward a Gaussian-blurred copy (default.yaml: 0.5)
+noise_scale: 0.03     # max additive Gaussian-noise std in [0,1] image units (default.yaml: 0.02)
+pc_color: 0.3         # per-channel colour multiply half-range (default.yaml: 0.2)

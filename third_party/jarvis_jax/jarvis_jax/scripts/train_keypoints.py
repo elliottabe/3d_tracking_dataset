@@ -34,6 +34,7 @@ register_resolvers()
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import orbax.checkpoint as ocp
 from flax import nnx
 
@@ -57,6 +58,35 @@ DEFAULT_MAE_NPZ = "/gscratch/portia/eabe/data/Johnson_lab/mae_vitb.npz"
 DEFAULT_EFFNET_B3_IMAGENET_NPZ = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
     "convert", "fixtures", "effnet_b3_imagenet.npz")
+
+
+def error_weights(error, *, alpha=4.0, cap=8.0):
+    """Per-annotation error-weighted sampling probabilities (sum-normalised)
+    from a ``mine_hard_frames.py`` per-annotation MPJPE ``error`` (px) array
+    (NaN where an annotation had no visible joints, see ``mine_errors``).
+
+    Formula (also documented in ``configs/sampling/hard_error.yaml``)::
+
+        r      = error / median(error[finite])            # relative-to-typical error
+        r      = clip(nan_to_num(r, nan=1.0), 0, cap)      # NaN -> neutral (median-like); cap the tail
+        weight = 1.0 + alpha * r                            # every weight > 0 -> nothing is ever forgotten
+        weight = weight / weight.sum()                      # sum-normalised sampling prob
+
+    A median-error annotation (r=1) keeps weight ``1+alpha``; the hardest
+    annotations (r capped at `cap`) get ``1+alpha*cap``; NaN-error
+    annotations are treated as median (no signal to up- or down-weight).
+    """
+    error = np.asarray(error, dtype=np.float64)
+    finite = np.isfinite(error)
+    if not finite.any():
+        raise ValueError("error_weights: `error` has no finite values")
+    median = float(np.median(error[finite]))
+    if median <= 0.0:
+        median = 1.0   # degenerate all-zero-error edge case; avoid div-by-0
+    r = error / median
+    r = np.clip(np.nan_to_num(r, nan=1.0), 0.0, float(cap))
+    w = 1.0 + float(alpha) * r
+    return w / w.sum()
 
 
 def _epochs(ds, batch_size, base_seed, weights=None, num_workers=8):
@@ -145,10 +175,29 @@ def run_training(root, *, out_dir, mae_npz=DEFAULT_MAE_NPZ, tcfg=None,
     val_ds = V3Dataset(root, "val", recordings=[val_recording])
     val_ds_all = V3Dataset(root, "val")     # full val = the truthful headline metric
 
-    # Weighted sampling: oversample the under-represented target (sex, behavior)
-    # class (e.g. female-courtship, ~2.2% of train) by `factor`. None -> uniform.
+    # Weighted sampling: EITHER error-weighted hard-example resampling (from a
+    # jarvis_jax.scripts.mine_hard_frames.py error npz -- configs/sampling/
+    # hard_error.yaml) OR the older category oversampling of an
+    # under-represented (sex, behavior) class (e.g. female-courtship, ~2.2% of
+    # train) by `factor`. Mutually exclusive; weights_file wins if both are
+    # set. None -> uniform.
     weights = None
-    if oversample is not None and float(oversample.get("factor", 1.0)) > 1.0:
+    if oversample is not None and oversample.get("weights_file"):
+        weights_file = oversample["weights_file"]
+        mined = np.load(weights_file)
+        error = mined["error"]
+        if len(error) != len(train_ds):
+            raise ValueError(
+                f"sampling.weights_file mismatch: {weights_file} has "
+                f"{len(error)} per-annotation errors but the train split has "
+                f"{len(train_ds)} annotations -- stale/mismatched mining file?")
+        alpha = float(oversample.get("error_alpha", 4.0))
+        cap = float(oversample.get("error_cap", 8.0))
+        weights = error_weights(error, alpha=alpha, cap=cap)
+        print(f"error-weighted sampling: weights_file={weights_file} "
+              f"(alpha={alpha}, cap={cap}) -- preferred over any category "
+              f"factor oversampling")
+    elif oversample is not None and float(oversample.get("factor", 1.0)) > 1.0:
         weights = train_ds.sampling_weights(
             oversample.get("sex"), oversample.get("behavior"),
             float(oversample["factor"]))
