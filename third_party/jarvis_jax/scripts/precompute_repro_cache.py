@@ -1,11 +1,31 @@
 """Precompute reprojected volumes for the HybridNet cached trainer.
 
-Sweeps all framesets in the requested split, runs frozen ViTPose + reproject
-(HybridNet3D.reproject_volume), and streams fp16 volumes to a memmap so the
-v2vNet trainer can skip the expensive front-end on every step.
+Sweeps all framesets in the requested split, runs a frozen 2-D front-end +
+reproject (HybridNet3D.reproject_volume), and streams fp16 volumes to a
+memmap so the v2vNet trainer can skip the expensive front-end on every step.
+
+The 2-D front-end is SELECTABLE via ``cache.front_end`` (default
+``"vitpose"``, byte-identical to the pre-selector behavior):
+
+  - ``front_end=vitpose`` (default): loads ``paths.vitpose_ckpt`` via
+    ``load_vitpose``, exactly as before.
+  - ``front_end=efficienttrack_bn``: restores an ``EfficientTrackBN``
+    checkpoint from ``cache.frontend_ckpt`` (an Orbax "final" dir, e.g.
+    ``.../jax_efficienttrack_runs/et2d_bn_imagenet/final``), the SAME
+    eval_shape + StandardCheckpointer + nnx.merge pattern as
+    ``jarvis_jax.scripts.eval_keypoints_2d.restore_model``. Because that
+    checkpoint was trained by the 2-D trainer's ``loss_fn`` (which does
+    ``img = normalize_image(img4_u8)`` before calling the model --
+    ImageNet-normalizes RGB, passes the mask channel through raw), the
+    HybridNet3D built here is constructed with ``normalize_frontend=True`` so
+    ``reproject_volume``/``predict_heatmaps`` feeds it the SAME
+    normalize_image-preprocessed input it saw at 2-D training time (NOT the
+    raw-float path used by the faithful-port plain ``EfficientTrack``, whose
+    default stays byte-identical -- see ``jarvis_jax/hybridnet/model.py``).
 
 Usage (Hydra)
 -------------
+    # ViTPose arm (default, unchanged)
     python scripts/precompute_repro_cache.py \\
         paths=hyak cache=default \\
         cache.split=val \\
@@ -13,10 +33,26 @@ Usage (Hydra)
         cache.limit=0 \\
         cache.force=false
 
-Idempotent: if <split>_meta.json exists and the 'vitpose_ckpt', 'grid_size',
-'grid_spacing', 'roi_cube', 'heatmap_size' keys match (and --limit matches n),
-and the volume file has the expected size, the precompute is skipped unless
-cache.force=true is given.
+    # EfficientTrackBN arm (own cache_dir -- see paths.cache_dir override)
+    python scripts/precompute_repro_cache.py \\
+        paths=hyak cache=default \\
+        cache.front_end=efficienttrack_bn \\
+        cache.frontend_ckpt=/gscratch/portia/$USER/data/Johnson_lab/jax_efficienttrack_runs/et2d_bn_imagenet/final \\
+        paths.cache_dir=/gscratch/portia/$USER/data/Johnson_lab/jax_repro_cache/v3_etbn \\
+        cache.split=val
+
+Per-arm cache directory: there is no separate config group for this -- rely
+on overriding ``paths.cache_dir=<dir>`` per arm (e.g. one dir per front_end)
+so the ViTPose and EfficientTrackBN caches never share a directory.
+
+Idempotent: if <split>_meta.json exists and the 'front_end', 'frontend_ckpt'
+(generic keys; back-compat also reads the legacy 'vitpose_ckpt' key when
+'front_end' is absent), 'grid_size', 'grid_spacing', 'roi_cube',
+'heatmap_size' keys match (and --limit matches n), and the volume file has
+the expected size, the precompute is skipped unless cache.force=true is
+given. A front-end/ckpt MISMATCH (e.g. requesting efficienttrack_bn against a
+cache built with vitpose) is treated as stale and forces a rebuild -- it is
+never silently reused.
 """
 
 from __future__ import annotations
@@ -59,14 +95,24 @@ _META_GRID_PARAMS = {
 def _cache_is_valid(
     cache_dir: str,
     split: str,
-    vitpose_ckpt: str,
+    front_end: str,
+    frontend_ckpt: str | None,
     n: int,
 ) -> bool:
     """Return True if a valid, matching, complete cache already exists.
 
     Checks:
-      - meta.json matches vitpose_ckpt, n, and all grid params
+      - meta.json matches front_end + frontend_ckpt, n, and all grid params
       - volume file exists and has the expected byte size (guards truncated files)
+
+    Back-compat: caches written before the front-end selector existed only
+    ever wrote a bare 'vitpose_ckpt' key (no 'front_end' key at all, since
+    ViTPose was the only option). Such a cache is treated as
+    front_end='vitpose' with frontend_ckpt taken from the legacy key, so
+    existing ViTPose caches remain valid without a forced rebuild. Any
+    front_end/ckpt MISMATCH (including a legacy cache being reused for
+    front_end='efficienttrack_bn') is treated as stale -> rebuild, never
+    silently reused.
     """
     meta_path = os.path.join(cache_dir, f"{split}_meta.json")
     vol_path = os.path.join(cache_dir, f"{split}_volumes.f16")
@@ -75,7 +121,12 @@ def _cache_is_valid(
     try:
         with open(meta_path) as f:
             meta = json.load(f)
-        if meta.get("vitpose_ckpt") != vitpose_ckpt:
+        meta_front_end = meta.get("front_end", "vitpose")
+        # Generic key first; fall back to the legacy vitpose-only key.
+        meta_ckpt = meta.get("frontend_ckpt", meta.get("vitpose_ckpt"))
+        if meta_front_end != front_end:
+            return False
+        if meta_ckpt != frontend_ckpt:
             return False
         if int(meta.get("n", -1)) != n:
             return False
@@ -93,38 +144,107 @@ def _cache_is_valid(
         return False
 
 
+_FRONT_ENDS = ("vitpose", "efficienttrack_bn")
+
+
+def _build_front_end(front_end: str, *, vitpose_ckpt, vitpose_cfg, frontend_ckpt):
+    """Construct + restore the frozen 2-D front-end for `front_end`.
+
+    Returns (front_end_module, ckpt_used, normalize_frontend):
+      - front_end='vitpose': loads `vitpose_ckpt` via load_vitpose (exactly
+        the pre-selector path). normalize_frontend=False -- HybridNet3D
+        always ImageNet-normalizes ViTPose input via its own `_is_vitpose`
+        branch, independent of this flag.
+      - front_end='efficienttrack_bn': restores `frontend_ckpt` (an Orbax
+        "final" dir) via `eval_keypoints_2d.restore_model`'s eval_shape +
+        StandardCheckpointer + nnx.merge pattern -- the SAME restore path
+        used to load trained EfficientTrackBN checkpoints elsewhere.
+        normalize_frontend=True is REQUIRED: this checkpoint was trained by
+        the 2-D trainer's loss_fn, which normalizes input
+        (`img = normalize_image(img4_u8)`) before calling the model, so
+        HybridNet3D must be told to do the same at cache-build time (see
+        `jarvis_jax/hybridnet/model.py`'s `normalize_frontend` flag) --
+        feeding it raw crops (the plain-EfficientTrack HybridNetBackbone-
+        parity default) would silently mismatch train/inference
+        normalization.
+    """
+    if front_end not in _FRONT_ENDS:
+        raise ValueError(
+            f"unknown front_end {front_end!r} (expected one of {_FRONT_ENDS})")
+
+    if front_end == "vitpose":
+        if not vitpose_ckpt:
+            raise ValueError("front_end='vitpose' requires a vitpose_ckpt "
+                              "(paths.vitpose_ckpt)")
+        from jarvis_jax.convert.build_checkpoint import load_vitpose
+        print(f"[precompute] Loading ViTPose from {vitpose_ckpt}")
+        model = load_vitpose(vitpose_ckpt, vitpose_cfg)
+        return model, vitpose_ckpt, False
+
+    # front_end == "efficienttrack_bn"
+    if not frontend_ckpt:
+        raise ValueError("front_end='efficienttrack_bn' requires a "
+                          "frontend_ckpt (cache.frontend_ckpt=...)")
+    from jarvis_jax.scripts.eval_keypoints_2d import restore_model
+    print(f"[precompute] Restoring EfficientTrackBN from {frontend_ckpt}")
+    model = restore_model(frontend_ckpt, "efficienttrack_bn", vitpose_cfg)
+    return model, frontend_ckpt, True
+
+
 def run_precompute(
     *,
     root: str,
-    vitpose_ckpt: str,
     cache_dir: str,
     split: str,
     batch: int,
     limit: int,
     force: bool,
+    vitpose_ckpt: str | None = None,
+    front_end: str = "vitpose",
+    frontend_ckpt: str | None = None,
     vitpose_cfg=None,
 ):
     """Precompute reprojected volumes and write them to a memmap cache.
 
     Args:
         root:        Root of the V3 dataset (contains annotations/, train/, val/).
-        vitpose_ckpt: Orbax ViTPose checkpoint directory.
-        cache_dir:   Output directory for the cache files.
+        cache_dir:   Output directory for the cache files. Callers building
+                     BOTH a ViTPose and an EfficientTrackBN cache MUST pass a
+                     different cache_dir per arm -- this function does not
+                     namespace cache_dir by front_end itself (see module
+                     docstring); the staleness check (_cache_is_valid) will
+                     force a rebuild rather than silently reuse a
+                     different-front-end cache in the SAME cache_dir, but two
+                     concurrent/successive arms sharing one cache_dir will
+                     still clobber each other's files on disk.
         split:       Dataset split: 'train' or 'val'.
         batch:       Framesets per batch.
         limit:       Cache only the first N framesets; 0 = all.
         force:       Overwrite existing cache even if meta matches.
-        vitpose_cfg: Optional ViTPoseConfig instance; built from defaults if None.
+        vitpose_ckpt: Orbax ViTPose checkpoint directory. Required when
+                     front_end='vitpose' (the default); ignored otherwise.
+        front_end:   'vitpose' (default) | 'efficienttrack_bn'. Selects the
+                     frozen 2-D front-end used to build the cache.
+        frontend_ckpt: Orbax checkpoint directory for a non-vitpose front_end
+                     (e.g. an EfficientTrackBN 'final' dir). Required when
+                     front_end != 'vitpose'; ignored otherwise.
+        vitpose_cfg: Optional ViTPoseConfig instance (doubles as the generic
+                     num_keypoints/in_ch container for EfficientTrackBN, same
+                     convention as eval_keypoints_2d.py); built from defaults
+                     if None.
     """
     from flax import nnx
 
     from jarvis_jax.config import ViTPoseConfig
-    from jarvis_jax.convert.build_checkpoint import load_vitpose
     from jarvis_jax.data.repro_cache import load_cache, write_cache
     from jarvis_jax.data.v3_3d import V3FramesetDataset
     from jarvis_jax.hybridnet.model import HybridNet3D
     from jarvis_jax.hybridnet.v2vnet import V2VNet
     from jarvis_jax.sharding import data_parallel_mesh, replicate, shard_batch
+
+    if front_end not in _FRONT_ENDS:
+        raise ValueError(
+            f"unknown front_end {front_end!r} (expected one of {_FRONT_ENDS})")
 
     if vitpose_cfg is None:
         vitpose_cfg = ViTPoseConfig()
@@ -139,20 +259,25 @@ def run_precompute(
     print(f"[precompute] {total} framesets in split; will cache {n}")
 
     # ------------------------------------------------------------------
-    # Idempotency check
+    # Idempotency check (cheap: resolve which ckpt this arm uses without
+    # constructing/restoring any model yet)
     # ------------------------------------------------------------------
-    if not force and _cache_is_valid(cache_dir, split, vitpose_ckpt, n):
+    ckpt_for_check = vitpose_ckpt if front_end == "vitpose" else frontend_ckpt
+    if not force and _cache_is_valid(cache_dir, split, front_end, ckpt_for_check, n):
         print(f"[precompute] Cache already valid at {cache_dir} "
-              f"(split={split}, n={n}). Use cache.force=true to recompute.")
+              f"(split={split}, n={n}, front_end={front_end}). "
+              f"Use cache.force=true to recompute.")
         return
 
     # ------------------------------------------------------------------
     # Build model
     # ------------------------------------------------------------------
-    print(f"[precompute] Loading ViTPose from {vitpose_ckpt}")
-    vitpose = load_vitpose(vitpose_ckpt, vitpose_cfg)
+    front_end_model, ckpt_used, normalize_frontend = _build_front_end(
+        front_end, vitpose_ckpt=vitpose_ckpt, vitpose_cfg=vitpose_cfg,
+        frontend_ckpt=frontend_ckpt)
     v2vnet = V2VNet(vitpose_cfg.num_keypoints, vitpose_cfg.num_keypoints, rngs=nnx.Rngs(0))
-    model = HybridNet3D(vitpose, v2vnet, vitpose_cfg)
+    model = HybridNet3D(front_end_model, v2vnet, vitpose_cfg,
+                         normalize_frontend=normalize_frontend)
 
     # ------------------------------------------------------------------
     # Replicate model across devices
@@ -173,7 +298,18 @@ def run_precompute(
     # Build meta dict
     # ------------------------------------------------------------------
     meta = dict(_META_GRID_PARAMS)
-    meta["vitpose_ckpt"] = vitpose_ckpt
+    # Generic front-end stamp -- distinguishes a ViTPose cache from an
+    # EfficientTrackBN cache and lets _cache_is_valid catch a mismatch.
+    meta["front_end"] = front_end
+    meta["frontend_ckpt"] = ckpt_used
+    # Back-compat: also write the legacy 'vitpose_ckpt' key when this IS a
+    # ViTPose cache, so any older reader that only knows that key (e.g.
+    # train_3d_cached.py's informational wandb log) keeps working unchanged.
+    # Deliberately NOT written for front_end='efficienttrack_bn' -- that
+    # front-end is not a ViTPose, and writing a non-ViTPose path under a key
+    # named 'vitpose_ckpt' would be misleading.
+    if front_end == "vitpose":
+        meta["vitpose_ckpt"] = ckpt_used
     meta["num_cameras"] = int(ds[0]["cameraMatrices"].shape[0])
     # Carry the skeleton so the cached trainer can wire the graph-Laplacian
     # bone prior (train_3d_cached reads meta["keypoint_names"]/["skeleton"]).
@@ -302,7 +438,13 @@ def run_precompute(
 
 
 def main_from_cfg(cfg):
-    """Map a composed Hydra config into run_precompute kwargs and run."""
+    """Map a composed Hydra config into run_precompute kwargs and run.
+
+    ``cache.front_end`` (default 'vitpose') / ``cache.frontend_ckpt`` (default
+    None) are read via ``.get`` with the pre-selector defaults so composing
+    against a ``cache`` group that predates these keys still works
+    byte-identically (front_end='vitpose', frontend_ckpt=None -> unused).
+    """
     from jarvis_jax.config import ViTPoseConfig
     vitpose_cfg = build_dataclass(ViTPoseConfig, cfg.model.vitpose)
     return run_precompute(
@@ -313,6 +455,8 @@ def main_from_cfg(cfg):
         batch=cfg.cache.batch,
         limit=cfg.cache.limit,
         force=cfg.cache.force,
+        front_end=cfg.cache.get("front_end", "vitpose"),
+        frontend_ckpt=cfg.cache.get("frontend_ckpt", None),
         vitpose_cfg=vitpose_cfg,
     )
 

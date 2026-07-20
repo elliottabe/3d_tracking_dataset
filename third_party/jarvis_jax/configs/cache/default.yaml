@@ -3,3 +3,14 @@ split: val
 batch: 8
 limit: 0
 force: false
+# 2-D front-end selector for the reprojected-volume cache builder
+# (scripts/precompute_repro_cache.py). 'vitpose' (default) is byte-identical
+# to the pre-selector behavior and uses paths.vitpose_ckpt.
+# 'efficienttrack_bn' restores an EfficientTrackBN checkpoint from
+# frontend_ckpt below and forces ImageNet normalization of the crops to match
+# how that checkpoint was trained (see precompute_repro_cache.py docstring).
+front_end: vitpose
+# Orbax "final" checkpoint dir for a non-vitpose front_end (e.g. an
+# EfficientTrackBN run). Required when front_end != 'vitpose'; ignored
+# (and may be left null) otherwise.
+frontend_ckpt: null

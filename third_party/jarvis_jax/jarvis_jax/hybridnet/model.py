@@ -153,9 +153,11 @@ class HybridNet3D(nnx.Module):
 
     Args:
         front_end: A 2-D keypoint module -- ``ViTPose`` (frozen; normalized
-            RGB+mask input) or ``EfficientTrack`` (frozen; raw RGB input, no
-            ImageNet normalization -- matches PyTorch ``HybridNetBackbone``,
-            which feeds ``effTrack`` un-normalized images). Run in eval mode.
+            RGB+mask input) or ``EfficientTrack``/``EfficientTrackBN`` (frozen;
+            by default raw RGB input, no ImageNet normalization -- matches
+            PyTorch ``HybridNetBackbone``, which feeds ``effTrack``
+            un-normalized images; see ``normalize_frontend`` to override this
+            for a front-end trained on normalized input). Run in eval mode.
         v2vnet:  A ``V2VNet`` module (trainable).
         cfg:     A config object (provides ``num_keypoints``, optional
             ``sharpen``, and optional SAM3 mask-fusion fields ``fusion_mode``
@@ -163,9 +165,21 @@ class HybridNet3D(nnx.Module):
             -- all read via ``getattr`` with backward-compatible defaults, so
             any bare cfg object works unchanged; see ``__call__``'s ``masks``
             arg and ``jarvis_jax.hybridnet.mask_fuse``).
+        normalize_frontend: If True, force ImageNet normalization
+            (``jarvis_jax.data.device.normalize_image``) of the crops before
+            the (non-ViTPose) front-end. Default False preserves the original
+            raw-float ``EfficientTrack`` / PyTorch-``HybridNetBackbone``-parity
+            path byte-identically. Set True for a front-end (e.g.
+            ``EfficientTrackBN``) whose checkpoint was trained by the 2-D
+            trainer (``jarvis_jax/train/train.py::make_train_step``'s
+            ``loss_fn``, which does ``img = normalize_image(img4_u8)`` before
+            calling the model) -- feeding such a checkpoint raw crops would be
+            a train/inference normalization mismatch. Ignored for ViTPose
+            (which is always normalized via the ``_is_vitpose`` branch below,
+            independent of this flag).
     """
 
-    def __init__(self, front_end, v2vnet, cfg):
+    def __init__(self, front_end, v2vnet, cfg, *, normalize_frontend: bool = False):
         self.front_end = front_end
         self.v2vnet = v2vnet
         self.cfg = cfg
@@ -180,14 +194,19 @@ class HybridNet3D(nnx.Module):
         self.fusion_mode = str(getattr(cfg, "fusion_mode", "none"))
         self.gate_temperature = float(getattr(cfg, "gate_temperature", 1.0))
         self.gate_floor = float(getattr(cfg, "gate_floor", 0.0))
-        # ViTPose is the only front-end that expects ImageNet-normalized
+        # ViTPose is the only front-end that ALWAYS gets ImageNet-normalized
         # input (RGB channels normalized + mask channel passed through raw);
-        # every other front-end (e.g. EfficientTrack) matches the PyTorch
+        # every other front-end (e.g. EfficientTrack) defaults to the PyTorch
         # HybridNetBackbone reference, which feeds effTrack RAW images (no
         # normalization at all -- see export_hybridnet_fixture.py, whose
-        # `imgs_nchw` are raw `torch.rand` in [0, 1)).
+        # `imgs_nchw` are raw `torch.rand` in [0, 1)). `normalize_frontend`
+        # (default False) lets a caller opt a non-ViTPose front-end INTO
+        # normalization when its checkpoint demands it (e.g. EfficientTrackBN
+        # trained via train/train.py's normalize_image-then-model loss_fn) --
+        # see predict_heatmaps below.
         from jarvis_jax.models.vitpose import ViTPose  # local: no cycle risk, avoids import at module load if unused
         self._is_vitpose = isinstance(front_end, ViTPose)
+        self.normalize_frontend = bool(normalize_frontend)
 
     @property
     def vitpose(self):
@@ -209,7 +228,12 @@ class HybridNet3D(nnx.Module):
         first ImageNet-normalized via ``normalize_image`` (byte-identical to
         the pre-refactor behavior); for any other front-end (e.g.
         EfficientTrack), crops are passed through as float32 with NO
-        normalization, matching the PyTorch ``HybridNetBackbone`` reference.
+        normalization by default, matching the PyTorch ``HybridNetBackbone``
+        reference -- UNLESS ``self.normalize_frontend`` is True, in which case
+        the crops are ImageNet-normalized the same way as ViTPose (see
+        ``normalize_frontend`` on ``__init__`` -- this is for a front-end,
+        e.g. EfficientTrackBN, whose checkpoint was trained on normalized
+        input).
 
         Args:
             crops_u8: ``(B, num_cam, 448, 448, C)`` crops -- uint8 RGBA for
@@ -241,12 +265,25 @@ class HybridNet3D(nnx.Module):
             J = hm_flat.shape[-1]
             return hm_flat.reshape(B, num_cam, 224, 224, J)
 
-        # Non-ViTPose front-ends (e.g. EfficientTrack) consume raw crops
-        # directly -- no normalization (PyTorch HybridNetBackbone parity).
-        # Pass the un-flattened (B, num_cam, H, W, C) tensor straight through:
-        # EfficientTrack.predict_heatmaps flattens/unflattens the leading
-        # batch dims itself (see its docstring), so this is exactly the same
-        # math as the old model.py-side manual flatten -- just relocated.
+        if self.normalize_frontend:
+            # Opt-in normalization for a non-ViTPose front-end whose
+            # checkpoint was trained on ImageNet-normalized input (e.g.
+            # EfficientTrackBN via train/train.py's loss_fn). normalize_image
+            # is elementwise/broadcast over the last (channel) axis, so it
+            # applies correctly to the un-flattened (B, num_cam, H, W, C)
+            # tensor with no reshape needed (unlike the ViTPose branch above,
+            # which flattens because it calls front_end(...) directly rather
+            # than through a self-flattening predict_heatmaps).
+            imgs_float = normalize_image(crops_u8)
+            return self.front_end.predict_heatmaps(imgs_float)  # (B, num_cam, 224, 224, J)
+
+        # Non-ViTPose, non-normalized front-ends (e.g. plain EfficientTrack)
+        # consume raw crops directly -- no normalization (PyTorch
+        # HybridNetBackbone parity). Pass the un-flattened
+        # (B, num_cam, H, W, C) tensor straight through: EfficientTrack
+        # .predict_heatmaps flattens/unflattens the leading batch dims itself
+        # (see its docstring), so this is exactly the same math as the old
+        # model.py-side manual flatten -- just relocated.
         imgs_float = crops_u8.astype(jnp.float32)
         return self.front_end.predict_heatmaps(imgs_float)  # (B, num_cam, 224, 224, J)
 
