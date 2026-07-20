@@ -50,7 +50,7 @@ register_resolvers()
 
 from jarvis_jax.config import ViTPoseConfig
 from jarvis_jax.models.vitpose import ViTPose
-from jarvis_jax.models.efficienttrack import EfficientTrack
+from jarvis_jax.models.efficienttrack import EfficientTrack, EfficientTrackBN
 from jarvis_jax.data.v3 import V3Dataset
 from jarvis_jax.train.train import eval_mpjpe
 
@@ -66,7 +66,13 @@ def _build_abstract(arch, cfg):
     if arch == "efficienttrack":
         return lambda: EfficientTrack(
             num_joints=cfg.num_keypoints, in_channels=cfg.in_ch, rngs=nnx.Rngs(0))
-    raise ValueError(f"unknown arch {arch!r} (expected 'vitpose' or 'efficienttrack')")
+    if arch == "efficienttrack_bn":
+        # Random-init constructor (correct shapes); the ckpt restore overwrites
+        # weights, so the ImageNet warm-start used at train time is irrelevant here.
+        return lambda: EfficientTrackBN(
+            num_joints=cfg.num_keypoints, in_channels=cfg.in_ch, rngs=nnx.Rngs(0))
+    raise ValueError(
+        f"unknown arch {arch!r} (expected 'vitpose', 'efficienttrack', or 'efficienttrack_bn')")
 
 
 def restore_model(ckpt_dir, arch, cfg):
