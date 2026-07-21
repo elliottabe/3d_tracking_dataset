@@ -31,6 +31,21 @@ convention to ``scripts/viz_compare_3d_runs.py:project_full`` and
 ``jarvis_jax.geometry.reprojection_tool.ReprojectionTool.reproject_point``.
 Overlay is drawn on the FULL camera frame (not a crop).
 
+Skeleton edges (``--skeleton``, default ON): in addition to the per-joint
+dots, thin bone lines are drawn connecting each fly's reprojected keypoints
+along the V3 dataset's skeleton graph (fly0/magenta, fly1/cyan -- same
+colors as the dots), so the overlay reads as a fly skeleton rather than a
+bare point cloud. Edge topology comes from ``build_skeleton_edges`` (see
+``jarvis_jax.train.losses_3d``, the same helper ``scripts/viz_compare_3d_runs.py``
+uses) fed with the bone list read (metadata-only, no images decoded) from
+``--data-root``'s ``annotations/instances_<split>.json`` -- but paired with
+the fly-CSV's OWN ``joint_names`` (not the dataset's), since that is what
+actually indexes the kp arrays here and may be a truncated prefix of the
+full 50-joint list (see ``load_skeleton_bones``'s docstring). An edge is
+only drawn when BOTH endpoints are valid (finite 3D + confidence >=
+``--min-conf``); a missing/low-conf endpoint silently drops that edge, not
+just that joint's dot. Use ``--no-skeleton`` to fall back to dots-only.
+
 Example (Session0, red_data_unified project, bout 4)::
 
     cd third_party/jarvis_jax
@@ -52,6 +67,11 @@ import shutil
 import subprocess
 
 import numpy as np
+
+# V3 dataset root used (metadata-only: annotations/instances_<split>.json's
+# "skeleton" bone list) to draw skeleton edges by default -- see
+# load_skeleton_bones. Matches configs/paths/hyak.yaml's paths.data_root.
+DEFAULT_DATA_ROOT = "/gscratch/portia/eabe/data/Johnson_lab/red_data/red_data_unified_V3"
 
 
 # --------------------------------------------------------------------------
@@ -92,6 +112,54 @@ def project_and_filter(kp3d_frame, conf_frame, M, min_conf=0.0):
     pts2d = reproject_points(kp3d_frame, M)            # (J,2), NaN-preserving
     valid = (~np.isnan(kp3d_frame).any(axis=-1)) & (conf_frame >= min_conf)
     return pts2d[valid]
+
+
+def skeleton_segments(pts2d, valid, ei, ej):
+    """(J,2) reprojected px + (J,) per-joint validity mask + skeleton edge
+    index arrays (from ``build_skeleton_edges``) -> ``(E_valid, 2, 2)`` line
+    -segment endpoint-pair array, ready for
+    ``reproj_video.draw_overlay_frame``'s ``mesh_edges``/``kp_edges``.
+
+    An edge is drawn only if BOTH its endpoints are valid (finite 3D coords
+    AND confidence >= min_conf, per ``project_and_filter``'s ``valid`` mask
+    convention) -- edges with a missing/low-conf endpoint are silently
+    skipped, never drawn with a NaN or stale coordinate.
+    """
+    pts2d = np.asarray(pts2d, dtype=np.float64)
+    valid = np.asarray(valid, dtype=bool)
+    ei = np.asarray(ei, dtype=np.int64)
+    ej = np.asarray(ej, dtype=np.int64)
+    if ei.size == 0:
+        return np.zeros((0, 2, 2), dtype=np.float64)
+    keep = valid[ei] & valid[ej]
+    a = pts2d[ei][keep]
+    b = pts2d[ej][keep]
+    return np.stack([a, b], axis=1)
+
+
+def load_skeleton_bones(data_root, split="val"):
+    """Read the ``skeleton`` bone-list (list of ``{keypointA,keypointB,...}``
+    dicts) from the V3 dataset's ``annotations/instances_<split>.json``.
+
+    Metadata-only read: this is a bare ``json.load`` of the COCO-style
+    annotations file (~1-2MB for red_data_unified_V3's val/train splits) --
+    no images are decoded and no ``V3FramesetDataset``/``ReprojectionTool``
+    objects are built (unlike ``V3FramesetDataset(root, split).skeleton``,
+    which is otherwise the "canonical" accessor -- see
+    ``jarvis_jax.predict.session_predict.session_geometry`` callers and
+    ``scripts/viz_compare_3d_runs.py``). We deliberately do NOT use
+    ``V3FramesetDataset.keypoint_names`` to build the edge index mapping:
+    the fly CSV's own ``joint_names`` (read positionally by
+    ``read_fly_csv``, and possibly a truncated prefix of the full 50-name
+    V3 list -- see ``session_predict.py``'s ``num_keypoints`` truncation)
+    is what actually indexes ``kp0d``/``proj0`` here, so
+    ``build_skeleton_edges(names0, bones)`` must be called with THAT list,
+    not the dataset's.
+    """
+    ann_path = os.path.join(str(data_root), "annotations", f"instances_{split}.json")
+    with open(ann_path) as f:
+        coco = json.load(f)
+    return coco.get("skeleton", [])
 
 
 # --------------------------------------------------------------------------
@@ -215,9 +283,20 @@ def iter_video_frames(video_path, start, num_frames):
 # --------------------------------------------------------------------------
 def render_bout(*, session_dir, masks_dir, pred_dir, bout_id, project,
                 jarvis_root, out, cameras=None, max_frames=None,
-                min_conf=0.0, fps=None):
+                min_conf=0.0, fps=None, skeleton=True, data_root=None,
+                split="val"):
     """Render one bout's fly0+fly1 3D-keypoint reprojection overlay, one mp4
     per camera, into `out`. Returns the list of written mp4 paths.
+
+    ``skeleton``: if True (default), also draw thin bone lines connecting
+    each fly's reprojected keypoints along the V3 dataset's skeleton edges
+    (fly0/magenta, fly1/cyan -- same colors as the existing joint dots), so
+    the overlay reads as a fly skeleton rather than a bare point cloud. Bone
+    metadata is read from ``data_root`` (default: red_data_unified_V3, see
+    ``load_skeleton_bones``); if that read fails (missing/unreadable
+    annotations file) skeleton drawing is disabled with a warning rather
+    than failing the whole render -- the dot overlay is unaffected either
+    way.
     """
     from jarvis_jax.predict.session_predict import session_geometry
 
@@ -260,6 +339,27 @@ def render_bout(*, session_dir, masks_dir, pred_dir, bout_id, project,
     kp0d, conf0d = dense_by_frame(frames0, kp0, conf0, start, num_frames)
     kp1d, conf1d = dense_by_frame(frames1, kp1, conf1, start, num_frames)
 
+    # Skeleton edges (both flies share the same joint_names -> same edges;
+    # names0 == names1 already checked above). See load_skeleton_bones'
+    # docstring for why names0 (the fly-CSV's OWN joint order/subset) is the
+    # correct keypoint_names to pass here, not the dataset's full list.
+    ei = ej = None
+    if skeleton:
+        root = data_root or DEFAULT_DATA_ROOT
+        try:
+            from jarvis_jax.train.losses_3d import build_skeleton_edges
+            bones = load_skeleton_bones(root, split)
+            ei, ej = build_skeleton_edges(names0, bones)
+            if ei.size == 0:
+                print(f"[render_bout_reproj] WARNING: 0 skeleton edges matched "
+                      f"against fly-CSV joint names from {root!r} split={split!r} "
+                      f"-- skeleton drawing will be a no-op.")
+        except (OSError, ValueError) as e:
+            print(f"[render_bout_reproj] WARNING: could not load skeleton "
+                  f"metadata from {root!r} split={split!r} ({e}) -- disabling "
+                  f"skeleton-edge drawing (dot overlay unaffected).")
+            ei = ej = None
+
     os.makedirs(str(out), exist_ok=True)
     out_paths = []
     for c, cam_name in enumerate(camera_names):
@@ -271,11 +371,16 @@ def render_bout(*, session_dir, masks_dir, pred_dir, bout_id, project,
         proj1 = reproject_points(kp1d, M)
         kp2d_by_frame = []
         mesh2d_by_frame = []
+        kp_edges_by_frame = [] if ei is not None else None
+        mesh_edges_by_frame = [] if ei is not None else None
         for t in range(num_frames):
             valid0 = (~np.isnan(kp0d[t]).any(axis=-1)) & (conf0d[t] >= min_conf)
             valid1 = (~np.isnan(kp1d[t]).any(axis=-1)) & (conf1d[t] >= min_conf)
             kp2d_by_frame.append(proj0[t][valid0])      # fly0 -> magenta
             mesh2d_by_frame.append(proj1[t][valid1])    # fly1 -> cyan
+            if ei is not None:
+                kp_edges_by_frame.append(skeleton_segments(proj0[t], valid0, ei, ej))
+                mesh_edges_by_frame.append(skeleton_segments(proj1[t], valid1, ei, ej))
 
         from jarvis_jax.tracking.reproj_video import write_camera_video
         out_path = os.path.join(str(out), f"bout{int(bout_id)}_{cam_name}.mp4")
@@ -284,10 +389,13 @@ def render_bout(*, session_dir, masks_dir, pred_dir, bout_id, project,
             frames_rgb_iter=iter_video_frames(video_path, start, num_frames),
             mesh2d_by_frame=mesh2d_by_frame,
             kp2d_by_frame=kp2d_by_frame,
+            mesh_edges_by_frame=mesh_edges_by_frame,
+            kp_edges_by_frame=kp_edges_by_frame,
             fps=cam_fps, codec="libx264", pixelformat="yuv420p")
         out_paths.append(out_path)
         print(f"[render_bout_reproj] wrote {out_path} "
-              f"({num_frames} frames @ {cam_fps:.3f} fps)")
+              f"({num_frames} frames @ {cam_fps:.3f} fps"
+              f"{', +skeleton' if ei is not None else ''})")
 
     return out_paths
 
@@ -340,6 +448,18 @@ def build_argparser():
     ap.add_argument("--fps", type=float, default=None,
                     help="override output fps; default = probed from each "
                          "camera's source video")
+    ap.add_argument("--skeleton", action=argparse.BooleanOptionalAction,
+                    default=True,
+                    help="draw skeleton bone lines connecting each fly's "
+                         "reprojected keypoints, in addition to the joint "
+                         "dots (default: on; use --no-skeleton for dots "
+                         "only, the old behavior)")
+    ap.add_argument("--data-root", default=DEFAULT_DATA_ROOT,
+                    help="V3 dataset root providing the skeleton bone list "
+                         "(annotations/instances_<split>.json); metadata "
+                         "only, no images decoded. Only used if --skeleton.")
+    ap.add_argument("--split", default="val",
+                    help="V3 dataset split to read skeleton metadata from")
     return ap
 
 
@@ -350,7 +470,8 @@ def main(argv=None):
         session_dir=args.session_dir, masks_dir=args.masks_dir,
         pred_dir=args.pred_dir, bout_id=args.bout_id, project=args.project,
         jarvis_root=args.jarvis_root, out=args.out, cameras=cameras,
-        max_frames=args.max_frames, min_conf=args.min_conf, fps=args.fps)
+        max_frames=args.max_frames, min_conf=args.min_conf, fps=args.fps,
+        skeleton=args.skeleton, data_root=args.data_root, split=args.split)
     if out_paths:
         info = ffprobe_codec(out_paths[0])
         if info:
