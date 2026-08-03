@@ -4,7 +4,8 @@ weight_decay: 0.05
 warmup_steps: 100
 total_steps: 20000
 batch_size: 8
-laplacian_weight: 0.05
+# See cached3d.yaml: 0.05 hurt val MPJPE (1.204->0.708 at 0.0); JARVIS ships 0.0.
+laplacian_weight: 0.0
 sigma: 2.0
 sharpen: 3.0
 seed: 0

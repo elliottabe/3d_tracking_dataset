@@ -7,13 +7,21 @@ from jarvis_jax.geometry.center3d import triangulate_dlt_batched, project_center
 CROP = 448
 
 
-def build_frameset(frame_imgs, masks, centroids, valid, cameraMatrices, *, crop=CROP):
+def build_frameset(frame_imgs, masks, centroids, valid, cameraMatrices, *,
+                   distractor_masks=None, crop=CROP):
     """Build a V3-format frameset for one fly at one frame.
 
     frame_imgs (nc,H,W,3) uint8 RGB; masks (nc,H,W) bool; centroids (nc,2) full-px;
     valid (nc,) bool; cameraMatrices (nc,4,3). Returns (crops4 (nc,crop,crop,4) uint8
     | None, centerHM (nc,2) f32, n_valid). center3D for placement = triangulated valid
     centroids -> reprojected to all cameras -> clamped crop centers (V3 crop_origin).
+
+    distractor_masks (nc,H,W) bool | None: union of OTHER animals' masks. When
+    given, distractor-fly pixels in the RGB crop are replaced with the crop's
+    mean colour (target-overlap excluded) so the detector sees a single clean
+    fly + the target-mask channel. This matches JARVIS's dataset2D training
+    crop and build_4ch_crops inference crop; omitting it feeds two overlapping
+    flies on courtship frames and collapses the 3D reconstruction.
     """
     nc, H, W = masks.shape
     valid = np.asarray(valid, bool)
@@ -35,6 +43,18 @@ def build_frameset(frame_imgs, masks, centroids, valid, cameraMatrices, *, crop=
         rgb = frame_imgs[c, y0:y0 + crop, x0:x0 + crop, :3]
         m = masks[c, y0:y0 + crop, x0:x0 + crop]
         # zero-pad if the (clamped) crop is short at an edge
-        crops4[c, :rgb.shape[0], :rgb.shape[1], :3] = rgb
+        hh, ww = rgb.shape[0], rgb.shape[1]
+        crops4[c, :hh, :ww, :3] = rgb
         crops4[c, :m.shape[0], :m.shape[1], 3] = m.astype(np.uint8)
+        # Gray-fill distractor-fly pixels with the crop mean (matches JARVIS
+        # dataset2D:253-262 / build_4ch_crops). Exclude target-overlap pixels
+        # so we never gray out part of the target fly. Mean is taken over the
+        # crop *before* filling, as in JARVIS.
+        if distractor_masks is not None:
+            d = distractor_masks[c, y0:y0 + crop, x0:x0 + crop].astype(bool)
+            d = d[:hh, :ww] & ~m[:hh, :ww].astype(bool)
+            if d.any():
+                region = crops4[c, :hh, :ww, :3]
+                mean_color = region.reshape(-1, 3).mean(axis=0)
+                region[d] = mean_color.astype(np.uint8)
     return crops4, centerHM, n_valid

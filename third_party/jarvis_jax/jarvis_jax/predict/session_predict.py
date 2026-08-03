@@ -308,6 +308,16 @@ def run_predict_session(*, session_dir, masks_dir, out, project, jarvis_root,
                 cents = slot["centroids"].cpu().numpy()   # (nc, 2)
                 valid = slot["valid"].cpu().numpy()       # (nc,) bool
 
+                # Distractor mask = union of OTHER animals' masks this frame.
+                # Fed to build_frameset to gray-fill the other fly out of the
+                # RGB crop (matches JARVIS; see session_frameset docstring).
+                distractor = None
+                for a2 in range(num_animals):
+                    if a2 == a or slot_list[a2] is None:
+                        continue
+                    m2 = slot_list[a2]["masks"].cpu().numpy()   # (nc,H,W) bool
+                    distractor = m2 if distractor is None else (distractor | m2)
+
                 # Read one RGB frame from each camera (sequential).
                 frame_imgs_list = []
                 for cap in caps:
@@ -320,7 +330,8 @@ def run_predict_session(*, session_dir, masks_dir, out, project, jarvis_root,
                 frame_imgs = np.stack(frame_imgs_list)   # (nc, H, W, 3) uint8 RGB
 
                 crops4, centerHM, nv = build_frameset(
-                    frame_imgs, masks, cents, valid, cameraMatrices
+                    frame_imgs, masks, cents, valid, cameraMatrices,
+                    distractor_masks=distractor
                 )
                 if crops4 is None:
                     rows.append((abs_frame, None, None))

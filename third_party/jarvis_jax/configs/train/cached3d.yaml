@@ -4,7 +4,10 @@ weight_decay: 0.05
 warmup_steps: 100
 total_steps: 20000
 batch_size: 64
-laplacian_weight: 0.05
+# Graph-Laplacian bone-vector loss. Ablation (v2v_etbn vs v2v_etbn_nolap on the
+# same cached features) showed 0.05 HURTS: val 3D MPJPE 1.204 -> 0.708 at 0.0.
+# JARVIS's unified_V3_masked config also ships LAPLACIAN_WEIGHT: 0.0. Keep OFF.
+laplacian_weight: 0.0
 sigma: 2.0
 sharpen: 3.0
 seed: 0
