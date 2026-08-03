@@ -66,6 +66,12 @@ anatomies).
   around with `unpadded_clip_lengths()` sniffing repeated trailing frames.
   Storing true lengths still loads correctly in `HDF5ReferenceClips` and makes
   `use_unpadded_clip_length` unnecessary.
+- **Segment calibration stays OFF.** `preprocessing.calibration.enabled: False`
+  (the current default) — no per-segment model morphing for this run. Only the
+  single global Procrustes scale applies. See §2.4 for why this also removes a
+  silent-failure mode.
+- **Adhesion actuators are commented out, not deleted**, matching how v2.1
+  handles the same 8 actuators.
 - **Keypoint inputs:** re-run preprocessing under `anatomy=v2_3` (rather than
   reusing the v1 preprocessed files), so the global Procrustes scale is fit to
   the v2.3 rest pose instead of v1's.
@@ -100,17 +106,44 @@ Impact if unfixed: `postprocess_stac_data.py:818 mjx.put_model(mj_model)` hard-f
 ### 2.2 The v2.3 model has no tracking sites
 
 v2.3 has 1059 sites, **all** `mu_*` muscle sites — 0 named `tracking[...]`.
-v2.1 has 50. STAC itself is fine (it creates marker sites at runtime from
-`KEYPOINT_MODEL_PAIRS` + `KEYPOINT_INITIAL_OFFSETS`), but two other places need
-them:
+v2.1 has 50.
 
-- `preprocess_keypoints_for_ik.py:234-282` parses `tracking[...]` sites out of
-  `${anatomy.mjcf_path}` to define keypoint column order and the rest-pose scale;
-- `postprocess_stac_data.py:826` selects sites by `'tracking' in site.name`,
-  which would silently yield `site_indices = []` → empty `(T, 0, 3)`
+**STAC itself does not need them** — `stac.py:214-275 _create_body_sites` adds all
+50 marker sites at runtime from `KEYPOINT_MODEL_PAIRS` + `KEYPOINT_INITIAL_OFFSETS`.
+But two other stages read them out of the XML, so they must be added anyway:
+
+- **Preprocessing (Stage 3) — hard dependency.**
+  `preprocess_keypoints_for_ik.py:256` selects sites via `'tracking[' in name`,
+  strips the wrapper, and matches skeleton nodes against the result to define
+  both the keypoint column order (`reorder_to_xml_site_order`) and the rest-pose
+  Procrustes reference. With 0 tracking sites `tracking_names_clean` is empty,
+  all 50 nodes land in `unmatched`, and the reorder degenerates — it prints a
+  warning but does not raise.
+- **Postprocess (Stage 5).** `postprocess_stac_data.py:826` selects by
+  `'tracking' in site.name` → `site_indices = []` → empty `(T, 0, 3)`
   `xpos_egocentric` / `site_xpos`. Silent garbage, not a crash.
 
-v2.1 and v2.3 have **identical body names**, so the 50 sites port over directly.
+Site names are `tracking[<KP_NAME>]`, e.g. `tracking[Scutellum]`. v2.1 and v2.3
+have **identical body names**, so the sites transfer directly.
+
+**Source of truth: `KEYPOINT_INITIAL_OFFSETS`, not the v2.1 XML.** Generating the
+sites from the anatomy config guarantees the XML sites and STAC's runtime sites
+agree. Compared numerically, the two sources match on 46/50 sites exactly, differ
+by sub-mm rounding on `Antenna_Base` / `EyeL` / `EyeR`, and genuinely disagree on
+one:
+
+```
+T1L_TaTip xml=+0.005  cfg=+0.005      T1R_TaTip xml=-0.005  cfg=-0.005
+T2L_TaTip xml=+0.005  cfg=+0.005      T2R_TaTip xml=-0.005  cfg=-0.005
+T3L_TaTip xml=+0.005  cfg=-0.005  <-- config breaks the L/R mirror
+T3R_TaTip xml=-0.005  cfg=-0.005
+```
+
+The v2.1 XML follows the left/right pattern; `v2_muscles.yaml` has the left T3
+tarsal tip mirrored onto the right side. These are *initial* offsets that STAC
+subsequently fits, so the cost is a poorer starting point for one keypoint rather
+than a wrong result — but `configs/anatomy/v2_3.yaml` must carry the corrected
+`T3L_TaTip: 0 0.005 0` rather than copy the bug forward.
 
 ### 2.3 Model files are not where the configs look
 
@@ -146,7 +179,7 @@ not `v2.yaml`.)
 Seven stages. Each writes a distinct artifact and is independently verifiable.
 
 ```
-Stage 0  model prep        -> models/fruitfly_v2.3/fruitfly_v2_3_ik.xml
+Stage 0  model prep        -> models/fruitfly_v2.3/fruitfly_muscles_warp.xml (edited in place)
 Stage 1  anatomy config    -> configs/anatomy/v2_3.yaml
 Stage 2  postproc config   -> v2.3 floor-alignment end effectors
 Stage 3  preprocessing     -> 22 x preprocessing/preprocessed_bout_v2_3_free_running.h5
@@ -162,28 +195,43 @@ Stage 7  pack              -> Fruitfly_v2_3_walk_1000hz_interp_padded.h5
 `fly_neuromech/fruitfly_body_models/fruitfly_v2.3`, so `${paths.body_model_dir}`
 resolves.
 
-New script `scripts/models/build_v2_3_ik_model.py` derives
-`fruitfly_v2_3_ik.xml` from `fruitfly_muscles_warp.xml`:
+Two edits to `fruitfly_muscles_warp.xml`, applied **in place** in the body-model
+tree (this modifies a file in the `fly_neuromech` repo):
 
-1. delete the 8 `<adhesion>` elements **inside the `<actuator>` section**
-   (leave the `<default class="adhesion*">` blocks alone, so the edit is
-   reversible and geom classes are untouched);
-2. insert the 50 `tracking[...]` sites, read from `fruitfly_v2.1_muscles.xml`,
-   into the matching bodies (body names are identical between the two).
+1. **Comment out** the 8 `<adhesion>` actuators — 4 two-line blocks at lines
+   2392-2393, 2539-2540, 2628-2629, 2723-2724 — wrapping them in `<!-- -->`
+   exactly as `fruitfly_v2.1_muscles.xml:2293-2300` already does. Commenting
+   rather than deleting keeps the muscle model's adhesion definition recoverable
+   for dynamics work, where MJX is not in the loop. Leave the
+   `<default class="adhesion*">` blocks alone: defaults create no actuators, and
+   the `adhesion-collision` geom class is needed for FK geometry.
+2. **Add the 50 `tracking[<KP_NAME>]` sites**, generated from
+   `configs/anatomy/v2_3.yaml`'s `KEYPOINT_MODEL_PAIRS` + `KEYPOINT_INITIAL_OFFSETS`
+   (see §2.2 for why the config, not the v2.1 XML, is the source of truth), each
+   added to its mapped parent body.
 
-Deriving by script rather than hand-editing keeps the model reproducible when
-v2.3 is updated upstream.
+Step 2 is scripted (`scripts/models/add_v2_3_tracking_sites.py`) rather than
+hand-written, so it stays reproducible if v2.3 is updated upstream and so the
+XML cannot drift from the anatomy config. Step 1 is a literal 8-line comment-out.
+
+**Ordering:** step 2 reads `configs/anatomy/v2_3.yaml`, so Stage 1 must be
+authored first. Stages are numbered by data flow, not execution order; the build
+order is 1 → 0 → 2 → … The `mjcf_path` in the config points at the XML that
+step 2 edits, which is fine — the config is only read for its
+`KEYPOINT_MODEL_PAIRS` / `KEYPOINT_INITIAL_OFFSETS`, and the model is not
+compiled until Stage 0's verification.
 
 **Verification:** compile and assert `nq=101, nv=100, nbody=74, nu=264`,
-`actuator_trntype` contains no `mjTRN_BODY`, exactly 50 `tracking[...]` sites,
-`mjx.put_model` succeeds, and every body in `KEYPOINT_MODEL_PAIRS` exists.
+`actuator_trntype` contains no `mjTRN_BODY`, exactly 50 `tracking[...]` sites
+whose names equal `KP_NAMES` and whose parent bodies equal
+`KEYPOINT_MODEL_PAIRS`, and `mjx.put_model` succeeds.
 
 ### Stage 1 — `configs/anatomy/v2_3.yaml`
 
 Copy `v2_muscles.yaml` and change:
 
 - `name: v2_3`
-- `mjcf_path: ${paths.body_model_dir}/fruitfly_v2.3/fruitfly_v2_3_ik.xml`
+- `mjcf_path: ${paths.body_model_dir}/fruitfly_v2.3/fruitfly_muscles_warp.xml`
 - `arena_path: ${paths.body_model_dir}/fruitfly_v2.3/floor.xml`
 - `joint_names`: v2.1's 82 **plus** the 13 v2.3 additions —
   `antenna_{left,right}`, `antenna_abduct_{left,right}`,
@@ -191,7 +239,9 @@ Copy `v2_muscles.yaml` and change:
   `haustellum_abduct`, `labrum_{left,right}`, `rostrum`.
 
 `body_names`, `KP_NAMES`, `KEYPOINT_MODEL_PAIRS`, `KEYPOINT_INITIAL_OFFSETS`,
-`SITES_TO_REGULARIZE` carry over **verbatim, order preserved** (see §2.4).
+`SITES_TO_REGULARIZE` carry over **verbatim, order preserved** (see §2.4), with
+one deliberate correction: `T3L_TaTip: 0 0.005 0`, restoring the left/right
+mirror that `v2_muscles.yaml` breaks (§2.2).
 
 ### Stage 2 — postprocessing config
 
@@ -280,12 +330,14 @@ serves future anatomies.
 
 **Unit (fast, no cluster):**
 
-- `build_v2_3_ik_model.py`: adhesion strip removes exactly 8 actuators from the
-  `<actuator>` section and leaves `nq/nv/nbody` unchanged; 50 tracking sites land
-  on the expected bodies; `mjx.put_model` succeeds.
+- Stage-0 model: commenting the adhesion actuators drops `nu` 272→264 and leaves
+  `nq/nv/nbody` at 101/100/74; no `mjTRN_BODY` remains; `mjx.put_model` succeeds;
+  exactly 50 `tracking[...]` sites, names == `KP_NAMES`, parents ==
+  `KEYPOINT_MODEL_PAIRS`, positions == `KEYPOINT_INITIAL_OFFSETS`.
 - `configs/anatomy/v2_3.yaml`: every `KEYPOINT_MODEL_PAIRS` body resolves in the
   compiled model; `KP_NAMES` order is byte-identical to `v1.yaml`'s; joint set
-  equals the model's minus the free joint.
+  equals the model's minus the free joint; `T3L_TaTip` mirrors `T3R_TaTip`
+  (regression test for the §2.2 bug).
 - `pack_reference_clips.py`: on a synthetic 3-bout dict with known lengths —
   padding repeats the last frame, `clip_lengths` are the true lengths, shapes are
   `(3, T_max, ...)`, `qpos_names` is a 101-entry group.
@@ -314,7 +366,8 @@ keypoint-order hazard (§2.4), not at real anatomy differences.
 | v2.3 rest-pose rescale shifts IK vs v1 | Expected and desired; quantify via the §4 sanity comparison |
 | Keypoint column order silently wrong | Unit test asserts `KP_NAMES` order matches v1 exactly |
 | Empty egocentric arrays | Explicit Stage 5 shape gate |
-| Someone enables `calibration.enabled` later | Documented in §2.4; v1 segment names would half-morph a v2.3 model silently |
+| Someone enables `calibration.enabled` later | Out of scope by decision (§1); documented in §2.4 — v1 segment names would half-morph a v2.3 model silently |
+| Cross-repo XML edit is lost or diverges | Commented (not deleted) so it is self-documenting; tracking-site insertion is scripted and re-runnable; Stage-0 assertions catch a reverted file |
 | Login-node saturation | All heavy stages run on compute nodes |
 
 ---
@@ -322,13 +375,15 @@ keypoint-order hazard (§2.4), not at real anatomy differences.
 ## 6. Deliverables
 
 **New files**
-- `scripts/models/build_v2_3_ik_model.py`
-- `models/fruitfly_v2.3` (symlink) + generated `fruitfly_v2_3_ik.xml`
+- `scripts/models/add_v2_3_tracking_sites.py`
+- `models/fruitfly_v2.3` (symlink)
 - `configs/anatomy/v2_3.yaml`
 - `scripts/export/pack_reference_clips.py`
 - tests per §4
 
 **Modified**
+- `fly_neuromech/fruitfly_body_models/fruitfly_v2.3/fruitfly_muscles_warp.xml`
+  — adhesion actuators commented out; 50 tracking sites added (cross-repo edit)
 - `scripts/batch_run_stac.py` — add `free_running` to `--dataset` choices
 - `configs/postprocessing/` — v2.3 floor-alignment end effectors
 - `docs/running_the_pipeline.md` — replace the "anatomy=v2_muscles does NOT work"
