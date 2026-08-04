@@ -2444,12 +2444,12 @@
          That note was half right and its conclusion was wrong for this project.
          VERIFIED: mjx.put_model(m) does raise NotImplementedError on mjTRN_BODY,
          but mjx.put_model(m, impl="warp") accepts all eight once
-         noslip_iterations is 0 -- which the env always does on the warp backend
+         noslip_iterations is 0, which the env always does on the warp backend
          (fly_mimic/envs/fruitfly/base.py:578-582). Warp is what this project
          trains and rolls out on, so these belong enabled. A direct warp
          put_model WITHOUT that override fails on "noslip solver not
          implemented", which is unrelated to adhesion and happens with or
-         without these actuators -- do not read it as evidence against them.
+         without these actuators; do not read it as evidence against them.
          Load-bearing besides: removing them takes nu from 272 to 264 and breaks
          every checkpoint trained with adhesion (walk/38032231 among them).
          Re-comment only alongside a retrain. -->
@@ -2603,12 +2603,12 @@
          That note was half right and its conclusion was wrong for this project.
          VERIFIED: mjx.put_model(m) does raise NotImplementedError on mjTRN_BODY,
          but mjx.put_model(m, impl="warp") accepts all eight once
-         noslip_iterations is 0 -- which the env always does on the warp backend
+         noslip_iterations is 0, which the env always does on the warp backend
          (fly_mimic/envs/fruitfly/base.py:578-582). Warp is what this project
          trains and rolls out on, so these belong enabled. A direct warp
          put_model WITHOUT that override fails on "noslip solver not
          implemented", which is unrelated to adhesion and happens with or
-         without these actuators -- do not read it as evidence against them.
+         without these actuators; do not read it as evidence against them.
          Load-bearing besides: removing them takes nu from 272 to 264 and breaks
          every checkpoint trained with adhesion (walk/38032231 among them).
          Re-comment only alongside a retrain. -->
@@ -2704,12 +2704,12 @@
          That note was half right and its conclusion was wrong for this project.
          VERIFIED: mjx.put_model(m) does raise NotImplementedError on mjTRN_BODY,
          but mjx.put_model(m, impl="warp") accepts all eight once
-         noslip_iterations is 0 -- which the env always does on the warp backend
+         noslip_iterations is 0, which the env always does on the warp backend
          (fly_mimic/envs/fruitfly/base.py:578-582). Warp is what this project
          trains and rolls out on, so these belong enabled. A direct warp
          put_model WITHOUT that override fails on "noslip solver not
          implemented", which is unrelated to adhesion and happens with or
-         without these actuators -- do not read it as evidence against them.
+         without these actuators; do not read it as evidence against them.
          Load-bearing besides: removing them takes nu from 272 to 264 and breaks
          every checkpoint trained with adhesion (walk/38032231 among them).
          Re-comment only alongside a retrain. -->
@@ -2811,12 +2811,12 @@
          That note was half right and its conclusion was wrong for this project.
          VERIFIED: mjx.put_model(m) does raise NotImplementedError on mjTRN_BODY,
          but mjx.put_model(m, impl="warp") accepts all eight once
-         noslip_iterations is 0 -- which the env always does on the warp backend
+         noslip_iterations is 0, which the env always does on the warp backend
          (fly_mimic/envs/fruitfly/base.py:578-582). Warp is what this project
          trains and rolls out on, so these belong enabled. A direct warp
          put_model WITHOUT that override fails on "noslip solver not
          implemented", which is unrelated to adhesion and happens with or
-         without these actuators -- do not read it as evidence against them.
+         without these actuators; do not read it as evidence against them.
          Load-bearing besides: removing them takes nu from 272 to 264 and breaks
          every checkpoint trained with adhesion (walk/38032231 among them).
          Re-comment only alongside a retrain. -->
