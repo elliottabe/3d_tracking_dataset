@@ -20,16 +20,28 @@ already exist on disk. The work is:
 
 ### Data source
 
-The 372 walking bouts of the **old (JARVIS) route**, spread over 22 session dirs:
+The walking bouts of the **old (JARVIS) route**, spread over 23 `Predictions_3D_*`
+dirs — 22 of which were processed for v1, plus one that never was:
 
 | session group | dirs | bout-summary filename |
 |---|---|---|
 | `free_running/session1_7/Predictions_3D_*` | 7 | `free_walking_bouts_summary.csv` |
 | `free_running/session10/Predictions_3D_*` | 9 | `free_walking_bouts_summary.csv` |
 | `free_running/session11/Predictions_3D_*` | 6 | `free_running_bout_summary.csv` |
+| `free_running/session11/Predictions_3D_34292437` | 1 | `free_running_bouts_summary.csv` |
 
-372 bouts (162 / 157 / 53 by group), 134,863 frames, per-bout T ∈ [121, 1514].
-All 22 dirs have `data3D.csv` and `info.yaml`. 19/22 also have
+**`Predictions_3D_34292437` is new to this run.** It has `data3D.csv`,
+`info.yaml` and a 15-row bout summary for recording
+`Session11/2026_03_03_13_53_33`, but **no `preprocessing/` dir** — the v1 route
+skipped it, most likely because its CSV is named `..._bouts_summary.csv` while
+its six siblings use `..._bout_summary.csv`. Since the goal is "all the walking
+bouts", it is included, taking the total to **387** (372 + 15). Its 15 bouts
+independently corroborate the new SAM3 pipeline, which found 15 bouts in the same
+recording.
+
+The 22 previously-processed dirs hold 372 bouts (162 / 157 / 53 by group),
+134,863 frames, per-bout T ∈ [121, 1514]. All 23 dirs have `data3D.csv` and
+`info.yaml`. 19/22 also have
 `walking_bouts_summary.curated.modified.json`, but no script or config on this
 route reads it (verified by grep), so the 3 dirs without it are not a risk —
 only `bouts_csv` drives bout selection.
@@ -233,10 +245,14 @@ Copy `v2_muscles.yaml` and change:
 - `name: v2_3`
 - `mjcf_path: ${paths.body_model_dir}/fruitfly_v2.3/fruitfly_muscles_warp.xml`
 - `arena_path: ${paths.body_model_dir}/fruitfly_v2.3/floor.xml`
-- `joint_names`: v2.1's 82 **plus** the 13 v2.3 additions —
-  `antenna_{left,right}`, `antenna_abduct_{left,right}`,
-  `antenna_twist_{left,right}`, `haltere_{left,right}`, `haustellum`,
-  `haustellum_abduct`, `labrum_{left,right}`, `rostrum`.
+- `joint_names`: add the 2 genuinely new v2.3 joints `haltere_left` /
+  `haltere_right`. **This key is documentation only** — nothing reads
+  `cfg.anatomy.joint_names` (verified by grep; `stac.py:111` reads joints from
+  the compiled model directly, as `end_eff_names` is likewise dead). The
+  existing list is already a curated 54-entry subset of the model's 95 joints,
+  excluding `free`, the 14 head/mouthpart joints (commented out in place), and
+  the 24 distal tarsal joints. Keep that curation; do not expand it to the full
+  model joint set.
 
 `body_names`, `KP_NAMES`, `KEYPOINT_MODEL_PAIRS`, `KEYPOINT_INITIAL_OFFSETS`,
 `SITES_TO_REGULARIZE` carry over **verbatim, order preserved** (see §2.4), with
@@ -259,32 +275,62 @@ floor `percentile: 5.0`, `target_z: -0.125`.
 
 ### Stage 3 — preprocessing
 
-Run `preprocess_keypoints_for_ik.py` per session dir with `anatomy=v2_3
-dataset=free_running`. `bouts_csv` defaults to
-`${dataset.name}_bouts_summary.csv` = `free_running_bouts_summary.csv`, which
-matches **nothing** on disk, so it must be overridden per group:
+`preprocess_keypoints_for_ik.py` is a **Hydra** entry (the argparse CLI in
+`PREPROCESSING_README.md` is stale and no longer exists). The batch driver is
+`scripts/batch_process_predictions.py`.
 
-- `session1_7`, `session10` → `preprocessing.bouts_csv=free_walking_bouts_summary.csv`
-- `session11` → `preprocessing.bouts_csv=free_running_bout_summary.csv`
+The bout-summary filename is the problem. `utils/fly_detection.py:739` hardcodes
+`f'{dataset}_bouts_summary.csv'` → `free_running_bouts_summary.csv`, which matches
+**1 of 23** dirs. The driver builds its own command line, so a Hydra override
+cannot fix this from outside. Patch `detect_flies` to try a candidate list in
+order and use the first that exists:
 
-Output: `preprocessing/preprocessed_bout_v2_3_free_running.h5` per dir — which
-satisfies the downstream filename templates natively, with no further overrides.
+```
+{dataset}_bouts_summary.csv, {dataset}_bout_summary.csv, free_walking_bouts_summary.csv
+```
 
-**Verification gate:** total bouts across the 22 files must be **372**, matching
-the v1 route. A mismatch means bout selection changed and must be reconciled
-before continuing — a different bout set would break comparability with the v1
-and v2_muscles datasets.
+Fail loudly if none match, so a missing summary is never silently skipped.
+
+Run with `anatomy=v2_3 dataset=free_running paths=hyak`, `--base-dir` at the
+`free_running` root (the driver uses `rglob`, so one call covers all 23).
+
+Output: `preprocessing/preprocessed_bout_v2_3_free_running.h5` per dir, which
+satisfies every downstream filename template natively. No collision with the
+existing `..._v1_free_walking.h5` files, so `--force` is unnecessary.
+
+**Verification gate — per-dir, not just total.** Each of the 22 previously-processed
+dirs must reproduce its exact v1 bout count:
+
+```
+session1_7:  56, 4, 55, 22, 4, 11, 10          (162)
+session10:   14, 13, 26, 17, 18, 14, 8, 33, 14 (157)
+session11:   14, 10, 7, 1, 13, 8               (53)
+34292437:    15                                (new)
+```
+
+Per-dir gating catches a shift that a matching total could mask. Expected grand
+total **387**. Any per-dir deviation must be reconciled before Stage 4 — a
+changed bout set breaks comparability with the v1 and v2_muscles datasets.
 
 ### Stage 4 — STAC IK
 
-`batch_run_stac.py --anatomy v2_3 --dataset free_running`, once per session root
-(`find_preprocessed_files` uses a non-recursive `glob`, so it needs each of
-`session1_7/`, `session10/`, `session11/` separately).
+`batch_run_stac.py --anatomy v2_3 --dataset free_running --paths hyak`.
 
-**Patch required:** `batch_run_stac.py:440-444` restricts `--dataset` to
-`['', 'courtship', 'stationary', 'amputation']`; add `free_running`.
+**Two patches required:**
+
+1. `batch_run_stac.py:442` restricts `--dataset` to
+   `['', 'courtship', 'stationary', 'amputation']`. The same narrowed list also
+   blocks `batch_process_predictions.py:201` (Stage 3) and
+   `batch_postprocess_predictions.py:217` (Stage 5). Add `free_running` to all
+   **three**.
+2. `batch_run_stac.py:223` uses non-recursive `glob("Predictions_3D_*")`, unlike
+   its two siblings which use `rglob`. Pointing `--base-dir` at the
+   `free_running` root therefore finds **zero** dirs. Change it to `rglob` for
+   consistency (the alternative — looping `--base-dir` over each session dir —
+   leaves the inconsistency in place for the next person).
 
 Output: `stac/Fruitfly_ik_v2_3_free_running.h5` (+ `Fruitfly_fit_...h5`) per dir.
+This is the long stage: 6 h timeout per dir, GPU required.
 
 ### Stage 5 — postprocess
 
@@ -344,7 +390,8 @@ serves future anatomies.
 
 **Integration gates, in order:**
 
-1. Stage 3 → 372 bouts total (hard gate; see §3 Stage 3).
+1. Stage 3 → per-dir bout counts match the table in §3 Stage 3; grand total 387
+   (hard gate).
 2. Stage 4 → one bout's `stac_ik.h5` has `qpos (T, 101)`, `xpos (T, 74, 3)`.
 3. Stage 5 → `xpos_egocentric` is `(T, 50, 3)` and **not** `(T, 0, 3)` — this is
    the §2.2 silent-garbage check.
@@ -362,7 +409,7 @@ keypoint-order hazard (§2.4), not at real anatomy differences.
 
 | risk | mitigation |
 |---|---|
-| Re-running preprocessing yields ≠372 bouts | Hard gate at Stage 3; reconcile before continuing |
+| Re-running preprocessing changes the bout set | Per-dir hard gate at Stage 3 (a matching total can mask a shift); reconcile before continuing |
 | v2.3 rest-pose rescale shifts IK vs v1 | Expected and desired; quantify via the §4 sanity comparison |
 | Keypoint column order silently wrong | Unit test asserts `KP_NAMES` order matches v1 exactly |
 | Empty egocentric arrays | Explicit Stage 5 shape gate |
@@ -384,11 +431,15 @@ keypoint-order hazard (§2.4), not at real anatomy differences.
 **Modified**
 - `fly_neuromech/fruitfly_body_models/fruitfly_v2.3/fruitfly_muscles_warp.xml`
   — adhesion actuators commented out; 50 tracking sites added (cross-repo edit)
-- `scripts/batch_run_stac.py` — add `free_running` to `--dataset` choices
+- `scripts/batch_run_stac.py` — `free_running` in `--dataset` choices (:442);
+  `glob` → `rglob` (:223)
+- `scripts/batch_process_predictions.py` — `free_running` in choices (:201)
+- `scripts/batch_postprocess_predictions.py` — `free_running` in choices (:217)
+- `utils/fly_detection.py` — bout-summary candidate list (:739)
 - `configs/postprocessing/` — v2.3 floor-alignment end effectors
 - `docs/running_the_pipeline.md` — replace the "anatomy=v2_muscles does NOT work"
   section with the working v2.3 recipe
 
 **Output**
 - `/gscratch/portia/eabe/fly_neuromech/data/datasets/Fruitfly_v2_3_walk_1000hz_interp_padded.h5`
-  — 372 clips, `qpos (372, T_max, 101)`, `xpos (372, T_max, 74, 3)`
+  — 387 clips, `qpos (387, T_max, 101)`, `xpos (387, T_max, 74, 3)`
