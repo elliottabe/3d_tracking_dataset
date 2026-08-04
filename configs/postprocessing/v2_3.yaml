@@ -1,0 +1,21 @@
+# @package _global_.postprocessing
+
+# v2.3 postprocessing: identical to `default` except the floor-alignment end
+# effectors, which v1 calls claw_* and v2.x calls tarsal_claw_*.
+#
+# The v1 names happen to still work under v2.3 because
+# postprocess_stac_data.py:590-593 does a SUBSTRING match and
+# 'claw_T1_left' in 'tarsal_claw_T1_left' is True -- but depending on that
+# accident is how a silent floor-height bug gets introduced later.
+defaults:
+  - default
+  - _self_
+
+floor_alignment:
+  end_effector_names:
+    - tarsal_claw_T1_left
+    - tarsal_claw_T1_right
+    - tarsal_claw_T2_left
+    - tarsal_claw_T2_right
+    - tarsal_claw_T3_left
+    - tarsal_claw_T3_right
