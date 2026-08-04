@@ -40,12 +40,11 @@
 - `scripts/export/pack_reference_clips.py` — combined per-bout h5 → batched reference-clip h5.
 - `tests/test_v2_3_anatomy.py` — model + config invariants.
 - `tests/test_pack_reference_clips.py` — padding/stacking invariants.
-- `tests/test_bout_summary_discovery.py` — bout-summary candidate resolution.
+- `scripts/data/normalize_bout_summary_names.py` — canonicalize the on-disk bout-summary CSV names (reversible).
 - `models/fruitfly_v2.3` — symlink into the body-model tree.
 
 **Modify**
 - `<body_models>/fruitfly_v2.3/fruitfly_muscles_warp.xml` — cross-repo: comment out 8 adhesion actuators, add 50 sites.
-- `utils/fly_detection.py:733-740` — bout-summary candidate list.
 - `scripts/batch_process_predictions.py:201` — `--dataset` choices.
 - `scripts/batch_run_stac.py:223,442` — `rglob`, `--dataset` choices.
 - `scripts/batch_postprocess_predictions.py:217` — `--dataset` choices.
@@ -440,158 +439,219 @@ config by 3d_tracking_dataset/scripts/models/add_v2_3_tracking_sites.py."
 
 ---
 
-## Task 3: Bout-summary discovery
+## Task 3: Normalize the bout-summary filenames on disk
 
-`utils/fly_detection.py:739` hardcodes `f'{dataset}_bouts_summary.csv'` → `free_running_bouts_summary.csv`, which matches **1 of 23** dirs. The batch driver builds its own command line, so no Hydra override can fix this from outside.
+Commit `451efb9 "rename: walking -> running across dataset, identifiers, and
+configs"` renamed the dataset in code, but the **data files on disk were never
+renamed**. The repo now has zero `free_walking` references; only the data lags.
+`free_walking` is not a different dataset — it is the old name for
+`free_running`.
+
+Current state across the 23 `Predictions_3D_*` dirs:
+
+| count | filename | status |
+|---|---|---|
+| 16 | `free_walking_bouts_summary.csv` | pre-rename name |
+| 6 | `free_running_bout_summary.csv` | renamed, but singular `bout` |
+| 1 | `free_running_bouts_summary.csv` | canonical |
+| 15 | `OLD_walking_bouts_summary.csv` | explicitly superseded — **do not touch** |
+
+`utils/fly_detection.py:739` builds `f'{dataset}_bouts_summary.csv'` →
+`free_running_bouts_summary.csv`, which today matches 1 of 23. Normalizing the
+filenames makes that hardcoded name correct for all 23, so **no code change is
+needed** — that is why this task renames data instead of adding a fallback.
 
 **Files:**
-- Modify: `utils/fly_detection.py:733-740`
-- Test: `tests/test_bout_summary_discovery.py`
+- Create: `scripts/data/normalize_bout_summary_names.py`
+- Modify: nothing in `utils/` — the existing `detect_flies` becomes correct once the data is normalized.
 
 **Interfaces:**
-- Produces: `find_bouts_csv(folder: Path, dataset: str) -> str` returning the **basename** of the first existing candidate; raises `FileNotFoundError` listing all candidates if none exist. `detect_flies` uses it to populate `fly_info['bouts_csv']`.
+- Produces: exactly one `free_running_bouts_summary.csv` in each of the 23 dirs. Task 6 depends on this; `detect_flies` is left untouched.
 
-- [ ] **Step 1: Write the failing test**
+**Scope boundary — deliberately NOT renamed.** Existing v1 artifacts keep their
+names: `preprocessed_bout_v1_free_walking.h5`, `Fruitfly_ik_v1_free_walking.h5`,
+`ik_output_v1_free_walking.h5`, `ik_output_combined_v1_free_walking*.h5`,
+`free_walking_raw_combined_v1.h5`, and the `pipeline_logs/*free_walking*` files.
+Those are the v1 dataset's provenance; renaming them would break the link
+between the published v1 h5 and the run that produced it, and any notebook
+referencing them. Only the *inputs this run consumes* are normalized.
 
-Create `tests/test_bout_summary_discovery.py`:
+- [ ] **Step 1: Write the normalizer**
+
+Create `scripts/data/normalize_bout_summary_names.py`:
 
 ```python
-"""Bout-summary filename resolution across the free_running session groups.
+"""Normalize free-running bout-summary CSV filenames to the canonical name.
 
-On disk the same dataset uses three different names:
-  session1_7 / session10      -> free_walking_bouts_summary.csv
-  session11 (6 dirs)          -> free_running_bout_summary.csv   (singular)
-  session11/Predictions_3D_34292437 -> free_running_bouts_summary.csv
+Commit 451efb9 renamed the dataset walking -> running in code and configs, but
+the data files on disk kept their old names. This brings them in line so
+utils/fly_detection.py's f'{dataset}_bouts_summary.csv' resolves everywhere.
+
+Renames (per Predictions_3D_* dir):
+    free_walking_bouts_summary.csv -> free_running_bouts_summary.csv
+    free_running_bout_summary.csv  -> free_running_bouts_summary.csv
+
+Leaves OLD_walking_bouts_summary.csv alone -- the OLD_ prefix marks it as
+deliberately superseded.
+
+Idempotent and reversible. --dry-run prints the plan without touching anything;
+--undo reverses a previous run using the sidecar manifest.
+
+Usage:
+    python scripts/data/normalize_bout_summary_names.py --root <dir> --dry-run
+    python scripts/data/normalize_bout_summary_names.py --root <dir>
+    python scripts/data/normalize_bout_summary_names.py --root <dir> --undo
 """
 from __future__ import annotations
 
-import pytest
+import argparse
+import json
+import sys
+from pathlib import Path
 
-from utils.fly_detection import find_bouts_csv
-
-
-def test_prefers_canonical_plural_name(tmp_path):
-    (tmp_path / 'free_running_bouts_summary.csv').write_text('x')
-    assert find_bouts_csv(tmp_path, 'free_running') == 'free_running_bouts_summary.csv'
-
-
-def test_falls_back_to_singular_bout(tmp_path):
-    (tmp_path / 'free_running_bout_summary.csv').write_text('x')
-    assert find_bouts_csv(tmp_path, 'free_running') == 'free_running_bout_summary.csv'
+CANONICAL = 'free_running_bouts_summary.csv'
+LEGACY = ['free_walking_bouts_summary.csv', 'free_running_bout_summary.csv']
+MANIFEST = '.bout_summary_rename_manifest.json'
 
 
-def test_falls_back_to_legacy_free_walking_name(tmp_path):
-    (tmp_path / 'free_walking_bouts_summary.csv').write_text('x')
-    assert find_bouts_csv(tmp_path, 'free_running') == 'free_walking_bouts_summary.csv'
+def plan_renames(root: Path) -> list[tuple[Path, Path]]:
+    """One (src, dst) per dir that has a legacy name and no canonical file."""
+    renames = []
+    for d in sorted(root.rglob('Predictions_3D_*')):
+        if not d.is_dir():
+            continue
+        if (d / CANONICAL).is_file():
+            continue  # already normalized
+        found = [d / name for name in LEGACY if (d / name).is_file()]
+        if len(found) > 1:
+            raise SystemExit(
+                f'ERROR: {d} has multiple legacy names {[f.name for f in found]}; '
+                f'resolve by hand')
+        if found:
+            renames.append((found[0], d / CANONICAL))
+    return renames
 
 
-def test_canonical_wins_when_several_present(tmp_path):
-    (tmp_path / 'free_running_bouts_summary.csv').write_text('x')
-    (tmp_path / 'free_walking_bouts_summary.csv').write_text('x')
-    assert find_bouts_csv(tmp_path, 'free_running') == 'free_running_bouts_summary.csv'
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument('--root', required=True, type=Path)
+    ap.add_argument('--dry-run', action='store_true')
+    ap.add_argument('--undo', action='store_true')
+    args = ap.parse_args()
+
+    manifest_path = args.root / MANIFEST
+
+    if args.undo:
+        if not manifest_path.is_file():
+            raise SystemExit(f'ERROR: no manifest at {manifest_path}')
+        entries = json.loads(manifest_path.read_text())
+        for dst, src in entries:  # reverse direction
+            Path(dst).rename(src)
+            print(f'undo: {Path(dst).name} -> {Path(src).name}  in {Path(src).parent}')
+        manifest_path.unlink()
+        print(f'reverted {len(entries)} renames')
+        return 0
+
+    renames = plan_renames(args.root)
+    if not renames:
+        print('nothing to do -- all Predictions_3D_* dirs already canonical')
+        return 0
+
+    for src, dst in renames:
+        print(f'{"[dry-run] " if args.dry_run else ""}{src.name} -> {dst.name}'
+              f'  in {src.parent}')
+    if args.dry_run:
+        print(f'\n{len(renames)} would be renamed')
+        return 0
+
+    for src, dst in renames:
+        src.rename(dst)
+    manifest_path.write_text(
+        json.dumps([[str(s), str(d)] for s, d in renames], indent=2))
+    print(f'\nrenamed {len(renames)}; manifest at {manifest_path} (--undo to revert)')
+    return 0
 
 
-def test_ignores_the_OLD_prefixed_file(tmp_path):
-    """session10 dirs carry OLD_walking_bouts_summary.csv alongside the real one."""
-    (tmp_path / 'OLD_walking_bouts_summary.csv').write_text('x')
-    with pytest.raises(FileNotFoundError):
-        find_bouts_csv(tmp_path, 'free_running')
-
-
-def test_raises_listing_candidates_when_none_found(tmp_path):
-    with pytest.raises(FileNotFoundError) as e:
-        find_bouts_csv(tmp_path, 'free_running')
-    assert 'free_running_bouts_summary.csv' in str(e.value)
-
-
-def test_other_datasets_still_use_canonical_name(tmp_path):
-    (tmp_path / 'courtship_bouts_summary.csv').write_text('x')
-    assert find_bouts_csv(tmp_path, 'courtship') == 'courtship_bouts_summary.csv'
+if __name__ == '__main__':
+    sys.exit(main())
 ```
 
-- [ ] **Step 2: Run to verify it fails**
+Note the manifest stores `[src, dst]` and `--undo` unpacks it as `dst, src` to
+reverse the direction.
+
+- [ ] **Step 2: Dry run**
 
 ```bash
-cd $REPO && python -m pytest tests/test_bout_summary_discovery.py -v
+cd $REPO && mkdir -p scripts/data
+python scripts/data/normalize_bout_summary_names.py --root $DATA --dry-run
 ```
-Expected: FAIL — `ImportError: cannot import name 'find_bouts_csv'`.
+Expected: 22 planned renames (16 `free_walking_*` + 6 `free_running_bout_*`), and
+`22 would be renamed`. The already-canonical dir (`Predictions_3D_34292437`) must
+NOT appear.
 
-- [ ] **Step 3: Implement**
-
-Add to `utils/fly_detection.py`, above `detect_flies`:
-
-```python
-def find_bouts_csv(folder, dataset: str) -> str:
-    """Return the basename of the bout-summary CSV present in ``folder``.
-
-    The free_running dirs are inconsistent: session1_7/session10 kept the
-    pre-rename ``free_walking_bouts_summary.csv``, six session11 dirs use the
-    singular ``free_running_bout_summary.csv``, and one uses the canonical
-    plural. Try the canonical name first so other datasets are unaffected.
-
-    Raises FileNotFoundError (listing the candidates) rather than returning a
-    name that does not exist -- a silent miss would skip the folder entirely.
-    """
-    from pathlib import Path
-
-    folder = Path(folder)
-    candidates = [
-        f'{dataset}_bouts_summary.csv',
-        f'{dataset}_bout_summary.csv',
-        'free_walking_bouts_summary.csv',
-    ]
-    for name in candidates:
-        if (folder / name).is_file():
-            return name
-    raise FileNotFoundError(
-        f'No bout-summary CSV in {folder}. Tried: {", ".join(candidates)}')
-```
-
-Then change the single-fly branch at lines 733-740 to use it:
-
-```python
-    else:
-        # Single-fly layout: data3D.csv
-        flies.append({
-            'fly_id': None,
-            'suffix': '',
-            'csv': 'data3D.csv',
-            'bouts_csv': find_bouts_csv(folder, dataset),
-        })
-```
-
-If `folder` is not already a parameter in scope at that point, read the enclosing `detect_flies` signature and use whatever it names the directory argument.
-
-- [ ] **Step 4: Run to verify it passes**
+- [ ] **Step 3: Apply**
 
 ```bash
-cd $REPO && python -m pytest tests/test_bout_summary_discovery.py -v
+cd $REPO
+python scripts/data/normalize_bout_summary_names.py --root $DATA
 ```
-Expected: 7 PASS.
+Expected: `renamed 22; manifest at .../.bout_summary_rename_manifest.json`
 
-- [ ] **Step 5: Confirm all 23 real dirs now resolve**
+- [ ] **Step 4: Verify all 23 dirs are canonical and OLD_ files survive**
 
 ```bash
 cd $REPO && python -c "
 from pathlib import Path
-from utils.fly_detection import find_bouts_csv
+R=Path('$DATA'); dirs=[d for d in sorted(R.rglob('Predictions_3D_*')) if d.is_dir()]
+missing=[d for d in dirs if not (d/'free_running_bouts_summary.csv').is_file()]
+legacy=[d for d in dirs if (d/'free_walking_bouts_summary.csv').is_file()
+        or (d/'free_running_bout_summary.csv').is_file()]
+old=[d for d in dirs if (d/'OLD_walking_bouts_summary.csv').is_file()]
+print('dirs',len(dirs),'missing canonical',len(missing),'legacy left',len(legacy),'OLD_ intact',len(old))
+assert len(dirs)==23 and not missing and not legacy and len(old)==15
+print('OK')"
+```
+Expected: `dirs 23 missing canonical 0 legacy left 0 OLD_ intact 15` then `OK`.
+
+- [ ] **Step 5: Verify `detect_flies` now resolves without any code change**
+
+```bash
+cd $REPO && python -c "
+from pathlib import Path
+from utils.fly_detection import detect_flies
 R=Path('$DATA')
 n=0
-for s in ['session1_7','session10','session11']:
-    for d in sorted((R/s).glob('Predictions_3D_*')):
-        print(f'{s}/{d.name}: {find_bouts_csv(d, \"free_running\")}'); n+=1
-print('total', n)"
+for d in sorted(R.rglob('Predictions_3D_*')):
+    if not d.is_dir(): continue
+    f=detect_flies(d,'free_running')[0]
+    assert (d/f['bouts_csv']).is_file(), (d, f['bouts_csv'])
+    n+=1
+print('resolved',n,'dirs'); assert n==23; print('OK')"
 ```
-Expected: 23 lines, no exception, `total 23`.
+Expected: `resolved 23 dirs` then `OK`. If `detect_flies` has a different
+signature, read `utils/fly_detection.py:733-740` and adapt the call — the point
+is that the unmodified function now finds a real file in all 23 dirs.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 6: Confirm idempotence**
+
+```bash
+cd $REPO && python scripts/data/normalize_bout_summary_names.py --root $DATA
+```
+Expected: `nothing to do -- all Predictions_3D_* dirs already canonical`
+
+- [ ] **Step 7: Commit**
 
 ```bash
 cd $REPO
-git add utils/fly_detection.py tests/test_bout_summary_discovery.py
-git commit -m "fix(fly_detection): resolve bout-summary CSV across free_running naming variants"
-```
+git add scripts/data/normalize_bout_summary_names.py
+git commit -m "feat(data): normalize free-running bout-summary CSV names
 
+Commit 451efb9 renamed walking -> running in code but not in the data tree.
+Brings the 22 non-canonical bout-summary CSVs in line so the hardcoded
+f'{dataset}_bouts_summary.csv' in fly_detection.py resolves for all 23
+Predictions_3D_* dirs. Reversible via --undo. Existing v1 output artifacts
+keep their free_walking names to preserve provenance."
+```
 ---
 
 ## Task 4: Unblock the batch drivers for `free_running`
@@ -1385,5 +1445,12 @@ git commit -m "docs: v2_3 anatomy is supported on the batch route"
 ## Self-Review Notes
 
 **Spec coverage:** §2.1 adhesion → Task 2 Step 2. §2.2 tracking sites → Task 2 Steps 3-5. §2.3 models/ path → Task 2 Step 1. §2.4 non-blockers → Task 5 (floor alignment), Task 1 test (keypoint order); segment calibration stays off by inheriting the default, no task needed. §3 Stages 0-7 → Tasks 1-2, 1, 5, 6, 7, 7, 7, 8-9. §4 testing → per-task tests plus Task 9 gates. §6 deliverables → all covered; the three `--dataset` choices patches and the `rglob` fix are Task 4.
+
+**Spec drift to fix on the next spec edit:** the spec's §3 Stage 3 still
+describes patching `utils/fly_detection.py` with a bout-summary candidate list.
+That approach was replaced — `free_walking` is the pre-rename name for
+`free_running` (commit `451efb9` renamed code but not data), so Task 3
+normalizes the filenames on disk instead and leaves `fly_detection.py`
+untouched.
 
 **Known soft spot:** Task 7 Step 4 flags that `batch_postprocess_predictions.py` may not forward the `postprocessing=v2_3` group. The fallback (edit the `cmd` list, or run `postprocess_stac_data.py` per folder) is written into the step. This is the one place the plan cannot be fully deterministic without running it, because the v1 substring accident means the wrong config still *works* — the step therefore verifies the config took effect rather than assuming it.

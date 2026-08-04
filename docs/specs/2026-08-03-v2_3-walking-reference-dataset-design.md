@@ -282,14 +282,31 @@ floor `percentile: 5.0`, `target_z: -0.125`.
 The bout-summary filename is the problem. `utils/fly_detection.py:739` hardcodes
 `f'{dataset}_bouts_summary.csv'` → `free_running_bouts_summary.csv`, which matches
 **1 of 23** dirs. The driver builds its own command line, so a Hydra override
-cannot fix this from outside. Patch `detect_flies` to try a candidate list in
-order and use the first that exists:
+cannot fix this from outside.
 
-```
-{dataset}_bouts_summary.csv, {dataset}_bout_summary.csv, free_walking_bouts_summary.csv
-```
+**`free_walking` is not a second dataset — it is the pre-rename name for
+`free_running`.** Commit `451efb9 "rename: walking -> running across dataset,
+identifiers, and configs"` renamed the code and configs; the data tree was never
+updated. The repo today has zero `free_walking` references. On disk:
 
-Fail loudly if none match, so a missing summary is never silently skipped.
+| count | filename | status |
+|---|---|---|
+| 16 | `free_walking_bouts_summary.csv` | pre-rename name |
+| 6 | `free_running_bout_summary.csv` | renamed, but singular `bout` |
+| 1 | `free_running_bouts_summary.csv` | canonical |
+| 15 | `OLD_walking_bouts_summary.csv` | deliberately superseded — leave alone |
+
+So the fix is to **finish the rename in the data tree**, not to teach the code a
+fallback for a name that should not exist. A reversible normalizer renames the
+22 non-canonical files to `free_running_bouts_summary.csv`, after which the
+existing hardcoded name is correct for all 23 dirs and `fly_detection.py` needs
+no change at all.
+
+Existing v1 output artifacts (`preprocessed_bout_v1_free_walking.h5`,
+`Fruitfly_ik_v1_free_walking.h5`, `ik_output_combined_v1_free_walking*.h5`, the
+`pipeline_logs/*free_walking*`) keep their names: they are the v1 dataset's
+provenance, and renaming them would sever the link between the published v1 h5
+and the run that produced it. Only the inputs this run consumes are normalized.
 
 Run with `anatomy=v2_3 dataset=free_running paths=hyak`, `--base-dir` at the
 `free_running` root (the driver uses `rglob`, so one call covers all 23).
@@ -435,7 +452,11 @@ keypoint-order hazard (§2.4), not at real anatomy differences.
   `glob` → `rglob` (:223)
 - `scripts/batch_process_predictions.py` — `free_running` in choices (:201)
 - `scripts/batch_postprocess_predictions.py` — `free_running` in choices (:217)
-- `utils/fly_detection.py` — bout-summary candidate list (:739)
+
+**Data normalization** (reversible, via `scripts/data/normalize_bout_summary_names.py`)
+- 22 bout-summary CSVs renamed to `free_running_bouts_summary.csv`, completing
+  commit `451efb9`'s walking→running rename in the data tree. `utils/fly_detection.py`
+  is deliberately left unmodified as a result.
 - `configs/postprocessing/` — v2.3 floor-alignment end effectors
 - `docs/running_the_pipeline.md` — replace the "anatomy=v2_muscles does NOT work"
   section with the working v2.3 recipe
