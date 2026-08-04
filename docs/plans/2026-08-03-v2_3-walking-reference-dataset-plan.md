@@ -815,7 +815,7 @@ git commit -m "fix(batch): allow --dataset free_running; make batch_run_stac dis
 - Create: `configs/postprocessing/v2_3.yaml`
 
 **Interfaces:**
-- Produces: Hydra group `postprocessing=v2_3`, identical to `default` except the floor-alignment end-effector names.
+- Produces: Hydra group `postprocessing/v2_3`, identical to `default` except the floor-alignment end-effector names. **Override syntax is `postprocessing@dataset.postprocessing=v2_3`** — a plain `postprocessing=v2_3` errors with "Could not override 'postprocessing'", because `configs/dataset/free_running.yaml` pulls the group in via its own `defaults:` list.
 
 - [ ] **Step 1: Create the config**
 
@@ -851,7 +851,7 @@ floor_alignment:
 
 ```bash
 cd $REPO && python test_configs.py paths=hyak dataset=free_running anatomy=v2_3 \
-    postprocessing=v2_3 2>&1 | grep -A8 floor_alignment
+    postprocessing@dataset.postprocessing=v2_3 2>&1 | grep -A8 floor_alignment
 ```
 Expected: the six `tarsal_claw_*` names, and `source_hz: 800.0` / `target_hz: 1000.0` / `method: cubic` still inherited from `default`.
 
@@ -1023,7 +1023,9 @@ python scripts/batch_postprocess_predictions.py --dataset free_running --anatomy
     --paths hyak --base-dir $DATA 2>&1 | tee /tmp/postproc_v2_3.log
 ```
 
-Note: `batch_postprocess_predictions.py` does not forward a `postprocessing=` group override. If the six `tarsal_claw_*` names from Task 5 are not being applied, add `postprocessing=v2_3` to the `cmd` list at `batch_postprocess_predictions.py:148-155`, or run `postprocess_stac_data.py` per folder with `postprocessing=v2_3` on the command line.
+Note: `batch_postprocess_predictions.py` does not forward a postprocessing group override. If the six `tarsal_claw_*` names from Task 5 are not applied, add `postprocessing@dataset.postprocessing=v2_3` to the `cmd` list at `batch_postprocess_predictions.py:148-155`, or run `postprocess_stac_data.py` per folder with that same override.
+
+**Use exactly `postprocessing@dataset.postprocessing=v2_3`** — verified. A plain `postprocessing=v2_3` fails with `Could not override 'postprocessing'. Did you mean to override postprocessing@dataset.postprocessing?` It errors loudly rather than silently ignoring, so a wrong invocation aborts rather than quietly using the v1 names.
 
 - [ ] **Step 5: Verify egocentric arrays are NOT empty — the §2.2 silent-garbage gate**
 
@@ -1537,4 +1539,4 @@ That approach was replaced — `free_walking` is the pre-rename name for
 normalizes the filenames on disk instead and leaves `fly_detection.py`
 untouched.
 
-**Known soft spot:** Task 7 Step 4 flags that `batch_postprocess_predictions.py` may not forward the `postprocessing=v2_3` group. The fallback (edit the `cmd` list, or run `postprocess_stac_data.py` per folder) is written into the step. This is the one place the plan cannot be fully deterministic without running it, because the v1 substring accident means the wrong config still *works* — the step therefore verifies the config took effect rather than assuming it.
+**Known soft spot:** Task 7 Step 4 flags that `batch_postprocess_predictions.py` may not forward the `postprocessing@dataset.postprocessing=v2_3` group. The fallback (edit the `cmd` list, or run `postprocess_stac_data.py` per folder) is written into the step. This is the one place the plan cannot be fully deterministic without running it, because the v1 substring accident means the wrong config still *works* — the step therefore verifies the config took effect rather than assuming it.
