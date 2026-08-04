@@ -26,10 +26,10 @@ def _model():
 
 
 def test_name_and_paths():
-    c = _cfg('v2_3')
-    assert c.name == 'v2_3'
-    assert c.mjcf_path.endswith('fruitfly_v2.3/fruitfly_muscles_warp.xml')
-    assert c.arena_path.endswith('fruitfly_v2.3/floor.xml')
+    raw = OmegaConf.to_container(_cfg('v2_3'), resolve=False)
+    assert raw['name'] == 'v2_3'
+    assert raw['mjcf_path'].endswith('fruitfly_v2.3/fruitfly_muscles_warp.xml')
+    assert raw['arena_path'].endswith('fruitfly_v2.3/floor.xml')
 
 
 def test_kp_names_order_identical_to_v1():
