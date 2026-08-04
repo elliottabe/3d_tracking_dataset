@@ -220,7 +220,10 @@ def find_preprocessed_files(base_dir: Path, anatomy_name: str, dataset: str,
     if base_dir.is_dir() and base_dir.match("Predictions_3D_*"):
         candidate_folders = [base_dir]
     else:
-        candidate_folders = sorted(base_dir.glob("Predictions_3D_*"))
+        # rglob (not glob) to match batch_process_predictions.py:55 and
+        # batch_postprocess_predictions.py:46 -- the prediction dirs live one
+        # level below the dataset root (free_running/session11/Predictions_3D_*).
+        candidate_folders = sorted(base_dir.rglob("Predictions_3D_*"))
     for folder in candidate_folders:
         if not folder.is_dir():
             continue
@@ -439,7 +442,7 @@ Examples:
         '--dataset',
         type=str,
         default='',
-        choices=['', 'courtship', 'stationary', 'amputation'],
+        choices=['', 'courtship', 'stationary', 'amputation', 'free_running', 'muscle_imaging'],
         help='Dataset type (default: )'
     )
     parser.add_argument(
