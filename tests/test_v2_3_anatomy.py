@@ -76,3 +76,35 @@ def test_haltere_joints_declared():
 def test_model_kinematic_shape():
     m = _model()
     assert (m.nq, m.nv, m.nbody, m.njnt) == (101, 100, 74, 95)
+
+
+def test_no_body_transmission_actuators():
+    """mjTRN_BODY (adhesion) actuators make mjx.put_model raise."""
+    m = _model()
+    assert int((m.actuator_trntype == mj.mjtTrn.mjTRN_BODY).sum()) == 0
+    assert m.nu == 264
+
+
+def test_has_50_tracking_sites_matching_config():
+    m = _model()
+    names = [mj.mj_id2name(m, mj.mjtObj.mjOBJ_SITE, i) for i in range(m.nsite)]
+    tracking = [n for n in names if n and n.startswith('tracking[')]
+    assert len(tracking) == 50
+    got = {n[len('tracking['):-1] for n in tracking}
+    assert got == set(_cfg('v2_3').model.KP_NAMES)
+
+
+def test_tracking_sites_attached_to_mapped_bodies():
+    m = _model()
+    pairs = _cfg('v2_3').model.KEYPOINT_MODEL_PAIRS
+    for kp, body in pairs.items():
+        sid = mj.mj_name2id(m, mj.mjtObj.mjOBJ_SITE, f'tracking[{kp}]')
+        assert sid >= 0, f'missing site for {kp}'
+        parent = mj.mj_id2name(m, mj.mjtObj.mjOBJ_BODY, m.site_bodyid[sid])
+        assert parent == body, f'{kp} on {parent}, expected {body}'
+
+
+def test_model_loads_into_mjx():
+    """The end-to-end guard: postprocess_stac_data.py calls mjx.put_model."""
+    from mujoco import mjx
+    mjx.put_model(_model())
