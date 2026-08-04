@@ -36,3 +36,11 @@ mjx_processing:
 # Egocentric site positions (body-frame coordinates)
 egocentric_sites:
   enabled: true            # Compute site positions relative to thorax body frame
+
+# Trim leading/trailing all-NaN frame runs from each bout before interpolation.
+# Necessary because filtering.interpolation.max_edge_extrap_frames leaves edge
+# frames NaN, pair_validity (which would drop them) is disabled for single-fly
+# data, and interp1d(kind='cubic') is a global solve -- one NaN poisons the
+# whole array.
+trim_nan_edges:
+  enabled: true

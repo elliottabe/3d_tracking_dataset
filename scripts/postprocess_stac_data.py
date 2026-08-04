@@ -221,6 +221,117 @@ def load_stac_output(stac_path: Path):
     return cfg_d, d, stac_data
 
 
+def trim_bouts_to_valid_span(
+    bout_dict: Dict,
+    bout_keys: List[str],
+    verbose: bool = False,
+) -> Dict:
+    """Trim leading/trailing all-NaN frame runs from each bout, in place.
+
+    `filtering.interpolation.max_edge_extrap_frames` (preprocessing) caps
+    edge gap-filling; frames beyond that cap stay NaN. For single-fly
+    `free_running` data `pair_validity.enabled` is False, so nothing drops
+    those NaN frames before they reach STAC and then
+    `interpolate_trajectory`'s `scipy.interp1d(kind='cubic')` -- a *global*
+    solve where a single leftover NaN poisons the entire interpolated array.
+
+    For each bout, a frame is BAD if any coordinate is NaN in `kp_data` or
+    `qpos` (checked independently and OR'd -- the two can differ). The bout
+    is then sliced to `[first_valid, last_valid]` across every per-bout array
+    whose leading dimension equals the bout's original frame count (e.g.
+    `qpos, qvel, xpos, xquat, kp_data, marker_sites, site_xpos`); arrays with
+    a different leading dim (e.g. `offsets`) are left alone.
+
+    A bout with no NaN is returned untouched (true no-op: no reassignment).
+    A bout with a NaN gap *inside* `[first_valid, last_valid]` is not
+    edge-damaged -- trimming cannot save it -- so it is left completely
+    untouched and reported in `interior_nan_bouts` instead of being silently
+    passed through half-fixed. A wholly-NaN bout (no valid frame at all) is
+    likewise left untouched and reported (never turned into a zero-length
+    bout).
+
+    Args:
+        bout_dict: Dict with 'info' and per-bout data (mutated in place).
+        bout_keys: Bout keys to consider (excluding 'info').
+        verbose: Print a one-line summary and loudly warn about any
+            interior/all-NaN bouts.
+
+    Returns:
+        Summary dict: {'bouts_trimmed': int, 'frames_dropped': int,
+        'interior_nan_bouts': list[str]}.
+    """
+    summary = {
+        'bouts_trimmed': 0,
+        'frames_dropped': 0,
+        'interior_nan_bouts': [],
+    }
+
+    for bout_key in bout_keys:
+        bout = bout_dict[bout_key]
+
+        # Build the per-frame BAD mask from whichever of kp_data/qpos are
+        # present, OR'd together (either one going NaN marks the frame bad).
+        bad_mask = None
+        T = None
+        for check_key in ('kp_data', 'qpos'):
+            arr = bout.get(check_key)
+            if arr is None:
+                continue
+            arr_np = np.asarray(arr)
+            if T is None:
+                T = arr_np.shape[0]
+            frame_bad = np.isnan(arr_np.reshape(arr_np.shape[0], -1)).any(axis=1)
+            bad_mask = frame_bad if bad_mask is None else (bad_mask | frame_bad)
+
+        if bad_mask is None or not bad_mask.any():
+            # Nothing to check against, or a fully clean bout: true no-op.
+            continue
+
+        valid_idx = np.flatnonzero(~bad_mask)
+        if valid_idx.size == 0:
+            # Entirely NaN -- leave untouched, do not fabricate a zero-length bout.
+            summary['interior_nan_bouts'].append(bout_key)
+            if verbose:
+                print(f"  [trim_nan_edges] WARNING: bout '{bout_key}' is entirely "
+                      f"NaN ({T} frames) -- left untouched")
+            continue
+
+        first_valid = int(valid_idx[0])
+        last_valid = int(valid_idx[-1])
+
+        # Interior NaN (a gap inside the valid span) is not fixable by
+        # trimming edges -- fail loudly instead of emitting a half-fixed bout.
+        if bad_mask[first_valid:last_valid + 1].any():
+            summary['interior_nan_bouts'].append(bout_key)
+            if verbose:
+                n_interior = int(bad_mask[first_valid:last_valid + 1].sum())
+                print(f"  [trim_nan_edges] WARNING: bout '{bout_key}' has "
+                      f"{n_interior} interior NaN frame(s) inside its valid "
+                      f"span -- trimming cannot fix this; left untouched")
+            continue
+
+        frames_dropped = T - (last_valid - first_valid + 1)
+
+        for key, val in list(bout.items()):
+            if (isinstance(val, (np.ndarray, jnp.ndarray))
+                    and val.ndim >= 1 and val.shape[0] == T):
+                bout[key] = val[first_valid:last_valid + 1]
+
+        summary['bouts_trimmed'] += 1
+        summary['frames_dropped'] += frames_dropped
+
+    if verbose:
+        if summary['interior_nan_bouts']:
+            print(f"  [trim_nan_edges] {'!' * 60}")
+            print(f"  [trim_nan_edges] {len(summary['interior_nan_bouts'])} bout(s) "
+                  f"have UNFIXABLE interior/all-NaN gaps: {summary['interior_nan_bouts']}")
+            print(f"  [trim_nan_edges] {'!' * 60}")
+        print(f"  [trim_nan_edges] Trimmed {summary['bouts_trimmed']} bouts, "
+              f"dropped {summary['frames_dropped']} frames")
+
+    return summary
+
+
 def reorganize_and_save(
     stac_data: dict,
     clip_lengths: list,
@@ -473,10 +584,25 @@ def process_all_bouts(
     mjx_cfg = cfg.postprocessing.mjx_processing
     
     bout_keys = sorted([k for k in bout_dict.keys() if k != 'info'])
-    
-    # Get original clip lengths
+
+    # Trim leading/trailing all-NaN frame runs BEFORE anything else touches
+    # the bout arrays, so clip_lengths_original (below) reflects the trimmed
+    # length and the '_stac'-suffixed data / interpolation never sees the
+    # edge NaNs that would otherwise poison interp1d(kind='cubic')'s global
+    # solve. See configs/postprocessing/default.yaml: trim_nan_edges.
+    trim_cfg = cfg.postprocessing.get('trim_nan_edges', {})
+    if trim_cfg.get('enabled', False):
+        trim_summary = trim_bouts_to_valid_span(bout_dict, bout_keys, verbose=verbose)
+        if trim_summary['interior_nan_bouts']:
+            print(f"  ⚠ WARNING: {len(trim_summary['interior_nan_bouts'])} bout(s) have "
+                  f"unfixable interior/all-NaN gaps (trimming only fixes edges): "
+                  f"{trim_summary['interior_nan_bouts']}")
+
+    # Get original clip lengths (computed AFTER trimming so downstream
+    # lengths -- clip_lengths_interp_unpadded, combine_data.py's unpadding --
+    # stay consistent with the trimmed data).
     clip_lengths_original = [
-        bout_dict[key]['qpos'].shape[0] 
+        bout_dict[key]['qpos'].shape[0]
         for key in bout_keys
     ]
     
