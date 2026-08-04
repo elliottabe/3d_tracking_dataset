@@ -7,8 +7,8 @@ name: v2_3
 alignment_exclude: ['*_V12', '*_V13']
 
 # Anatomical structure for FruitflyV2 model
-mjcf_path: "${paths.body_model_dir}/fruitfly_v2.3/fruitfly_muscles_warp.xml"
-arena_path: "${paths.body_model_dir}/fruitfly_v2.3/floor.xml"
+mjcf_path: "${paths.body_model_dir}/fruitfly_v2_3_ik/fruitfly_v2_3_ik.xml"
+arena_path: "${paths.body_model_dir}/fruitfly_v2_3_ik/floor.xml"
 
 end_eff_names:
   - tarsal_claw_T1_left
