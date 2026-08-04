@@ -463,6 +463,7 @@ needed** — that is why this task renames data instead of adding a fallback.
 
 **Files:**
 - Create: `scripts/data/normalize_bout_summary_names.py`
+- Test: `tests/test_normalize_bout_summary_names.py`
 - Modify: nothing in `utils/` — the existing `detect_flies` becomes correct once the data is normalized.
 
 **Interfaces:**
@@ -579,10 +580,93 @@ if __name__ == '__main__':
 Note the manifest stores `[src, dst]` and `--undo` unpacks it as `dst, src` to
 reverse the direction.
 
+- [ ] **Step 1b: Test the rename logic before pointing it at real data**
+
+Create `tests/test_normalize_bout_summary_names.py`:
+
+```python
+"""Rename-planning rules for the bout-summary normalizer.
+
+This script mutates the data tree, so the selection rules are tested before it
+runs: never touch OLD_-prefixed files, never re-rename an already-canonical
+dir, and refuse rather than guess when a dir has two legacy names.
+"""
+from __future__ import annotations
+
+import pytest
+
+from scripts.data.normalize_bout_summary_names import CANONICAL, plan_renames
+
+
+def _dir(root, name, *files):
+    d = root / name
+    d.mkdir()
+    for f in files:
+        (d / f).write_text('x')
+    return d
+
+
+def test_plans_rename_for_pre_rename_name(tmp_path):
+    d = _dir(tmp_path, 'Predictions_3D_a', 'free_walking_bouts_summary.csv')
+    assert plan_renames(tmp_path) == [
+        (d / 'free_walking_bouts_summary.csv', d / CANONICAL)]
+
+
+def test_plans_rename_for_singular_bout(tmp_path):
+    d = _dir(tmp_path, 'Predictions_3D_a', 'free_running_bout_summary.csv')
+    assert plan_renames(tmp_path) == [
+        (d / 'free_running_bout_summary.csv', d / CANONICAL)]
+
+
+def test_skips_already_canonical_dir(tmp_path):
+    _dir(tmp_path, 'Predictions_3D_a', CANONICAL)
+    assert plan_renames(tmp_path) == []
+
+
+def test_canonical_wins_over_legacy_in_same_dir(tmp_path):
+    """A dir holding both is already done; the legacy file is left as-is."""
+    _dir(tmp_path, 'Predictions_3D_a', CANONICAL,
+         'free_walking_bouts_summary.csv')
+    assert plan_renames(tmp_path) == []
+
+
+def test_never_touches_OLD_prefixed_file(tmp_path):
+    _dir(tmp_path, 'Predictions_3D_a', 'OLD_walking_bouts_summary.csv')
+    assert plan_renames(tmp_path) == []
+
+
+def test_refuses_when_two_legacy_names_present(tmp_path):
+    _dir(tmp_path, 'Predictions_3D_a', 'free_walking_bouts_summary.csv',
+         'free_running_bout_summary.csv')
+    with pytest.raises(SystemExit, match='multiple legacy names'):
+        plan_renames(tmp_path)
+
+
+def test_ignores_dirs_that_are_not_predictions(tmp_path):
+    _dir(tmp_path, 'something_else', 'free_walking_bouts_summary.csv')
+    assert plan_renames(tmp_path) == []
+
+
+def test_finds_dirs_nested_under_session_folders(tmp_path):
+    (tmp_path / 'session10').mkdir()
+    d = _dir(tmp_path, 'session10/Predictions_3D_a',
+             'free_walking_bouts_summary.csv')
+    assert plan_renames(tmp_path) == [
+        (d / 'free_walking_bouts_summary.csv', d / CANONICAL)]
+```
+
+Run it:
+```bash
+cd $REPO && mkdir -p scripts/data && touch scripts/data/__init__.py
+python -m pytest tests/test_normalize_bout_summary_names.py -v
+```
+Expected: 8 PASS. (`scripts/__init__.py` is created in Task 8; if this runs
+first, create it here — `touch scripts/__init__.py` — and Task 8's step becomes
+a no-op.)
+
 - [ ] **Step 2: Dry run**
 
 ```bash
-cd $REPO && mkdir -p scripts/data
 python scripts/data/normalize_bout_summary_names.py --root $DATA --dry-run
 ```
 Expected: 22 planned renames (16 `free_walking_*` + 6 `free_running_bout_*`), and
