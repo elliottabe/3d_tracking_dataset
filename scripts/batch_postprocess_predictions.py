@@ -118,7 +118,7 @@ def check_postprocess_outputs_exist(folder: Path, anatomy: str, dataset: str, fl
 
 
 def run_postprocessing(folder: Path, anatomy: str, dataset: str, paths: str,
-                       fly_suffix: str = '', dry_run: bool = False) -> dict:
+                       fly_suffix: str = '', dry_run: bool = False, postprocessing_group: str = None) -> dict:
     """
     Run postprocessing for a single prediction folder and fly.
 
@@ -153,6 +153,10 @@ def run_postprocessing(folder: Path, anatomy: str, dataset: str, paths: str,
         f"anatomy={anatomy}",
         f"paths.data_dir={folder}",
     ]
+
+    # Add postprocessing group override if specified
+    if postprocessing_group:
+        cmd.append(f"postprocessing@dataset.postprocessing={postprocessing_group}")
 
     # Add fly-specific overrides
     if fly_suffix:
@@ -251,6 +255,15 @@ def main():
         default=None,
         help='Path to log file (default: batch_postprocess_TIMESTAMP.log)'
     )
+    parser.add_argument(
+        '--postprocessing',
+        type=str,
+        default=None,
+        help='Postprocessing config group to select, e.g. v2_3. Passed through as '
+             'postprocessing@dataset.postprocessing=<value> (the dataset config pulls '
+             'the group in via its own defaults list, so a plain postprocessing=<value> '
+             'is rejected by Hydra).'
+    )
 
     args = parser.parse_args()
 
@@ -341,7 +354,7 @@ def main():
             # Run postprocessing
             print(f"  [{fly_label}] STAC output found - running postprocessing...")
             folder_result = run_postprocessing(
-                folder, args.anatomy, args.dataset, args.paths, fly_suffix, args.dry_run
+                folder, args.anatomy, args.dataset, args.paths, fly_suffix, args.dry_run, args.postprocessing
             )
             results.append(folder_result)
 
