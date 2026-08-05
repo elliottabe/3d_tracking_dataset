@@ -33,6 +33,9 @@ except AttributeError:
 
 import sys
 from pathlib import Path
+
+import h5py
+import numpy as np
 from jax import numpy as jp
 import hydra
 from omegaconf import DictConfig, OmegaConf
@@ -48,6 +51,59 @@ from utils import io_dict_to_hdf5 as ioh5
 from utils.path_utils import convert_dict_to_path, register_custom_resolvers
 
 register_custom_resolvers()
+
+
+def check_fit_offsets_finite(cfg, fit_offsets_path) -> None:
+    """Abort loudly if `fit_offsets()` wrote a non-finite `offsets` array.
+
+    Measured failure (v2_3 run): `fit_offsets` sampled NaN keypoints for 7 of
+    23 directories and wrote an all-NaN `offsets` array while the pipeline
+    reported success. Every bout in those directories then ran `ik_only()`
+    against NaN offsets and every one of the 58 leg joints solved to exactly
+    0 for the whole clip -- 113 of 387 clips silently ruined, found only by
+    watching a render. This check makes that state fatal instead of silent.
+
+    Reads ONLY the `offsets` dataset (not the whole fit_offsets file, which
+    also carries qpos/xpos/xquat/kp_data for the fit frames) -- cheap even
+    though this runs after every fit.
+
+    No-ops (does not open the file) when:
+      * `cfg.stac.skip_fit_offsets` is truthy -- no fit was performed on this
+        call, so there is nothing new to check.
+      * `fit_offsets_path` is falsy, or the file does not exist yet.
+    """
+    if cfg.stac.get('skip_fit_offsets', False):
+        return
+    if not fit_offsets_path:
+        return
+    fit_offsets_path = Path(fit_offsets_path)
+    if not fit_offsets_path.exists():
+        return
+
+    with h5py.File(fit_offsets_path, 'r') as f:
+        if 'offsets' not in f:
+            return
+        offsets = np.asarray(f['offsets'][()])
+
+    finite = np.isfinite(offsets)
+    if finite.all():
+        return
+
+    n_total = int(offsets.size)
+    n_bad = n_total - int(finite.sum())
+    raise RuntimeError(
+        f"fit_offsets wrote a non-finite `offsets` array to "
+        f"{fit_offsets_path}: {n_bad}/{n_total} entries are NaN/Inf. "
+        f"Likely cause: NaN keypoints in the frames sampled for the offset "
+        f"fit (the first cfg.stac.n_fit_frames frames of bout 0). Every "
+        f"downstream ik_only() solve would silently freeze the affected leg "
+        f"joints at 0 for every frame of every clip -- refusing to proceed. "
+        f"The file has NOT been deleted so you can inspect it. Remedy: "
+        f"enable NaN-edge trimming before STAC "
+        f"(cfg.preprocessing.trim_nan_edges; see "
+        f"scripts/preprocess_keypoints_for_ik.py:trim_bout_to_valid_span) so "
+        f"the fit never samples a NaN frame."
+    )
 
 
 def _bucketed_run_stac(cfg, kp_data, bout_real_lens, kp_names, base_path, save_path):
@@ -67,7 +123,6 @@ def _bucketed_run_stac(cfg, kp_data, bout_real_lens, kp_names, base_path, save_p
     bout->output ordering. Guarded by ``cfg.stac.bucketed_ik`` (default off).
     """
     import os as _os
-    import numpy as np
     from stac_mjx import io as _sio
 
     kp_data = np.asarray(kp_data)
@@ -104,7 +159,10 @@ def _bucketed_run_stac(cfg, kp_data, bout_real_lens, kp_names, base_path, save_p
     cfg.stac.skip_fit_offsets = False
     cfg.stac.skip_ik_only = 1
     cfg.stac.n_frames_per_clip = int(bout_real_lens[0])
-    stac_mjx.run_stac(cfg, bouts[0], kp_names, base_path=base_path, save_path=save_path)
+    _fit_offsets_path, _ = stac_mjx.run_stac(
+        cfg, bouts[0], kp_names, base_path=base_path, save_path=save_path
+    )
+    check_fit_offsets_finite(cfg, _fit_offsets_path)
 
     # 2. ik_only per bucket (clips are uniform within a bucket).
     cfg.stac.skip_fit_offsets = 1
@@ -279,6 +337,10 @@ def main(cfg: DictConfig):
         fit_path, transform_path = stac_mjx.run_stac(
             cfg, kp_data, sorted_kp_names, base_path=base_path, save_path=save_path
         )
+        # Guard: abort loudly if fit_offsets wrote non-finite offsets rather
+        # than silently proceeding to solve every clip with garbage offsets
+        # (see check_fit_offsets_finite docstring for the measured failure).
+        check_fit_offsets_finite(cfg, fit_path)
     print(f"\n✓ STAC IK complete!\n  Fit: {fit_path}\n  Transform: {transform_path}")
 
     # --- Render visualization video ---
