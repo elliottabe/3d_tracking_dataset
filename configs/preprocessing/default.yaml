@@ -183,6 +183,15 @@ pair_validity:
   min_pair_separation_mm: 0.0
   colocation_centroid_kp: Scutellum
 
+# Drop leading/trailing frame runs that are still NaN after gap-filling.
+# filtering.interpolation.max_edge_extrap_frames caps edge extrapolation and
+# pair_validity (which would drop the remainder) is disabled for single-fly
+# data, so without this NaN reaches STAC: it poisons the offsets fit (all-NaN
+# offsets -> every leg joint frozen) and later interp1d(kind='cubic'), a global
+# solve where one NaN poisons the whole array.
+trim_nan_edges:
+  enabled: true
+
 # Per-sex aggressive cleaning (runs in batch_split_valid_bouts.py after
 # identity relink, before pair_validity and bucket splitting).
 # Requires both per-fly h5s — only applies to shared (paired) bouts.

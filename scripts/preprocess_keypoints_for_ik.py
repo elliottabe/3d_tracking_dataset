@@ -1158,6 +1158,147 @@ def process_single_bout(csv_path: Path,
         return None
 
 
+# Keys in a `bout_data` dict (as built by `process_bouts_batch`, ~line
+# 1479-1512) that must never be sliced by `trim_bout_to_valid_span`, even if
+# their length happens to coincide with the bout's frame count T. Both are
+# genuinely non-temporal: `kp_names` is the (N,) keypoint-name list shared by
+# the whole run, `skeleton_edges` is the (E, 2) static edge index table.
+_TRIM_NEVER_SLICE_KEYS = frozenset({'kp_names', 'skeleton_edges'})
+
+
+def _trim_leading_dim(value):
+    """Return `len(value)` for anything array/list-like, else None.
+
+    None covers dict-valued fields (e.g. `alignment_info`, whose values are
+    whole-bout aggregates -- one scale/rotation/translation per bout, not
+    per-frame -- so slicing it makes no sense) and scalars (e.g. `floor_z`,
+    a single float per bout).
+    """
+    if isinstance(value, dict):
+        return None
+    try:
+        return len(value)
+    except TypeError:
+        return None
+
+
+def trim_bout_to_valid_span(
+    bout_data: Dict,
+    verbose: bool = False,
+    bout_name: Optional[str] = None,
+) -> Tuple[Dict, int]:
+    """Trim leading/trailing NaN frame runs from ONE bout before it is
+    stored, so STAC never reads a NaN keypoint (Task 11).
+
+    This is the PRE-STAC sibling of `trim_bouts_to_valid_span` in
+    `scripts/postprocess_stac_data.py`. That downstream trim fixed
+    `interpolate_trajectory`'s NaN-poisoning problem but runs too late: STAC
+    itself still reads NaN keypoints in between. Root cause is the same edge
+    case in both: `filtering.interpolation.max_edge_extrap_frames` caps
+    bounded edge gap-filling, and `pair_validity` (which would otherwise
+    drop the still-NaN remainder) is disabled for single-fly `free_running`
+    data, so NaN keypoints reach STAC. There they poison two independent
+    global solves: the offsets fit (landing on a NaN frame writes an
+    all-NaN `offsets` array -> every one of 58 leg joints stays frozen at
+    exactly 0 for the whole bout) and, later, `interp1d(kind='cubic')`
+    (one leftover NaN poisons the entire interpolated array). Measured in
+    the v2_3 run: 7 of 23 directories got all-NaN offsets this way (113
+    clips, 58/58 legs frozen); 10 further bouts froze individually from
+    scattered NaN keypoints. 123 of 387 clips (32%) were unusable. Of 79
+    bouts with NaN keypoints, all were edge-only with zero interior gaps:
+    508 leading + 569 trailing NaN frames out of 140,809 total (0.76%).
+
+    A frame is BAD if any coordinate is NaN in `keypoints`. `first_valid`
+    and `last_valid` are computed from that mask alone (not `orig_keypoints`
+    or anything else). Every array in `bout_data` whose leading dimension
+    equals the bout's original frame count T is then sliced to
+    `[first_valid, last_valid]` -- in practice `keypoints`, `orig_keypoints`,
+    `edge_nan`, and (when pair_validity is enabled) `valid_fly`, `filter_ok`,
+    `ground_ok`, `swap_state`. `kp_names` and `skeleton_edges` are never
+    sliced (see `_TRIM_NEVER_SLICE_KEYS`); `alignment_info` (dict of
+    whole-bout aggregates) and scalars like `floor_z` are left alone because
+    they have no per-frame axis to slice. `edge_nan` is checked by leading
+    dimension like everything else rather than assumed temporal -- it is
+    (T, N) here, but treat that as verified, not given.
+
+    A bout with no NaN in `keypoints` is returned completely untouched (true
+    no-op: the same dict object, unsliced, no reassignment -- not a copy).
+
+    A NaN gap *inside* `[first_valid, last_valid]` is not edge damage --
+    trimming cannot fix it -- so the bout is left completely untouched and a
+    prominent warning is printed (when `verbose`) naming the bout and the
+    interior NaN count, rather than silently passing through a half-fixed
+    bout. A wholly-NaN bout (no valid frame at all) is likewise left
+    untouched and warned about, never turned into a zero-length bout.
+
+    Args:
+        bout_data: The dict built for one bout, as it exists right before
+            being stored into `all_bouts_dict[f'bout_{bout_idx:03d}']`.
+            Not mutated: either returned as-is (no-op) or a new dict is
+            built with the sliced/kept-as-is values.
+        verbose: Print a one-line summary when trimmed, and loudly warn
+            about interior-NaN or all-NaN bouts.
+        bout_name: Optional identifier (e.g. `'bout_007'`) used only to
+            name the bout in a printed warning; purely cosmetic.
+
+    Returns:
+        (bout_data_out, frames_dropped): `bout_data_out` is `bout_data`
+        itself when nothing was trimmed, else a new dict; `frames_dropped`
+        is the number of leading + trailing frames removed (0 when nothing
+        was trimmed, including the interior-NaN and all-NaN cases).
+    """
+    name = bout_name if bout_name is not None else 'bout'
+    keypoints = np.asarray(bout_data['keypoints'])
+    T = keypoints.shape[0]
+    bad_mask = np.isnan(keypoints.reshape(T, -1)).any(axis=1)
+
+    if not bad_mask.any():
+        return bout_data, 0
+
+    valid_idx = np.flatnonzero(~bad_mask)
+    if valid_idx.size == 0:
+        # Entirely NaN -- leave untouched, do not fabricate a zero-length bout.
+        if verbose:
+            print(f"  [trim_nan_edges] WARNING: {name} is entirely NaN "
+                  f"({T} frames) -- left untouched")
+        return bout_data, 0
+
+    first_valid = int(valid_idx[0])
+    last_valid = int(valid_idx[-1])
+
+    # Interior NaN (a gap inside the valid span) is not fixable by trimming
+    # edges -- fail loudly instead of emitting a half-fixed bout.
+    if bad_mask[first_valid:last_valid + 1].any():
+        if verbose:
+            n_interior = int(bad_mask[first_valid:last_valid + 1].sum())
+            print(f"  [trim_nan_edges] WARNING: {name} has {n_interior} "
+                  f"interior NaN frame(s) inside its valid span "
+                  f"[{first_valid}, {last_valid}] -- trimming cannot fix "
+                  f"interior gaps; left untouched")
+        return bout_data, 0
+
+    n_dropped = first_valid + (T - 1 - last_valid)
+    if n_dropped == 0:
+        return bout_data, 0
+
+    trimmed = {}
+    for key, value in bout_data.items():
+        if key in _TRIM_NEVER_SLICE_KEYS:
+            trimmed[key] = value
+            continue
+        if _trim_leading_dim(value) == T:
+            trimmed[key] = value[first_valid:last_valid + 1]
+        else:
+            trimmed[key] = value
+
+    if verbose:
+        print(f"  [trim_nan_edges] {name}: dropped {n_dropped} NaN edge "
+              f"frame(s) ({first_valid} leading, {T - 1 - last_valid} "
+              f"trailing) -- {T} -> {T - n_dropped} frames")
+
+    return trimmed, n_dropped
+
+
 def process_bouts_batch(csv_path: Path,
                        skeleton_path: Path,
                        xml_path: Path,
@@ -1174,7 +1315,8 @@ def process_bouts_batch(csv_path: Path,
                        arena_path: Optional[Path] = None,
                        calibration_cfg: Optional[DictConfig] = None,
                        keypoint_model_pairs: Optional[Dict] = None,
-                       canonical_cfg: Optional[DictConfig] = None) -> Optional[Dict]:
+                       canonical_cfg: Optional[DictConfig] = None,
+                       trim_nan_edges_cfg: Optional[DictConfig] = None) -> Optional[Dict]:
     """
     Efficiently process multiple bouts by loading skeleton/model once and
     processing all data as a concatenated array.
@@ -1195,6 +1337,11 @@ def process_bouts_batch(csv_path: Path,
             from the Procrustes alignment fit (e.g. ['*_V12', '*_V13', 'Antenna*'])
         filter_cfg: Optional filtering configuration (OmegaConf DictConfig)
         output_dir: Optional output directory for filter diagnostic figures
+        trim_nan_edges_cfg: Optional config gating `trim_bout_to_valid_span`
+            (see `configs/preprocessing/default.yaml: trim_nan_edges`).
+            When enabled, each bout is trimmed to its first/last valid
+            (non-NaN, per `keypoints`) frame right before it is stored, so
+            NaN keypoints never reach STAC (Task 11).
 
     Returns:
         Dictionary with all bout data keyed by 'bout_<idx>' if successful, None otherwise
@@ -1362,6 +1509,16 @@ def process_bouts_batch(csv_path: Path,
         if pair_validity_cfg is not None:
             pv_obj = pair_validity_config_from_dict(pair_validity_cfg)
             pv_enabled = bool(pv_obj.enabled)
+
+        # trim_nan_edges (Task 11): gate + running per-file counters, printed
+        # as a summary once the bout loop below finishes.
+        trim_nan_enabled = bool(
+            trim_nan_edges_cfg is not None and trim_nan_edges_cfg.get('enabled', False))
+        trim_bouts_trimmed = 0
+        trim_frames_dropped = 0
+        if trim_nan_enabled:
+            print("\n[trim_nan_edges] enabled: trimming leading/trailing NaN "
+                  "keypoint frames from each bout before storage")
         if pv_enabled:
             print(f"\n[pair_validity] enabled: critical={list(pv_obj.critical_kp_patterns)}, "
                   f"ground_eps={pv_obj.ground_epsilon_mm}mm, "
@@ -1509,6 +1666,19 @@ def process_bouts_batch(csv_path: Path,
                 if bout_swap is not None:
                     bout_data['swap_state'] = bout_swap
 
+            # Trim leading/trailing NaN keypoint frames (Task 11) before
+            # this bout is stored -- see `trim_bout_to_valid_span` for why:
+            # STAC's offsets fit and interp1d(kind='cubic') are both global
+            # solves poisoned by any leftover NaN, and pair_validity (which
+            # would otherwise drop such frames) is disabled for single-fly
+            # data.
+            if trim_nan_enabled:
+                bout_data, n_trim_dropped = trim_bout_to_valid_span(
+                    bout_data, verbose=True, bout_name=f'bout_{bout_idx:03d}')
+                if n_trim_dropped:
+                    trim_bouts_trimmed += 1
+                    trim_frames_dropped += n_trim_dropped
+
             all_bouts_dict[f'bout_{bout_idx:03d}'] = bout_data
 
             # Optional per-bout QC render: body model + aligned keypoints overlaid.
@@ -1573,6 +1743,10 @@ def process_bouts_batch(csv_path: Path,
                 if isinstance(sex_cleaning_cfg, DictConfig) else dict(sex_cleaning_cfg)
             all_bouts_dict['info']['sex_cleaning'] = sc_dict
         
+        if trim_nan_enabled:
+            print(f"\n[trim_nan_edges] summary: {trim_bouts_trimmed} bout(s) "
+                  f"trimmed, {trim_frames_dropped} frame(s) dropped")
+
         print(f"\n✓ Successfully split into {len([k for k in all_bouts_dict.keys() if k != 'info'])} bouts")
         print(f"✓ Stored fly_ids in 'info': {fly_ids}")
         
@@ -1686,6 +1860,7 @@ def main(cfg: DictConfig):
             calibration_cfg=cfg.preprocessing.get('calibration', None),
             keypoint_model_pairs=cfg.model.get('KEYPOINT_MODEL_PAIRS', None),
             canonical_cfg=cfg.preprocessing.get('canonical_orientation', None),
+            trim_nan_edges_cfg=cfg.preprocessing.get('trim_nan_edges', None),
         )
 
         if all_bouts_dict is not None:
