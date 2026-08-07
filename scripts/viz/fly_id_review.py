@@ -224,8 +224,8 @@ class ReviewHandler(BaseHTTPRequestHandler):
         if self.path != "/api/decision":
             self.send_error(HTTPStatus.NOT_FOUND)
             return
-        length = int(self.headers.get("Content-Length", 0))
         try:
+            length = int(self.headers.get("Content-Length", 0))
             req = json.loads(self.rfile.read(length))
             with self.server.lock:
                 entry = record_decision(

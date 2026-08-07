@@ -228,7 +228,7 @@ MEDIA_BYTES = bytes(range(256)) * 4  # 1024 recognizable bytes
 
 
 @pytest.fixture()
-def server(tmp_path):
+def server(tmp_path, monkeypatch):
     root = tmp_path / "data"
     bout_dir = make_bout(root, "Session1", "recA", "bout_00001")
     (bout_dir / "fly0" / VIDEO_NAME).write_bytes(MEDIA_BYTES)
@@ -238,10 +238,10 @@ def server(tmp_path):
     thread = threading.Thread(target=srv.serve_forever, daemon=True)
     thread.start()
     host, port = srv.server_address
-    # Disable proxy for localhost connections
-    proxy_handler = urllib.request.ProxyHandler({})
-    opener = urllib.request.build_opener(proxy_handler)
-    urllib.request.install_opener(opener)
+    # Disable proxy for localhost connections via environment (urllib reads per-request)
+    monkeypatch.delenv("http_proxy", raising=False)
+    monkeypatch.delenv("HTTP_PROXY", raising=False)
+    monkeypatch.setenv("no_proxy", "127.0.0.1,localhost")
     yield f"http://{host}:{port}", srv, root
     srv.shutdown()
 
@@ -320,3 +320,22 @@ def test_post_decision_bad_input_400(server):
     with pytest.raises(urllib.error.HTTPError) as exc:
         urllib.request.urlopen(req)
     assert exc.value.code == 400
+
+
+def test_post_decision_malformed_content_length_400(server):
+    url, srv, root = server
+    host, port = srv.server_address
+    # Use raw http.client to send non-numeric Content-Length (urllib would correct it)
+    conn = http.client.HTTPConnection(host, port, timeout=2)
+    payload = b'{"bout_key": "Session1/recA/bout_00001"}'
+    conn.putrequest("POST", "/api/decision")
+    conn.putheader("Content-Length", "abc")  # invalid numeric value
+    conn.putheader("Content-Type", "application/json")
+    conn.endheaders()
+    conn.send(payload)
+    resp = conn.getresponse()
+    assert resp.status == 400
+    conn.close()
+    # Verify server thread still alive by making another request
+    with urllib.request.urlopen(url + "/api/bouts") as resp2:
+        assert resp2.status == 200
