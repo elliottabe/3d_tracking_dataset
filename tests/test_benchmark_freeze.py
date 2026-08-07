@@ -73,3 +73,95 @@ def test_verify_detects_tamper(tmp_path):
     victim.write_bytes(b"corrupt")
     bad = verify(dest)
     assert len(bad) == 1 and bad[0].endswith("kp3d.npz")
+
+
+def make_source_bout_with_qc(root: Path, bout: int, n_frames=10, reproj_px=None,
+                              soft_iou=None, flies=(0,)) -> Path:
+    """Helper to create a bout with qc.json metadata."""
+    bdir = make_source_bout(root, bout, flies=flies)
+    for f in flies:
+        qc_data = {"n_frames": n_frames}
+        if reproj_px is not None:
+            qc_data["per_camera_reproj_px"] = {"median": reproj_px}
+        if soft_iou is not None:
+            qc_data["silhouette_iou"] = {"soft_median": soft_iou}
+        (bdir / f"fly{f}" / "qc.json").write_text(json.dumps(qc_data))
+    return bdir
+
+
+def test_select_bouts_csv_contract(tmp_path, capsys):
+    """Verify CSV header matches contract and rows are sorted by reproj_px descending."""
+    import csv
+    import io
+    from scripts.benchmark.select_bouts import main
+    root = tmp_path / "free_running"
+    root.mkdir()
+
+    # Create 2 bouts with different reproj_px values
+    # Expected glob pattern: *_bouts/bouts/bout_*
+    make_source_bout_with_qc(root / "test_bouts", bout=1, reproj_px=5.0, soft_iou=0.8)
+    make_source_bout_with_qc(root / "test_bouts", bout=2, reproj_px=15.0, soft_iou=0.9)
+
+    main(["--freerun-root", str(root)])
+    captured = capsys.readouterr().out
+
+    # Use csv module to parse output properly
+    reader = csv.reader(io.StringIO(captured))
+    rows = list(reader)
+
+    # Verify header contract
+    expected_header = ["run_key", "bout", "fly", "assay", "n_frames", "reproj_px",
+                       "soft_iou", "proximity_median", "suggestion"]
+    assert rows[0] == expected_header, f"Got {rows[0]}"
+
+    # Verify rows are sorted by reproj_px descending
+    assert len(rows) == 3  # header + 2 data rows
+    repr1 = float(rows[1][5])
+    repr2 = float(rows[2][5])
+    assert repr1 > repr2, f"Not sorted descending: {repr1} vs {repr2}"
+
+
+def test_select_bouts_top_n(tmp_path, capsys):
+    """Verify --top N truncates to N data rows."""
+    import csv
+    import io
+    from scripts.benchmark.select_bouts import main
+    root = tmp_path / "free_running"
+    root.mkdir()
+
+    # Create 3 bouts
+    make_source_bout_with_qc(root / "test_bouts", bout=1, reproj_px=5.0)
+    make_source_bout_with_qc(root / "test_bouts", bout=2, reproj_px=15.0)
+    make_source_bout_with_qc(root / "test_bouts", bout=3, reproj_px=10.0)
+
+    main(["--freerun-root", str(root), "--top", "1"])
+    captured = capsys.readouterr().out
+
+    reader = csv.reader(io.StringIO(captured))
+    rows = list(reader)
+    assert len(rows) == 2, f"Expected 2 rows (header + 1 data), got {len(rows)}"
+    assert float(rows[1][5]) == 15.0, f"Top row should have highest reproj_px"
+
+
+def test_select_bouts_suggestion(tmp_path, capsys):
+    """Verify suggestion column logic: close_interaction, hard, clean."""
+    import csv
+    import io
+    from scripts.benchmark.select_bouts import main
+    root = tmp_path / "free_running"
+    root.mkdir()
+
+    # Bout with reproj > 12.0 -> "hard"
+    make_source_bout_with_qc(root / "test_bouts", bout=1, reproj_px=20.0)
+    # Bout with reproj <= 12.0 -> "clean"
+    make_source_bout_with_qc(root / "test_bouts", bout=2, reproj_px=5.0)
+
+    main(["--freerun-root", str(root)])
+    captured = capsys.readouterr().out
+
+    reader = csv.reader(io.StringIO(captured))
+    rows = list(reader)
+    # First data row: reproj=20.0 -> "hard"
+    assert rows[1][-1] == "hard", f"reproj=20.0 should be 'hard', got {rows[1][-1]}"
+    # Second data row: reproj=5.0 -> "clean"
+    assert rows[2][-1] == "clean", f"reproj=5.0 should be 'clean', got {rows[2][-1]}"
