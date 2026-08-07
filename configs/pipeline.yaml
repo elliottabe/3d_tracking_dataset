@@ -50,6 +50,7 @@ scaling:
   estimator: umeyama       # 'umeyama' | 'norm_ratio'
   robust_stat: median      # 'median' | 'mean'
   robust: none             # 'huber' | 'none'
+  scale_keypoints: trunk   # 'trunk' | 'all' (pair 'all' with estimator=norm_ratio)
 
 # Fly sexing + identity canonicalization (jarvis_jax.tracking.sexing). After both
 # flies of a courtship bout are processed, the male (larger wing-song CV) is

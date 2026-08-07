@@ -47,6 +47,7 @@ from jarvis_jax.tracking.qc import qc_report
 from jarvis_jax.tracking.reproj_video import write_camera_video
 from jarvis_jax.predict.sam3_driver import parse_bouts, session_tag_for, masks_are_stale
 from jarvis_jax.predict.synced_reader import load_plan, read_window, read_one_cam
+from scripts.scale_keypoints import resolve_scale_keypoints
 
 # Register the `basename` OmegaConf resolver used by configs/outputs/default.yaml
 # (out = .../${recording.name}/${basename:${recording.session_dir}}/pose). Done as
@@ -509,15 +510,18 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
     #    rest-pose scale, which stalls the STAC jaxls LM-batch solve.
     scale_path = os.path.join(run_root, "scale.json")
     if not stage_done(scale_path):
+        scale_names = resolve_scale_keypoints(cfg, kp_names)
         _scale = compute_trunk_scale(
             kp3d, kp_names, cfg.silhouette.xml,
-            trunk_names=list(cfg.scaling.trunk_keypoints),
+            trunk_names=scale_names,
             estimator=cfg.scaling.estimator,
             robust_stat=cfg.scaling.robust_stat,
             robust=cfg.scaling.robust)
-        atomic_save_json(scale_path, {"scale": float(_scale),
-                                      "trunk_keypoints": list(cfg.scaling.trunk_keypoints),
-                                      "estimator": str(cfg.scaling.estimator)})
+        atomic_save_json(scale_path, {
+            "scale": float(_scale),
+            "scale_keypoints": str(cfg.scaling.get("scale_keypoints", "trunk")),
+            "trunk_keypoints": list(scale_names),
+            "estimator": str(cfg.scaling.estimator)})
     with open(scale_path) as _f:
         scale = float(json.load(_f)["scale"])
 
