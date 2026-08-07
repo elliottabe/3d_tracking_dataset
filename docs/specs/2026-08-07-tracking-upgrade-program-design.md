@@ -140,6 +140,28 @@ Down-weight per-camera detections by heatmap confidence in the DLT solve
 (currently unweighted). Small, independent, identical for both assays,
 benchmark-gated like everything else.
 
+## Track 5 — Multi-view segmentation fusion (feasibility spike)
+
+SAM3 segments each of the 7 views independently; the rig's calibration is
+unused at segmentation time. Spike (gated on Track 0 existing):
+
+- **Visual-hull fusion:** back-project per-view fly masks into a per-fly,
+  per-frame voxel grid via the DLT calibration; a voxel is occupied if it
+  projects inside the mask in ≥k of the visible views (k≈4–5 of 7). JAX,
+  chunked — no large materialized volumes (memory-efficiency preference).
+- **Hull → repaired 2D masks:** reproject the hull into each view. Restores
+  single-view dropouts (a leg seen by ≥k views reappears in the failing
+  view — the known near-partner SAM3 dropout case) and removes single-view
+  hallucinations.
+- **Deliverables:** (a) mask-quality delta vs raw SAM3 on benchmark bouts,
+  especially flies-close frames; (b) downstream scorecard delta when
+  polish/mask-gated fusion consume repaired masks; (c) optional per-fly 3D
+  occupancy as a new output.
+- **SAM3D-objects: parked.** Single-view 3D shape with a category prior is
+  strictly weaker than a calibrated 7-view hull for this rig and adds a
+  heavy dependency; revisit only if the hull spike shows masks remain the
+  bottleneck and geometry alone can't fix them.
+
 ## Error handling / attribution discipline
 
 - Every experiment runs against the frozen benchmark inputs; no experiment
