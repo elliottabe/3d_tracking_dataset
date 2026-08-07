@@ -1,7 +1,11 @@
 """Tests for scripts/viz/fly_id_review.py (fly identity review server)."""
 from __future__ import annotations
 
+import http.client
 import json
+import threading
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 import pytest
@@ -10,9 +14,11 @@ from scripts.viz.fly_id_review import (
     DEFAULT_MALE_FLY,
     MANIFEST_NAME,
     VIDEO_NAME,
+    ReviewServer,
     bout_dir_from_key,
     build_manifest,
     load_manifest,
+    parse_range,
     read_sex_json,
     record_decision,
     save_manifest,
@@ -192,3 +198,125 @@ def test_record_rejects_bad_input(tmp_path):
         record_decision(tmp_path, m, "Session1/recA/bout_00001", 2, "confirmed")
     with pytest.raises(ValueError):
         record_decision(tmp_path, m, "Session1/recA/bout_00001", 1, "pending")
+
+
+# ---------------------------------------------------------------------------
+# parse_range (pure)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("header,size,expected", [
+    (None, 100, None),                       # no header -> whole file
+    ("bytes=0-9", 100, (0, 9)),
+    ("bytes=10-", 100, (10, 99)),            # open-ended
+    ("bytes=-20", 100, (80, 99)),            # suffix
+    ("bytes=0-500", 100, (0, 99)),           # end clamped
+    ("bytes=100-", 100, "unsatisfiable"),    # start past EOF -> 416
+    ("bytes=-0", 100, "unsatisfiable"),      # zero-length suffix -> 416
+    ("bytes=5-3", 100, None),                # inverted -> ignore, whole file
+    ("bites=0-9", 100, None),                # malformed -> ignore
+    ("bytes=-", 100, None),                  # empty -> ignore
+])
+def test_parse_range(header, size, expected):
+    assert parse_range(header, size) == expected
+
+
+# ---------------------------------------------------------------------------
+# server integration
+# ---------------------------------------------------------------------------
+
+MEDIA_BYTES = bytes(range(256)) * 4  # 1024 recognizable bytes
+
+
+@pytest.fixture()
+def server(tmp_path):
+    root = tmp_path / "data"
+    bout_dir = make_bout(root, "Session1", "recA", "bout_00001")
+    (bout_dir / "fly0" / VIDEO_NAME).write_bytes(MEDIA_BYTES)
+    manifest = build_manifest(root)
+    save_manifest(root, manifest)
+    srv = ReviewServer(("127.0.0.1", 0), root, manifest)
+    thread = threading.Thread(target=srv.serve_forever, daemon=True)
+    thread.start()
+    host, port = srv.server_address
+    # Disable proxy for localhost connections
+    proxy_handler = urllib.request.ProxyHandler({})
+    opener = urllib.request.build_opener(proxy_handler)
+    urllib.request.install_opener(opener)
+    yield f"http://{host}:{port}", srv, root
+    srv.shutdown()
+
+
+MEDIA_PATH = "/media/Session1/recA/pose/bouts/bout_00001/fly0/sidebyside.mp4"
+
+
+def test_api_bouts_returns_manifest(server):
+    url, srv, root = server
+    with urllib.request.urlopen(url + "/api/bouts") as resp:
+        body = json.loads(resp.read())
+    assert "Session1/recA/bout_00001" in body["bouts"]
+
+
+def test_media_full_200_with_accept_ranges(server):
+    url, srv, root = server
+    with urllib.request.urlopen(url + MEDIA_PATH) as resp:
+        assert resp.status == 200
+        assert resp.headers["Accept-Ranges"] == "bytes"
+        assert resp.read() == MEDIA_BYTES
+
+
+def test_media_range_206(server):
+    url, srv, root = server
+    req = urllib.request.Request(url + MEDIA_PATH, headers={"Range": "bytes=10-19"})
+    with urllib.request.urlopen(req) as resp:
+        assert resp.status == 206
+        assert resp.headers["Content-Range"] == f"bytes 10-19/{len(MEDIA_BYTES)}"
+        assert resp.headers["Content-Length"] == "10"
+        assert resp.read() == MEDIA_BYTES[10:20]
+
+
+def test_media_suffix_range(server):
+    url, srv, root = server
+    req = urllib.request.Request(url + MEDIA_PATH, headers={"Range": "bytes=-16"})
+    with urllib.request.urlopen(req) as resp:
+        assert resp.status == 206
+        assert resp.read() == MEDIA_BYTES[-16:]
+
+
+def test_media_unsatisfiable_416(server):
+    url, srv, root = server
+    req = urllib.request.Request(url + MEDIA_PATH, headers={"Range": "bytes=999999-"})
+    with pytest.raises(urllib.error.HTTPError) as exc:
+        urllib.request.urlopen(req)
+    assert exc.value.code == 416
+
+
+def test_media_traversal_forbidden(server):
+    url, srv, root = server
+    (root.parent / "secret.txt").write_text("nope")
+    host, port = srv.server_address
+    conn = http.client.HTTPConnection(host, port)  # raw: no client-side path collapse
+    conn.request("GET", "/media/../secret.txt")
+    assert conn.getresponse().status in (403, 404)
+    conn.close()
+
+
+def test_post_decision_roundtrip(server):
+    url, srv, root = server
+    payload = json.dumps({"bout_key": "Session1/recA/bout_00001",
+                          "reviewed_male_fly": 0, "status": "swapped"}).encode()
+    req = urllib.request.Request(url + "/api/decision", data=payload, method="POST")
+    with urllib.request.urlopen(req) as resp:
+        entry = json.loads(resp.read())
+    assert entry["status"] == "swapped"
+    assert load_manifest(root)["bouts"]["Session1/recA/bout_00001"]["reviewed_male_fly"] == 0
+    assert read_sex_json(bout_dir_from_key(root, "Session1/recA/bout_00001"))["male_fly"] == 0
+
+
+def test_post_decision_bad_input_400(server):
+    url, srv, root = server
+    payload = json.dumps({"bout_key": "nope/nope/nope",
+                          "reviewed_male_fly": 1, "status": "confirmed"}).encode()
+    req = urllib.request.Request(url + "/api/decision", data=payload, method="POST")
+    with pytest.raises(urllib.error.HTTPError) as exc:
+        urllib.request.urlopen(req)
+    assert exc.value.code == 400

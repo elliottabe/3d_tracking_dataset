@@ -165,3 +165,142 @@ def _write_sex_json(bout_dir: Path, entry: dict) -> None:
     tmp = bout_dir / "sex.json.tmp"
     tmp.write_text(json.dumps(sex, indent=2))
     os.replace(tmp, bout_dir / "sex.json")
+
+
+# ---------------------------------------------------------------------------
+# HTTP server
+# ---------------------------------------------------------------------------
+
+_RANGE_RE = re.compile(r"bytes=(\d*)-(\d*)$")
+
+
+def parse_range(header: str | None, file_size: int):
+    """Parse a Range header. Returns inclusive (start, end), the string
+    'unsatisfiable' (caller sends 416), or None (caller sends plain 200 --
+    malformed headers are ignored per RFC 9110)."""
+    if not header:
+        return None
+    m = _RANGE_RE.match(header.strip())
+    if not m:
+        return None
+    start_s, end_s = m.groups()
+    if start_s == "" and end_s == "":
+        return None
+    if start_s == "":  # suffix: last N bytes
+        n = int(end_s)
+        if n == 0 or file_size == 0:
+            return "unsatisfiable"
+        return (max(0, file_size - n), file_size - 1)
+    start = int(start_s)
+    if start >= file_size:
+        return "unsatisfiable"
+    end = int(end_s) if end_s else file_size - 1
+    if end < start:
+        return None
+    return (start, min(end, file_size - 1))
+
+
+class ReviewHandler(BaseHTTPRequestHandler):
+    server: "ReviewServer"
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, *args):  # keep the terminal quiet during review
+        pass
+
+    def do_GET(self):
+        path = unquote(self.path.split("?", 1)[0])
+        if path == "/":
+            self._send(HTTPStatus.OK, "text/html; charset=utf-8", PAGE_HTML.encode())
+        elif path == "/api/bouts":
+            with self.server.lock:
+                body = json.dumps(self.server.manifest).encode()
+            self._send(HTTPStatus.OK, "application/json", body)
+        elif path.startswith("/media/"):
+            self._serve_media(path[len("/media/"):])
+        else:
+            self.send_error(HTTPStatus.NOT_FOUND)
+
+    def do_POST(self):
+        if self.path != "/api/decision":
+            self.send_error(HTTPStatus.NOT_FOUND)
+            return
+        length = int(self.headers.get("Content-Length", 0))
+        try:
+            req = json.loads(self.rfile.read(length))
+            with self.server.lock:
+                entry = record_decision(
+                    self.server.root, self.server.manifest,
+                    req["bout_key"], int(req["reviewed_male_fly"]), req["status"])
+        except (KeyError, ValueError, TypeError, json.JSONDecodeError) as exc:
+            self.send_error(HTTPStatus.BAD_REQUEST, explain=str(exc))
+            return
+        self._send(HTTPStatus.OK, "application/json", json.dumps(entry).encode())
+
+    # -- media with byte-range support (the seek-performance requirement) --
+
+    def _serve_media(self, relpath: str):
+        root = self.server.root.resolve()
+        target = (root / relpath).resolve()
+        if not (target == root or str(target).startswith(str(root) + os.sep)):
+            self.send_error(HTTPStatus.FORBIDDEN)
+            return
+        if not target.is_file():
+            self.send_error(HTTPStatus.NOT_FOUND)
+            return
+        size = target.stat().st_size
+        rng = parse_range(self.headers.get("Range"), size)
+        if rng == "unsatisfiable":
+            self.send_response(HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE)
+            self.send_header("Content-Range", f"bytes */{size}")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        ctype = "video/mp4" if target.suffix == ".mp4" else "application/octet-stream"
+        with open(target, "rb") as f:
+            if rng is None:
+                self.send_response(HTTPStatus.OK)
+                start, length = 0, size
+            else:
+                start, end = rng
+                length = end - start + 1
+                self.send_response(HTTPStatus.PARTIAL_CONTENT)
+                self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+            self.send_header("Accept-Ranges", "bytes")
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(length))
+            self.end_headers()
+            f.seek(start)
+            self._copy(f, length)
+
+    def _copy(self, f, length: int, chunk: int = 64 * 1024):
+        remaining = length
+        try:
+            while remaining > 0:
+                data = f.read(min(chunk, remaining))
+                if not data:
+                    break
+                self.wfile.write(data)
+                remaining -= len(data)
+        except (BrokenPipeError, ConnectionResetError):
+            pass  # browser aborted mid-stream (e.g. a seek) -- normal
+
+    def _send(self, status, ctype: str, body: bytes):
+        self.send_response(status)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
+
+class ReviewServer(ThreadingHTTPServer):
+    daemon_threads = True
+
+    def __init__(self, addr, root: Path, manifest: dict):
+        super().__init__(addr, ReviewHandler)
+        self.root = root
+        self.manifest = manifest
+        self.lock = threading.Lock()
+
+
+PAGE_HTML = "<!doctype html><title>Fly ID Review</title>placeholder until Task 4"
