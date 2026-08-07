@@ -47,7 +47,10 @@ from jarvis_jax.tracking.qc import qc_report
 from jarvis_jax.tracking.reproj_video import write_camera_video
 from jarvis_jax.predict.sam3_driver import parse_bouts, session_tag_for, masks_are_stale
 from jarvis_jax.predict.synced_reader import load_plan, read_window, read_one_cam
-from scripts.scale_keypoints import resolve_scale_keypoints
+try:
+    from scripts.scale_keypoints import resolve_scale_keypoints
+except ModuleNotFoundError:  # direct invocation: sys.path[0] is scripts/, not repo root
+    from scale_keypoints import resolve_scale_keypoints
 
 # Register the `basename` OmegaConf resolver used by configs/outputs/default.yaml
 # (out = .../${recording.name}/${basename:${recording.session_dir}}/pose). Done as
