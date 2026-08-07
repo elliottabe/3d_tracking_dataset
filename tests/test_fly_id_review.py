@@ -339,3 +339,37 @@ def test_post_decision_malformed_content_length_400(server):
     # Verify server thread still alive by making another request
     with urllib.request.urlopen(url + "/api/bouts") as resp2:
         assert resp2.status == 200
+
+
+# ---------------------------------------------------------------------------
+# page + main
+# ---------------------------------------------------------------------------
+
+def test_index_serves_ui(server):
+    url, srv, root = server
+    with urllib.request.urlopen(url + "/") as resp:
+        assert resp.status == 200
+        assert "text/html" in resp.headers["Content-Type"]
+        html = resp.read().decode()
+    for needle in ('id="v0"', 'id="v1"', "keydown", "/api/bouts", "/api/decision",
+                   "prefetch", "playbackRate"):
+        assert needle in html, needle
+
+
+def test_main_scans_and_saves_manifest_before_serving(tmp_path, monkeypatch):
+    import scripts.viz.fly_id_review as mod
+    make_bout(tmp_path, "Session1", "recA", "bout_00001")
+
+    served = {}
+
+    class FakeServer:
+        def __init__(self, addr, root, manifest):
+            served["root"], served["manifest"] = root, manifest
+            self.server_address = ("127.0.0.1", 0)
+        def serve_forever(self):
+            raise KeyboardInterrupt  # return immediately
+
+    monkeypatch.setattr(mod, "ReviewServer", FakeServer)
+    mod.main(["--root", str(tmp_path), "--port", "0"])
+    assert "Session1/recA/bout_00001" in served["manifest"]["bouts"]
+    assert load_manifest(tmp_path) is not None  # manifest persisted before serving

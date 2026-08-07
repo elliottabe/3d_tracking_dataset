@@ -303,4 +303,173 @@ class ReviewServer(ThreadingHTTPServer):
         self.lock = threading.Lock()
 
 
-PAGE_HTML = "<!doctype html><title>Fly ID Review</title>placeholder until Task 4"
+PAGE_HTML = """<!doctype html>
+<html><head><meta charset="utf-8"><title>Fly ID Review</title>
+<style>
+  body { margin:0; font:14px system-ui, sans-serif; background:#111; color:#ddd; }
+  header { display:flex; gap:1rem; align-items:center; padding:.5rem 1rem; background:#1b1b1b; }
+  header .spacer { flex:1; }
+  main { display:flex; gap:8px; padding:8px; }
+  .card { flex:1; position:relative; }
+  video { width:100%; background:#000; display:block; }
+  .badge { position:absolute; top:8px; left:8px; font-size:28px; font-weight:800;
+           padding:2px 14px; border-radius:6px; color:#fff; }
+  .badge.male { background:#1565d8; }
+  .badge.female { background:#c2337e; }
+  .flylabel { position:absolute; top:8px; right:8px; color:#aaa; font-size:13px; }
+  footer { padding:.4rem 1rem; color:#888; font-size:12px; }
+  #status { font-weight:600; }
+  .st-confirmed { color:#5dbb63; } .st-swapped { color:#e2a93b; }
+  .st-unsure { color:#d05c5c; } .st-pending { color:#888; }
+  select { background:#222; color:#ddd; border:1px solid #444; }
+  kbd { background:#2a2a2a; border-radius:3px; padding:0 4px; }
+</style></head>
+<body>
+<header>
+  <span id="pos"></span>
+  <select id="filter"><option value="">all recordings</option></select>
+  <span id="status"></span>
+  <span id="warn" style="color:#e2a93b"></span>
+  <span class="spacer"></span>
+  <span id="progress"></span>
+</header>
+<main>
+  <div class="card"><video id="v0" muted loop autoplay playsinline></video>
+    <div class="badge" id="b0"></div><div class="flylabel">fly0</div></div>
+  <div class="card"><video id="v1" muted loop autoplay playsinline></video>
+    <div class="badge" id="b1"></div><div class="flylabel">fly1</div></div>
+</main>
+<footer>
+ <kbd>Enter</kbd>/<kbd>&rarr;</kbd> confirm &middot; <kbd>S</kbd> swap &middot;
+ <kbd>U</kbd> unsure &middot; <kbd>&larr;</kbd> back &middot;
+ <kbd>J</kbd> next unresolved &middot; <kbd>Space</kbd> pause &middot;
+ <kbd>R</kbd> replay &middot; <kbd>1</kbd>/<kbd>2</kbd> speed
+</footer>
+<script>
+let bouts = {}, keys = [], idx = 0, assign = {}; // assign[key] = displayed male fly index
+const $ = id => document.getElementById(id);
+const v0 = $("v0"), v1 = $("v1");
+// prefetch elements for bout N+1 (seek-performance requirement #4)
+const prefetch = [document.createElement("video"), document.createElement("video")];
+prefetch.forEach(v => { v.preload = "auto"; v.muted = true; });
+
+function mediaUrl(key, fly) {
+  const [s, r, b] = key.split("/");
+  return `/media/${s}/${r}/pose/bouts/${b}/fly${fly}/sidebyside.mp4`;
+}
+function visibleKeys() {
+  const f = $("filter").value;
+  return f ? keys.filter(k => k.startsWith(f + "/")) : keys;
+}
+function render() {
+  const vis = visibleKeys();
+  if (!vis.length) return;
+  idx = Math.max(0, Math.min(idx, vis.length - 1));
+  const key = vis[idx], e = bouts[key], male = assign[key];
+  v0.src = mediaUrl(key, 0); v1.src = mediaUrl(key, 1);
+  v0.play().catch(() => {}); v1.play().catch(() => {});
+  $("b0").textContent = male === 0 ? "M" : "F";
+  $("b0").className = "badge " + (male === 0 ? "male" : "female");
+  $("b1").textContent = male === 1 ? "M" : "F";
+  $("b1").className = "badge " + (male === 1 ? "male" : "female");
+  $("pos").textContent = `${idx + 1}/${vis.length}  ${key}`;
+  $("status").textContent = e.status;
+  $("status").className = "st-" + e.status;
+  $("warn").textContent = e.warning || "";
+  const done = vis.filter(k => bouts[k].status !== "pending").length;
+  $("progress").textContent = `${done}/${vis.length} reviewed`;
+  if (idx + 1 < vis.length) {
+    prefetch[0].src = mediaUrl(vis[idx + 1], 0);
+    prefetch[1].src = mediaUrl(vis[idx + 1], 1);
+  }
+}
+async function post(status) {
+  const key = visibleKeys()[idx];
+  const res = await fetch("/api/decision", { method: "POST",
+    body: JSON.stringify({ bout_key: key, reviewed_male_fly: assign[key], status }) });
+  if (!res.ok) { alert("save failed: " + await res.text()); return false; }
+  bouts[key] = await res.json();
+  return true;
+}
+async function decide(status) { if (await post(status)) { idx += 1; render(); } }
+
+document.addEventListener("keydown", async ev => {
+  if (ev.target.tagName === "SELECT") return;
+  const vis = visibleKeys(), key = vis[idx];
+  switch (ev.key) {
+    case "Enter": case "ArrowRight":
+      await decide(assign[key] === bouts[key].original_male_fly ? "confirmed" : "swapped");
+      break;
+    case "s": case "S":
+      assign[key] = 1 - assign[key];
+      await decide(assign[key] === bouts[key].original_male_fly ? "confirmed" : "swapped");
+      break;
+    case "u": case "U": await decide("unsure"); break;
+    case "ArrowLeft": idx -= 1; render(); break;
+    case "j": case "J": {
+      const next = vis.findIndex((k, i) => i > idx &&
+        (bouts[k].status === "pending" || bouts[k].status === "unsure"));
+      if (next >= 0) { idx = next; render(); }
+      break;
+    }
+    case " ": ev.preventDefault();
+      if (v0.paused) { v0.play(); v1.play(); } else { v0.pause(); v1.pause(); }
+      break;
+    case "r": case "R":
+      v0.currentTime = 0; v1.currentTime = 0; v0.play(); v1.play(); break;
+    case "1": v0.playbackRate = v1.playbackRate = 0.5; break;
+    case "2": v0.playbackRate = v1.playbackRate = 2.0; break;
+  }
+});
+// keep the two videos in sync (they are the same bout, same length)
+v0.addEventListener("timeupdate", () => {
+  if (Math.abs(v0.currentTime - v1.currentTime) > 0.15) v1.currentTime = v0.currentTime;
+});
+(async () => {
+  const m = await (await fetch("/api/bouts")).json();
+  bouts = m.bouts;
+  keys = Object.keys(bouts).sort();
+  keys.forEach(k => { assign[k] = bouts[k].reviewed_male_fly; });
+  const recs = [...new Set(keys.map(k => k.split("/").slice(0, 2).join("/")))];
+  for (const r of recs) {
+    const o = document.createElement("option");
+    o.value = r; o.textContent = r;
+    $("filter").appendChild(o);
+  }
+  $("filter").addEventListener("change", () => { idx = 0; render(); });
+  render();
+})();
+</script>
+</body></html>
+"""
+
+
+# ---------------------------------------------------------------------------
+# main
+# ---------------------------------------------------------------------------
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--root", type=Path, default=DEFAULT_ROOT,
+                        help="processed courtship root (default: %(default)s)")
+    parser.add_argument("--port", type=int, default=8642)
+    args = parser.parse_args(argv)
+    root = args.root.resolve()
+    manifest = build_manifest(root, load_manifest(root))
+    save_manifest(root, manifest)
+    n_bouts = len(manifest["bouts"])
+    n_pending = sum(1 for e in manifest["bouts"].values() if e["status"] == "pending")
+    server = ReviewServer(("127.0.0.1", args.port), root, manifest)
+    port = server.server_address[1]
+    print(f"{n_bouts} bouts ({n_pending} pending) under {root}")
+    print(f"open   http://localhost:{port}")
+    print(f"remote? ssh -L {port}:localhost:{port} <this-host>  (VS Code auto-forwards)")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+
+
+if __name__ == "__main__":
+    main()
