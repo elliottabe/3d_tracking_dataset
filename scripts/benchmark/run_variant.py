@@ -61,12 +61,30 @@ def build_variant_root(manifest: dict, dest_root: Path, variant: str) -> Path:
 def variant_commands(manifest: dict, variant_root: Path,
                      overrides: list[str]) -> list[str]:
     cmds = []
+    # Group entries by run_key to merge bouts and avoid concurrent artifact races
+    by_run_key = {}
     for e in entries(manifest):
+        rk = e["run_key"]
+        if rk not in by_run_key:
+            by_run_key[rk] = []
+        by_run_key[rk].append(e)
+
+    for run_key, es in by_run_key.items():
+        # Use first entry for recording_cfg, session_dir, etc.
+        e = es[0]
+        # Sort bouts numerically to ensure deterministic order
+        bouts = sorted([int(x["bout"]) for x in es])
+        if len(bouts) == 1:
+            bout_str = str(bouts[0])
+        else:
+            # Multiple bouts: use escaped single quotes for hydra sweep syntax
+            bout_str = f"\\'{','.join(map(str, bouts))}\\'"
+
         parts = ["python", "scripts/run_bout.py", "paths=hyak",
                  f"recording={e['recording_cfg']}",
                  f"recording.session_dir={e['session_dir']}",
-                 f"outputs.out={Path(variant_root) / e['run_key']}",
-                 f"+bout_ids={int(e['bout'])}", *overrides]
+                 f"outputs.out={Path(variant_root) / run_key}",
+                 f"bout_ids={bout_str}", *overrides]
         cmds.append(" ".join(shlex.quote(p) if " " in p else p for p in parts))
     return cmds
 

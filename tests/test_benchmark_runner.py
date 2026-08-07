@@ -42,8 +42,54 @@ def test_variant_commands_shape(tmp_path):
     assert "recording=session1" in c
     assert "recording.session_dir=/nope" in c
     assert f"outputs.out={vroot}/courtship_r" in c
-    assert "+bout_ids=1" in c
+    assert "bout_ids=1" in c
     assert "scaling.scale_keypoints=all" in c and "scaling.estimator=norm_ratio" in c
+
+
+def test_variant_commands_merges_bouts_per_run_key(tmp_path):
+    src, dest = tmp_path / "src", tmp_path / "dest"
+    # Create two bouts with the same run_key
+    make_source_bout(src, 3, flies=(0, 1), sex_json={"male_fly": 1})
+    make_source_bout(src, 8, flies=(0, 1), sex_json={"male_fly": 1})
+    # Build manifest with both bouts in the same run_key
+    m = {
+        "benchmark_root": "",
+        "proximity_threshold_bl": 2.0,
+        "bouts": [
+            {
+                "run_key": "courtship_r",
+                "layout": "canonical",
+                "source_root": str(src),
+                "recording_cfg": "session1",
+                "session_dir": "/nope",
+                "assay": "courtship",
+                "bout": 3,
+                "flies": [0, 1],
+                "tags": [],
+                "render_frames": [],
+            },
+            {
+                "run_key": "courtship_r",
+                "layout": "canonical",
+                "source_root": str(src),
+                "recording_cfg": "session1",
+                "session_dir": "/nope",
+                "assay": "courtship",
+                "bout": 8,
+                "flies": [0, 1],
+                "tags": [],
+                "render_frames": [],
+            },
+        ],
+    }
+    freeze(m, dest)
+    vroot = build_variant_root(m, dest, "v")
+    cmds = variant_commands(m, vroot, [])
+    # Should emit ONE command per run_key, not per bout
+    assert len(cmds) == 1
+    c = cmds[0]
+    # Bouts must be merged with escaped quotes (hydra sweep syntax)
+    assert "bout_ids=\\'3,8\\'" in c
 
 
 def test_render_bout_smoke(tmp_path):
