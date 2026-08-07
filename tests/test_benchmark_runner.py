@@ -44,3 +44,15 @@ def test_variant_commands_shape(tmp_path):
     assert f"outputs.out={vroot}/courtship_r" in c
     assert "+bout_ids=1" in c
     assert "scaling.scale_keypoints=all" in c and "scaling.estimator=norm_ratio" in c
+
+
+def test_render_bout_smoke(tmp_path):
+    import mujoco  # noqa: F401  (skip if unavailable)
+    from scripts.benchmark.render_grid import render_bout
+    xml = tmp_path / "m.xml"
+    xml.write_text("""<mujoco><worldbody><body name="root">
+      <joint type="free"/><geom size="0.02"/></body></worldbody></mujoco>""")
+    qpos = np.zeros((10, 7)); qpos[:, 3] = 1.0     # identity quat
+    out = tmp_path / "grid.png"
+    render_bout(qpos, [0, 5, 9], str(xml), out, size=(64, 64))
+    assert out.exists() and out.stat().st_size > 0
