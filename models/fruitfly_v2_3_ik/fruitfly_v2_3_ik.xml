@@ -600,7 +600,7 @@
             <geom name="abdomen_3_collision" class="collision" type="cylinder" size="0.0413 0.0168 0" pos="-1.72e-06 0.0158 -0.00212" quat="0.537 -0.462 0.461 0.535" contype="0" conaffinity="0"/>
             <geom name="abdomen_3_lower" material="lower" pos="0 -0.0265 -0.158" quat="1.08e-07 0 -0.229 0.973" mesh="abdomen_3_lower"/>
             <body name="abdomen_4" pos="0 0.0249 0" quat="-0.994 0.105 0 0">
-      <site name="tracking[Abd_A4]" pos="0 0.015 0.025" size="0.01" group="3"/>
+      <site name="tracking[Abd_A4]" pos="0 0.01323 0.03941" size="0.01" group="3"/>
               <!-- <include file="assets/include/abdomen_4.xml"/> -->
               <joint name="abdomen_abduct_4" class="abduct_abdomen"/>
               <joint name="abdomen_4" class="extend_abdomen"/>
@@ -625,7 +625,7 @@
                   <geom name="abdomen_6_collision" class="collision" type="ellipsoid" size="0.022 0.022 0.024" pos="-1.3e-07 0.00633 0.00338" contype="0" conaffinity="0"/>
                   <geom name="abdomen_6_lower" material="lower" pos="0 -0.0278 -0.173" quat="1.74e-07 1.15e-07 -0.43 0.903" mesh="abdomen_6_lower"/>
                   <body name="abdomen_7" pos="0 0.0239 0" quat="-1 0.026 0 -1.46e-07">
-      <site name="tracking[Abd_tip]" pos="0 0.035 0" size="0.01" group="3"/>
+      <site name="tracking[Abd_tip]" pos="-0.00272 0.01956 0.0028" size="0.01" group="3"/>
                     <!-- <include file="assets/include/abdomen_7.xml"/> -->
                     <joint name="abdomen_abduct_7" class="abduct_abdomen"/>
                     <joint name="abdomen_7" class="extend_abdomen"/>
@@ -3537,4 +3537,35 @@
     <torque name="torque_cs_Ta5G_T3_right_3" site="cs_T3_Ta5G^tarsal_claw_T3_right%.004"/>
   </sensor>
 
+  <!-- default_pose: the experimentally determined rest point of the muscles with the fly
+       HANGING (unloaded, no ground contact). It is deliberately NOT a standing pose: the legs
+       do not form a level tripod and the front tarsal claws draw together and slightly overlap,
+       which is what an unloaded fly looks like. Do not "correct" either. With ctrl=0 and na=0
+       there is no muscle tone, so simulating from this pose against a floor will not hold it.
+
+       Remapped from fruitfly_v2.1_muscles_warp.xml BY JOINT NAME. v2.1 has nq=88; v2.3 adds 13
+       joints (antennae x6, rostrum, haustellum_abduct, haustellum, labrum x2, halteres x2), so
+       copying the v2.1 qpos block positionally shifts every later value by 13 (wing angles
+       land on the antennae, leg angles on the abdomen/halteres) and leaves it 13 values short
+       of nq=101, which MuJoCo zero-pads on a direct load but REJECTS when the model is attached
+       into a scene. The 13 new joints take qpos0. Keep XML comments OUT of the qpos attribute;
+       MuJoCo rejects them ("bad format in attribute 'qpos'"). qpos rows below are grouped: free,
+       head, antennae, mouthparts, wings, abdomen, halteres, then legs T1L T1R T2L T2R T3L T3R. -->
+  <keyframe>
+    <key name="default_pose" qpos="
+      0 0 0 1 0 0 0
+      0 0 0
+      0 0 0 0 0 0
+      0 0 0 0 0
+      1.5 0.7 -0.85 1.5 0.7 -0.85
+      0 0 0 0 0 0 0 0 0 0 0 0 0 0
+      0 0
+      -0.1415 0.256 -0.3825 -0.0079 -0.02615 -0.0992 -0.1345 0 0 0 0
+      -0.1415 0.256 -0.3825 -0.0079 -0.02615 -0.0992 -0.1345 0 0 0 0
+      0.18775 -0.63939 -0.07845 0.24605 -0.24197 0 0 0 0
+      0.18775 -0.63939 -0.07845 0.24605 -0.24197 0 0 0 0
+      0.004 -0.91656 0.152125 -0.3036 -0.121155 0 0 0 0
+      0.004 -0.91656 0.152125 -0.3036 -0.121155 0 0 0 0
+    "/>
+  </keyframe>
 </mujoco>

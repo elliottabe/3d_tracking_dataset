@@ -314,8 +314,17 @@ model:
     WingL_V13: 0.02 -0.26 -0.02
     WingR_V12: 0.005 0.215 -0.005
     WingR_V13: -0.02 0.26 0.02
-    Abd_A4: 0 0.015 0.025
-    Abd_tip: 0 0.035 0
+    # Re-placed onto the v2.3 abdomen meshes. Inherited from v2.1, these two sat
+    # off the body -- Abd_A4 by 0.0145 and Abd_tip by 0.0159, the two worst-placed
+    # sites in the model (v1's worst is 0.0042). Both are trunk markers, so the
+    # Procrustes scale is fit to them: their displacement inflated the trunk-marker
+    # spread and therefore over-scaled every keypoint.
+    #   Abd_A4  kept its y (it must still mark segment A4) and was snapped to the
+    #           dorsal surface: z 0.025 -> 0.03941.
+    #   Abd_tip sat at y=0.035 but the abdomen_7 mesh ends at y=0.0196 -- it was
+    #           floating past the tip. Moved to the mesh's posterior extreme.
+    Abd_A4: 0 0.01323 0.03941
+    Abd_tip: -0.00272 0.01956 0.0028
     T1L_ThxCx: 0.00126 0.01863 -0.00716
     T1L_Tro: 0. 0. 0.
     T1L_FeTi: 0. 0. 0.
