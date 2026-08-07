@@ -1,24 +1,152 @@
-# Curated in Task 7 — entries below are format examples only.
+# Curated 2026-08-07 (Task 7, benchmark-and-scale-ab plan). User-approved
+# 13-bout selection: 5 free-running + 8 courtship (4 close_interaction-tagged
+# recording-bouts spanning close_interaction/long, 4 apart-tagged including one
+# apart_but_bad outlier). Selection is FIXED — do not reshuffle without a new
+# user approval round.
 benchmark_root: /gscratch/portia/eabe/data/Johnson_lab/processed/benchmark
 proximity_threshold_bl: 2.0        # body-lengths; apart vs close split
 bouts:
-  - run_key: courtship_S1_2026_04_02_16_03_48   # unique per source run_root
-    layout: canonical                            # pose/bouts/... under source_root
-    source_root: /gscratch/portia/eabe/data/Johnson_lab/processed/courtship/Session1/2026_04_02_16_03_48/pose
-    recording_cfg: session1                      # hydra recording group
-    session_dir: /gscratch/portia/eabe/data/Johnson_lab/Video_recordings/courtship/Session1/2026_04_02_16_03_48
-    assay: courtship
+  # --- free-running (layout: flat, flies: [0]) ---------------------------
+  - run_key: freerun_13_53_33
+    layout: flat
+    source_root: /gscratch/portia/eabe/data/Johnson_lab/free_running/Session11_2026_03_03_13_53_33_bouts
+    recording_cfg: free_running_session11
+    session_dir: /gscratch/portia/eabe/data/Johnson_lab/Video_recordings/free_running/Session11/2026_03_03_13_53_33
+    assay: free_running
+    bout: 7
+    flies: [0]
+    tags: [clean]
+    render_frames: [0, 145, 290, 435]
+
+  - run_key: freerun_14_27_48
+    layout: flat
+    source_root: /gscratch/portia/eabe/data/Johnson_lab/free_running/Session11_2026_03_03_14_27_48_bouts
+    recording_cfg: free_running_session11
+    session_dir: /gscratch/portia/eabe/data/Johnson_lab/Video_recordings/free_running/Session11/2026_03_03_14_27_48
+    assay: free_running
     bout: 1
-    flies: [0, 1]                                # cohort resolved via sex.json
-    tags: [close_interaction, wing_extension]
-    render_frames: [10, 200, 400, 700]
-  - run_key: freerun_S11_2026_03_03_13_37_35
-    layout: flat                                 # bouts/ directly under source_root
+    flies: [0]
+    tags: [clean]
+    render_frames: [0, 96, 192, 275, 288]
+
+  - run_key: freerun_13_25_13
+    layout: flat
+    source_root: /gscratch/portia/eabe/data/Johnson_lab/free_running/Session11_2026_03_03_13_25_13_bouts
+    recording_cfg: free_running_session11
+    session_dir: /gscratch/portia/eabe/data/Johnson_lab/Video_recordings/free_running/Session11/2026_03_03_13_25_13
+    assay: free_running
+    bout: 7
+    flies: [0]
+    tags: [clean]
+    render_frames: [0, 82, 165, 240, 247]
+
+  - run_key: freerun_14_10_44
+    layout: flat
+    source_root: /gscratch/portia/eabe/data/Johnson_lab/free_running/Session11_2026_03_03_14_10_44_bouts
+    recording_cfg: free_running_session11
+    session_dir: /gscratch/portia/eabe/data/Johnson_lab/Video_recordings/free_running/Session11/2026_03_03_14_10_44
+    assay: free_running
+    bout: 1
+    flies: [0]
+    tags: [clean]
+    render_frames: [0, 171, 343, 513, 514]
+
+  - run_key: freerun_13_37_35
+    layout: flat
     source_root: /gscratch/portia/eabe/data/Johnson_lab/free_running/Session11_2026_03_03_13_37_35_bouts
     recording_cfg: free_running_session11
     session_dir: /gscratch/portia/eabe/data/Johnson_lab/Video_recordings/free_running/Session11/2026_03_03_13_37_35
     assay: free_running
-    bout: 1
+    bout: 5
     flies: [0]
-    tags: [walking]
-    render_frames: [10, 200, 400]
+    tags: [fr_outlier]
+    render_frames: [0, 100, 121, 201, 301]
+
+  # --- courtship (layout: canonical, flies: [0, 1]) -----------------------
+  - run_key: courtship_S1_2026_04_02_15_25_51
+    layout: canonical
+    source_root: /gscratch/portia/eabe/data/Johnson_lab/processed/courtship/Session1/2026_04_02_15_25_51/pose
+    recording_cfg: session1
+    session_dir: /gscratch/portia/eabe/data/Johnson_lab/Video_recordings/courtship/Session1/2026_04_02_15_25_51
+    assay: courtship
+    bout: 29
+    flies: [0, 1]
+    tags: [close_interaction]
+    render_frames: [0, 226, 345, 452, 677]
+
+  - run_key: courtship_S0_2025_10_20_13_20_04
+    layout: canonical
+    source_root: /gscratch/portia/eabe/data/Johnson_lab/processed/courtship/Session0/2025_10_20_13_20_04/pose
+    recording_cfg: session0
+    session_dir: /gscratch/portia/eabe/data/Johnson_lab/Video_recordings/courtship/Session0/2025_10_20_13_20_04
+    assay: courtship
+    bout: 26
+    flies: [0, 1]
+    tags: [close_interaction]
+    render_frames: [0, 103, 249, 498, 747]
+
+  - run_key: courtship_S1_2026_04_02_15_25_51
+    layout: canonical
+    source_root: /gscratch/portia/eabe/data/Johnson_lab/processed/courtship/Session1/2026_04_02_15_25_51/pose
+    recording_cfg: session1
+    session_dir: /gscratch/portia/eabe/data/Johnson_lab/Video_recordings/courtship/Session1/2026_04_02_15_25_51
+    assay: courtship
+    bout: 8
+    flies: [0, 1]
+    tags: [close_interaction]
+    render_frames: [0, 146, 292, 409, 438]
+
+  - run_key: courtship_S0_2025_10_20_13_20_04
+    layout: canonical
+    source_root: /gscratch/portia/eabe/data/Johnson_lab/processed/courtship/Session0/2025_10_20_13_20_04/pose
+    recording_cfg: session0
+    session_dir: /gscratch/portia/eabe/data/Johnson_lab/Video_recordings/courtship/Session0/2025_10_20_13_20_04
+    assay: courtship
+    bout: 22
+    flies: [0, 1]
+    tags: [close_interaction, long]
+    render_frames: [0, 464, 710, 928, 1392]
+
+  - run_key: courtship_S1_2026_04_02_17_52_50
+    layout: canonical
+    source_root: /gscratch/portia/eabe/data/Johnson_lab/processed/courtship/Session1/2026_04_02_17_52_50/pose
+    recording_cfg: session1
+    session_dir: /gscratch/portia/eabe/data/Johnson_lab/Video_recordings/courtship/Session1/2026_04_02_17_52_50
+    assay: courtship
+    bout: 1
+    flies: [0, 1]
+    tags: [apart]
+    render_frames: [0, 1, 86, 172, 257]
+
+  - run_key: courtship_S1_2026_04_02_14_54_28
+    layout: canonical
+    source_root: /gscratch/portia/eabe/data/Johnson_lab/processed/courtship/Session1/2026_04_02_14_54_28/pose
+    recording_cfg: session1
+    session_dir: /gscratch/portia/eabe/data/Johnson_lab/Video_recordings/courtship/Session1/2026_04_02_14_54_28
+    assay: courtship
+    bout: 12
+    flies: [0, 1]
+    tags: [apart]
+    render_frames: [0, 4, 248, 496, 744]
+
+  - run_key: courtship_S1_2026_04_02_14_54_28
+    layout: canonical
+    source_root: /gscratch/portia/eabe/data/Johnson_lab/processed/courtship/Session1/2026_04_02_14_54_28/pose
+    recording_cfg: session1
+    session_dir: /gscratch/portia/eabe/data/Johnson_lab/Video_recordings/courtship/Session1/2026_04_02_14_54_28
+    assay: courtship
+    bout: 17
+    flies: [0, 1]
+    tags: [apart]
+    render_frames: [0, 327, 654, 899, 981]
+
+  - run_key: courtship_S1_2026_04_02_12_11_50
+    layout: canonical
+    source_root: /gscratch/portia/eabe/data/Johnson_lab/processed/courtship/Session1/2026_04_02_12_11_50/pose
+    recording_cfg: session1
+    session_dir: /gscratch/portia/eabe/data/Johnson_lab/Video_recordings/courtship/Session1/2026_04_02_12_11_50
+    assay: courtship
+    bout: 2
+    flies: [0, 1]
+    tags: [apart, apart_but_bad]
+    render_frames: [0, 97, 129, 194, 291]

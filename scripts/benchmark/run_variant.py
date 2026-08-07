@@ -71,11 +71,21 @@ def variant_commands(manifest: dict, variant_root: Path,
     return cmds
 
 
-def _male_fly(bout_dir_parent: Path) -> int | None:
+# fly_id_review.py's DEFAULT_MALE_FLY: bouts that predate sexing
+# canonicalization (no per-bout sex.json yet) default to fly1=male,
+# fly0=female -- the same convention id_review.json already records for
+# every unreviewed bout it scans (source="default"). Falling back to it
+# here (instead of raising) lets the benchmark cohort split run on bouts
+# whose recording hasn't been through canonicalize_session_sex.py; treat
+# those cohort labels as provisional pending a real review pass.
+_DEFAULT_MALE_FLY = 1
+
+
+def _male_fly(bout_dir_parent: Path) -> int:
     sex = bout_dir_parent / "sex.json"
     if sex.is_file():
         return int(json.loads(sex.read_text()).get("male_fly"))
-    return None
+    return _DEFAULT_MALE_FLY
 
 
 def collect(manifest: dict, root_for_outputs: Path | None,
