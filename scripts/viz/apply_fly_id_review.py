@@ -56,16 +56,32 @@ def plan_swaps(manifest: dict, allow_pending: bool = False) -> list[str]:
 
 
 def swap_bout(root: Path, key: str, entry: dict) -> None:
-    """Swap fly0/ <-> fly1/ for one bout and rewrite its sex.json."""
+    """Swap fly0/ <-> fly1/ for one bout and rewrite its sex.json.
+
+    Invariant: every bout selected by plan_swaps has sex.json.male_fly == 0 on disk
+    pre-swap (record_decision wrote it at review time; allow-pending bouts got
+    original 0 from sex.json). Recovery: if sex.json already shows male_fly == 1,
+    the physical swap completed in a prior interrupted run — return immediately
+    WITHOUT renaming anything. The marker .fly_swap_tmp spans the metadata write
+    so any crash leaves evidence for next run to raise RuntimeError loudly.
+    """
     bout_dir = bout_dir_from_key(root, key)
     tmp = bout_dir / TMP_NAME
     if tmp.exists():
         raise RuntimeError(
             f"{key}: stale {TMP_NAME} from an interrupted swap -- inspect manually")
+
+    # Recovery: if sex.json already shows the swap completed, skip the dirs
+    existing = read_sex_json(bout_dir) or {}
+    if existing.get("male_fly") == 1:
+        return
+
+    # Read pre-swap sex.json BEFORE any renames (avoid mid-operation state)
+    # Then: fly0 → tmp, fly1 → fly0
     (bout_dir / "fly0").rename(tmp)
     (bout_dir / "fly1").rename(bout_dir / "fly0")
-    tmp.rename(bout_dir / "fly1")
-    existing = read_sex_json(bout_dir) or {}
+
+    # Build and atomically write sex.json while marker still exists
     sex = dict(existing)
     sex.update({
         "male_fly": 1,
@@ -78,6 +94,9 @@ def swap_bout(root: Path, key: str, entry: dict) -> None:
     tmp_json = bout_dir / "sex.json.tmp"
     tmp_json.write_text(json.dumps(sex, indent=2))
     os.replace(tmp_json, bout_dir / "sex.json")
+
+    # Marker disappears LAST, so any crash before this leaves the marker
+    tmp.rename(bout_dir / "fly1")
 
 
 def main(argv=None):

@@ -79,6 +79,64 @@ def test_swap_bout_stale_tmp_marker_raises(tmp_path):
         swap_bout(tmp_path, "Session1/recA/bout_00001", entry("swapped", reviewed=0))
 
 
+def test_swap_bout_skips_when_sex_json_already_swapped(tmp_path):
+    """Recovery: if sex.json already shows male_fly==1, don't rename dirs (no double-swap)."""
+    bout_dir = make_bout(tmp_path, "Session1", "recA", "bout_00001",
+                         sex_json={"male_fly": 1, "applied_swap": True})
+    (bout_dir / "fly0" / "MARKER_A").touch()
+    (bout_dir / "fly1" / "MARKER_B").touch()
+    e = entry("swapped", reviewed=0, original=1)
+    swap_bout(tmp_path, "Session1/recA/bout_00001", e)
+    # Dirs NOT renamed (recovery path skipped the swap)
+    assert (bout_dir / "fly0" / "MARKER_A").exists()
+    assert (bout_dir / "fly1" / "MARKER_B").exists()
+
+
+def test_swap_bout_crash_leaves_loud_marker(tmp_path, monkeypatch):
+    """Crash during sex.json write leaves .fly_swap_tmp marker for error detection."""
+    bout_dir = make_bout(tmp_path, "Session1", "recA", "bout_00001")
+    (bout_dir / "fly0" / "MARKER_A").touch()
+    (bout_dir / "fly1" / "MARKER_B").touch()
+
+    # Monkeypatch os.replace to simulate crash during sex.json atomic write
+    original_replace = __import__("os").replace
+    def crash_on_sex_json(*args, **kwargs):
+        # Check if this is the sex.json write
+        if len(args) >= 2 and str(args[1]).endswith("sex.json"):
+            raise OSError("simulated crash during sex.json write")
+        return original_replace(*args, **kwargs)
+
+    monkeypatch.setattr("scripts.viz.apply_fly_id_review.os.replace", crash_on_sex_json)
+
+    # First call crashes, leaving dirs renamed but marker exists
+    e = entry("swapped", reviewed=0, original=1)
+    with pytest.raises(OSError, match="simulated crash"):
+        swap_bout(tmp_path, "Session1/recA/bout_00001", e)
+
+    # Marker should still exist (didn't get renamed to fly1)
+    assert (bout_dir / ".fly_swap_tmp").exists()
+
+    # Restore os.replace and call swap_bout again — should raise on stale marker
+    monkeypatch.undo()
+    with pytest.raises(RuntimeError, match="fly_swap_tmp"):
+        swap_bout(tmp_path, "Session1/recA/bout_00001", e)
+
+
+def test_swap_bout_preserves_existing_original_male_fly(tmp_path):
+    """When sex.json pre-exists with original_male_fly, preserve it (don't use entry default)."""
+    bout_dir = make_bout(tmp_path, "Session1", "recA", "bout_00001",
+                         sex_json={"male_fly": 0, "original_male_fly": 0, "applied_swap": False})
+    (bout_dir / "fly0" / "M0").touch()
+    (bout_dir / "fly1" / "M1").touch()
+    # Entry says original=1, but pre-existing sex.json says original=0
+    e = entry("swapped", reviewed=0, original=1)
+    swap_bout(tmp_path, "Session1/recA/bout_00001", e)
+    sex = read_sex_json(bout_dir)
+    # Should preserve the pre-existing original_male_fly=0, not entry's original=1
+    assert sex["original_male_fly"] == 0
+    assert sex["male_fly"] == 1
+
+
 # ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
