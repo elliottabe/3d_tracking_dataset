@@ -20,7 +20,11 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 from pathlib import Path
+
+if __package__ in (None, ""):  # direct invocation: put repo root on sys.path
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from scripts.viz.fly_id_review import (
     DEFAULT_ROOT,

@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -198,3 +200,15 @@ def test_main_allow_pending_treats_pending_as_original(tmp_path):
 def test_main_missing_manifest_exits(tmp_path):
     with pytest.raises(SystemExit):
         main(["--root", str(tmp_path), "--apply"])
+
+
+def test_direct_invocation_no_import_error(tmp_path):
+    """Direct file invocation should not die at import (missing manifest still exits cleanly)."""
+    repo_root = Path(__file__).resolve().parents[1]
+    result = subprocess.run(
+        [sys.executable, "scripts/viz/apply_fly_id_review.py", "--root", str(tmp_path)],
+        capture_output=True, text=True, cwd=repo_root)
+    assert "ModuleNotFoundError" not in result.stderr, f"Got import error: {result.stderr}"
+    assert result.returncode != 0, "Missing manifest should cause non-zero exit"
+    combined = result.stderr + result.stdout
+    assert "id_review.json" in combined, f"Should mention missing manifest, got: {combined}"
