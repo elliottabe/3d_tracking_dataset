@@ -165,7 +165,19 @@ def test_derived_model_kinematically_identical_to_shared():
     np.testing.assert_array_equal(derived.body_pos, shared.body_pos)
     np.testing.assert_array_equal(derived.body_quat, shared.body_quat)
     np.testing.assert_array_equal(derived.body_parentid, shared.body_parentid)
-    np.testing.assert_array_equal(derived.site_pos, shared.site_pos)
+
+    # site_pos differs for exactly the two abdomen trunk markers we deliberately
+    # re-placed onto the v2.3 meshes (they were inherited from v2.1: Abd_A4 sat
+    # 0.0145 INSIDE the abdomen, Abd_tip 0.0159 PAST the tip). Everything else
+    # must still match, and no OTHER site may drift.
+    CORRECTED = {'tracking[Abd_A4]', 'tracking[Abd_tip]'}
+    site_names = _names(derived, mj.mjtObj.mjOBJ_SITE)
+    differs = {site_names[i] for i in range(derived.nsite)
+               if not np.array_equal(derived.site_pos[i], shared.site_pos[i])}
+    assert differs == CORRECTED, f'unexpected site drift: {differs ^ CORRECTED}'
+
+    keep = [i for i in range(derived.nsite) if site_names[i] not in CORRECTED]
+    np.testing.assert_array_equal(derived.site_pos[keep], shared.site_pos[keep])
 
     # Forward kinematics from a random qpos must agree exactly (bit-identical
     # kinematic trees, so no floating-point drift is expected either).
