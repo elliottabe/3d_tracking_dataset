@@ -1,7 +1,6 @@
 """Tests for the scaling.scale_keypoints mode (scripts/scale_keypoints.py)."""
 from __future__ import annotations
 
-import os
 import subprocess
 import sys
 
@@ -9,8 +8,6 @@ import pytest
 from omegaconf import OmegaConf
 
 from scripts.scale_keypoints import resolve_scale_keypoints
-
-REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 KP = ["Scutellum", "WingL_base", "T1L_FeTi", "T1R_FeTi", "Abd_tip"]
 
@@ -42,12 +39,13 @@ def test_bad_mode_raises():
         resolve_scale_keypoints(cfg_with("some"), KP)
 
 
-def test_scale_keypoints_importable_both_ways():
-    """run_bout.py is invoked as `python scripts/run_bout.py` (sys.path[0]=scripts/)
-    AND imported as scripts.run_bout — the helper must import under both."""
-    code = ("import sys; sys.path.insert(0, 'scripts'); "
-            "import scale_keypoints; "
-            "print(scale_keypoints.resolve_scale_keypoints.__name__)")
-    r = subprocess.run([sys.executable, "-c", code],
-                        capture_output=True, text=True, cwd=REPO_ROOT)
-    assert r.returncode == 0 and "resolve_scale_keypoints" in r.stdout, r.stderr
+def test_run_bout_direct_invocation_imports():
+    """run_bout.py is launched as `python scripts/run_bout.py` (sys.path[0] = scripts/);
+    a plain `from scripts...` import there crashes every pipeline launcher (regression:
+    2026-08-07 benchmark run). --help exits 0 only if all module-level imports succeed."""
+    from pathlib import Path
+    repo_root = Path(__file__).resolve().parents[1]
+    r = subprocess.run([sys.executable, "scripts/run_bout.py", "--help"],
+                        capture_output=True, text=True, cwd=repo_root, timeout=240)
+    assert "ModuleNotFoundError" not in r.stderr, r.stderr[-2000:]
+    assert r.returncode == 0, r.stderr[-2000:]
