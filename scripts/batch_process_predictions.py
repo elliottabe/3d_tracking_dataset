@@ -104,7 +104,8 @@ def check_outputs_exist(folder: Path, anatomy: str, dataset: str, fly_suffix: st
 
 
 def run_preprocessing(folder: Path, anatomy: str, dataset: str, paths: str,
-                      fly_info: dict, dry_run: bool = False) -> dict:
+                      fly_info: dict, dry_run: bool = False,
+                      preprocessing_group: str = None) -> dict:
     """
     Run preprocessing for a single prediction folder and fly.
 
@@ -145,6 +146,9 @@ def run_preprocessing(folder: Path, anatomy: str, dataset: str, paths: str,
         f"preprocessing.bouts_csv={fly_info['bouts_csv']}",
         f"preprocessing.bout_name={bout_name}",
     ]
+
+    if preprocessing_group:
+        cmd.append(f"preprocessing@dataset.preprocessing={preprocessing_group}")
 
     result['command'] = ' '.join(cmd)
 
@@ -212,6 +216,15 @@ def main():
         type=str,
         default='v1',
         help='Anatomy version to use (v1, v2_muscles, etc.)'
+    )
+    parser.add_argument(
+        '--preprocessing',
+        type=str,
+        default=None,
+        help='Preprocessing config group to select, e.g. v2_3. Passed through '
+             'as preprocessing@dataset.preprocessing=<value> (the dataset config '
+             'pulls the group in via its own defaults list, so a plain '
+             'preprocessing=<value> is rejected by Hydra).'
     )
     parser.add_argument(
         '--paths',
@@ -329,7 +342,8 @@ def main():
             # Run preprocessing
             print(f"  [{fly_label}] Prerequisites OK - running preprocessing...")
             folder_result = run_preprocessing(
-                folder, args.anatomy, args.dataset, args.paths, fly_info, args.dry_run
+                folder, args.anatomy, args.dataset, args.paths, fly_info,
+                args.dry_run, preprocessing_group=args.preprocessing
             )
             results.append(folder_result)
 

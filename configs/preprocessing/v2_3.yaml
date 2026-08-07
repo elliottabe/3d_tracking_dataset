@@ -1,0 +1,40 @@
+# @package _global_.preprocessing
+
+# v2.3 preprocessing: identical to `default` except the global-scale estimator.
+#
+# WHY THIS EXISTS (measured on session11/Predictions_3D_34292440):
+# The default fits ONE Procrustes scale to the five trunk markers
+# (scaling.scale_keypoints: trunk). On the v2.3 model that over-scales every
+# keypoint, because v2.3's trunk markers are unusually widely spread relative to
+# the rest of its body:
+#
+#   rest-pose trunk-marker spread   v1 0.0845   v2_3 0.0965   (+14.2%)
+#   rest-pose all-marker spread     v1 0.1496   v2_3 0.1416   ( -5.3%)
+#   body size relative to own trunk v1 1.7707   v2_3 1.4671   (-17.1%)
+#
+# So the fly is sized by a trunk that is wide for its body, and every non-trunk
+# landmark then falls short of its keypoint. With per-segment calibration off,
+# STAC's only freedom is to push all 50 marker offsets outward, which is why the
+# markers visibly float off the mesh (worst at head, wing veins and tarsus tips).
+#
+# Fitting the scale to ALL 50 markers with the norm-ratio estimator gives
+# 0.011140 instead of 0.012593 (-11.5%), which matches the independent estimate
+# from comparing keypoints to anatomical sites at the fitted pose (+10.6% too
+# large, so ~-9.6% needed). End-to-end that took over-scaling from 10.7% -> 2.1%
+# and roughly halved marker displacement from anatomy (0.0064 -> 0.0036 to mesh).
+#
+# NOTE the estimator matters as much as the marker set: `all` + umeyama collapses
+# to 0.008353 (-34%), because Umeyama's scale is provably <= the norm ratio and
+# shrinks hard on a shape that does not match -- and the legs, being pose-varying,
+# make the match worse. Use norm_ratio with `all`, not umeyama.
+#
+# This is v2.3-specific ON PURPOSE. v1's trunk/body proportions differ and its
+# markers already sit close to anatomy (displacement 0.0065 vs v2_3's 0.0159
+# before this change), so the shared default is left alone.
+defaults:
+  - default
+  - _self_
+
+scaling:
+  scale_keypoints: all
+  estimator: norm_ratio
