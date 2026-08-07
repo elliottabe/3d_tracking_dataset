@@ -69,3 +69,49 @@ def test_write_and_markdown(tmp_path):
     md = scorecard_markdown(sc)
     assert "free_running" in md and "gap" in md.lower()
     assert (tmp_path / "scorecard.md").exists()
+
+
+def test_nan_metric_skipped_from_gap_ratios():
+    """NaN in cohort metric -> no gap_ratio entry for that metric."""
+    per_bout = [
+        _bout("free_running", 4.0, 0.001),
+        {"cohort": "courtship_male", "run_key": "r", "bout": 1, "fly": 0, "tags": [],
+         "scalars": {"reproj_px_median": float("nan"), "jitter_median": 0.002},
+         "splits": {"reproj_px": {"all": float("nan"), "apart": float("nan"), "close": None}}}
+    ]
+    sc = build_scorecard(per_bout)
+    # NaN reproj_px_median should not appear in gap_ratios
+    assert "reproj_px_median" not in sc["gap_ratios"]["courtship_male"]
+    # jitter_median should be there (it's finite)
+    assert "jitter_median" in sc["gap_ratios"]["courtship_male"]
+
+
+def test_write_scorecard_nan_converts_to_null(tmp_path):
+    """write_scorecard converts NaN to JSON null and parses correctly."""
+    per_bout = [
+        {"cohort": "free_running", "run_key": "r", "bout": 1, "fly": 0, "tags": [],
+         "scalars": {"reproj_px_median": float("nan")},
+         "splits": {}},
+        {"cohort": "courtship_male", "run_key": "r", "bout": 1, "fly": 0, "tags": [],
+         "scalars": {"reproj_px_median": 10.0},
+         "splits": {}}
+    ]
+    sc = build_scorecard(per_bout)
+    p = tmp_path / "scorecard.json"
+    write_scorecard(p, sc)
+    # Parse the JSON: should not raise
+    data = json.loads(p.read_text())
+    # NaN should have been converted to null in JSON
+    assert data["cohorts"]["free_running"]["reproj_px_median"] is None
+
+
+def test_build_scorecard_unrecognized_cohort_raises():
+    """Unrecognized cohort string raises ValueError."""
+    per_bout = [
+        _bout("free_running", 4.0, 0.001),
+        {"cohort": "courtship_msle", "run_key": "r", "bout": 1, "fly": 0, "tags": [],
+         "scalars": {"reproj_px_median": 10.0},
+         "splits": {}}
+    ]
+    with pytest.raises(ValueError, match="courtship_msle"):
+        build_scorecard(per_bout)

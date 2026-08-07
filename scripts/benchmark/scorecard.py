@@ -37,6 +37,11 @@ def split_series(series: np.ndarray, proximity: np.ndarray | None,
 
 
 def build_scorecard(per_bout: list[dict]) -> dict:
+    # Validate all cohorts upfront
+    bad_cohorts = {b["cohort"] for b in per_bout if b["cohort"] not in COHORTS}
+    if bad_cohorts:
+        raise ValueError(f"Unrecognized cohort(s): {sorted(bad_cohorts)}")
+
     cohorts: dict[str, dict] = {}
     n_bouts: dict[str, int] = {}
     for c in COHORTS:
@@ -61,7 +66,10 @@ def build_scorecard(per_bout: list[dict]) -> dict:
         if c not in cohorts:
             continue
         gap_ratios[c] = {k: cohorts[c][k] / base[k]
-                         for k in cohorts[c] if base.get(k) not in (None, 0)}
+                         for k in cohorts[c]
+                         if base.get(k) not in (None, 0)
+                         and np.isfinite(cohorts[c][k])
+                         and np.isfinite(base[k])}
     return {"cohorts": cohorts, "gap_ratios": gap_ratios, "n_bouts": n_bouts,
             "per_bout": per_bout}
 
@@ -86,12 +94,17 @@ def scorecard_markdown(scorecard: dict) -> str:
 
 
 def _jsonable(obj):
+    # Convert non-finite floats to None for valid JSON
+    if isinstance(obj, float) and not np.isfinite(obj):
+        return None
     if isinstance(obj, dict):
         return {k: _jsonable(v) for k, v in obj.items()}
     if isinstance(obj, (list, tuple)):
         return [_jsonable(v) for v in obj]
     if isinstance(obj, (np.floating, np.integer)):
-        return obj.item()
+        v = obj.item()
+        # Check converted value too (for np.floating that becomes Python float)
+        return None if isinstance(v, float) and not np.isfinite(v) else v
     if isinstance(obj, np.ndarray):
         return obj.tolist()
     return obj
