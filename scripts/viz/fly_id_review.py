@@ -146,6 +146,10 @@ def record_decision(root: Path, manifest: dict, bout_key: str,
     entry["reviewed_male_fly"] = reviewed_male_fly
     entry["status"] = status
     entry["reviewed_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    # Physical state lives in sex.json's applied_swap; resetting this flag lets
+    # a post-apply re-review be re-selected by plan_swaps (swap_bout's
+    # male_fly==1 recovery guard keeps a no-op re-confirm safe either way).
+    entry["applied"] = False
     save_manifest(root, manifest)
     if status != "unsure":
         _write_sex_json(bout_dir_from_key(root, bout_key), entry)
@@ -154,14 +158,15 @@ def record_decision(root: Path, manifest: dict, bout_key: str,
 
 def _write_sex_json(bout_dir: Path, entry: dict) -> None:
     existing = read_sex_json(bout_dir) or {}
-    sex = {
+    sex = dict(existing)
+    sex.update({
         "male_fly": entry["reviewed_male_fly"],
         "original_male_fly": existing.get("original_male_fly", entry["original_male_fly"]),
         "applied_swap": existing.get("applied_swap", False),
         "confidence": "user",
         "method": "manual-gui",
         "note": f"fly_id_review {entry['reviewed_at']} status={entry['status']}",
-    }
+    })
     tmp = bout_dir / "sex.json.tmp"
     tmp.write_text(json.dumps(sex, indent=2))
     os.replace(tmp, bout_dir / "sex.json")
@@ -268,6 +273,7 @@ class ReviewHandler(BaseHTTPRequestHandler):
             self.send_header("Accept-Ranges", "bytes")
             self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(length))
+            self.send_header("Cache-Control", "no-cache")
             self.end_headers()
             f.seek(start)
             self._copy(f, length)

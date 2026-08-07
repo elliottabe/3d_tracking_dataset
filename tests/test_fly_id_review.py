@@ -176,11 +176,14 @@ def test_record_swap_writes_male_fly_0(tmp_path):
 def test_record_preserves_existing_sex_json_history(tmp_path):
     m = _fresh(tmp_path, sex_json={"male_fly": 1, "original_male_fly": 0,
                                    "applied_swap": True, "method": "manual",
-                                   "confidence": "user", "note": "old"})
+                                   "confidence": "user", "note": "old",
+                                   "montage": "old-info"})
     record_decision(tmp_path, m, "Session1/recA/bout_00001", 1, "confirmed")
     sex = read_sex_json(bout_dir_from_key(tmp_path, "Session1/recA/bout_00001"))
     assert sex["original_male_fly"] == 0   # history kept
     assert sex["applied_swap"] is True     # history kept
+    assert sex["montage"] == "old-info"    # unknown field survives (not dropped)
+    assert sex["note"] != "old"            # note IS a fresh decision, overwritten
 
 
 def test_record_unsure_skips_sex_json(tmp_path):
@@ -188,6 +191,15 @@ def test_record_unsure_skips_sex_json(tmp_path):
     record_decision(tmp_path, m, "Session1/recA/bout_00001", 1, "unsure")
     assert read_sex_json(bout_dir_from_key(tmp_path, "Session1/recA/bout_00001")) is None
     assert load_manifest(tmp_path)["bouts"]["Session1/recA/bout_00001"]["status"] == "unsure"
+
+
+def test_record_decision_resets_applied_flag(tmp_path):
+    """A re-review after apply must clear 'applied' so plan_swaps reconsiders it."""
+    m = _fresh(tmp_path)
+    m["bouts"]["Session1/recA/bout_00001"]["applied"] = True  # simulate post-apply
+    e = record_decision(tmp_path, m, "Session1/recA/bout_00001", 0, "swapped")
+    assert e["applied"] is False
+    assert load_manifest(tmp_path)["bouts"]["Session1/recA/bout_00001"]["applied"] is False
 
 
 def test_record_rejects_bad_input(tmp_path):
@@ -271,6 +283,7 @@ def test_media_range_206(server):
         assert resp.status == 206
         assert resp.headers["Content-Range"] == f"bytes 10-19/{len(MEDIA_BYTES)}"
         assert resp.headers["Content-Length"] == "10"
+        assert resp.headers["Cache-Control"] == "no-cache"  # apply can swap dirs mid-session
         assert resp.read() == MEDIA_BYTES[10:20]
 
 

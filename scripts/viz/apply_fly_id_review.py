@@ -42,6 +42,8 @@ def validate(manifest: dict, allow_pending: bool) -> list[str]:
     """Blockers that must be resolved before --apply may run."""
     errors = []
     for key, e in sorted(manifest["bouts"].items()):
+        if e.get("warning"):
+            continue  # unreviewable/excluded from swaps (plan_swaps skips these too)
         if e["status"] == "unsure":
             errors.append(f"{key}: unsure (resolve in the GUI first)")
         elif e["status"] == "pending" and not allow_pending:

@@ -38,6 +38,17 @@ def test_validate_blocks_pending_and_unsure(tmp_path):
     assert len(errors) == 1 and "unsure" in errors[0]  # unsure ALWAYS blocks
 
 
+def test_validate_skips_warned_bouts(tmp_path):
+    """Warned bouts are excluded from swaps and reported separately by main --
+    blocking on their pending/unsure status would be an operator dead end."""
+    m = manifest_of(
+        tmp_path,
+        warned=entry("pending", warning="missing: fly1/sidebyside.mp4"),
+        ok=entry("confirmed"),
+    )
+    assert validate(m, allow_pending=False) == []
+
+
 # ---------------------------------------------------------------------------
 # plan_swaps
 # ---------------------------------------------------------------------------

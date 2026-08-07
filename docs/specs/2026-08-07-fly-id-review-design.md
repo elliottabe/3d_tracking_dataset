@@ -139,8 +139,13 @@ flipping through — satisfying the "default to original" requirement.
 - All manifest writes are atomic (temp file + `os.replace`).
 - Server binds `127.0.0.1` only; `/media` rejects paths escaping the root.
 - Missing/partial bouts: warning badge in UI, excluded from apply.
-- Apply uses per-bout try/except; a failure mid-swap leaves a `.fly_swap_tmp`
-  marker that the script detects and reports on next run.
+- Apply is **fail-fast**: it stops on the first error rather than continuing
+  past a broken bout. The manifest is persisted after every successful bout
+  swap, so a failure mid-run loses no completed work. An interrupted swap
+  leaves a `.fly_swap_tmp` marker that the next run detects and reports
+  loudly (refuses to guess); a swap that completed physically but wasn't
+  recorded (e.g. crash right after the rename) is detected via `sex.json`
+  showing `male_fly == 1` and is skipped rather than re-swapped.
 
 ## Testing
 
