@@ -14,6 +14,7 @@ from scripts.viz.fly_id_review import (
     build_manifest,
     load_manifest,
     read_sex_json,
+    record_decision,
     save_manifest,
     scan_bouts,
 )
@@ -133,3 +134,61 @@ def test_read_sex_json_absent_or_corrupt(tmp_path):
     assert read_sex_json(bout_dir) is None
     (bout_dir / "sex.json").write_text("{not json")
     assert read_sex_json(bout_dir) is None
+
+
+# ---------------------------------------------------------------------------
+# record_decision
+# ---------------------------------------------------------------------------
+
+def _fresh(tmp_path, **bout_kw):
+    make_bout(tmp_path, "Session1", "recA", "bout_00001", **bout_kw)
+    return build_manifest(tmp_path)
+
+
+def test_record_confirmed_writes_manifest_and_sex_json(tmp_path):
+    m = _fresh(tmp_path)
+    e = record_decision(tmp_path, m, "Session1/recA/bout_00001", 1, "confirmed")
+    assert e["status"] == "confirmed" and e["reviewed_male_fly"] == 1
+    assert e["reviewed_at"] is not None
+    assert load_manifest(tmp_path)["bouts"]["Session1/recA/bout_00001"]["status"] == "confirmed"
+    sex = read_sex_json(bout_dir_from_key(tmp_path, "Session1/recA/bout_00001"))
+    assert sex["male_fly"] == 1
+    assert sex["original_male_fly"] == 1
+    assert sex["applied_swap"] is False
+    assert sex["method"] == "manual-gui"
+    assert sex["confidence"] == "user"
+
+
+def test_record_swap_writes_male_fly_0(tmp_path):
+    m = _fresh(tmp_path)
+    record_decision(tmp_path, m, "Session1/recA/bout_00001", 0, "swapped")
+    sex = read_sex_json(bout_dir_from_key(tmp_path, "Session1/recA/bout_00001"))
+    assert sex["male_fly"] == 0
+    assert sex["original_male_fly"] == 1  # pre-review original preserved
+
+
+def test_record_preserves_existing_sex_json_history(tmp_path):
+    m = _fresh(tmp_path, sex_json={"male_fly": 1, "original_male_fly": 0,
+                                   "applied_swap": True, "method": "manual",
+                                   "confidence": "user", "note": "old"})
+    record_decision(tmp_path, m, "Session1/recA/bout_00001", 1, "confirmed")
+    sex = read_sex_json(bout_dir_from_key(tmp_path, "Session1/recA/bout_00001"))
+    assert sex["original_male_fly"] == 0   # history kept
+    assert sex["applied_swap"] is True     # history kept
+
+
+def test_record_unsure_skips_sex_json(tmp_path):
+    m = _fresh(tmp_path)
+    record_decision(tmp_path, m, "Session1/recA/bout_00001", 1, "unsure")
+    assert read_sex_json(bout_dir_from_key(tmp_path, "Session1/recA/bout_00001")) is None
+    assert load_manifest(tmp_path)["bouts"]["Session1/recA/bout_00001"]["status"] == "unsure"
+
+
+def test_record_rejects_bad_input(tmp_path):
+    m = _fresh(tmp_path)
+    with pytest.raises(KeyError):
+        record_decision(tmp_path, m, "Session9/nope/bout_99999", 1, "confirmed")
+    with pytest.raises(ValueError):
+        record_decision(tmp_path, m, "Session1/recA/bout_00001", 2, "confirmed")
+    with pytest.raises(ValueError):
+        record_decision(tmp_path, m, "Session1/recA/bout_00001", 1, "pending")

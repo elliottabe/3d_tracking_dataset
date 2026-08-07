@@ -123,3 +123,45 @@ def load_manifest(root: Path) -> dict | None:
     if not path.is_file():
         return None
     return json.loads(path.read_text())
+
+
+# ---------------------------------------------------------------------------
+# Decisions
+# ---------------------------------------------------------------------------
+
+def record_decision(root: Path, manifest: dict, bout_key: str,
+                    reviewed_male_fly: int, status: str) -> dict:
+    """Record one review decision: update manifest (atomic) + bout sex.json.
+
+    sex.json is only written for confirmed/swapped — an 'unsure' bout has no
+    trustworthy identity to record.
+    """
+    if bout_key not in manifest["bouts"]:
+        raise KeyError(bout_key)
+    if status not in ("confirmed", "swapped", "unsure"):
+        raise ValueError(f"bad status: {status}")
+    if reviewed_male_fly not in (0, 1):
+        raise ValueError(f"bad reviewed_male_fly: {reviewed_male_fly}")
+    entry = manifest["bouts"][bout_key]
+    entry["reviewed_male_fly"] = reviewed_male_fly
+    entry["status"] = status
+    entry["reviewed_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    save_manifest(root, manifest)
+    if status != "unsure":
+        _write_sex_json(bout_dir_from_key(root, bout_key), entry)
+    return entry
+
+
+def _write_sex_json(bout_dir: Path, entry: dict) -> None:
+    existing = read_sex_json(bout_dir) or {}
+    sex = {
+        "male_fly": entry["reviewed_male_fly"],
+        "original_male_fly": existing.get("original_male_fly", entry["original_male_fly"]),
+        "applied_swap": existing.get("applied_swap", False),
+        "confidence": "user",
+        "method": "manual-gui",
+        "note": f"fly_id_review {entry['reviewed_at']} status={entry['status']}",
+    }
+    tmp = bout_dir / "sex.json.tmp"
+    tmp.write_text(json.dumps(sex, indent=2))
+    os.replace(tmp, bout_dir / "sex.json")
