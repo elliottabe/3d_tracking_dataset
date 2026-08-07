@@ -1,0 +1,24 @@
+# Curated in Task 7 — entries below are format examples only.
+benchmark_root: /gscratch/portia/eabe/data/Johnson_lab/processed/benchmark
+proximity_threshold_bl: 2.0        # body-lengths; apart vs close split
+bouts:
+  - run_key: courtship_S1_2026_04_02_16_03_48   # unique per source run_root
+    layout: canonical                            # pose/bouts/... under source_root
+    source_root: /gscratch/portia/eabe/data/Johnson_lab/processed/courtship/Session1/2026_04_02_16_03_48/pose
+    recording_cfg: session1                      # hydra recording group
+    session_dir: /gscratch/portia/eabe/data/Johnson_lab/Video_recordings/courtship/Session1/2026_04_02_16_03_48
+    assay: courtship
+    bout: 1
+    flies: [0, 1]                                # cohort resolved via sex.json
+    tags: [close_interaction, wing_extension]
+    render_frames: [10, 200, 400, 700]
+  - run_key: freerun_S11_2026_03_03_13_37_35
+    layout: flat                                 # bouts/ directly under source_root
+    source_root: /gscratch/portia/eabe/data/Johnson_lab/free_running/Session11_2026_03_03_13_37_35_bouts
+    recording_cfg: free_running_session11
+    session_dir: /gscratch/portia/eabe/data/Johnson_lab/Video_recordings/free_running/Session11/2026_03_03_13_37_35
+    assay: free_running
+    bout: 1
+    flies: [0]
+    tags: [walking]
+    render_frames: [10, 200, 400]
