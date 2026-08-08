@@ -80,10 +80,15 @@ bouts:
     recording_cfg: session0
     session_dir: /gscratch/portia/eabe/data/Johnson_lab/Video_recordings/courtship/Session0/2025_10_20_13_20_04
     assay: courtship
-    bout: 26
+    # Replaced bout 26 (2026-08-08): 37.2% of its frames had BOTH fly slots
+    # tracking the same animal (duplicate-slot artifact, see comparison.md), so
+    # its "closeness" was tracking failure rather than behaviour. Bout 6 has
+    # clean two-slot tracking (0% coincident) and the female is up on the wall
+    # for 84% of frames -- hard for the right reason (OOD pose, still visible).
+    bout: 6
     flies: [0, 1]
-    tags: [close_interaction]
-    render_frames: [0, 103, 249, 498, 747]
+    tags: [female_on_wall]
+    render_frames: [0, 351, 703, 827, 1054]
 
   - run_key: courtship_S1_2026_04_02_15_25_51
     layout: canonical
@@ -102,10 +107,14 @@ bouts:
     recording_cfg: session0
     session_dir: /gscratch/portia/eabe/data/Johnson_lab/Video_recordings/courtship/Session0/2025_10_20_13_20_04
     assay: courtship
-    bout: 22
+    # Replaced bout 22 (2026-08-08): 24.6% duplicate-slot frames, and its fly0
+    # had only 68% trunk-marker coverage -- the bout-fly that produced the 38x
+    # scale error. Bout 14 keeps the close-interaction character (median 1.71
+    # body-lengths) with clean tracking (0% coincident, 100% trunk coverage).
+    bout: 14
     flies: [0, 1]
     tags: [close_interaction, long]
-    render_frames: [0, 464, 710, 928, 1392]
+    render_frames: [0, 238, 391, 782, 1173]
 
   - run_key: courtship_S1_2026_04_02_17_52_50
     layout: canonical
