@@ -102,6 +102,20 @@ def resolve_bout_ids(cfg):
     return [int(x) for x in spec.split(",") if x.strip() != ""]
 
 
+def should_stop_after_triangulate(cfg) -> bool:
+    """``cfg.pipeline.stop_after == 'triangulate'`` (Task 18:
+    scripts/probe_recording.py). Absent ``pipeline`` block, or ``stop_after``
+    null/unset/any other value, is a strict no-op returning False -- a config
+    predating this feature (or simply not using it) runs every stage exactly
+    as before. Used by ``process_bout_fly`` to return immediately after
+    Stage A/B (2D keypoints + triangulation, + optional B2 smoothing)
+    without spending GPU time on scale/offsets/STAC/polish/outputs/overlay --
+    e.g. the scale probe, which only needs kp2d/kp3d to estimate a
+    recording's body scale + quality from many short frame windows."""
+    pipeline_cfg = cfg.get("pipeline") or {}
+    return str(pipeline_cfg.get("stop_after", None)) == "triangulate"
+
+
 def bout_start_frame(cfg, bout_idx):
     """Absolute start-frame for bout_idx from cfg.recording.bouts_csv.
 
@@ -595,6 +609,22 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
             atomic_save_npz(kp3d_filt_path, kp3d=kp3d_f, conf3d=conf3d)
         with np.load(kp3d_filt_path) as z:
             kp3d, conf3d = z["kp3d"], z["conf3d"]
+
+    # -- Task 18 stage limit: cfg.pipeline.stop_after='triangulate' (see
+    #    should_stop_after_triangulate) stops right here, after 2D keypoints +
+    #    triangulation (+ optional B2 smoothing) -- no scale/offsets/STAC/
+    #    polish/outputs/overlay. Absent/null (the default) is a strict no-op,
+    #    so this is byte-identical to pre-Task-18 behaviour otherwise. Used by
+    #    scripts/probe_recording.py's scale probe, which only needs kp3d to
+    #    estimate a brand-new recording's body scale + quality from many short
+    #    frame windows, without spending GPU time on IK. Deliberately no
+    #    mark_done/DONE marker: kp2d.npz/kp3d.npz/kp3d_filt.npz are already
+    #    individually stage-checkpointed above, so a later full (non-limited)
+    #    run resumes from here instead of recomputing them.
+    if should_stop_after_triangulate(cfg):
+        print(f"[courtship] bout {bout_idx} fly{fly}: pipeline.stop_after=triangulate "
+              f"-- stopping after kp2d/kp3d (no STAC)")
+        return
 
     # -- scale.json: trunk Procrustes body-size scale, computed ONCE (shared
     #    across all bouts/flies, since body size is constant per fly) from

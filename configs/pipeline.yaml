@@ -14,6 +14,16 @@ bout_ids: ''      # '' = all; else comma-separated
 max_frames: 0     # 0 = all frames per bout
 seed: 0
 
+# Stage-limiting for lightweight/QC-only runs (Task 18: scripts/probe_recording.py
+# scale probe). Absent/null (default) runs every stage exactly as before --
+# byte-identical to pre-Task-18 behaviour. 'triangulate' makes run_bout.py return
+# immediately after Stage B (+ optional B2 filter)'s kp2d/kp3d artifacts, before
+# scale.json/segment_scales.json/offsets.h5/STAC/polish/outputs/overlay -- used to
+# get a robust body-scale + pre-flight quality estimate from many short frame
+# windows across a brand-new recording without spending any GPU time on IK.
+pipeline:
+  stop_after: null   # null | 'triangulate'
+
 # Minimal inline keys so `paths.data_dir` (and other groups' `${dataset.name}`/
 # `${version}` interpolations, e.g. stac/default.yaml's save_path) resolve.
 # Deliberately NOT a `- dataset: courtship` defaults entry: that group pulls in
