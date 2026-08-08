@@ -66,6 +66,24 @@ scaling:
 # flies of a courtship bout are processed, the male (larger wing-song CV) is
 # canonicalized to fly1 by physically swapping the fly dirs; a per-bout sex.json
 # records the decision + confidence. num_animals==1 (free-running) skips this.
+# Per-camera SAM3 mask-coverage gate (Task 17, scripts/mask_coverage.py).
+# Absent entirely -> OFF (run_bout gates nothing; behaves exactly as before
+# this feature). Set here: any frame with fewer than min_views valid-camera
+# SAM3 masks for a fly has its triangulated keypoints marked NaN instead of
+# being triangulated from too few views, which is ill-conditioned and
+# produces garbage (measured: looks like coincident flies / bones flexing
+# 20-50% downstream). 4 of a typical 7-camera rig is the point past which
+# triangulation stays well-conditioned for the hard wall/occluded poses that
+# most need it (>=2 is the bare DLT minimum). Measured failure mode: the
+# female (fly0) drops to as few as 3/7 cameras in several Session0 bouts
+# (22, 26, 13, 8, 4) while the male (fly1) stays 7/7 in every bout examined
+# -- SAM3 correctly reports "not found" per (fly,cam,frame) rather than
+# mis-assigning, so this is a real but NOT dominant contributor to bad
+# keypoints (coverage-vs-badness r=-0.63 vs 2D-confidence r=-0.85 over 28
+# bout-flies -- don't oversell it).
+masks:
+  min_views: 4
+
 sexing:
   ratio_thr: 1.5      # min CV ratio (max/min) to trust the pose signal
   high_ratio: 2.5     # CV ratio at/above which confidence is 'high' (else 'medium')

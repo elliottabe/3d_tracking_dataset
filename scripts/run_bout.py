@@ -55,6 +55,12 @@ try:
     from scripts.sync_policy import stale_invalidation_enabled
 except ModuleNotFoundError:  # direct invocation: sys.path[0] is scripts/, not repo root
     from sync_policy import stale_invalidation_enabled
+try:
+    from scripts.mask_coverage import (
+        MIN_VIEWS_DEFAULT, coverage_report, load_valid, per_frame_views, write_report)
+except ModuleNotFoundError:  # direct invocation: sys.path[0] is scripts/, not repo root
+    from mask_coverage import (
+        MIN_VIEWS_DEFAULT, coverage_report, load_valid, per_frame_views, write_report)
 
 # Register the `basename` OmegaConf resolver used by configs/outputs/default.yaml
 # (out = .../${recording.name}/${basename:${recording.session_dir}}/pose). Done as
@@ -167,6 +173,40 @@ def high_confidence_sample(kp3d, max_frames=None):
     if max_frames:
         idx = idx[:max_frames]
     return idx
+
+
+def gate_low_coverage_frames(kp3d, views_per_frame, min_views):
+    """NaN-out triangulated keypoints for frames with too few valid-camera
+    views (Task 17: scripts/mask_coverage.py). Triangulating from very few
+    views is ill-conditioned and produces garbage (coincident-looking flies,
+    bones flexing 20-50%) that is worse than simply having no pose for that
+    frame -- so below `min_views`, mark the whole frame NaN instead.
+
+    Frames at/above `min_views` are returned byte-identical to the input.
+    `min_views=None` (i.e. `cfg.masks.min_views` absent, the default) is a
+    strict no-op -- gated_kp3d is a copy of `kp3d` with `n_gated == 0` -- so
+    a config without a `masks` block behaves exactly as before this feature.
+
+    Parameters
+    ----------
+    kp3d : (T, K, 3) array
+        Triangulated keypoints for one fly.
+    views_per_frame : (T,) int array
+        Number of cameras with a valid mask for this fly, per frame (see
+        scripts.mask_coverage.per_frame_views).
+    min_views : int | None
+
+    Returns
+    -------
+    (gated_kp3d, n_gated) : gated_kp3d is a (T, K, 3) array (always a copy,
+        never the input object); n_gated is the number of frames NaN'd out.
+    """
+    gated = np.array(kp3d, copy=True)
+    if min_views is None:
+        return gated, 0
+    below = np.asarray(views_per_frame) < int(min_views)
+    gated[below] = np.nan
+    return gated, int(np.count_nonzero(below))
 
 
 def _import_segment_calibration():
@@ -406,6 +446,28 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
     masks_dict = load_bout_masks(bout_npz, fly, expected_cameras=cameras)
     T, C = masks_dict["T"], masks_dict["C"]
 
+    # -- Per-camera mask coverage (Task 17, scripts/mask_coverage.py): a
+    #    first-class QC signal computed BEFORE triangulation, straight from
+    #    the sam3_masks.npz BOTH flies share. SAM3 correctly reports "not
+    #    found" per (fly,cam,frame) rather than mis-assigning the same
+    #    animal to both slots -- the measured failure mode is the female
+    #    (fly0) dropping to as few as 3/7 cameras in several Session0 bouts
+    #    while the male (fly1) stays 7/7 in every bout examined -- and
+    #    triangulating from too few views is ill-conditioned (produces
+    #    garbage that downstream looks like coincident flies or bones
+    #    flexing 20-50%). coverage.json covers BOTH flies from one npz read,
+    #    so it is written ONCE per bout to the bout dir (parent of
+    #    fly0/fly1), mirroring scale.json's "whoever gets there first"
+    #    pattern, not duplicated per fly-dir.
+    masks_cfg = cfg.get("masks") or {}
+    _min_views_cfg = masks_cfg.get("min_views", None)
+    _min_views_for_report = int(_min_views_cfg) if _min_views_cfg is not None else MIN_VIEWS_DEFAULT
+    views_per_frame = per_frame_views(load_valid(bout_npz))[fly]  # (T,) for this fly
+    coverage_path = os.path.join(os.path.dirname(bout_dir), "coverage.json")
+    if not stage_done(coverage_path):
+        _coverage = coverage_report(bout_npz, min_views=_min_views_for_report)
+        write_report(os.path.dirname(bout_dir), _coverage)
+
     kp2d_path = os.path.join(bout_dir, "kp2d.npz")
     kp3d_path = os.path.join(bout_dir, "kp3d.npz")
     kp3d_filt_path = os.path.join(bout_dir, "kp3d_filt.npz")
@@ -492,6 +554,16 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
     if not stage_done(kp3d_path):
         kp3d, conf3d = triangulate_keypoints(
             kp2d, conf, cam_mats, conf_thresh=float(cfg.detector.conf_thresh))
+        # Gate frames with too few valid-camera masks to NaN instead of
+        # triangulating from too few views (see mask-coverage comment above
+        # masks_dict). cfg.masks.min_views absent (_min_views_cfg is None)
+        # is a strict no-op -- gate_low_coverage_frames returns kp3d
+        # unchanged, so a config without a `masks` block behaves exactly as
+        # before this feature.
+        kp3d, _n_gated = gate_low_coverage_frames(kp3d, views_per_frame, _min_views_cfg)
+        if _min_views_cfg is not None:
+            print(f"[mask-coverage] bout {bout_idx} fly{fly}: gated {_n_gated}/{T} frames "
+                  f"below min_views={_min_views_cfg} (too few valid camera masks)")
         atomic_save_npz(kp3d_path, kp3d=kp3d, conf3d=conf3d)
     with np.load(kp3d_path) as z:
         kp3d, conf3d = z["kp3d"], z["conf3d"]
