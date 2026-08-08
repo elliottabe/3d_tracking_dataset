@@ -1,0 +1,1297 @@
+{
+  "cohorts": {
+    "courtship_female": {
+      "hard_iou_apart": 0.023132034914297266,
+      "hard_iou_close": 0.0,
+      "hard_iou_median": 0.013599552625352965,
+      "jitter_apart": 0.011669850442558527,
+      "jitter_close": 0.01754242181777954,
+      "jitter_median": 0.003623402037192136,
+      "jl_violation_rate": 0.00011301710495838116,
+      "loo_px_median": 54.388276056052014,
+      "reproj_px_apart": 33.00283203464329,
+      "reproj_px_close": 84.40649788055352,
+      "reproj_px_leg_apart": 34.58656952576361,
+      "reproj_px_leg_close": 92.53359940870988,
+      "reproj_px_leg_median": 67.296561902293,
+      "reproj_px_median": 57.71332263286296,
+      "reproj_px_trunk_apart": 21.517344721448087,
+      "reproj_px_trunk_close": 84.88901538146132,
+      "reproj_px_trunk_median": 53.0229214922854,
+      "reproj_px_wing_apart": 40.47389671173006,
+      "reproj_px_wing_close": 146.57319213272092,
+      "reproj_px_wing_median": 79.71888083183775,
+      "soft_iou_apart": 0.14134645603431345,
+      "soft_iou_close": 0.0,
+      "soft_iou_median": 0.06834491662645253
+    },
+    "courtship_male": {
+      "hard_iou_apart": 0.023795199482268447,
+      "hard_iou_close": 0.022514879323491527,
+      "hard_iou_median": 0.02426397180580853,
+      "jitter_apart": 0.0030214027501642704,
+      "jitter_close": 0.00320308655500412,
+      "jitter_median": 0.002326785586774349,
+      "jl_violation_rate": 0.00021217020640469195,
+      "loo_px_median": 5.0268524195670885,
+      "reproj_px_apart": 19.48925217384545,
+      "reproj_px_close": 21.173613894588584,
+      "reproj_px_leg_apart": 17.793034197606502,
+      "reproj_px_leg_close": 19.53931727203012,
+      "reproj_px_leg_median": 18.376259354684493,
+      "reproj_px_median": 19.92927901842358,
+      "reproj_px_trunk_apart": 21.393954884541692,
+      "reproj_px_trunk_close": 20.43308086607847,
+      "reproj_px_trunk_median": 20.306789199625154,
+      "reproj_px_wing_apart": 31.6367216446897,
+      "reproj_px_wing_close": 48.062657044007295,
+      "reproj_px_wing_median": 30.50041458217768,
+      "soft_iou_apart": 0.1390208302585833,
+      "soft_iou_close": 0.1312390668850018,
+      "soft_iou_median": 0.14057072623883726
+    },
+    "free_running": {
+      "hard_iou_median": 0.024046829930267622,
+      "jitter_median": 0.0031988918781280518,
+      "jl_violation_rate": 0.0004219804951237809,
+      "loo_px_median": 3.8127204398449726,
+      "reproj_px_leg_median": 4.220812774957112,
+      "reproj_px_median": 3.9029771218386724,
+      "reproj_px_trunk_median": 3.2894617674258804,
+      "reproj_px_wing_median": 4.5537745927944915,
+      "soft_iou_median": 0.1482469655535636
+    }
+  },
+  "gap_ratios": {
+    "courtship_female": {
+      "hard_iou_median": 0.5655445089764317,
+      "jitter_median": 1.132705378999087,
+      "jl_violation_rate": 0.26782542383915037,
+      "loo_px_median": 14.264952522525746,
+      "reproj_px_leg_median": 15.94398176142196,
+      "reproj_px_median": 14.786999982637488,
+      "reproj_px_trunk_median": 16.119026528092984,
+      "reproj_px_wing_median": 17.506110416176107,
+      "soft_iou_median": 0.4610206783744158
+    },
+    "courtship_male": {
+      "hard_iou_median": 1.0090299584673152,
+      "jitter_median": 0.7273723762542273,
+      "jl_violation_rate": 0.5027962402443633,
+      "loo_px_median": 1.318442434707194,
+      "reproj_px_leg_median": 4.353725297581154,
+      "reproj_px_median": 5.106173671096232,
+      "reproj_px_trunk_median": 6.173286280665889,
+      "reproj_px_wing_median": 6.697831427677373,
+      "soft_iou_median": 0.9482199228425164
+    }
+  },
+  "n_bouts": {
+    "courtship_female": 8,
+    "courtship_male": 8,
+    "free_running": 5
+  },
+  "per_bout": [
+    {
+      "bout": 7,
+      "cohort": "free_running",
+      "fly": 0,
+      "run_key": "freerun_13_53_33",
+      "scalars": {
+        "hard_iou_median": 0.024136726367252052,
+        "jitter_median": 0.002179923001676798,
+        "jl_violation_rate": 0.0,
+        "loo_px_median": 3.186385502985567,
+        "reproj_px_leg_median": 4.220812774957112,
+        "reproj_px_median": 3.9029771218386724,
+        "reproj_px_trunk_median": 2.8379560215506907,
+        "reproj_px_wing_median": 4.5537745927944915,
+        "soft_iou_median": 0.14879620410337088
+      },
+      "splits": {
+        "hard_iou": {
+          "all": 0.023968316071903674,
+          "apart": null,
+          "close": null
+        },
+        "jitter": {
+          "all": 0.002179923001676798,
+          "apart": null,
+          "close": null
+        },
+        "reproj_px": {
+          "all": 3.9173218386634567,
+          "apart": null,
+          "close": null
+        },
+        "reproj_px_leg": {
+          "all": 4.220812774957112,
+          "apart": null,
+          "close": null
+        },
+        "reproj_px_trunk": {
+          "all": 2.8379560215506907,
+          "apart": null,
+          "close": null
+        },
+        "reproj_px_wing": {
+          "all": 4.5537745927944915,
+          "apart": null,
+          "close": null
+        },
+        "soft_iou": {
+          "all": 0.14627941344466344,
+          "apart": null,
+          "close": null
+        }
+      },
+      "tags": [
+        "clean"
+      ]
+    },
+    {
+      "bout": 1,
+      "cohort": "free_running",
+      "fly": 0,
+      "run_key": "freerun_14_27_48",
+      "scalars": {
+        "hard_iou_median": 0.024046829930267622,
+        "jitter_median": 0.0032747499644756317,
+        "jl_violation_rate": 0.00048281966685442986,
+        "loo_px_median": 3.8016122235631413,
+        "reproj_px_leg_median": 3.9092279115600537,
+        "reproj_px_median": 3.7555189983628483,
+        "reproj_px_trunk_median": 3.4006412663722445,
+        "reproj_px_wing_median": 3.812808183202571,
+        "soft_iou_median": 0.1482469655535636
+      },
+      "splits": {
+        "hard_iou": {
+          "all": 0.023969502025256134,
+          "apart": null,
+          "close": null
+        },
+        "jitter": {
+          "all": 0.0032747499644756317,
+          "apart": null,
+          "close": null
+        },
+        "reproj_px": {
+          "all": 3.733078775229996,
+          "apart": null,
+          "close": null
+        },
+        "reproj_px_leg": {
+          "all": 3.9092279115600537,
+          "apart": null,
+          "close": null
+        },
+        "reproj_px_trunk": {
+          "all": 3.4006412663722445,
+          "apart": null,
+          "close": null
+        },
+        "reproj_px_wing": {
+          "all": 3.812808183202571,
+          "apart": null,
+          "close": null
+        },
+        "soft_iou": {
+          "all": 0.14714887560018095,
+          "apart": null,
+          "close": null
+        }
+      },
+      "tags": [
+        "clean"
+      ]
+    },
+    {
+      "bout": 7,
+      "cohort": "free_running",
+      "fly": 0,
+      "run_key": "freerun_13_25_13",
+      "scalars": {
+        "hard_iou_median": 0.024126983134186056,
+        "jitter_median": 0.0031988918781280518,
+        "jl_violation_rate": 0.0004219804951237809,
+        "loo_px_median": 3.8127204398449726,
+        "reproj_px_leg_median": 3.8975224012250704,
+        "reproj_px_median": 3.76898241460978,
+        "reproj_px_trunk_median": 3.0575964712807338,
+        "reproj_px_wing_median": 3.888895978666727,
+        "soft_iou_median": 0.14961712019393253
+      },
+      "splits": {
+        "hard_iou": {
+          "all": 0.02361295664091239,
+          "apart": null,
+          "close": null
+        },
+        "jitter": {
+          "all": 0.0031988918781280518,
+          "apart": null,
+          "close": null
+        },
+        "reproj_px": {
+          "all": 3.679221849742684,
+          "apart": null,
+          "close": null
+        },
+        "reproj_px_leg": {
+          "all": 3.8975224012250704,
+          "apart": null,
+          "close": null
+        },
+        "reproj_px_trunk": {
+          "all": 3.0575964712807338,
+          "apart": null,
+          "close": null
+        },
+        "reproj_px_wing": {
+          "all": 3.888895978666727,
+          "apart": null,
+          "close": null
+        },
+        "soft_iou": {
+          "all": 0.14586533362438714,
+          "apart": null,
+          "close": null
+        }
+      },
+      "tags": [
+        "clean"
+      ]
+    },
+    {
+      "bout": 1,
+      "cohort": "free_running",
+      "fly": 0,
+      "run_key": "freerun_14_10_44",
+      "scalars": {
+        "hard_iou_median": 0.02343632568821431,
+        "jitter_median": 0.0029556695371866226,
+        "jl_violation_rate": 0.0007676676450666064,
+        "loo_px_median": 4.311712154273673,
+        "reproj_px_leg_median": 5.114044590791842,
+        "reproj_px_median": 4.771057677714987,
+        "reproj_px_trunk_median": 3.2894617674258804,
+        "reproj_px_wing_median": 4.925576351732598,
+        "soft_iou_median": 0.14391975261591614
+      },
+      "splits": {
+        "hard_iou": {
+          "all": 0.023038825506323517,
+          "apart": null,
+          "close": null
+        },
+        "jitter": {
+          "all": 0.0029556695371866226,
+          "apart": null,
+          "close": null
+        },
+        "reproj_px": {
+          "all": 4.743323325247202,
+          "apart": null,
+          "close": null
+        },
+        "reproj_px_leg": {
+          "all": 5.114044590791842,
+          "apart": null,
+          "close": null
+        },
+        "reproj_px_trunk": {
+          "all": 3.2894617674258804,
+          "apart": null,
+          "close": null
+        },
+        "reproj_px_wing": {
+          "all": 4.925576351732598,
+          "apart": null,
+          "close": null
+        },
+        "soft_iou": {
+          "all": 0.14147262458837376,
+          "apart": null,
+          "close": null
+        }
+      },
+      "tags": [
+        "clean"
+      ]
+    },
+    {
+      "bout": 5,
+      "cohort": "free_running",
+      "fly": 0,
+      "run_key": "freerun_13_37_35",
+      "scalars": {
+        "hard_iou_median": 0.011032827970553606,
+        "jitter_median": 0.014497076364932582,
+        "jl_violation_rate": 0.00034652702910827044,
+        "loo_px_median": 54.93102698203113,
+        "reproj_px_leg_median": 40.032588764674145,
+        "reproj_px_median": 40.73119899859965,
+        "reproj_px_trunk_median": 42.02814687408815,
+        "reproj_px_wing_median": 33.6735671446494,
+        "soft_iou_median": 0.06698937535834171
+      },
+      "splits": {
+        "hard_iou": {
+          "all": 0.011612417019000933,
+          "apart": null,
+          "close": null
+        },
+        "jitter": {
+          "all": 0.014497076364932582,
+          "apart": null,
+          "close": null
+        },
+        "reproj_px": {
+          "all": 43.33354922963949,
+          "apart": null,
+          "close": null
+        },
+        "reproj_px_leg": {
+          "all": 40.032588764674145,
+          "apart": null,
+          "close": null
+        },
+        "reproj_px_trunk": {
+          "all": 42.02814687408815,
+          "apart": null,
+          "close": null
+        },
+        "reproj_px_wing": {
+          "all": 33.6735671446494,
+          "apart": null,
+          "close": null
+        },
+        "soft_iou": {
+          "all": 0.07089489008592964,
+          "apart": null,
+          "close": null
+        }
+      },
+      "tags": [
+        "fr_outlier"
+      ]
+    },
+    {
+      "bout": 29,
+      "cohort": "courtship_female",
+      "fly": 0,
+      "run_key": "courtship_S1_2026_04_02_15_25_51",
+      "scalars": {
+        "hard_iou_median": 0.011999508852003618,
+        "jitter_median": 0.013929469045251608,
+        "jl_violation_rate": 0.00032585580023324415,
+        "loo_px_median": 42.74029042001952,
+        "reproj_px_leg_median": 46.2967781230458,
+        "reproj_px_median": 37.13619526949945,
+        "reproj_px_trunk_median": 27.63316617482046,
+        "reproj_px_wing_median": 39.858250768353486,
+        "soft_iou_median": 0.06453214058840048
+      },
+      "splits": {
+        "hard_iou": {
+          "all": 0.007469913817303072,
+          "apart": 0.025986342943854324,
+          "close": 0.0
+        },
+        "jitter": {
+          "all": 0.013929469045251608,
+          "apart": 0.013330794870853424,
+          "close": 0.01449621468782425
+        },
+        "reproj_px": {
+          "all": 34.845440848219496,
+          "apart": 33.00283203464329,
+          "close": 38.79245624163516
+        },
+        "reproj_px_leg": {
+          "all": 46.2967781230458,
+          "apart": 34.58656952576361,
+          "close": 54.053467652595785
+        },
+        "reproj_px_trunk": {
+          "all": 27.63316617482046,
+          "apart": 21.517344721448087,
+          "close": 35.94954195890258
+        },
+        "reproj_px_wing": {
+          "all": 39.858250768353486,
+          "apart": 40.47389671173006,
+          "close": 34.59903626000634
+        },
+        "soft_iou": {
+          "all": 0.04317680286661739,
+          "apart": 0.14958514938861442,
+          "close": 0.0
+        }
+      },
+      "tags": [
+        "close_interaction"
+      ]
+    },
+    {
+      "bout": 29,
+      "cohort": "courtship_male",
+      "fly": 1,
+      "run_key": "courtship_S1_2026_04_02_15_25_51",
+      "scalars": {
+        "hard_iou_median": 0.02250522753396421,
+        "jitter_median": 0.0045723263174295425,
+        "jl_violation_rate": 0.00029155518968237634,
+        "loo_px_median": 7.9700000676537375,
+        "reproj_px_leg_median": 20.24511648735642,
+        "reproj_px_median": 21.764973267719302,
+        "reproj_px_trunk_median": 20.308498489327974,
+        "reproj_px_wing_median": 32.08970874607445,
+        "soft_iou_median": 0.1328238192941343
+      },
+      "splits": {
+        "hard_iou": {
+          "all": 0.022130498708954727,
+          "apart": 0.02157240700488045,
+          "close": 0.022602375465343025
+        },
+        "jitter": {
+          "all": 0.0045723263174295425,
+          "apart": 0.005378466099500656,
+          "close": 0.003972809761762619
+        },
+        "reproj_px": {
+          "all": 22.086466791906844,
+          "apart": 19.57451940575698,
+          "close": 24.144472930419845
+        },
+        "reproj_px_leg": {
+          "all": 20.24511648735642,
+          "apart": 17.76579216776044,
+          "close": 22.577926082332162
+        },
+        "reproj_px_trunk": {
+          "all": 20.308498489327974,
+          "apart": 19.795582067292145,
+          "close": 20.589031618138474
+        },
+        "reproj_px_wing": {
+          "all": 32.08970874607445,
+          "apart": 33.04329119079817,
+          "close": 31.23334712988245
+        },
+        "soft_iou": {
+          "all": 0.13214650949200513,
+          "apart": 0.12986373499953377,
+          "close": 0.1337783674657275
+        }
+      },
+      "tags": [
+        "close_interaction"
+      ]
+    },
+    {
+      "bout": 26,
+      "cohort": "courtship_female",
+      "fly": 0,
+      "run_key": "courtship_S0_2025_10_20_13_20_04",
+      "scalars": {
+        "hard_iou_median": 0.0056499905267753964,
+        "jitter_median": 0.0035942770773544908,
+        "jl_violation_rate": 0.0002642706131078224,
+        "loo_px_median": 66.03626169208451,
+        "reproj_px_leg_median": 88.29634568154023,
+        "reproj_px_median": 78.29044999622647,
+        "reproj_px_trunk_median": 78.41267680975034,
+        "reproj_px_wing_median": 159.0807905212064,
+        "soft_iou_median": 0.010744068419822263
+      },
+      "splits": {
+        "hard_iou": {
+          "all": 0.0057014535030563245,
+          "apart": 0.0,
+          "close": 0.00619032033958708
+        },
+        "jitter": {
+          "all": 0.0035942770773544908,
+          "apart": 0.011669850442558527,
+          "close": 0.003143840469419956
+        },
+        "reproj_px": {
+          "all": 77.79021786600562,
+          "apart": 124.47957409935697,
+          "close": 73.6210184788848
+        },
+        "reproj_px_leg": {
+          "all": 88.29634568154023,
+          "apart": 133.70285814542115,
+          "close": 76.59749096703432
+        },
+        "reproj_px_trunk": {
+          "all": 78.41267680975034,
+          "apart": 101.97355983413453,
+          "close": 56.71472331143924
+        },
+        "reproj_px_wing": {
+          "all": 159.0807905212064,
+          "apart": 144.4407747269709,
+          "close": 162.86453300061982
+        },
+        "soft_iou": {
+          "all": 0.01085136694228322,
+          "apart": 0.0,
+          "close": 0.011912679235492224
+        }
+      },
+      "tags": [
+        "close_interaction"
+      ]
+    },
+    {
+      "bout": 26,
+      "cohort": "courtship_male",
+      "fly": 1,
+      "run_key": "courtship_S0_2025_10_20_13_20_04",
+      "scalars": {
+        "hard_iou_median": 0.0,
+        "jitter_median": 0.0007729567587375641,
+        "jl_violation_rate": 0.00043526924511876633,
+        "loo_px_median": 4.48196071737252,
+        "reproj_px_leg_median": 64.85762507283061,
+        "reproj_px_median": 68.98469699030127,
+        "reproj_px_trunk_median": 54.74793947554343,
+        "reproj_px_wing_median": 147.76268610727612,
+        "soft_iou_median": 0.0
+      },
+      "splits": {
+        "hard_iou": {
+          "all": 0.0,
+          "apart": 0.0,
+          "close": 0.0
+        },
+        "jitter": {
+          "all": 0.0007729567587375641,
+          "apart": 0.0008792877197265625,
+          "close": 0.0007613692432641983
+        },
+        "reproj_px": {
+          "all": 69.04164794963785,
+          "apart": 68.20576027033647,
+          "close": 69.05197308259976
+        },
+        "reproj_px_leg": {
+          "all": 64.85762507283061,
+          "apart": 65.04910152641207,
+          "close": 64.83233044603563
+        },
+        "reproj_px_trunk": {
+          "all": 54.74793947554343,
+          "apart": 52.212438522712574,
+          "close": 55.307185185842414
+        },
+        "reproj_px_wing": {
+          "all": 147.76268610727612,
+          "apart": 146.01851657801674,
+          "close": 148.11383879671806
+        },
+        "soft_iou": {
+          "all": 0.0,
+          "apart": 0.0,
+          "close": 0.0
+        }
+      },
+      "tags": [
+        "close_interaction"
+      ]
+    },
+    {
+      "bout": 8,
+      "cohort": "courtship_female",
+      "fly": 0,
+      "run_key": "courtship_S1_2026_04_02_15_25_51",
+      "scalars": {
+        "hard_iou_median": 0.015199596398702312,
+        "jitter_median": 0.020814836025238037,
+        "jl_violation_rate": 0.0004502834136780209,
+        "loo_px_median": 126.67643328232164,
+        "reproj_px_leg_median": 108.36569244814561,
+        "reproj_px_median": 106.84551004428383,
+        "reproj_px_trunk_median": 85.91072257191695,
+        "reproj_px_wing_median": 163.6726284284862,
+        "soft_iou_median": 0.0721576926645046
+      },
+      "splits": {
+        "hard_iou": {
+          "all": 0.014729209154769997,
+          "apart": 0.015405162151126344,
+          "close": 0.014609028858819303
+        },
+        "jitter": {
+          "all": 0.020814836025238037,
+          "apart": 0.022671510465443134,
+          "close": 0.020588628947734833
+        },
+        "reproj_px": {
+          "all": 107.85198739845491,
+          "apart": 111.19780663073718,
+          "close": 107.73106325027524
+        },
+        "reproj_px_leg": {
+          "all": 108.36569244814561,
+          "apart": 110.60274802625584,
+          "close": 108.32072157303308
+        },
+        "reproj_px_trunk": {
+          "all": 85.91072257191695,
+          "apart": 89.11600258463963,
+          "close": 85.89422453415078
+        },
+        "reproj_px_wing": {
+          "all": 163.6726284284862,
+          "apart": 160.33499309570485,
+          "close": 165.59129678630632
+        },
+        "soft_iou": {
+          "all": 0.06294124982936496,
+          "apart": 0.06496298880983642,
+          "close": 0.062462769613666334
+        }
+      },
+      "tags": [
+        "close_interaction"
+      ]
+    },
+    {
+      "bout": 8,
+      "cohort": "courtship_male",
+      "fly": 1,
+      "run_key": "courtship_S1_2026_04_02_15_25_51",
+      "scalars": {
+        "hard_iou_median": 0.025071463391961497,
+        "jitter_median": 0.0024383338168263435,
+        "jl_violation_rate": 0.00018541081739683213,
+        "loo_px_median": 5.611611349726173,
+        "reproj_px_leg_median": 16.507402222012566,
+        "reproj_px_median": 18.09358476912785,
+        "reproj_px_trunk_median": 20.305079909922334,
+        "reproj_px_wing_median": 28.91112041828091,
+        "soft_iou_median": 0.14591987369719295
+      },
+      "splits": {
+        "hard_iou": {
+          "all": 0.023923653477427226,
+          "apart": 0.025226993865030675,
+          "close": 0.02391889459457979
+        },
+        "jitter": {
+          "all": 0.0024383338168263435,
+          "apart": 0.004261180758476257,
+          "close": 0.0024333633482456207
+        },
+        "reproj_px": {
+          "all": 18.21005377394762,
+          "apart": 19.40398494193392,
+          "close": 18.202754858757324
+        },
+        "reproj_px_leg": {
+          "all": 16.507402222012566,
+          "apart": 17.820276227452563,
+          "close": 16.50070846172808
+        },
+        "reproj_px_trunk": {
+          "all": 20.305079909922334,
+          "apart": 22.930939628125763,
+          "close": 20.27713011401847
+        },
+        "reproj_px_wing": {
+          "all": 28.91112041828091,
+          "apart": 30.230152098581232,
+          "close": 28.909605048560184
+        },
+        "soft_iou": {
+          "all": 0.1407790267553715,
+          "apart": 0.14432080990388332,
+          "close": 0.14073628827665402
+        }
+      },
+      "tags": [
+        "close_interaction"
+      ]
+    },
+    {
+      "bout": 22,
+      "cohort": "courtship_female",
+      "fly": 0,
+      "run_key": "courtship_S0_2025_10_20_13_20_04",
+      "scalars": {
+        "hard_iou_median": 3.002078763020383e-05,
+        "jitter_median": 0.0004646431189030409,
+        "jl_violation_rate": 0.0,
+        "loo_px_median": 107.92987384619283,
+        "reproj_px_leg_median": 192.50021711974918,
+        "reproj_px_median": 218.45510056430314,
+        "reproj_px_trunk_median": 213.90786947460725,
+        "reproj_px_wing_median": 222.01474114842955,
+        "soft_iou_median": 0.0002036928478807763
+      },
+      "splits": {
+        "hard_iou": {
+          "all": 0.0,
+          "apart": null,
+          "close": 0.0
+        },
+        "jitter": {
+          "all": 0.0004646431189030409,
+          "apart": null,
+          "close": 0.0004646431189030409
+        },
+        "reproj_px": {
+          "all": 187.79463997055333,
+          "apart": null,
+          "close": 187.79463997055333
+        },
+        "reproj_px_leg": {
+          "all": 192.50021711974918,
+          "apart": null,
+          "close": 192.50021711974918
+        },
+        "reproj_px_trunk": {
+          "all": 213.90786947460725,
+          "apart": null,
+          "close": 213.90786947460725
+        },
+        "reproj_px_wing": {
+          "all": 222.01474114842955,
+          "apart": null,
+          "close": 222.01474114842955
+        },
+        "soft_iou": {
+          "all": 0.0,
+          "apart": null,
+          "close": 0.0
+        }
+      },
+      "tags": [
+        "close_interaction",
+        "long"
+      ]
+    },
+    {
+      "bout": 22,
+      "cohort": "courtship_male",
+      "fly": 1,
+      "run_key": "courtship_S0_2025_10_20_13_20_04",
+      "scalars": {
+        "hard_iou_median": 0.0,
+        "jitter_median": 0.0004394054412841797,
+        "jl_violation_rate": 0.0001752950800514199,
+        "loo_px_median": 2.4393316552195703,
+        "reproj_px_leg_median": 62.52482059232243,
+        "reproj_px_median": 66.60008308916153,
+        "reproj_px_trunk_median": 50.02392153101282,
+        "reproj_px_wing_median": 142.8311820891657,
+        "soft_iou_median": 0.0
+      },
+      "splits": {
+        "hard_iou": {
+          "all": 0.0,
+          "apart": 0.0,
+          "close": 0.0
+        },
+        "jitter": {
+          "all": 0.0004394054412841797,
+          "apart": 0.0004513063468039036,
+          "close": 0.0004129260778427124
+        },
+        "reproj_px": {
+          "all": 66.18624630586348,
+          "apart": 65.75930111326265,
+          "close": 66.98533381250087
+        },
+        "reproj_px_leg": {
+          "all": 62.52482059232243,
+          "apart": 62.197872861463125,
+          "close": 63.53911411018535
+        },
+        "reproj_px_trunk": {
+          "all": 50.02392153101282,
+          "apart": 49.705845120087446,
+          "close": 51.08487688116435
+        },
+        "reproj_px_wing": {
+          "all": 142.8311820891657,
+          "apart": 142.31044589954143,
+          "close": 144.96252762756325
+        },
+        "soft_iou": {
+          "all": 0.0,
+          "apart": 0.0,
+          "close": 0.0
+        }
+      },
+      "tags": [
+        "close_interaction",
+        "long"
+      ]
+    },
+    {
+      "bout": 1,
+      "cohort": "courtship_female",
+      "fly": 0,
+      "run_key": "courtship_S1_2026_04_02_17_52_50",
+      "scalars": {
+        "hard_iou_median": 0.02414206497482866,
+        "jitter_median": 0.002950342372059822,
+        "jl_violation_rate": 0.0,
+        "loo_px_median": 4.9338785120014395,
+        "reproj_px_leg_median": 4.233807683543761,
+        "reproj_px_median": 4.2218830827519644,
+        "reproj_px_trunk_median": 3.7990359144127894,
+        "reproj_px_wing_median": 4.693511913944791,
+        "soft_iou_median": 0.1451863349580353
+      },
+      "splits": {
+        "hard_iou": {
+          "all": 0.023132034914297266,
+          "apart": 0.023132034914297266,
+          "close": null
+        },
+        "jitter": {
+          "all": 0.002950342372059822,
+          "apart": 0.002950342372059822,
+          "close": null
+        },
+        "reproj_px": {
+          "all": 4.2267116471518005,
+          "apart": 4.2267116471518005,
+          "close": null
+        },
+        "reproj_px_leg": {
+          "all": 4.233807683543761,
+          "apart": 4.233807683543761,
+          "close": null
+        },
+        "reproj_px_trunk": {
+          "all": 3.7990359144127894,
+          "apart": 3.7990359144127894,
+          "close": null
+        },
+        "reproj_px_wing": {
+          "all": 4.693511913944791,
+          "apart": 4.693511913944791,
+          "close": null
+        },
+        "soft_iou": {
+          "all": 0.14134645603431345,
+          "apart": 0.14134645603431345,
+          "close": null
+        }
+      },
+      "tags": [
+        "apart"
+      ]
+    },
+    {
+      "bout": 1,
+      "cohort": "courtship_male",
+      "fly": 1,
+      "run_key": "courtship_S1_2026_04_02_17_52_50",
+      "scalars": {
+        "hard_iou_median": 0.025597042087793585,
+        "jitter_median": 0.003827568143606186,
+        "jl_violation_rate": 4.506940688660537e-05,
+        "loo_px_median": 5.4972379344536035,
+        "reproj_px_leg_median": 5.568378562363442,
+        "reproj_px_median": 6.208295093355595,
+        "reproj_px_trunk_median": 5.608883637465893,
+        "reproj_px_wing_median": 10.374831341370605,
+        "soft_iou_median": 0.15602091317603695
+      },
+      "splits": {
+        "hard_iou": {
+          "all": 0.025357421541918154,
+          "apart": 0.025357421541918154,
+          "close": null
+        },
+        "jitter": {
+          "all": 0.003827568143606186,
+          "apart": 0.003827568143606186,
+          "close": null
+        },
+        "reproj_px": {
+          "all": 6.077799743145359,
+          "apart": 6.077799743145359,
+          "close": null
+        },
+        "reproj_px_leg": {
+          "all": 5.568378562363442,
+          "apart": 5.568378562363442,
+          "close": null
+        },
+        "reproj_px_trunk": {
+          "all": 5.608883637465893,
+          "apart": 5.608883637465893,
+          "close": null
+        },
+        "reproj_px_wing": {
+          "all": 10.374831341370605,
+          "apart": 10.374831341370605,
+          "close": null
+        },
+        "soft_iou": {
+          "all": 0.15594242997203522,
+          "apart": 0.15594242997203522,
+          "close": null
+        }
+      },
+      "tags": [
+        "apart"
+      ]
+    },
+    {
+      "bout": 12,
+      "cohort": "courtship_female",
+      "fly": 0,
+      "run_key": "courtship_S1_2026_04_02_14_54_28",
+      "scalars": {
+        "hard_iou_median": 0.02512347873737093,
+        "jitter_median": 0.0027378788217902184,
+        "jl_violation_rate": 0.0,
+        "loo_px_median": 4.817772159745704,
+        "reproj_px_leg_median": 4.564146569174378,
+        "reproj_px_median": 4.4645383024608805,
+        "reproj_px_trunk_median": 4.161813719896448,
+        "reproj_px_wing_median": 5.410124591318132,
+        "soft_iou_median": 0.14981692449444708
+      },
+      "splits": {
+        "hard_iou": {
+          "all": 0.023649271620874057,
+          "apart": 0.023649271620874057,
+          "close": null
+        },
+        "jitter": {
+          "all": 0.0027378788217902184,
+          "apart": 0.0027378788217902184,
+          "close": null
+        },
+        "reproj_px": {
+          "all": 4.389194293531107,
+          "apart": 4.389194293531107,
+          "close": null
+        },
+        "reproj_px_leg": {
+          "all": 4.564146569174378,
+          "apart": 4.564146569174378,
+          "close": null
+        },
+        "reproj_px_trunk": {
+          "all": 4.161813719896448,
+          "apart": 4.161813719896448,
+          "close": null
+        },
+        "reproj_px_wing": {
+          "all": 5.410124591318132,
+          "apart": 5.410124591318132,
+          "close": null
+        },
+        "soft_iou": {
+          "all": 0.14251265326606524,
+          "apart": 0.14251265326606524,
+          "close": null
+        }
+      },
+      "tags": [
+        "apart"
+      ]
+    },
+    {
+      "bout": 12,
+      "cohort": "courtship_male",
+      "fly": 1,
+      "run_key": "courtship_S1_2026_04_02_14_54_28",
+      "scalars": {
+        "hard_iou_median": 0.024919259867358434,
+        "jitter_median": 0.002215237356722355,
+        "jl_violation_rate": 0.00034337443421258,
+        "loo_px_median": 26.316836699243837,
+        "reproj_px_leg_median": 28.7353921542011,
+        "reproj_px_median": 27.49230881388079,
+        "reproj_px_trunk_median": 26.63122673586954,
+        "reproj_px_wing_median": 25.377498723901013,
+        "soft_iou_median": 0.150162813862374
+      },
+      "splits": {
+        "hard_iou": {
+          "all": 0.024508877975066113,
+          "apart": 0.024508877975066113,
+          "close": null
+        },
+        "jitter": {
+          "all": 0.002215237356722355,
+          "apart": 0.002215237356722355,
+          "close": null
+        },
+        "reproj_px": {
+          "all": 26.980431059688378,
+          "apart": 26.980431059688378,
+          "close": null
+        },
+        "reproj_px_leg": {
+          "all": 28.7353921542011,
+          "apart": 28.7353921542011,
+          "close": null
+        },
+        "reproj_px_trunk": {
+          "all": 26.63122673586954,
+          "apart": 26.63122673586954,
+          "close": null
+        },
+        "reproj_px_wing": {
+          "all": 25.377498723901013,
+          "apart": 25.377498723901013,
+          "close": null
+        },
+        "soft_iou": {
+          "all": 0.1478663550859061,
+          "apart": 0.1478663550859061,
+          "close": null
+        }
+      },
+      "tags": [
+        "apart"
+      ]
+    },
+    {
+      "bout": 17,
+      "cohort": "courtship_female",
+      "fly": 0,
+      "run_key": "courtship_S1_2026_04_02_14_54_28",
+      "scalars": {
+        "hard_iou_median": 0.03144539041761528,
+        "jitter_median": 0.0036525269970297813,
+        "jl_violation_rate": 0.00010656941221048644,
+        "loo_px_median": 9.676861141236785,
+        "reproj_px_leg_median": 15.259920655346772,
+        "reproj_px_median": 13.869966939927636,
+        "reproj_px_trunk_median": 8.567874003835218,
+        "reproj_px_wing_median": 16.44361133261644,
+        "soft_iou_median": 0.18550588420654313
+      },
+      "splits": {
+        "hard_iou": {
+          "all": 0.02896051468109495,
+          "apart": 0.02934240114078868,
+          "close": 0.0
+        },
+        "jitter": {
+          "all": 0.0036525269970297813,
+          "apart": 0.002727195620536804,
+          "close": 0.02403975185006857
+        },
+        "reproj_px": {
+          "all": 13.245299744587026,
+          "apart": 11.603227643504004,
+          "close": 94.2549748571964
+        },
+        "reproj_px_leg": {
+          "all": 15.259920655346772,
+          "apart": 12.539403239536828,
+          "close": 101.32850905910664
+        },
+        "reproj_px_trunk": {
+          "all": 8.567874003835218,
+          "apart": 7.754151626828815,
+          "close": 83.88380622877185
+        },
+        "reproj_px_wing": {
+          "all": 16.44361133261644,
+          "apart": 15.862173791606223,
+          "close": 82.20336348992592
+        },
+        "soft_iou": {
+          "all": 0.17114663568836896,
+          "apart": 0.1722777764524773,
+          "close": 0.0
+        }
+      },
+      "tags": [
+        "apart"
+      ]
+    },
+    {
+      "bout": 17,
+      "cohort": "courtship_male",
+      "fly": 1,
+      "run_key": "courtship_S1_2026_04_02_14_54_28",
+      "scalars": {
+        "hard_iou_median": 0.02515746493954202,
+        "jitter_median": 0.0022089052945375443,
+        "jl_violation_rate": 0.0,
+        "loo_px_median": 4.12430970492284,
+        "reproj_px_leg_median": 4.409389255265681,
+        "reproj_px_median": 4.43110233406385,
+        "reproj_px_trunk_median": 4.0066157387187635,
+        "reproj_px_wing_median": 6.40081127160226,
+        "soft_iou_median": 0.1507508188487599
+      },
+      "splits": {
+        "hard_iou": {
+          "all": 0.02459560383185887,
+          "apart": 0.02466984592809978,
+          "close": 0.02281741610588707
+        },
+        "jitter": {
+          "all": 0.0022089052945375443,
+          "apart": 0.002120623365044594,
+          "close": 0.006629765033721924
+        },
+        "reproj_px": {
+          "all": 4.404939162287324,
+          "apart": 4.3703165709434115,
+          "close": 7.095340546530027
+        },
+        "reproj_px_leg": {
+          "all": 4.409389255265681,
+          "apart": 4.364722114888325,
+          "close": 8.360813197934
+        },
+        "reproj_px_trunk": {
+          "all": 4.0066157387187635,
+          "apart": 3.970561461795654,
+          "close": 4.7848474091252635
+        },
+        "reproj_px_wing": {
+          "all": 6.40081127160226,
+          "apart": 6.489092994273543,
+          "close": 5.043205998357003
+        },
+        "soft_iou": {
+          "all": 0.1490297090739065,
+          "apart": 0.14958845123494013,
+          "close": 0.13833780703671586
+        }
+      },
+      "tags": [
+        "apart"
+      ]
+    },
+    {
+      "bout": 2,
+      "cohort": "courtship_female",
+      "fly": 0,
+      "run_key": "courtship_S1_2026_04_02_12_11_50",
+      "scalars": {
+        "hard_iou_median": 0.0006010833310568382,
+        "jitter_median": 0.03619286394678056,
+        "jl_violation_rate": 0.00011946479770627588,
+        "loo_px_median": 170.2428239000718,
+        "reproj_px_leg_median": 131.79344489164507,
+        "reproj_px_median": 128.96657948318068,
+        "reproj_px_trunk_median": 93.00513116532078,
+        "reproj_px_wing_median": 119.57951089532202,
+        "soft_iou_median": 0.0031648955196517123
+      },
+      "splits": {
+        "hard_iou": {
+          "all": 0.0,
+          "apart": 0.0,
+          "close": 0.0
+        },
+        "jitter": {
+          "all": 0.03619286394678056,
+          "apart": 0.03927828697487712,
+          "close": 0.02890612930059433
+        },
+        "reproj_px": {
+          "all": 125.67407603454296,
+          "apart": 134.9341705514739,
+          "close": 74.55802090391063
+        },
+        "reproj_px_leg": {
+          "all": 131.79344489164507,
+          "apart": 134.52951765673134,
+          "close": 83.7386897583131
+        },
+        "reproj_px_trunk": {
+          "all": 93.00513116532078,
+          "apart": 94.28438928405542,
+          "close": 91.431687727101
+        },
+        "reproj_px_wing": {
+          "all": 119.57951089532202,
+          "apart": 114.80237939359657,
+          "close": 130.28185126482202
+        },
+        "soft_iou": {
+          "all": 0.0,
+          "apart": 0.0,
+          "close": 0.0
+        }
+      },
+      "tags": [
+        "apart",
+        "apart_but_bad"
+      ]
+    },
+    {
+      "bout": 2,
+      "cohort": "courtship_male",
+      "fly": 1,
+      "run_key": "courtship_S1_2026_04_02_12_11_50",
+      "scalars": {
+        "hard_iou_median": 0.023608683744258625,
+        "jitter_median": 0.005540371406823397,
+        "jl_violation_rate": 0.00023892959541255176,
+        "loo_px_median": 4.556466904680574,
+        "reproj_px_leg_median": 11.735651560633858,
+        "reproj_px_median": 14.304147252272823,
+        "reproj_px_trunk_median": 19.89192658761064,
+        "reproj_px_wing_median": 60.38842203863738,
+        "soft_iou_median": 0.13522157878048158
+      },
+      "splits": {
+        "hard_iou": {
+          "all": 0.022836988976414334,
+          "apart": 0.02308152098947078,
+          "close": 0.022427383181640028
+        },
+        "jitter": {
+          "all": 0.005540371406823397,
+          "apart": 0.004892170429229736,
+          "close": 0.006280846893787384
+        },
+        "reproj_px": {
+          "all": 13.95596829378457,
+          "apart": 13.358516454820206,
+          "close": 17.46334250291015
+        },
+        "reproj_px_leg": {
+          "all": 11.735651560633858,
+          "apart": 11.016494163072277,
+          "close": 14.98060347904358
+        },
+        "reproj_px_trunk": {
+          "all": 19.89192658761064,
+          "apart": 19.85697014095762,
+          "close": 20.047075123229718
+        },
+        "reproj_px_wing": {
+          "all": 60.38842203863738,
+          "apart": 57.608036462091604,
+          "close": 64.89196695813214
+        },
+        "soft_iou": {
+          "all": 0.13191055461421533,
+          "apart": 0.13372085061328332,
+          "close": 0.12869976630427613
+        }
+      },
+      "tags": [
+        "apart",
+        "apart_but_bad"
+      ]
+    }
+  ]
+}
