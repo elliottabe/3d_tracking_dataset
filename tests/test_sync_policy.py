@@ -77,3 +77,28 @@ def test_string_false_is_treated_as_false():
 def test_string_true_is_treated_as_true():
     cfg = {"sync": {"invalidate_stale": "true"}}
     assert stale_invalidation_enabled(cfg) is True
+
+
+def test_empty_string_falls_back_to_true():
+    # bool("") is False in plain Python -- that would silently disable the
+    # cascade on a malformed/empty config value. Disabling must be explicit,
+    # so an empty string is NOT a recognized falsy spelling and must fall
+    # back to the safe default (True).
+    cfg = {"sync": {"invalidate_stale": ""}}
+    assert stale_invalidation_enabled(cfg) is True
+
+
+def test_unrecognized_string_falls_back_to_true():
+    cfg = {"sync": {"invalidate_stale": "maybe"}}
+    assert stale_invalidation_enabled(cfg) is True
+
+
+@pytest.mark.parametrize("value", [0, 0.0, [], {}])
+def test_odd_falsy_nonbool_values_fall_back_to_true(value):
+    # 0 / 0.0 / [] / {} are all falsy under bool(), but none of them is a
+    # real `False` or a recognized falsy string -- only those two may
+    # disable the cascade. Everything else (including these) resolves to
+    # the safe default True, so a stray non-bool config value can never
+    # silently turn off stale-artifact deletion.
+    cfg = {"sync": {"invalidate_stale": value}}
+    assert stale_invalidation_enabled(cfg) is True

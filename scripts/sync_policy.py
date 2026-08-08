@@ -17,12 +17,26 @@ def stale_invalidation_enabled(cfg) -> bool:
     Reads cfg.sync.invalidate_stale, defaulting to True when the key or the
     whole `sync` block is absent (production behaviour is unchanged).
 
-    Accepts a plain dict or an OmegaConf DictConfig. A recognized falsy/truthy
-    YAML-ish string (e.g. "false", "no", "0" / "true", "yes", "1", case-
-    insensitive) is interpreted accordingly rather than relying on Python's
-    "non-empty string is truthy" rule, since a stray unconverted CLI override
-    string must not silently disable the flag's intent. Any other value falls
-    back to plain Python truthiness. The return value is always a real bool.
+    Accepts a plain dict or an OmegaConf DictConfig. The rule for the raw
+    value is deliberately asymmetric, because disabling the cascade must
+    always be explicit and unambiguous -- anything ambiguous resolves to the
+    safe default (True, i.e. keep deleting stale artifacts):
+
+      - an actual bool is returned as-is (True -> True, False -> False).
+      - a recognized falsy string ("false", "no", "off", "0", case-
+        insensitive, surrounding whitespace ignored) -> False.
+      - a recognized truthy string ("true", "yes", "on", "1", same rules)
+        -> True.
+      - any OTHER string -- including "", or junk like "maybe" -- is NOT
+        run through Python's bare `bool(str)` truthiness (that would make
+        "" resolve to False, silently and unsafely turning the cascade off)
+        -> True.
+      - any other type (int, float, list, dict, ...), including falsy ones
+        like 0, 0.0, [], {} -> True. Only a real `False` or a recognized
+        falsy string may disable the cascade; every other value resolves to
+        the safe default.
+
+    The return value is always a real bool.
     """
     sync_block = getattr(cfg, "sync", None)
     if sync_block is None and isinstance(cfg, dict):
@@ -36,12 +50,15 @@ def stale_invalidation_enabled(cfg) -> bool:
     if value is None:
         return True
 
+    if isinstance(value, bool):
+        return value
+
     if isinstance(value, str):
         lowered = value.strip().lower()
         if lowered in _FALSY_STRINGS:
             return False
         if lowered in _TRUTHY_STRINGS:
             return True
-        return bool(value)
+        return True  # unrecognized string (incl. "") -> safe default
 
-    return bool(value)
+    return True  # non-bool, non-string (0, 0.0, [], {}, ...) -> safe default
