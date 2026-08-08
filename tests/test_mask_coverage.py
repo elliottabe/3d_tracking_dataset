@@ -85,6 +85,45 @@ def test_status_ok_when_valid_in_7_of_7_cams(tmp_path):
     assert report["per_fly"]["0"]["median_views"] == 7.0
 
 
+def test_status_insufficient_when_stably_at_exactly_min_views(tmp_path):
+    # STABLE-low coverage: fly0 valid in exactly min_views (4) cameras, every
+    # single frame -- median_views == cams_usable == min_views, with ZERO
+    # frames below the threshold. The original spec's `median_views <
+    # min_views` test called this "ok" (real Session0 bout 8: exactly 4/7
+    # cams, within-bone CV 43.8%). Being AT the bare minimum every frame is
+    # exactly as untrustworthy as fluctuating below it, so this must be
+    # "insufficient", not merely "degraded" or "ok".
+    valid = np.zeros((1, 7, 10), dtype=bool)
+    valid[0, [0, 1, 2, 3], :] = True
+    npz = _write_mask_npz(tmp_path / "sam3_masks.npz", valid)
+
+    report = coverage_report(npz, min_views=4)
+
+    fly0 = report["per_fly"]["0"]
+    assert fly0["cams_usable"] == 4
+    assert fly0["median_views"] == 4.0
+    assert fly0["frac_frames_below_min"] == 0.0
+    assert fly0["status"] == "insufficient"
+
+
+def test_status_degraded_not_insufficient_when_stably_above_min_views_but_below_n_cams(tmp_path):
+    # fly0 valid in 5/7 cams (comfortably above min_views=4), every frame:
+    # not "insufficient" (well above the bare minimum), but not every
+    # camera is usable either, so "degraded" -- distinguishes the
+    # cams_usable < n_cams degraded criterion from the <= min_views
+    # insufficient criterion.
+    valid = np.zeros((1, 7, 10), dtype=bool)
+    valid[0, [0, 1, 2, 3, 4], :] = True
+    npz = _write_mask_npz(tmp_path / "sam3_masks.npz", valid)
+
+    report = coverage_report(npz, min_views=4)
+
+    fly0 = report["per_fly"]["0"]
+    assert fly0["cams_usable"] == 5
+    assert fly0["median_views"] == 5.0
+    assert fly0["status"] == "degraded"
+
+
 def test_status_degraded_when_full_views_but_only_60pct_of_frames(tmp_path):
     # fly0 valid in all 7 cams for 60% of frames, 0 cams for the rest ->
     # median_views is still 7 (>= min_views) so NOT "insufficient", but 40%

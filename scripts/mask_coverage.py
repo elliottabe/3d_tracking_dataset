@@ -22,7 +22,10 @@ triangulating from very few views is ill-conditioned and produces garbage
 that downstream looks like coincident flies or bones changing length
 20-50%. NOTE: correlating coverage against measured keypoint badness over 28
 bout-flies gives r=-0.63 (2D confidence: r=-0.85) -- coverage is a real
-contributor but not the dominant one; don't oversell it.
+contributor but not the dominant one; don't oversell it. In particular, low
+coverage is a strong WARNING but adequate coverage does NOT imply good
+keypoints: female bouts 1, 6, 11, 12 have 7/7 cameras and still fail. Do not
+treat an "ok" status as a quality certificate.
 
 This module is intentionally stdlib + numpy only (no jax/mujoco/etc.) so it
 can run as a cheap, dependency-light CLI over a whole recording's masks
@@ -72,13 +75,26 @@ def per_frame_views(valid: np.ndarray) -> np.ndarray:
 def coverage_report(mask_npz, *, min_views: int = MIN_VIEWS_DEFAULT) -> dict:
     """Per-fly camera-coverage summary for one bout's sam3_masks.npz.
 
-    status is:
-      - "insufficient" when the fly's median per-frame view count is below
-        min_views (typical/best case is already too few views to trust);
-      - "degraded" when the median is fine but more than
-        `_DEGRADED_FRAME_FRAC` of frames individually fall below min_views
-        (a fly that mostly tracks well but drops out episodically);
-      - "ok" otherwise.
+    status is one of three states, checked in this order:
+
+      - "insufficient": `cams_usable <= min_views` OR `median_views <=
+        min_views`. Covers BOTH ways a fly can be too-few-views-to-trust --
+        fluctuating below min_views often enough to drag the median down,
+        AND stably sitting AT min_views every frame with zero fluctuation.
+        The stable case matters: real Session0 bout 8 fly0 sits at exactly
+        4/7 cameras (== the default min_views) in every frame and still has
+        43.8% within-bone-length CV -- being AT the bare minimum the whole
+        time is exactly as untrustworthy as dipping below it sometimes, so
+        it must not read as "ok" just because it never got worse.
+      - "degraded": not insufficient, AND (`cams_usable < n_cams` -- at
+        least one camera is not usable for this fly, even though overall
+        coverage clears the min_views bar -- OR `frac_frames_below_min >
+        _DEGRADED_FRAME_FRAC` -- a fly that mostly tracks well but drops
+        out episodically).
+      - "ok": everything else (every camera usable, and essentially no
+        frames dip below min_views). NOT a quality certificate -- see the
+        module docstring's r=-0.63-vs-r=-0.85 note; "ok" coverage can still
+        have bad keypoints from other causes.
     """
     valid = load_valid(mask_npz)
     n_flies, n_cams, n_frames = valid.shape
@@ -97,9 +113,9 @@ def coverage_report(mask_npz, *, min_views: int = MIN_VIEWS_DEFAULT) -> dict:
             frac_frames_below_min = 0.0
         cams_usable = int(np.sum(per_camera_frac > _USABLE_CAMERA_FRAC))
 
-        if median_views < min_views:
+        if cams_usable <= min_views or median_views <= min_views:
             status = "insufficient"
-        elif frac_frames_below_min > _DEGRADED_FRAME_FRAC:
+        elif cams_usable < n_cams or frac_frames_below_min > _DEGRADED_FRAME_FRAC:
             status = "degraded"
         else:
             status = "ok"
