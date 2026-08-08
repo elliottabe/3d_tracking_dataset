@@ -31,6 +31,7 @@ from scripts.estimate_recording_scale import (
     rigid_segment_pairs,
     per_bout_segment_scale,
     segment_scale_diagnostics,
+    warn_if_estimator_ignored,
     WITHIN_BONE_CV_WARN_THRESH,
     main as estimate_scale_main,
 )
@@ -776,20 +777,43 @@ def test_estimate_run_root_rigid_segment_mode_same_key_structure(tmp_path):
     run_root = _synthetic_full_run_root(tmp_path, kp_names, ref)
     cfg = OmegaConf.create({"model": {"KP_NAMES": kp_names}, "mjcf_path": str(MODEL_XML)})
 
-    result = estimate_run_root(run_root, cfg, scale_keypoints="rigid_segment")
+    # This fixture's near-zero genuine cross-bout spread (only 1e-6 synthetic
+    # noise) is known to trip the all-bouts-MAD-outlier fallback -- expected,
+    # see test_estimate_run_root_warns_when_mad_flags_all_bouts below.
+    with pytest.warns(UserWarning, match="ALL"):
+        result = estimate_run_root(run_root, cfg, scale_keypoints="rigid_segment")
 
     assert result["identity"] == "canonical"
     assert result["duplicate_slot_bouts"] == []
     assert set(result["scale_by_fly"].keys()) == {"0", "1"}
     assert result["scale_by_fly"]["0"] == pytest.approx(0.011, rel=0.02)
     assert result["scale_by_fly"]["1"] == pytest.approx(0.0119, rel=0.02)
+    n_pairs_per_bout = len(rigid_segment_pairs(kp_names))
     for fly in ("0", "1"):
         diag = result["diagnostics"][fly]
         for key in ("scale", "n_bouts", "n_frames", "per_bout_median",
                     "outlier_bouts", "spread_pct", "scale_cv_across_bouts",
-                    "within_bone_cv", "across_bone_cv", "n_pairs_used"):
+                    "within_bone_cv", "across_bone_cv", "n_pairs_used", "n_pairs"):
             assert key in diag, f"missing diagnostic key {key!r}"
         assert diag["within_bone_cv"] < 0.05
+        # n_pairs is an alias of n_frames (robust_scale's generic key is a
+        # per-PAIR sample count here, not a frame count -- see its docstring).
+        assert diag["n_pairs"] == diag["n_frames"]
+        # Pin against a known count: n_bouts_used bouts x n_pairs_per_bout.
+        assert diag["n_pairs"] == n_pairs_per_bout * diag["n_bouts"]
+
+
+def test_estimate_run_root_warns_when_mad_flags_all_bouts(tmp_path):
+    """Regression: near-zero genuine cross-bout scale spread (here, only
+    1e-6 synthetic per-bout noise) can make MAD flag EVERY bout an outlier --
+    robust_scale falls back to pooling all bouts unfiltered, and must warn
+    that this happened rather than silently discarding every bout."""
+    kp_names, ref = _full_kp_names_and_ref()
+    run_root = _synthetic_full_run_root(tmp_path, kp_names, ref, n_bouts=3)
+    cfg = OmegaConf.create({"model": {"KP_NAMES": kp_names}, "mjcf_path": str(MODEL_XML)})
+
+    with pytest.warns(UserWarning, match="MAD outlier rejection flagged ALL"):
+        estimate_run_root(run_root, cfg, scale_keypoints="rigid_segment")
 
 
 def test_estimate_run_root_rigid_segment_warns_when_estimator_not_default(tmp_path):
@@ -824,3 +848,59 @@ def test_estimate_run_root_rigid_segment_flags_noisy_female_like_fly(tmp_path, c
     # fly1 (the jittered one) must be the one flagged.
     warn_lines = [l for l in out.splitlines() if "WARNING" in l and "within_bone_cv" in l.lower()]
     assert any("fly1" in l for l in warn_lines) or "fly1" in out.split("WARNING")[1]
+
+
+# ---------------------------------------------------------------------------
+# Review fixes (round 2): honesty/diagnostics-layer items.
+# ---------------------------------------------------------------------------
+
+def test_warn_if_estimator_ignored_warns_on_non_default():
+    with pytest.warns(UserWarning, match="ignored"):
+        warn_if_estimator_ignored("norm_ratio", caller="some_caller")
+
+
+def test_warn_if_estimator_ignored_silent_on_default():
+    import warnings as _warnings
+    with _warnings.catch_warnings():
+        _warnings.simplefilter("error")  # any warning here fails the test
+        warn_if_estimator_ignored("umeyama", caller="some_caller")
+
+
+def test_run_bout_rigid_segment_branch_shares_estimator_warning_and_never_echoes_it():
+    """scripts/run_bout.py's rigid_segment scale.json branch is production
+    code (not exercised by estimate_run_root at all) -- it must use the SAME
+    warn_if_estimator_ignored as estimate_run_root (regression: an earlier
+    version warned only in estimate_run_root/this module's CLI, leaving the
+    actual production driver silent about a stale scaling.estimator
+    override), and it must never write the raw (unused) configured estimator
+    value into scale.json -- that would be indistinguishable from a run
+    where it was actually applied."""
+    src = (REPO_ROOT / "scripts" / "run_bout.py").read_text()
+
+    assert "warn_if_estimator_ignored" in src, (
+        "run_bout.py must call the shared warn_if_estimator_ignored, not "
+        "duplicate/omit the estimator-ignored check inline")
+    assert '"estimator": "ignored (rigid_segment)"' in src
+
+    start = src.index('if _scale_keypoints_mode == "rigid_segment":')
+    end = src.index("\n        else:", start)
+    rigid_branch = src[start:end]
+    assert "warn_if_estimator_ignored" in rigid_branch
+    # It's fine (expected) to pass the configured value to the shared
+    # checker; the regression is writing it back into scale.json's
+    # "estimator" field, which would look identical to a run where the
+    # estimator was actually used.
+    assert '"estimator": str(cfg.scaling.estimator)' not in rigid_branch, (
+        "must not echo the ignored, unused configured estimator into scale.json")
+
+
+def test_run_bout_help_exits_0_after_estimator_warning_wiring():
+    """Regression for the shared-import wiring: `python scripts/run_bout.py
+    --help` must still succeed (module-level imports untouched by the
+    estimator-ignored-warning refactor)."""
+    import subprocess
+    import sys as _sys
+    r = subprocess.run([_sys.executable, "scripts/run_bout.py", "--help"],
+                       capture_output=True, text=True, cwd=REPO_ROOT, timeout=240)
+    assert "ModuleNotFoundError" not in r.stderr, r.stderr[-2000:]
+    assert r.returncode == 0, r.stderr[-2000:]

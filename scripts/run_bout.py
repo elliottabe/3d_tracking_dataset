@@ -15,6 +15,16 @@ so a preempted/resumed run picks up where it left off. A ``DONE`` marker per
 ``<run_root>/bouts/bout_<idx:05d>/fly<f>/`` gates re-processing an already
 completed bout/fly.
 
+This driver is SHARED between courtship (``cfg.recording.num_animals == 2``)
+and free-running (``num_animals == 1``) -- ``range(cfg.recording.num_animals)``
+above is the only branch point. In particular ``configs/pipeline.yaml``'s
+``scaling.scale_keypoints: rigid_segment`` default (Task 16) applies to BOTH
+assays: free-running silently inherits it too. This is structurally safe --
+same rig, same anatomy config, and the rigid-segment estimator has no
+sex.json/identity dependency (unlike the per-fly canonicalization path) --
+but it is a real, deliberate change of behaviour for free-running runs, not
+just courtship ones.
+
 Usage:
     python scripts/run_bout.py paths=hyak +bout_ids=3
     python scripts/run_bout.py paths=hyak            # bout_ids='' -> all bouts
@@ -598,18 +608,27 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
         if _scale_keypoints_mode == "rigid_segment":
             # Pose-invariant direct rigid-leg-segment-length measurement (see
             # scripts/estimate_recording_scale.py) instead of a trunk-marker
-            # Procrustes/norm-ratio fit -- `estimator` below is ignored.
+            # Procrustes/norm-ratio fit -- `cfg.scaling.estimator` is IGNORED
+            # here (a rigid segment's length is measured, not fit). Warn (not
+            # silently no-op) if an operator has a stale non-default
+            # estimator override, and record that it was ignored in
+            # scale.json itself so the artifact is self-describing -- do NOT
+            # echo the (unused) configured value, which would be
+            # indistinguishable from a run where it actually mattered.
             try:
-                from scripts.estimate_recording_scale import per_bout_segment_scale
+                from scripts.estimate_recording_scale import (
+                    per_bout_segment_scale, warn_if_estimator_ignored)
             except ModuleNotFoundError:  # direct invocation: sys.path[0] is scripts/
-                from estimate_recording_scale import per_bout_segment_scale
+                from estimate_recording_scale import (
+                    per_bout_segment_scale, warn_if_estimator_ignored)
+            warn_if_estimator_ignored(str(cfg.scaling.estimator), caller="run_bout.py")
             _pair_scales = per_bout_segment_scale(kp3d, kp_names, cfg.silhouette.xml)
             _scale = float(np.median(_pair_scales))
             atomic_save_json(scale_path, {
                 "scale": float(_scale),
                 "scale_keypoints": _scale_keypoints_mode,
                 "trunk_keypoints": list(scale_names),
-                "estimator": str(cfg.scaling.estimator),
+                "estimator": "ignored (rigid_segment)",
                 "method": "rigid_segment"})
         else:
             _scale = compute_trunk_scale(

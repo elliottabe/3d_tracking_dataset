@@ -33,6 +33,14 @@ diagnostics (``within_bone_cv``/``across_bone_cv``, see
 ``segment_scale_diagnostics``) since a rigid-segment measurement doubles as a
 check that keypoints obey basic skeletal physics.
 
+``configs/pipeline.yaml``'s ``scaling.scale_keypoints: rigid_segment``
+default (which drives ``scripts/run_bout.py``'s own inline scale.json
+computation, a separate code path from this CLI/``estimate_run_root``) is
+SHARED between courtship (2 flies) and free-running (1 fly) -- there is no
+assay-specific branch, so free-running silently inherits this default too.
+Structurally safe (same rig/anatomy, no sex.json/identity dependency), but a
+real behaviour change for both assays, not courtship alone.
+
 CLI:
     python scripts/estimate_recording_scale.py --run-root <path> \\
         [--estimator umeyama|norm_ratio] \\
@@ -140,6 +148,26 @@ THORAX_PAIRS: Tuple[Tuple[str, str], ...] = (
 # (60%). Total separation between the two populations -- 0.15 sits well
 # above the male ceiling (~0.062) and well below the female floor (~0.20).
 WITHIN_BONE_CV_WARN_THRESH = 0.15
+
+
+def warn_if_estimator_ignored(estimator: str, *, caller: str = "estimate_run_root") -> None:
+    """Emit a ``UserWarning`` if ``estimator`` is anything but the default
+    ``'umeyama'``, for a caller about to ignore it entirely because
+    ``scale_keypoints='rigid_segment'`` has nothing to fit an estimator
+    choice to.
+
+    Shared by ``estimate_run_root`` AND ``scripts/run_bout.py``'s own inline
+    rigid_segment scale.json branch, so BOTH surfaces warn identically
+    instead of one silently no-op'ing an operator's stale
+    ``scaling.estimator`` override (regression: an earlier version only
+    warned in this module's own CLI/``estimate_run_root``, leaving the
+    actual production driver, ``run_bout.py``, silent).
+    """
+    if estimator != "umeyama":
+        warnings.warn(
+            f"{caller}: `estimator`={estimator!r} is ignored for "
+            f"scale_keypoints='rigid_segment' -- a rigid segment's length is "
+            f"measured directly, not fit.", UserWarning, stacklevel=2)
 
 
 def rigid_segment_pairs(kp_names: List[str], *, include_thorax: bool = False
@@ -376,6 +404,15 @@ def robust_scale(per_bout: Dict[int, np.ndarray], *, mad_k: float = 3.0) -> dict
     when its own median deviates from that pooled median by more than
     ``mad_k * MAD`` (MAD computed over the per-bout medians); the final scale
     re-pools frames EXCLUDING flagged bouts. Deterministic; no randomness.
+    Emits a ``UserWarning`` (not a silent fallback) if MAD flags EVERY bout
+    an outlier -- see the in-function comment.
+
+    NOTE on the returned ``n_frames`` key: it is a generic count of whatever
+    per-bout array elements were passed in -- genuinely per-FRAME scales for
+    ``scale_keypoints in {'trunk', 'all'}``, but per-PAIR implied scales
+    (~20/bout, not frames) for ``'rigid_segment'``. ``estimate_run_root``
+    additionally attaches an ``n_pairs`` alias for that mode so callers don't
+    have to guess which one they got; ``main()`` labels it accordingly too.
     """
     filtered: Dict[int, np.ndarray] = {}
     for bi, arr in per_bout.items():
@@ -402,6 +439,21 @@ def robust_scale(per_bout: Dict[int, np.ndarray], *, mad_k: float = 3.0) -> dict
     else:
         outlier_bouts = [bi for bi in bout_idxs
                          if abs(per_bout_median[bi] - pooled_median) > mad_k * mad]
+
+    # Pathological (but real) edge case: near-zero genuine cross-bout scale
+    # spread lets float-precision noise alone cross the MAD threshold for
+    # EVERY bout. Silently discarding every bout and falling back to "use
+    # them all unfiltered" is the right behaviour, but it must not be a
+    # silent no-signal event -- warn so a caller relying on outlier
+    # rejection actually happening (this IS the scale-from-first-bout
+    # defect's regression test) knows it didn't, this time, by design.
+    if outlier_bouts and len(outlier_bouts) == len(bout_idxs):
+        warnings.warn(
+            f"robust_scale: MAD outlier rejection flagged ALL {len(bout_idxs)} "
+            f"bouts as outliers (near-zero genuine cross-bout spread -- "
+            f"float-precision noise alone crossed the MAD threshold); "
+            f"falling back to pooling all bouts UNFILTERED instead of "
+            f"discarding every one.", UserWarning, stacklevel=2)
 
     keep = [bi for bi in bout_idxs if bi not in outlier_bouts] or bout_idxs
     final_scale = float(np.median(np.concatenate([filtered[bi] for bi in keep])))
@@ -645,11 +697,16 @@ def _per_fly_segment_diagnostics(kp3d_by_fly_bout: Dict[int, Dict[int, np.ndarra
 
 def _attach_segment_quality(diag: dict, bout_diags: Dict[int, dict]) -> None:
     """Mutate a ``robust_scale`` result in place with rigid-segment
-    keypoint-quality aggregates (mean over the KEPT, non-outlier bouts).
+    keypoint-quality aggregates (mean over the KEPT, non-outlier bouts), and
+    an ``n_pairs`` alias of ``n_frames`` -- for ``rigid_segment`` mode
+    ``robust_scale``'s generic ``n_frames`` key is actually a count of
+    per-PAIR implied-scale samples, not frames (see ``robust_scale``
+    docstring); ``n_pairs`` names that correctly for anything reading
+    ``diagnostics`` without also cross-referencing ``scale_keypoints``.
 
-    Mirrors ``robust_scale``'s OWN fallback for its ``final_scale`` (``keep =
-    [...] or bout_idxs``): if every bout happened to be flagged an outlier
-    (e.g. near-zero real spread makes the MAD threshold degenerate), fall
+    The KEPT-bout selection mirrors ``robust_scale``'s OWN fallback for its
+    ``final_scale`` (``keep = [...] or bout_idxs``): if every bout happened
+    to be flagged an outlier (warned about by ``robust_scale`` itself), fall
     back to using all bouts rather than aggregating over an empty set.
     """
     all_bouts = list(diag["per_bout_median"])
@@ -660,6 +717,7 @@ def _attach_segment_quality(diag: dict, bout_diags: Dict[int, dict]) -> None:
     diag["within_bone_cv"] = float(np.mean(within)) if within else float("nan")
     diag["across_bone_cv"] = float(np.mean(across)) if across else float("nan")
     diag["n_pairs_used"] = int(round(float(np.mean(npairs)))) if npairs else 0
+    diag["n_pairs"] = diag["n_frames"]
 
 
 def estimate_run_root(run_root: Path, cfg, *, estimator: str = "umeyama",
@@ -703,7 +761,9 @@ def estimate_run_root(run_root: Path, cfg, *, estimator: str = "umeyama",
         Additionally attaches physics-based keypoint-quality diagnostics
         (``within_bone_cv``, ``across_bone_cv``, ``n_pairs_used`` -- see
         ``segment_scale_diagnostics``) to each fly's (or the pooled) entry
-        under ``diagnostics``.
+        under ``diagnostics``, plus an ``n_pairs`` alias of ``n_frames``
+        (``robust_scale``'s generic key is a per-PAIR sample count here, not
+        a frame count -- see ``robust_scale`` docstring).
       ``include_thorax`` (rigid_segment only): also use the 3 thorax-plate
       pairs (default False -- see ``THORAX_PAIRS``).
 
@@ -723,7 +783,7 @@ def estimate_run_root(run_root: Path, cfg, *, estimator: str = "umeyama",
                                                 # 'rigid_segment',
                                                 # "within_bone_cv" /
                                                 # "across_bone_cv" /
-                                                # "n_pairs_used".
+                                                # "n_pairs_used" / "n_pairs".
     """
     run_root = Path(run_root)
     kp_names = list(cfg.model.KP_NAMES)
@@ -734,13 +794,8 @@ def estimate_run_root(run_root: Path, cfg, *, estimator: str = "umeyama",
     elif scale_keypoints == "all":
         trunk_names = list(kp_names)
     elif scale_keypoints == "rigid_segment":
-        trunk_names = None  # unused -- see the estimator-ignored warning below
-        if estimator != "umeyama":
-            warnings.warn(
-                "estimate_run_root: `estimator` is ignored for "
-                f"scale_keypoints='rigid_segment' (got estimator={estimator!r}) "
-                "-- a rigid segment's length is measured directly, not fit.",
-                UserWarning, stacklevel=2)
+        trunk_names = None  # unused -- rigid_segment has no trunk-marker fit
+        warn_if_estimator_ignored(estimator, caller="estimate_run_root")
     else:
         raise ValueError(
             f"estimate_run_root: scale_keypoints must be 'trunk', 'all', or "
@@ -840,11 +895,22 @@ def _print_scale_diag(label: str, s: Optional[float], diag: dict) -> None:
     """Print one fly's (or "pooled") robust_scale diagnostics, including the
     scale_cv_across_bouts signal (all modes) and, for scale_keypoints=
     'rigid_segment', the within/across-bone-CV keypoint-quality signals plus
-    a WARNING when within_bone_cv exceeds WITHIN_BONE_CV_WARN_THRESH."""
+    a WARNING when within_bone_cv exceeds WITHIN_BONE_CV_WARN_THRESH.
+
+    Sample-count label: robust_scale's own ``n_frames`` key is genuinely a
+    frame count for trunk/all modes, but a PER-PAIR sample count for
+    rigid_segment (see robust_scale docstring) -- detected here via the
+    presence of ``n_pairs`` (set by ``_attach_segment_quality``) so the
+    printed label never claims "frames" when it's actually leg-pair samples.
+    """
     scale_val = diag["scale"] if s is None else s
     outliers = diag["outlier_bouts"]
+    if "n_pairs" in diag:
+        sample_label, sample_val = "n_pairs", diag["n_pairs"]
+    else:
+        sample_label, sample_val = "n_frames", diag["n_frames"]
     print(f"  {label}: scale={scale_val:.6f} n_bouts={diag['n_bouts']} "
-          f"n_frames={diag['n_frames']} spread_pct={diag['spread_pct']:.2f}% "
+          f"{sample_label}={sample_val} spread_pct={diag['spread_pct']:.2f}% "
           f"scale_cv_across_bouts={diag.get('scale_cv_across_bouts', 0.0) * 100:.2f}%"
           + (f" outlier_bouts={outliers}" if outliers else ""))
     if "within_bone_cv" in diag:

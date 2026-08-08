@@ -36,6 +36,14 @@ preserve_translation: true  # Preserve original position/orientation (only scale
 # which avoids the heading-smear of the old bout-averaged-pose estimate.
 scaling:
   shared_across_bouts: true   # one robust per-fly scale applied to every bout
+  # NOTE: this is a DIFFERENT config surface from configs/pipeline.yaml's
+  # `scaling` block (consumed by scripts/run_bout.py /
+  # scripts/estimate_recording_scale.py). THIS one is read by
+  # scripts/preprocess_keypoints_for_ik.py, whose dispatch treats any
+  # scale_keypoints value other than 'trunk' as 'all' -- it does NOT know
+  # about 'rigid_segment' (Task 16). Setting 'rigid_segment' here will
+  # silently behave as 'all', not raise. Do not port that mode here without
+  # updating preprocess_keypoints_for_ik.py's dispatch first.
   scale_keypoints: trunk      # 'trunk' (rigid body markers) | 'all' (legacy: all included keypoints)
   trunk_keypoints: [Scutellum, WingL_base, WingR_base, Abd_A4, Abd_tip]
   robust_stat: median         # 'median' | 'mean' over the per-frame scales

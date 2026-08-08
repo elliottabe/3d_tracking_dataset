@@ -54,7 +54,14 @@ preprocessing:
 # chain the IK actually solves (the LEGS, not the trunk plates) -- measured
 # on real data the trunk-derived scale is ~10.2% off the leg-chain scale (see
 # docs/benchmark/scale-check/). `estimator` below is ignored for this mode
-# (a rigid segment's length is measured, not fit).
+# (a rigid segment's length is measured, not fit; scripts/run_bout.py warns
+# and marks scale.json's `estimator` field "ignored (rigid_segment)" rather
+# than echoing an unused configured value).
+# THIS BLOCK IS SHARED between courtship (num_animals=2) and free-running
+# (num_animals=1) bouts -- scripts/run_bout.py has no assay-specific branch
+# here, so this default applies to BOTH. Structurally safe for free-running
+# too (same rig/anatomy, no sex.json/identity dependency), but it is a real
+# behaviour change there as well, not just for courtship.
 scaling:
   trunk_keypoints: [Scutellum, WingL_base, WingR_base, Abd_A4, Abd_tip]
   estimator: umeyama       # 'umeyama' | 'norm_ratio' (ignored for scale_keypoints=rigid_segment)
