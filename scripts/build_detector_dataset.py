@@ -139,6 +139,44 @@ REQUIRED_VAL_CATEGORIES: frozenset[str] = frozenset({
     "amputated",
 })
 
+# Per-annotation (sex, behavior) tags. These are NOT present in the source
+# subset jsons -- V3 derived them per-subset and the training sampler reads
+# them off each annotation (V3Dataset.sampling_weights), so dropping them
+# silently degrades weighted sampling to uniform. The values below for the
+# 14 subsets that V3 also contained were recovered empirically by joining V4
+# annotations to V3 on file_name: every subset resolved to exactly one
+# (sex, behavior) pair, so this table reproduces V3 exactly.
+#
+# The 6 subsets new in V4 (headless_*, S8/S9 amputated, wall_frames) had no
+# V3 counterpart. Their sex is taken from the subset name where it states one
+# ("S8_male_R_amp" -> male; wall_frames is the female-on-wall set) and is
+# "unknown" for the headless prep, where the name does not say. Behavior is
+# "general" for all six: none is a courtship or grooming recording.
+SUBSET_SEX_BEHAVIOR: dict[str, tuple[str, str]] = {
+    # --- recovered from V3 (exact) ---
+    "S6male": ("male", "general"),
+    "female": ("female", "general"),
+    "grooming": ("unknown", "grooming"),
+    "courtship_11_50_female": ("female", "courtship"),
+    "courtship_25_51_female": ("female", "courtship"),
+    "courtship_28_34_female": ("female", "courtship"),
+    "courtship_11_50_male": ("male", "courtship"),
+    "courtship_25_51_male": ("male", "courtship"),
+    "courtship_28_34_male": ("male", "courtship"),
+    "courtship_V2": ("unknown", "courtship"),
+    "courtship_V3": ("unknown", "courtship"),
+    "courtship_V4": ("unknown", "courtship"),
+    # --- new in V4 (no V3 counterpart) ---
+    "S8_male_R_amp": ("male", "general"),
+    "S9_male_L_amp": ("male", "general"),
+    "wall_frames": ("female", "general"),
+    "headless_22_50": ("unknown", "general"),
+    "headless_24_04": ("unknown", "general"),
+    "headless_24_04_1": ("unknown", "general"),
+    "headless_56_42": ("unknown", "general"),
+    "headless_56_42_1": ("unknown", "general"),
+}
+
 
 class SubsetRuleMismatch(ValueError):
     """A subset's observed keypoint count contradicts its declared rule."""
@@ -347,7 +385,8 @@ def _load_subset_coco(source_root: Path, subset: str) -> dict[str, dict]:
 
 
 def discover_subsets(source_root: Path, subset_rules: dict,
-                      skip_subsets: frozenset) -> list[str]:
+                      skip_subsets: frozenset,
+                      subset_sex_behavior: dict | None = None) -> list[str]:
     subsets = []
     for child in sorted(source_root.iterdir()):
         if not child.is_dir() or child.name in skip_subsets:
@@ -361,6 +400,18 @@ def discover_subsets(source_root: Path, subset_rules: dict,
                 f"SKIP_SUBSETS if it truly has no usable annotations) "
                 f"before building."
             )
+        tags = (SUBSET_SEX_BEHAVIOR if subset_sex_behavior is None
+                else subset_sex_behavior)
+        if child.name not in tags:
+            # Fail loudly rather than defaulting to ("unknown", "unknown"): a
+            # silently-untagged subset is invisible to the weighted sampler,
+            # which is precisely the regression that made V4's first build
+            # train uniformly while appearing to oversample.
+            raise ValueError(
+                f"subset {child.name!r} has no SUBSET_SEX_BEHAVIOR entry -- "
+                f"add its (sex, behavior) tags before building, or weighted "
+                f"sampling will silently ignore it."
+            )
         subsets.append(child.name)
     return subsets
 
@@ -368,6 +419,7 @@ def discover_subsets(source_root: Path, subset_rules: dict,
 def build(source_root: Path, out_root: Path, *, val_recordings=None, seed: int = 0,
           subset_rules: dict | None = None, subset_category: dict | None = None,
           required_categories=None, skip_subsets: frozenset | None = None,
+          subset_sex_behavior: dict | None = None,
           target_val_frac: tuple[float, float] = (0.15, 0.20)) -> dict:
     """Merge every general_model subset into one unified 50-node COCO
     dataset, split by recording, and write it (+ a build report) to
@@ -385,8 +437,11 @@ def build(source_root: Path, out_root: Path, *, val_recordings=None, seed: int =
     required_categories = (REQUIRED_VAL_CATEGORIES if required_categories is None
                             else set(required_categories))
     skip_subsets = SKIP_SUBSETS if skip_subsets is None else skip_subsets
+    subset_sex_behavior = (SUBSET_SEX_BEHAVIOR if subset_sex_behavior is None
+                            else subset_sex_behavior)
 
-    subsets = discover_subsets(source_root, subset_rules, skip_subsets)
+    subsets = discover_subsets(source_root, subset_rules, skip_subsets,
+                                subset_sex_behavior)
 
     image_records = []  # every image, annotated or not -- these become merged_images
     ann_records = []    # every annotation (expanded to canonical) -- become merged_annotations
@@ -507,6 +562,7 @@ def build(source_root: Path, out_root: Path, *, val_recordings=None, seed: int =
 
         new_ann_id = ann_id_counters[new_split]
         ann_id_counters[new_split] += 1
+        sex, behavior = subset_sex_behavior[rec["subset"]]
         merged_annotations[new_split].append({
             "id": new_ann_id,
             "image_id": new_img_id,
@@ -517,6 +573,14 @@ def build(source_root: Path, out_root: Path, *, val_recordings=None, seed: int =
             "num_keypoints": int(mask50.sum()),
             "keypoints": flat_kp,
             "segmentation": rec["ann"].get("segmentation", []),
+            # Sampling metadata. `sex`/`behavior` reproduce V3's schema (read by
+            # V3Dataset.sampling_weights); `category` is the finer axis added in
+            # V4 -- it distinguishes wall/headless/amputated, which all collapse
+            # to the same (sex, behavior) pair and so cannot be balanced apart
+            # on the V3 axes alone. Used by V3Dataset.balanced_weights.
+            "sex": sex,
+            "behavior": behavior,
+            "category": rec["category"],
         })
 
         for i, present in enumerate(mask50):
@@ -531,10 +595,26 @@ def build(source_root: Path, out_root: Path, *, val_recordings=None, seed: int =
         "skeleton": FLY50_EDGES,
     }]
 
+    # Top-level `keypoint_names`/`skeleton` mirror the V3 COCO json exactly, so
+    # a V4 root is a drop-in replacement for a V3 one. Several consumers read
+    # them from the top level rather than from categories[0] -- notably
+    # jarvis_jax.scripts.train_keypoints (build_lr_swap, the left/right flip
+    # augmentation table) which does a bare `["keypoint_names"]` and dies with a
+    # KeyError otherwise. `skeleton` uses V3's dict schema (keypointA/keypointB,
+    # not index pairs); build_skeleton_edges accepts both, but matching V3 keeps
+    # the two roots byte-comparable for anything that copies the field through.
+    skeleton_named = [
+        {"keypointA": FLY50[a], "keypointB": FLY50[b],
+         "length": 0.0, "name": f"Joint {i + 1}"}
+        for i, (a, b) in enumerate(FLY50_EDGES)
+    ]
+
     ann_dir = out_root / "annotations"
     ann_dir.mkdir(parents=True, exist_ok=True)
     for split in ("train", "val"):
         payload = {
+            "keypoint_names": FLY50,
+            "skeleton": skeleton_named,
             "images": merged_images[split],
             "annotations": merged_annotations[split],
             "categories": categories,

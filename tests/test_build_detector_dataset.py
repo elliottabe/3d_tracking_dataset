@@ -22,6 +22,7 @@ from scripts.build_detector_dataset import (
     FLY50_EDGES,
     SUBSET_RULES,
     SUBSET_CATEGORY,
+    SUBSET_SEX_BEHAVIOR,
     REQUIRED_VAL_CATEGORIES,
     SubsetRuleMismatch,
     expected_count_for_rule,
@@ -287,7 +288,7 @@ def test_build_emits_nonempty_categories_matching_fly50(fake_source_root, tmp_pa
     report = build(
         fake_source_root, out_root, seed=0,
         subset_rules=FAKE_SUBSET_RULES, subset_category=FAKE_SUBSET_CATEGORY,
-        required_categories=FAKE_REQUIRED,
+        required_categories=FAKE_REQUIRED, subset_sex_behavior=FAKE_SEX_BEHAVIOR,
     )
     train_coco = json.loads((out_root / "annotations" / "instances_train.json").read_text())
     val_coco = json.loads((out_root / "annotations" / "instances_val.json").read_text())
@@ -307,7 +308,7 @@ def test_build_no_recording_split_across_train_and_val(fake_source_root, tmp_pat
     build(
         fake_source_root, out_root, seed=0,
         subset_rules=FAKE_SUBSET_RULES, subset_category=FAKE_SUBSET_CATEGORY,
-        required_categories=FAKE_REQUIRED,
+        required_categories=FAKE_REQUIRED, subset_sex_behavior=FAKE_SEX_BEHAVIOR,
     )
     train_coco = json.loads((out_root / "annotations" / "instances_train.json").read_text())
     val_coco = json.loads((out_root / "annotations" / "instances_val.json").read_text())
@@ -329,7 +330,7 @@ def test_build_report_has_required_fields(fake_source_root, tmp_path):
     report = build(
         fake_source_root, out_root, seed=0,
         subset_rules=FAKE_SUBSET_RULES, subset_category=FAKE_SUBSET_CATEGORY,
-        required_categories=FAKE_REQUIRED,
+        required_categories=FAKE_REQUIRED, subset_sex_behavior=FAKE_SEX_BEHAVIOR,
     )
     assert "subsets" in report
     assert "categories" in report
@@ -364,8 +365,104 @@ def test_build_val_recordings_override_is_respected(fake_source_root, tmp_path):
         fake_source_root, out_root, seed=0,
         val_recordings=["rec_full_a", "rec_headless_b"],
         subset_rules=FAKE_SUBSET_RULES, subset_category=FAKE_SUBSET_CATEGORY,
-        required_categories=FAKE_REQUIRED,
+        required_categories=FAKE_REQUIRED, subset_sex_behavior=FAKE_SEX_BEHAVIOR,
     )
     val_coco = json.loads((out_root / "annotations" / "instances_val.json").read_text())
     val_recs = {im["file_name"].split("/")[0] for im in val_coco["images"]}
     assert val_recs == {"rec_full_a", "rec_headless_b"}
+
+
+# ---------------------------------------------------------------------------
+# per-annotation sampling metadata (sex / behavior / category)
+# ---------------------------------------------------------------------------
+
+FAKE_SEX_BEHAVIOR = {
+    "fake_full_a": ("male", "general"),
+    "fake_full_b": ("female", "courtship"),
+    "fake_headless_a": ("unknown", "general"),
+    "fake_headless_b": ("unknown", "general"),
+}
+
+
+def _build_fake(fake_source_root, out_root):
+    return build(
+        fake_source_root, out_root, seed=0,
+        subset_rules=FAKE_SUBSET_RULES, subset_category=FAKE_SUBSET_CATEGORY,
+        required_categories=FAKE_REQUIRED,
+        subset_sex_behavior=FAKE_SEX_BEHAVIOR,
+    )
+
+
+def test_build_tags_every_annotation_with_sex_behavior_category(
+        fake_source_root, tmp_path):
+    # Dropping these fields is invisible at build time but silently degrades
+    # weighted sampling to uniform at train time, so assert they are present
+    # on EVERY annotation, not just the first.
+    out_root = tmp_path / "out"
+    _build_fake(fake_source_root, out_root)
+    for split in ("train", "val"):
+        coco = json.loads(
+            (out_root / "annotations" / f"instances_{split}.json").read_text())
+        for ann in coco["annotations"]:
+            assert "sex" in ann and "behavior" in ann and "category" in ann
+
+
+def test_build_sex_behavior_match_the_subset_of_the_annotations_image(
+        fake_source_root, tmp_path):
+    out_root = tmp_path / "out"
+    _build_fake(fake_source_root, out_root)
+    for split in ("train", "val"):
+        coco = json.loads(
+            (out_root / "annotations" / f"instances_{split}.json").read_text())
+        id2subset = {im["id"]: im["subset"] for im in coco["images"]}
+        for ann in coco["annotations"]:
+            subset = id2subset[ann["image_id"]]
+            assert (ann["sex"], ann["behavior"]) == FAKE_SEX_BEHAVIOR[subset]
+            assert ann["category"] == FAKE_SUBSET_CATEGORY[subset]
+
+
+def test_build_raises_when_a_subset_has_no_sex_behavior_entry(
+        fake_source_root, tmp_path):
+    incomplete = {k: v for k, v in FAKE_SEX_BEHAVIOR.items()
+                  if k != "fake_headless_b"}
+    with pytest.raises(ValueError, match="SUBSET_SEX_BEHAVIOR"):
+        build(fake_source_root, tmp_path / "out", seed=0,
+              subset_rules=FAKE_SUBSET_RULES,
+              subset_category=FAKE_SUBSET_CATEGORY,
+              required_categories=FAKE_REQUIRED,
+              subset_sex_behavior=incomplete)
+
+
+def test_every_real_subset_rule_has_sex_behavior_tags():
+    # The production tables must stay in sync: a subset that can be built but
+    # cannot be sampled-by-class is the regression this guards.
+    missing = set(SUBSET_RULES) - set(SUBSET_SEX_BEHAVIOR)
+    assert not missing, f"subsets missing SUBSET_SEX_BEHAVIOR tags: {missing}"
+
+
+def test_real_sex_behavior_values_are_from_the_known_vocabulary():
+    # V3 used exactly these spellings; V3Dataset.sampling_weights matches on
+    # them by string equality, so a typo silently makes a class unselectable.
+    for subset, (sex, behavior) in SUBSET_SEX_BEHAVIOR.items():
+        assert sex in {"male", "female", "unknown"}, (subset, sex)
+        assert behavior in {"general", "courtship", "grooming", "unknown"}, (
+            subset, behavior)
+
+
+def test_build_emits_top_level_keypoint_names_and_skeleton(
+        fake_source_root, tmp_path):
+    # jarvis_jax.scripts.train_keypoints reads a bare coco["keypoint_names"]
+    # to build the L/R flip-swap table and dies with a KeyError without it.
+    out_root = tmp_path / "out"
+    _build_fake(fake_source_root, out_root)
+    for split in ("train", "val"):
+        coco = json.loads(
+            (out_root / "annotations" / f"instances_{split}.json").read_text())
+        assert coco["keypoint_names"] == FLY50
+        assert len(coco["skeleton"]) == len(FLY50_EDGES)
+        # V3's dict schema, not index pairs -- see the builder comment.
+        bone = coco["skeleton"][0]
+        assert set(bone) == {"keypointA", "keypointB", "length", "name"}
+        names = set(FLY50)
+        for b in coco["skeleton"]:
+            assert b["keypointA"] in names and b["keypointB"] in names

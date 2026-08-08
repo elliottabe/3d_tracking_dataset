@@ -1,0 +1,29 @@
+# @package sampling
+# Class-balanced sampling across ALL conditions (V4 datasets only -- needs the
+# per-annotation `category` field that scripts/build_detector_dataset.py emits).
+#
+# Supersedes the single-class `female_courtship` preset. V4 train spans an
+# ~139x class-size spread (wall=33 anns .. grooming=4592), so boosting one
+# hand-picked class leaves every other rare condition -- wall, headless,
+# amputated, female_general -- swamped by the abundant ones. This rebalances
+# them all from the observed counts, and needs no re-tuning when a condition
+# is added.
+#
+# alpha=0.5 is square-root balancing: rare classes are lifted substantially
+# but not to full parity, which would repeat the 33 wall annotations so often
+# that the model memorises them. max_repeat then hard-caps any single
+# annotation at 20x the uniform draw rate, bounding memorisation of the
+# smallest classes regardless of alpha.
+#
+# PAIR WITH aug=heavy. Balanced sampling shows the rare classes many times per
+# epoch; heavy augmentation is what makes those repeats distinct rather than
+# identical. Using this with aug=default risks overfitting the small classes.
+balance_key: category   # group by category (finest axis); also accepts sex/behavior
+balance_alpha: 0.5      # 0=uniform (overfits big classes), 1=full parity (memorises small ones)
+max_repeat: 20.0        # cap per-annotation draw rate at 20x uniform; null disables
+
+# Unused on this path, but kept so the legacy single-class branch stays
+# disabled if balance_key is ever cleared.
+sex: null
+behavior: null
+factor: 1

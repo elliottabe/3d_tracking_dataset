@@ -2,6 +2,7 @@
 448 uint8 crops and (50,2) heatmap-coord keypoints."""
 import json
 import os
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
@@ -99,6 +100,7 @@ class V3Dataset:
         self.img_wh = []
         self.sex = []          # per-annotation "male"/"female"/"unknown" (for weighted sampling)
         self.behavior = []     # per-annotation "general"/"courtship"/"grooming"/"unknown"
+        self.category = []     # per-annotation V4 category ("wall"/"headless"/... ); "unknown" on V3
         for a in coco["annotations"]:
             fn = id2file[a["image_id"]]
             if recordings is not None and not any(
@@ -113,6 +115,7 @@ class V3Dataset:
             self.img_wh.append(id2wh[a["image_id"]])
             self.sex.append(a.get("sex", "unknown"))
             self.behavior.append(a.get("behavior", "unknown"))
+            self.category.append(a.get("category", "unknown"))
 
     def __len__(self):
         return len(self.file_names)
@@ -129,6 +132,93 @@ class V3Dataset:
                     (target_behavior is None or self.behavior[i] == target_behavior)):
                 w[i] = float(factor)
         return w / w.sum()
+
+    def balanced_weights(self, key="category", alpha=0.5, max_repeat=None):
+        """Class-balanced per-annotation sampling weights (sum-normalised).
+
+        `sampling_weights` boosts ONE (sex, behavior) class by a hand-tuned
+        factor, which does not generalise once there are many under-represented
+        conditions at very different sizes (V4 train: wall=33 anns vs
+        grooming=4592, a 139x spread). This instead rebalances every class at
+        once from the observed counts, so adding a new condition needs no
+        re-tuning.
+
+        Weights are inverse-frequency raised to `alpha`::
+
+            w_i  proportional to  (1 / n_c) ** alpha       for i in class c
+
+        `alpha` interpolates between the two things you actually want to trade
+        off, and neither endpoint is usually right:
+
+        - ``alpha=0``   -> uniform: the model sees the true data distribution
+          and overfits whichever condition happens to be biggest.
+        - ``alpha=1``   -> fully balanced: every class contributes equal total
+          mass. With a 139x spread that repeats each wall annotation ~139x more
+          often than each grooming one, so the rare class is memorised rather
+          than learned.
+        - ``alpha=0.5`` (default) -> square-root balancing: the standard
+          middle ground. Rare classes are lifted substantially without being
+          repeated so often that augmentation cannot keep the repeats distinct.
+
+        `max_repeat` caps how often any single annotation may be drawn per
+        epoch relative to uniform sampling (e.g. 20.0 = at most ~20x). This
+        bounds memorisation of the very smallest classes independently of
+        `alpha`. Because clipping then renormalising can lift other entries
+        back over the cap, the clip is applied iteratively to convergence.
+
+        Args:
+            key:        Attribute to group by -- "category" (default, the
+                        finest axis), "sex", or "behavior".
+            alpha:      Balancing exponent in [0, 1].
+            max_repeat: Optional cap, in multiples of the uniform weight
+                        (1/n). Must be >= 1.0. None disables the cap.
+
+        Returns:
+            (n,) float64 array of sum-normalised sampling probabilities.
+        """
+        labels = getattr(self, key, None)
+        if labels is None:
+            raise ValueError(
+                f"balanced_weights: unknown grouping key {key!r} -- expected "
+                f"one of 'category', 'sex', 'behavior'")
+        n = len(labels)
+        if n == 0:
+            raise ValueError("balanced_weights: dataset is empty")
+        if not 0.0 <= alpha <= 1.0:
+            raise ValueError(f"balanced_weights: alpha must be in [0,1], got {alpha}")
+
+        counts = Counter(labels)
+        w = np.array([(1.0 / counts[l]) ** alpha for l in labels], dtype=np.float64)
+        w /= w.sum()
+
+        if max_repeat is not None:
+            max_repeat = float(max_repeat)
+            if max_repeat < 1.0:
+                # A cap below uniform is unsatisfiable: every weight would have
+                # to sit under 1/n yet still sum to 1.
+                raise ValueError(
+                    f"balanced_weights: max_repeat must be >= 1.0 (it is a "
+                    f"multiple of the uniform weight), got {max_repeat}")
+            ceiling = max_repeat / n
+            for _ in range(100):
+                over = w > ceiling
+                if not over.any():
+                    break
+                w[over] = ceiling
+                slack = 1.0 - w.sum()
+                free = ~over
+                if slack <= 0 or not free.any():
+                    break
+                # Redistribute the freed mass proportionally among the
+                # uncapped entries, preserving their relative balance.
+                w[free] += slack * (w[free] / w[free].sum())
+            w /= w.sum()
+
+        return w
+
+    def class_counts(self, key="category"):
+        """Annotation counts per class, for logging what the sampler is up against."""
+        return dict(Counter(getattr(self, key)))
 
     def _load_mask(self, img_record, ann_id, img_w, img_h):
         npz_path = _resolve_mask_path(self.root, self.split, img_record, self.source_root)

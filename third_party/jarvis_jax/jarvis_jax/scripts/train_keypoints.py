@@ -228,6 +228,36 @@ def run_training(root, *, out_dir, mae_npz=DEFAULT_MAE_NPZ, tcfg=None,
         print(f"error-weighted sampling: weights_file={weights_file} "
               f"(alpha={alpha}, cap={cap}) -- preferred over any category "
               f"factor oversampling")
+    elif oversample is not None and oversample.get("balance_key"):
+        # Class-balanced sampling over every condition at once (V4). Preferred
+        # over the single-class `factor` path when the dataset carries a
+        # `category` per annotation -- see V3Dataset.balanced_weights.
+        bkey = oversample["balance_key"]
+        alpha = float(oversample.get("balance_alpha", 0.5))
+        max_repeat = oversample.get("max_repeat")
+        max_repeat = float(max_repeat) if max_repeat is not None else None
+        counts = train_ds.class_counts(bkey)
+        if set(counts) == {"unknown"}:
+            # Every annotation untagged => balancing is a silent no-op. That is
+            # the V4-build regression this guard exists to catch; fail instead.
+            raise ValueError(
+                f"sampling.balance_key={bkey!r} but every train annotation is "
+                f"'unknown' on that axis -- the dataset json carries no {bkey} "
+                f"field, so balanced sampling would silently degrade to "
+                f"uniform. Rebuild the dataset with scripts/"
+                f"build_detector_dataset.py (which emits sex/behavior/category).")
+        weights = train_ds.balanced_weights(
+            key=bkey, alpha=alpha, max_repeat=max_repeat)
+        share = {c: 0.0 for c in counts}
+        for w, lab in zip(weights, getattr(train_ds, bkey)):
+            share[lab] += float(w)
+        print(f"balanced sampling: key={bkey} alpha={alpha} "
+              f"max_repeat={max_repeat}")
+        for c in sorted(counts, key=lambda c: -counts[c]):
+            n_c = counts[c]
+            print(f"    {c:<20} {n_c:>6} anns ({100*n_c/len(train_ds):5.1f}% of data) "
+                  f"-> {100*share[c]:5.1f}% of samples "
+                  f"({share[c]*len(train_ds)/n_c:5.2f}x repeat)")
     elif oversample is not None and float(oversample.get("factor", 1.0)) > 1.0:
         weights = train_ds.sampling_weights(
             oversample.get("sex"), oversample.get("behavior"),
