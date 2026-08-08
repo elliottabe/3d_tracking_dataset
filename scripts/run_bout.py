@@ -526,7 +526,15 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
             "trunk_keypoints": list(scale_names),
             "estimator": str(cfg.scaling.estimator)})
     with open(scale_path) as _f:
-        scale = float(json.load(_f)["scale"])
+        _scale_data = json.load(_f)
+    # Prefer a per-fly scale when present (scripts/estimate_recording_scale.py
+    # writes scale_by_fly for recordings whose fly0/fly1 identity is stable
+    # across bouts); otherwise fall back to the single shared scale above.
+    _scale_by_fly = _scale_data.get("scale_by_fly")
+    if _scale_by_fly and str(fly) in _scale_by_fly:
+        scale = float(_scale_by_fly[str(fly)])
+    else:
+        scale = float(_scale_data["scale"])
 
     # -- segment_scales.json: per-segment (per-limb) SHAPE calibration. Like
     #    scale.json, this is a per-fly-constant morph computed ONCE per session
