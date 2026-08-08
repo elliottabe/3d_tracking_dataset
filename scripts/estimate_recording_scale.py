@@ -280,6 +280,20 @@ def _bout_dirs(run_root: Path) -> List[Path]:
             if d.is_dir() and _BOUT_DIR_RE.match(d.name)]
 
 
+def _usable_male_fly(value) -> Optional[int]:
+    """``male_fly`` is only usable if it is a real ``int`` (not a bool, not a
+    numeric string, not a float) equal to 0 or 1. A well-formed sex.json that
+    simply omits the key, or sets it to ``null``, yields ``None`` from
+    ``dict.get`` -- treated as unusable here, same as any other malformed
+    value, rather than silently forming a length-1 {None} agreement set that
+    would defeat this whole gate."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    if value not in (0, 1):
+        return None
+    return value
+
+
 def _determine_identity(run_root: Path) -> "tuple[str, str]":
     """Whether fly0/fly1 is a stable individual label across this
     recording's bouts.
@@ -287,10 +301,11 @@ def _determine_identity(run_root: Path) -> "tuple[str, str]":
     Identity is assigned PER BOUT by the tracker; the fly0/fly1 slot is
     otherwise arbitrary. Only once a recording has been sex-canonicalized
     (every bout dir carries a ``sex.json`` sibling of the fly dirs, written
-    by the canonicalization step, all agreeing on ``male_fly``) is fly0/fly1
-    a stable per-individual label. Measured counter-example (uncanonicalized
-    2026_04_02_14_54_28): fly0 > fly1 in bout 12 but fly0 < fly1 in bout 17 --
-    pooling per-slot across bouts there would blend the two individuals.
+    by the canonicalization step, all agreeing on a USABLE ``male_fly``, see
+    ``_usable_male_fly``) is fly0/fly1 a stable per-individual label.
+    Measured counter-example (uncanonicalized 2026_04_02_14_54_28): fly0 >
+    fly1 in bout 12 but fly0 < fly1 in bout 17 -- pooling per-slot across
+    bouts there would blend the two individuals.
 
     Returns (identity, reason) with identity in {"canonical", "unknown"}.
     """
@@ -299,20 +314,32 @@ def _determine_identity(run_root: Path) -> "tuple[str, str]":
         return "unknown", "no bout directories found"
     n = len(bout_dirs)
     male_flies = []
-    missing = 0
+    missing_file = 0
+    bad_value = 0
     for d in bout_dirs:
         sex_path = d / "sex.json"
         if not sex_path.exists():
-            missing += 1
+            missing_file += 1
             continue
         try:
             with open(sex_path) as f:
-                male_flies.append(json.load(f).get("male_fly"))
+                raw_value = json.load(f).get("male_fly")
         except (OSError, json.JSONDecodeError):
-            missing += 1
-    if missing:
-        return "unknown", f"{missing}/{n} bouts lack (or have unreadable) sex.json"
-    uniq = sorted({m for m in male_flies})
+            missing_file += 1
+            continue
+        usable = _usable_male_fly(raw_value)
+        if usable is None:
+            bad_value += 1
+            continue
+        male_flies.append(usable)
+    if missing_file or bad_value:
+        parts = []
+        if missing_file:
+            parts.append(f"{missing_file}/{n} bouts lack (or have unreadable) sex.json")
+        if bad_value:
+            parts.append(f"{bad_value}/{n} bouts have sex.json without a usable male_fly")
+        return "unknown", "; ".join(parts)
+    uniq = sorted(set(male_flies))
     if len(uniq) != 1:
         return "unknown", f"bouts disagree on male_fly: {uniq}"
     return "canonical", f"all {n} bouts have sex.json, male_fly={uniq[0]}"

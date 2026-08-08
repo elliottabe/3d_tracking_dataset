@@ -183,6 +183,13 @@ def _write_sex_json(bout_dir: Path, male_fly: int):
     (bout_dir / "sex.json").write_text(json.dumps({"male_fly": male_fly}))
 
 
+def _write_sex_json_raw(bout_dir: Path, obj: dict):
+    """Like _write_sex_json but writes an arbitrary dict (e.g. missing the
+    male_fly key entirely, or with an unusable value)."""
+    bout_dir.mkdir(parents=True, exist_ok=True)
+    (bout_dir / "sex.json").write_text(json.dumps(obj))
+
+
 def _write_kp3d(fly_dir: Path, kp3d: np.ndarray):
     fly_dir.mkdir(parents=True, exist_ok=True)
     np.savez(fly_dir / "kp3d.npz", kp3d=kp3d, conf3d=np.ones(kp3d.shape[:2]))
@@ -257,6 +264,96 @@ def test_estimate_run_root_disagreeing_sex_json_is_unknown_identity(tmp_path):
 
     assert result["identity"] == "unknown"
     assert result["scale_by_fly"] is None
+
+
+# ---------------------------------------------------------------------------
+# _determine_identity must treat an unusable male_fly (missing key, null,
+# wrong type, out-of-range value) exactly like a missing sex.json file --
+# NOT as a value that can validly agree with itself across bouts. Regression
+# for review finding: `json.load(f).get("male_fly")` yields None for a
+# well-formed sex.json that simply lacks the key; {None} has length 1, so the
+# old code silently returned identity="canonical" for a recording whose
+# identity is not actually known, defeating the entire gate.
+# ---------------------------------------------------------------------------
+
+def _run_root_with_sex_objs(tmp_path, sex_objs):
+    """Every bout gets well-separated fly0/fly1 kp3d (so the pooled/per-fly
+    scale still computes cleanly) and the given raw sex.json content."""
+    _require_model()
+    ref = _ref_trunk_positions()
+    run_root = tmp_path / "run"
+    rng = np.random.default_rng(7)
+    for i, obj in enumerate(sex_objs, start=1):
+        bout_dir = run_root / "bouts" / f"bout_{i:05d}"
+        f0 = ref / 0.011 + rng.normal(0, 1e-6, size=ref.shape)
+        f1 = ref / 0.0119 + _FLY_SEPARATION + rng.normal(0, 1e-6, size=ref.shape)
+        _write_kp3d(bout_dir / "fly0", np.repeat(f0[None], 15, axis=0))
+        _write_kp3d(bout_dir / "fly1", np.repeat(f1[None], 15, axis=0))
+        _write_sex_json_raw(bout_dir, obj)
+    return run_root
+
+
+def test_estimate_run_root_sex_json_missing_male_fly_key_is_unknown(tmp_path):
+    run_root = _run_root_with_sex_objs(
+        tmp_path, [{"confidence": "user"}, {"confidence": "user"}, {"confidence": "user"}])
+    cfg = _cfg()
+
+    result = estimate_run_root(run_root, cfg)
+
+    assert result["identity"] == "unknown"
+    assert "usable male_fly" in result["identity_reason"]
+    assert result["scale_by_fly"] is None
+    assert isinstance(result["scale"], float) and result["scale"] > 0
+
+
+def test_estimate_run_root_sex_json_null_male_fly_is_unknown(tmp_path):
+    run_root = _run_root_with_sex_objs(
+        tmp_path, [{"male_fly": None}, {"male_fly": None}, {"male_fly": None}])
+    cfg = _cfg()
+
+    result = estimate_run_root(run_root, cfg)
+
+    assert result["identity"] == "unknown"
+    assert "usable male_fly" in result["identity_reason"]
+    assert result["scale_by_fly"] is None
+
+
+def test_estimate_run_root_sex_json_string_male_fly_is_unknown(tmp_path):
+    # One bout's male_fly is a string, not an int -- even though the other
+    # two bouts are proper agreeing ints, the whole recording must be
+    # "unknown" (a mixed-type sex.json is itself a sign something is wrong).
+    run_root = _run_root_with_sex_objs(
+        tmp_path, [{"male_fly": 1}, {"male_fly": "1"}, {"male_fly": 1}])
+    cfg = _cfg()
+
+    result = estimate_run_root(run_root, cfg)
+
+    assert result["identity"] == "unknown"
+    assert result["scale_by_fly"] is None
+
+
+def test_estimate_run_root_sex_json_out_of_range_male_fly_is_unknown(tmp_path):
+    run_root = _run_root_with_sex_objs(
+        tmp_path, [{"male_fly": 1}, {"male_fly": 2}, {"male_fly": 1}])
+    cfg = _cfg()
+
+    result = estimate_run_root(run_root, cfg)
+
+    assert result["identity"] == "unknown"
+    assert result["scale_by_fly"] is None
+
+
+def test_estimate_run_root_all_usable_ints_agreeing_stays_canonical(tmp_path):
+    """Non-regression: the ordinary well-formed case must still work."""
+    run_root = _run_root_with_sex_objs(
+        tmp_path, [{"male_fly": 1}, {"male_fly": 1}, {"male_fly": 1}])
+    cfg = _cfg()
+
+    result = estimate_run_root(run_root, cfg)
+
+    assert result["identity"] == "canonical"
+    assert result["scale_by_fly"] is not None
+    assert set(result["scale_by_fly"]) == {"0", "1"}
 
 
 # ---------------------------------------------------------------------------
