@@ -77,16 +77,24 @@ def kp2d_stats(ref: Path, other: Path) -> dict:
 
     NaN-in-the-same-position in both arrays compares equal (no difference).
     Shape mismatches never raise -- they short-circuit with shape_mismatch=True.
+    frac_gt_half_px is a per-KEYPOINT fraction (one Euclidean distance per
+    (t,c,k) triple, collapsing the trailing x/y pair), not a per-scalar-
+    coordinate fraction.
     """
-    ref_z = np.load(ref)
-    other_z = np.load(other)
-    ref_kp2d, ref_conf = ref_z["kp2d"], ref_z["conf"]
-    other_kp2d, other_conf = other_z["kp2d"], other_z["conf"]
+    with np.load(ref) as ref_z, np.load(other) as other_z:
+        ref_kp2d, ref_conf = ref_z["kp2d"], ref_z["conf"]
+        other_kp2d, other_conf = other_z["kp2d"], other_z["conf"]
 
-    if ref_kp2d.shape != other_kp2d.shape or ref_conf.shape != other_conf.shape:
-        return {"identical": False, "median_px": None, "p99_px": None,
-                "max_px": None, "frac_gt_half_px": None, "max_conf_diff": None,
-                "shape_mismatch": True}
+        if ref_kp2d.shape != other_kp2d.shape or ref_conf.shape != other_conf.shape:
+            return {"identical": False, "median_px": None, "p99_px": None,
+                    "max_px": None, "frac_gt_half_px": None, "max_conf_diff": None,
+                    "shape_mismatch": True}
+
+        # Copy out of the npz handle's lazy arrays before the `with` closes it.
+        ref_kp2d = np.array(ref_kp2d)
+        other_kp2d = np.array(other_kp2d)
+        ref_conf = np.array(ref_conf)
+        other_conf = np.array(other_conf)
 
     dist = _nan_safe_dist(ref_kp2d, other_kp2d)
     conf_diff = _nan_safe_abs_diff(ref_conf, other_conf)
@@ -148,38 +156,51 @@ def scan_divergence(manifest: dict, variants_root: Path,
             if worst_vals:
                 worst = max(worst_vals)
 
+            shape_mismatch = any(stats.get(v) is not None and stats[v]["shape_mismatch"]
+                                 for v in regenerated)
+
+            # Mutually exclusive, partitioning classification -- INCOMPLETE
+            # takes precedence: a bout-fly a variant never produced is NOT
+            # evidence of a controlled comparison, even if the variants that
+            # DO have it happen to be frozen-identical.
+            if missing:
+                status = "incomplete"
+            elif regenerated:
+                status = "divergent"
+            else:
+                status = "clean"
+
             rows.append({
                 "run_key": e["run_key"], "bout": e["bout"], "fly": fly,
                 "present": present, "missing": missing,
                 "frozen_identical": frozen_identical,
                 "regenerated": regenerated,
                 "worst": worst, "stats": stats,
+                "status": status, "shape_mismatch": shape_mismatch,
             })
     return rows
 
 
 def summarize(rows: list[dict]) -> dict:
+    """Mutually exclusive, partitioning counts (n_clean + n_divergent +
+    n_incomplete == n_bout_flies), using each row's precomputed `status`
+    (incomplete takes precedence over divergent over clean) so the summary
+    can never disagree with the per-row table."""
     n_bout_flies = len(rows)
-    n_clean = sum(1 for r in rows if not r["regenerated"])
-    n_divergent = sum(1 for r in rows if r["regenerated"])
-    n_incomplete = sum(1 for r in rows if r["missing"])
+    n_incomplete = sum(1 for r in rows if r["status"] == "incomplete")
+    n_divergent = sum(1 for r in rows if r["status"] == "divergent")
+    n_clean = sum(1 for r in rows if r["status"] == "clean")
+    n_shape_mismatch = sum(1 for r in rows if r["shape_mismatch"])
     worst_vals = [r["worst"] for r in rows if r["worst"] is not None]
     worst_max_px = max(worst_vals) if worst_vals else None
     return {"n_bout_flies": n_bout_flies, "n_clean": n_clean,
             "n_divergent": n_divergent, "n_incomplete": n_incomplete,
-            "worst_max_px": worst_max_px}
+            "n_shape_mismatch": n_shape_mismatch, "worst_max_px": worst_max_px}
 
 
 def _print_table(rows: list[dict]) -> None:
     for r in rows:
-        tags = []
-        if r["missing"]:
-            tags.append("INCOMPLETE")
-        if r["regenerated"]:
-            tags.append("DIVERGENT")
-        if not tags:
-            tags.append("CLEAN")
-        status = "+".join(tags)
+        status = r["status"].upper()
         print(f"{r['run_key']} bout={r['bout']} fly={r['fly']}: {status}")
         if r["missing"]:
             print(f"    missing from: {', '.join(r['missing'])}")
