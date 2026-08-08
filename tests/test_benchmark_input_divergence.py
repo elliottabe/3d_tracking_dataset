@@ -268,17 +268,19 @@ def test_scan_divergence_missing_and_regenerated_counts_once_as_incomplete(tmp_p
     rel1 = _rel(run_key, 1, 0)
     fpath1 = frozen_root / rel1
     _write_kp2d(fpath1, kp2d1, conf1)
-    # VARIANTS[0]: hardlinked (frozen-identical).
+    # VARIANTS[0]: regenerated (present but differs from frozen).
     vp0 = variants_root / VARIANTS[0] / rel1
-    vp0.parent.mkdir(parents=True, exist_ok=True)
-    os.link(fpath1, vp0)
+    bad = kp2d1.copy()
+    bad[0, 0, 0, 0] += 2.0
+    _write_kp2d(vp0, bad, conf1)
     # VARIANTS[1]: missing entirely.
 
     rows = scan_divergence(manifest, variants_root, frozen_root)
     assert len(rows) == 1
     r = rows[0]
     assert r["missing"] == [VARIANTS[1]]
-    assert r["regenerated"] == []
+    assert r["regenerated"] == [VARIANTS[0]]
+    # Both missing and regenerated are non-empty; missing takes precedence.
     assert r["status"] == "incomplete"
 
     summary = summarize(rows)
