@@ -28,6 +28,11 @@ from scripts.estimate_recording_scale import (
     robust_scale,
     coincident_fraction,
     estimate_run_root,
+    rigid_segment_pairs,
+    per_bout_segment_scale,
+    segment_scale_diagnostics,
+    WITHIN_BONE_CV_WARN_THRESH,
+    main as estimate_scale_main,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -42,6 +47,10 @@ def _require_model():
 
 def _ref_trunk_positions():
     """Real model rest-pose positions for the DEFAULT_TRUNK_KEYPOINTS sites."""
+    return _ref_positions_for(TRUNK)
+
+
+def _site_idx():
     import mujoco
 
     mj = mujoco.MjModel.from_xml_path(str(MODEL_XML))
@@ -52,7 +61,45 @@ def _ref_trunk_positions():
         name = mujoco.mj_id2name(mj, mujoco.mjtObj.mjOBJ_SITE, i)
         if name and name.startswith("tracking[") and name.endswith("]"):
             site_idx[name[len("tracking["):-1]] = i
-    return np.array([d.site_xpos[site_idx[n]] for n in TRUNK])
+    return site_idx, d
+
+
+def _ref_positions_for(names):
+    """Real model rest-pose positions for an arbitrary list of tracking-site names."""
+    site_idx, d = _site_idx()
+    return np.array([d.site_xpos[site_idx[n]] for n in names])
+
+
+def _random_rotation(rng):
+    """A random proper rotation matrix (det=+1), via QR of a random normal matrix."""
+    a = rng.normal(size=(3, 3))
+    q, r = np.linalg.qr(a)
+    q = q @ np.diag(np.sign(np.diag(r)))
+    if np.linalg.det(q) < 0:
+        q[:, 0] *= -1
+    return q
+
+
+# A real (checked-in-model) subset of leg keypoints spanning 2 legs, one with
+# a ThxCx tracking site (T1L) and one without (T2L, matching the real v1
+# model -- see rigid_segment_pairs "silently drops" behaviour). Used for
+# per_bout_segment_scale / segment_scale_diagnostics tests that need real
+# model rest-pose geometry (rotation/translation invariance, bending, etc.).
+LEG_SUBSET = [
+    "T1L_ThxCx", "T1L_Tro", "T1L_FeTi", "T1L_TiTa", "T1L_TaT1",
+    "T2L_Tro", "T2L_FeTi", "T2L_TiTa", "T2L_TaT1",
+]
+
+# A hypothetical "full" leg keypoint set (all 6 legs, all 4 chain segments,
+# including ThxCx for every leg) used only to test rigid_segment_pairs'
+# pure name-matching logic -- it does not need to match the real (incomplete)
+# v1 model, since rigid_segment_pairs takes no model argument.
+FULL_LEG_NAMES = [
+    f"{leg}_{joint}"
+    for leg in ("T1L", "T1R", "T2L", "T2R", "T3L", "T3R")
+    for joint in ("ThxCx", "Tro", "FeTi", "TiTa", "TaT1")
+]
+THORAX_NAMES = ["WingL_base", "WingR_base", "Scutellum"]
 
 
 # ---------------------------------------------------------------------------
@@ -437,3 +484,343 @@ def test_estimate_run_root_single_fly_bout_never_flagged_duplicate(tmp_path):
 
     assert result["duplicate_slot_bouts"] == []
     assert 2 in result["diagnostics"]["0"]["per_bout_median"]
+
+
+# ---------------------------------------------------------------------------
+# rigid_segment_pairs
+# ---------------------------------------------------------------------------
+
+def test_rigid_segment_pairs_full_v1_yields_24_leg_pairs_no_thorax_by_default():
+    pairs = rigid_segment_pairs(FULL_LEG_NAMES)
+
+    assert len(pairs) == 24
+    assert ("T1L_ThxCx", "T1L_Tro") in pairs
+    assert ("T1L_Tro", "T1L_FeTi") in pairs
+    assert ("T1L_FeTi", "T1L_TiTa") in pairs
+    assert ("T1L_TiTa", "T1L_TaT1") in pairs
+    # 4 pairs/leg x 6 legs, and nothing beyond TaT1 (no TaT1->TaT3 etc.).
+    assert not any("TaT3" in a or "TaT3" in b or "TaTip" in a or "TaTip" in b
+                  for a, b in pairs)
+
+
+def test_rigid_segment_pairs_include_thorax_adds_3():
+    names = FULL_LEG_NAMES + THORAX_NAMES
+
+    without = rigid_segment_pairs(names, include_thorax=False)
+    with_thorax = rigid_segment_pairs(names, include_thorax=True)
+
+    assert len(without) == 24
+    assert len(with_thorax) == 27
+    added = set(with_thorax) - set(without)
+    assert added == {
+        ("WingL_base", "WingR_base"),
+        ("Scutellum", "WingL_base"),
+        ("Scutellum", "WingR_base"),
+    }
+
+
+def test_rigid_segment_pairs_silently_drops_missing_names():
+    """The real v1 model only has a ThxCx tracking site for T1L/T1R -- T2/T3
+    legs must silently lose their ThxCx->Tro pair, not error."""
+    names = [
+        "T1L_ThxCx", "T1L_Tro", "T1L_FeTi", "T1L_TiTa", "T1L_TaT1",
+        "T2L_Tro", "T2L_FeTi", "T2L_TiTa", "T2L_TaT1",  # no T2L_ThxCx
+    ]
+
+    pairs = rigid_segment_pairs(names)
+
+    assert ("T1L_ThxCx", "T1L_Tro") in pairs
+    assert not any(a == "T2L_ThxCx" or b == "T2L_ThxCx" for a, b in pairs)
+    # T1L: ThxCx->Tro, Tro->FeTi, FeTi->TiTa, TiTa->TaT1 (4)
+    # T2L: Tro->FeTi, FeTi->TiTa, TiTa->TaT1 (3, no ThxCx->Tro)
+    assert len(pairs) == 7
+
+
+def test_rigid_segment_pairs_against_real_anatomy_config_drops_t2_t3_thxcx():
+    """Non-regression against the actual checked-in anatomy config: T2/T3 legs
+    have no ThxCx keypoint, so the real v1 KP_NAMES set yields 20 leg pairs,
+    not the hypothetical full 24."""
+    anatomy_path = REPO_ROOT / "configs" / "anatomy" / "v1.yaml"
+    if not anatomy_path.exists():
+        pytest.skip(f"anatomy config not found: {anatomy_path}")
+    raw = OmegaConf.load(str(anatomy_path))
+    kp_names = list(raw.model.KP_NAMES)
+
+    pairs = rigid_segment_pairs(kp_names)
+
+    assert len(pairs) == 20
+    for leg in ("T2L", "T2R", "T3L", "T3R"):
+        assert not any(a == f"{leg}_ThxCx" or b == f"{leg}_ThxCx" for a, b in pairs)
+    for leg in ("T1L", "T1R"):
+        assert (f"{leg}_ThxCx", f"{leg}_Tro") in pairs
+
+
+# ---------------------------------------------------------------------------
+# per_bout_segment_scale
+# ---------------------------------------------------------------------------
+
+def test_per_bout_segment_scale_recovers_known_scale_under_rotation_translation():
+    """Pose (per-frame rotation + translation) must not matter -- this is the
+    entire point of a rigid-segment measurement vs. a cloud-spread fit."""
+    _require_model()
+    ref = _ref_positions_for(LEG_SUBSET)
+    known_scale = 0.0117
+    rest_data = ref / known_scale
+    rng = np.random.default_rng(0)
+    frames = []
+    for _ in range(24):
+        R = _random_rotation(rng)
+        t = rng.normal(0, 50, size=3)
+        frames.append(rest_data @ R.T + t)
+    kp3d = np.stack(frames, axis=0)
+
+    scales = per_bout_segment_scale(kp3d, LEG_SUBSET, str(MODEL_XML))
+
+    assert scales.shape == (len(rigid_segment_pairs(LEG_SUBSET)),)
+    assert np.all(np.isfinite(scales))
+    assert np.allclose(scales, known_scale, rtol=0.01)
+
+
+def test_per_bout_segment_scale_bending_isolates_only_that_pair():
+    """Moving one keypoint along its own segment's axis changes ONLY that
+    pair's implied scale; every other pair is untouched."""
+    _require_model()
+    ref = _ref_positions_for(LEG_SUBSET)
+    known_scale = 0.0117
+    rest_data = ref / known_scale
+    n_frames = 20
+
+    baseline = np.repeat(rest_data[None], n_frames, axis=0).copy()
+    bent = baseline.copy()
+
+    i_taT1 = LEG_SUBSET.index("T2L_TaT1")
+    i_tita = LEG_SUBSET.index("T2L_TiTa")
+    axis_dir = rest_data[i_taT1] - rest_data[i_tita]
+    bent[:10, i_taT1] = rest_data[i_tita] + axis_dir * 1.4  # bend in half the frames
+
+    pairs = rigid_segment_pairs(LEG_SUBSET)
+    changed = pairs.index(("T2L_TiTa", "T2L_TaT1"))
+
+    base_scales = per_bout_segment_scale(baseline, LEG_SUBSET, str(MODEL_XML))
+    bent_scales = per_bout_segment_scale(bent, LEG_SUBSET, str(MODEL_XML))
+
+    assert not np.isclose(bent_scales[changed], base_scales[changed], rtol=0.01)
+    unchanged = [i for i in range(len(pairs)) if i != changed]
+    assert np.allclose(bent_scales[unchanged], base_scales[unchanged], rtol=1e-6)
+
+
+def test_per_bout_segment_scale_drops_nan_frames_and_unusable_pairs():
+    _require_model()
+    ref = _ref_positions_for(LEG_SUBSET)
+    known_scale = 0.0117
+    good = ref / known_scale
+    kp3d = np.repeat(good[None], 5, axis=0).copy()
+
+    # T1L_ThxCx is NaN in every frame -> its one pair (ThxCx->Tro) is dropped.
+    i_thxcx = LEG_SUBSET.index("T1L_ThxCx")
+    kp3d[:, i_thxcx, :] = np.nan
+    # T2L_TaT1 is NaN in only one frame -> its pair survives on the rest.
+    i_taT1 = LEG_SUBSET.index("T2L_TaT1")
+    kp3d[0, i_taT1, :] = np.nan
+
+    scales = per_bout_segment_scale(kp3d, LEG_SUBSET, str(MODEL_XML))
+
+    all_pairs = rigid_segment_pairs(LEG_SUBSET)
+    assert scales.shape == (len(all_pairs) - 1,)
+    assert np.all(np.isfinite(scales))
+    assert np.allclose(scales, known_scale, rtol=0.01)
+
+
+def test_per_bout_segment_scale_raises_when_all_pairs_unusable():
+    _require_model()
+    kp3d = np.full((5, len(LEG_SUBSET), 3), np.nan)
+
+    with pytest.raises(ValueError):
+        per_bout_segment_scale(kp3d, LEG_SUBSET, str(MODEL_XML))
+
+
+# ---------------------------------------------------------------------------
+# segment_scale_diagnostics -- physics-based keypoint-quality metrics.
+#
+# A bone cannot change length ("within_bone_cv"); different bones must agree
+# on one body size ("across_bone_cv"). Measured on real data (Session0, 4
+# bouts): male within-bone CV 3.6-6.2%, across-bone CV 6.0-6.7%; female
+# (known-bad keypoints) within-bone CV 20-50%, across-bone CV 29-57%. The two
+# signals are independent: jitter (noise) breaks rigidity without breaking
+# agreement between bones; bias (a systematically wrong length) breaks
+# agreement without breaking rigidity.
+# ---------------------------------------------------------------------------
+
+def test_segment_scale_diagnostics_clean_rigid_data_has_near_zero_cvs():
+    _require_model()
+    ref = _ref_positions_for(LEG_SUBSET)
+    known_scale = 0.0117
+    rest_data = ref / known_scale
+    rng = np.random.default_rng(1)
+    frames = []
+    for _ in range(30):
+        R = _random_rotation(rng)
+        t = rng.normal(0, 50, size=3)
+        frames.append(rest_data @ R.T + t)
+    kp3d = np.stack(frames, axis=0)
+
+    diag = segment_scale_diagnostics(kp3d, LEG_SUBSET, str(MODEL_XML))
+
+    assert diag["within_bone_cv"] < 1e-6
+    assert diag["across_bone_cv"] < 1e-6
+    assert diag["n_pairs_used"] == len(rigid_segment_pairs(LEG_SUBSET))
+    assert diag["scale"] == pytest.approx(known_scale, rel=0.01)
+
+
+def test_segment_scale_diagnostics_per_frame_jitter_raises_within_not_across():
+    """Per-frame (zero-mean) jitter on one pair breaks rigidity but the
+    median-based implied scale for that pair is unaffected, so agreement
+    between bones (across_bone_cv) stays low."""
+    _require_model()
+    ref = _ref_positions_for(LEG_SUBSET)
+    known_scale = 0.0117
+    rest_data = ref / known_scale
+    n_frames = 400
+    rng = np.random.default_rng(2)
+    kp3d = np.repeat(rest_data[None], n_frames, axis=0).copy()
+
+    i_taT1 = LEG_SUBSET.index("T2L_TaT1")
+    jitter = rng.normal(0, rest_data.std() * 0.15, size=(n_frames, 3))
+    kp3d[:, i_taT1, :] += jitter
+
+    clean = segment_scale_diagnostics(rest_data[None].repeat(n_frames, axis=0),
+                                      LEG_SUBSET, str(MODEL_XML))
+    jittered = segment_scale_diagnostics(kp3d, LEG_SUBSET, str(MODEL_XML))
+
+    assert jittered["within_bone_cv"] > clean["within_bone_cv"] + 0.01
+    assert jittered["across_bone_cv"] < 0.05
+
+
+def test_segment_scale_diagnostics_systematic_bias_raises_across_not_within():
+    """A deterministic (per-frame constant) wrong length on one pair breaks
+    agreement between bones but leaves that pair (and every other pair)
+    perfectly rigid across frames."""
+    _require_model()
+    ref = _ref_positions_for(LEG_SUBSET)
+    known_scale = 0.0117
+    rest_data = ref / known_scale
+    n_frames = 20
+    kp3d = np.repeat(rest_data[None], n_frames, axis=0).copy()
+
+    i_taT1 = LEG_SUBSET.index("T2L_TaT1")
+    i_tita = LEG_SUBSET.index("T2L_TiTa")
+    axis_dir = rest_data[i_taT1] - rest_data[i_tita]
+    kp3d[:, i_taT1] = rest_data[i_tita] + axis_dir * 1.3  # constant across ALL frames
+
+    clean = segment_scale_diagnostics(np.repeat(rest_data[None], n_frames, axis=0),
+                                      LEG_SUBSET, str(MODEL_XML))
+    biased = segment_scale_diagnostics(kp3d, LEG_SUBSET, str(MODEL_XML))
+
+    assert biased["across_bone_cv"] > clean["across_bone_cv"] + 0.01
+    assert biased["within_bone_cv"] < 1e-6
+
+
+def test_segment_scale_diagnostics_raises_when_all_pairs_unusable():
+    _require_model()
+    kp3d = np.full((5, len(LEG_SUBSET), 3), np.nan)
+    with pytest.raises(ValueError):
+        segment_scale_diagnostics(kp3d, LEG_SUBSET, str(MODEL_XML))
+
+
+# ---------------------------------------------------------------------------
+# estimate_run_root(..., scale_keypoints="rigid_segment")
+# ---------------------------------------------------------------------------
+
+def _full_kp_names_and_ref():
+    anatomy_path = REPO_ROOT / "configs" / "anatomy" / "v1.yaml"
+    if not anatomy_path.exists() or not MODEL_XML.exists():
+        pytest.skip("anatomy config or model xml not found")
+    raw = OmegaConf.load(str(anatomy_path))
+    kp_names = list(raw.model.KP_NAMES)
+    ref = _ref_positions_for(kp_names)
+    return kp_names, ref
+
+
+def _synthetic_full_run_root(tmp_path, kp_names, ref, *, n_bouts=3,
+                             fly0_scale=0.011, fly1_scale=0.0119,
+                             fly0_leg_jitter=0.0, fly1_leg_jitter=0.0):
+    """Like _synthetic_run_root but over the FULL v1 keypoint set (so
+    rigid_segment mode has leg pairs to work with), with optional per-fly
+    per-frame jitter injected into leg keypoints only (to simulate bad
+    female-like keypoints for the within_bone_cv warning test)."""
+    run_root = tmp_path / "run"
+    rng = np.random.default_rng(11)
+    leg_mask = np.array(["T1" in n or "T2" in n or "T3" in n for n in kp_names])
+    for i in range(1, n_bouts + 1):
+        bout_dir = run_root / "bouts" / f"bout_{i:05d}"
+        f0 = ref / fly0_scale + rng.normal(0, 1e-6, size=ref.shape)
+        f1 = ref / fly1_scale + _FLY_SEPARATION + rng.normal(0, 1e-6, size=ref.shape)
+        kp3d0 = np.repeat(f0[None], 40, axis=0)
+        kp3d1 = np.repeat(f1[None], 40, axis=0)
+        if fly0_leg_jitter:
+            kp3d0 = kp3d0.copy()
+            kp3d0[:, leg_mask, :] += rng.normal(0, fly0_leg_jitter,
+                                                size=kp3d0[:, leg_mask, :].shape)
+        if fly1_leg_jitter:
+            kp3d1 = kp3d1.copy()
+            kp3d1[:, leg_mask, :] += rng.normal(0, fly1_leg_jitter,
+                                                size=kp3d1[:, leg_mask, :].shape)
+        _write_kp3d(bout_dir / "fly0", kp3d0)
+        _write_kp3d(bout_dir / "fly1", kp3d1)
+        _write_sex_json(bout_dir, 1)
+    return run_root
+
+
+def test_estimate_run_root_rigid_segment_mode_same_key_structure(tmp_path):
+    kp_names, ref = _full_kp_names_and_ref()
+    run_root = _synthetic_full_run_root(tmp_path, kp_names, ref)
+    cfg = OmegaConf.create({"model": {"KP_NAMES": kp_names}, "mjcf_path": str(MODEL_XML)})
+
+    result = estimate_run_root(run_root, cfg, scale_keypoints="rigid_segment")
+
+    assert result["identity"] == "canonical"
+    assert result["duplicate_slot_bouts"] == []
+    assert set(result["scale_by_fly"].keys()) == {"0", "1"}
+    assert result["scale_by_fly"]["0"] == pytest.approx(0.011, rel=0.02)
+    assert result["scale_by_fly"]["1"] == pytest.approx(0.0119, rel=0.02)
+    for fly in ("0", "1"):
+        diag = result["diagnostics"][fly]
+        for key in ("scale", "n_bouts", "n_frames", "per_bout_median",
+                    "outlier_bouts", "spread_pct", "scale_cv_across_bouts",
+                    "within_bone_cv", "across_bone_cv", "n_pairs_used"):
+            assert key in diag, f"missing diagnostic key {key!r}"
+        assert diag["within_bone_cv"] < 0.05
+
+
+def test_estimate_run_root_rigid_segment_warns_when_estimator_not_default(tmp_path):
+    kp_names, ref = _full_kp_names_and_ref()
+    run_root = _synthetic_full_run_root(tmp_path, kp_names, ref, n_bouts=1)
+    cfg = OmegaConf.create({"model": {"KP_NAMES": kp_names}, "mjcf_path": str(MODEL_XML)})
+
+    with pytest.warns(UserWarning, match="ignored"):
+        estimate_run_root(run_root, cfg, scale_keypoints="rigid_segment",
+                          estimator="norm_ratio")
+
+
+def test_estimate_run_root_rigid_segment_flags_noisy_female_like_fly(tmp_path, capsys):
+    """Integration/regression for the within_bone_cv warning: a fly with
+    noisy (jittered) leg keypoints must trip WITHIN_BONE_CV_WARN_THRESH and
+    print a WARNING naming it, while a clean fly must not."""
+    kp_names, ref = _full_kp_names_and_ref()
+    # 1.0 data-unit jitter on ~5-data-unit leg bones (median, at fly1's own
+    # scale) reproduces the measured female-like within_bone_cv (~0.27, well
+    # above WITHIN_BONE_CV_WARN_THRESH); fly0 is left clean (within_bone_cv ~0).
+    run_root = _synthetic_full_run_root(
+        tmp_path, kp_names, ref, n_bouts=2, fly0_leg_jitter=0.0, fly1_leg_jitter=1.0)
+
+    estimate_scale_main([
+        "--run-root", str(run_root),
+        "--scale-keypoints", "rigid_segment",
+        "--dry-run",
+    ])
+    out = capsys.readouterr().out
+
+    assert "WARNING" in out
+    # fly1 (the jittered one) must be the one flagged.
+    warn_lines = [l for l in out.splitlines() if "WARNING" in l and "within_bone_cv" in l.lower()]
+    assert any("fly1" in l for l in warn_lines) or "fly1" in out.split("WARNING")[1]

@@ -10,6 +10,11 @@ from omegaconf import OmegaConf
 from scripts.scale_keypoints import resolve_scale_keypoints
 
 KP = ["Scutellum", "WingL_base", "T1L_FeTi", "T1R_FeTi", "Abd_tip"]
+# A trunk pair plus a full T1L leg chain plus a partial T2L chain (matching
+# the real v1 model's "no ThxCx on T2/T3" gap) -- enough for
+# rigid_segment_pairs to yield >0 pairs spanning 2 legs.
+KP_LEG = ["Scutellum", "WingL_base", "T1L_ThxCx", "T1L_Tro", "T1L_FeTi",
+          "T1L_TiTa", "T1L_TaT1", "T2L_FeTi", "T2L_TiTa"]
 
 
 def cfg_with(mode=None):
@@ -37,6 +42,21 @@ def test_all_uses_every_keypoint():
 def test_bad_mode_raises():
     with pytest.raises(ValueError, match="scale_keypoints"):
         resolve_scale_keypoints(cfg_with("some"), KP)
+
+
+def test_rigid_segment_returns_names_participating_in_pairs():
+    result = resolve_scale_keypoints(cfg_with("rigid_segment"), KP_LEG)
+
+    assert result == ["T1L_ThxCx", "T1L_Tro", "T1L_FeTi", "T1L_TiTa",
+                      "T1L_TaT1", "T2L_FeTi", "T2L_TiTa"]
+    # Trunk-only names (not part of any rigid-segment pair) are excluded.
+    assert "Scutellum" not in result
+    assert "WingL_base" not in result
+
+
+def test_rigid_segment_no_pairs_returns_empty_list():
+    assert resolve_scale_keypoints(cfg_with("rigid_segment"),
+                                   ["Scutellum", "WingL_base"]) == []
 
 
 def test_run_bout_direct_invocation_imports():

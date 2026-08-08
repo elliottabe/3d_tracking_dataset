@@ -522,17 +522,35 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
     scale_path = os.path.join(run_root, "scale.json")
     if not stage_done(scale_path):
         scale_names = resolve_scale_keypoints(cfg, kp_names)
-        _scale = compute_trunk_scale(
-            kp3d, kp_names, cfg.silhouette.xml,
-            trunk_names=scale_names,
-            estimator=cfg.scaling.estimator,
-            robust_stat=cfg.scaling.robust_stat,
-            robust=cfg.scaling.robust)
-        atomic_save_json(scale_path, {
-            "scale": float(_scale),
-            "scale_keypoints": str(cfg.scaling.get("scale_keypoints", "trunk")),
-            "trunk_keypoints": list(scale_names),
-            "estimator": str(cfg.scaling.estimator)})
+        _scale_keypoints_mode = str(cfg.scaling.get("scale_keypoints", "trunk"))
+        if _scale_keypoints_mode == "rigid_segment":
+            # Pose-invariant direct rigid-leg-segment-length measurement (see
+            # scripts/estimate_recording_scale.py) instead of a trunk-marker
+            # Procrustes/norm-ratio fit -- `estimator` below is ignored.
+            try:
+                from scripts.estimate_recording_scale import per_bout_segment_scale
+            except ModuleNotFoundError:  # direct invocation: sys.path[0] is scripts/
+                from estimate_recording_scale import per_bout_segment_scale
+            _pair_scales = per_bout_segment_scale(kp3d, kp_names, cfg.silhouette.xml)
+            _scale = float(np.median(_pair_scales))
+            atomic_save_json(scale_path, {
+                "scale": float(_scale),
+                "scale_keypoints": _scale_keypoints_mode,
+                "trunk_keypoints": list(scale_names),
+                "estimator": str(cfg.scaling.estimator),
+                "method": "rigid_segment"})
+        else:
+            _scale = compute_trunk_scale(
+                kp3d, kp_names, cfg.silhouette.xml,
+                trunk_names=scale_names,
+                estimator=cfg.scaling.estimator,
+                robust_stat=cfg.scaling.robust_stat,
+                robust=cfg.scaling.robust)
+            atomic_save_json(scale_path, {
+                "scale": float(_scale),
+                "scale_keypoints": _scale_keypoints_mode,
+                "trunk_keypoints": list(scale_names),
+                "estimator": str(cfg.scaling.estimator)})
     with open(scale_path) as _f:
         _scale_data = json.load(_f)
     # Prefer a per-fly scale when present (scripts/estimate_recording_scale.py

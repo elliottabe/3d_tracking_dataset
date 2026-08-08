@@ -13,19 +13,30 @@ cloud. Other bout-flies of the same recording spread 0.0098-0.0130 (+-20%).
 Body size is constant across a recording's bouts for a given individual, so
 this spread is estimator noise, not signal. This module:
 
-  1. computes a per-frame scale for every bout-fly (``per_frame_scales``,
-     built on ``jarvis_jax.tracking.scale``'s per-frame Umeyama primitive),
-  2. pools frames across a fly's bouts and rejects outlier bouts by a
-     MAD threshold on their per-bout medians (``robust_scale``),
+  1. computes a per-bout-fly scale (default ``scale_keypoints='rigid_segment'``:
+     ``per_bout_segment_scale``, a pose-invariant direct rigid-leg-segment
+     length measurement -- see that function's docstring; the older
+     ``'trunk'``/``'all'`` modes use ``per_frame_scales``, a Procrustes/
+     norm-ratio FIT over a trunk-marker cloud, which cloud-spread estimators
+     confound with pose),
+  2. pools (frames, or per-pair values for rigid_segment) across a fly's
+     bouts and rejects outlier bouts by a MAD threshold on their per-bout
+     medians (``robust_scale``),
   3. drives that per (run_root, fly) -- UNLESS the recording's fly-slot
      identity is not stable across bouts, in which case all bout-flies are
      pooled into a single recording-level scale instead (see
      ``estimate_run_root`` docstring: fly0/fly1 is only a stable individual
      label once the recording has been sex-canonicalized).
 
+``rigid_segment`` additionally derives physics-based keypoint-quality
+diagnostics (``within_bone_cv``/``across_bone_cv``, see
+``segment_scale_diagnostics``) since a rigid-segment measurement doubles as a
+check that keypoints obey basic skeletal physics.
+
 CLI:
     python scripts/estimate_recording_scale.py --run-root <path> \\
-        [--estimator umeyama|norm_ratio] [--scale-keypoints trunk|all] \\
+        [--estimator umeyama|norm_ratio] \\
+        [--scale-keypoints trunk|all|rigid_segment] [--include-thorax] \\
         [--anatomy configs/anatomy/v1.yaml] [--out <path>] [--dry-run]
 """
 from __future__ import annotations
@@ -34,8 +45,9 @@ import argparse
 import json
 import os
 import re
+import warnings
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -88,6 +100,197 @@ def _ref_positions(model_xml: str, present: List[str]) -> np.ndarray:
     d = mujoco.MjData(mj)
     mujoco.mj_forward(mj, d)
     return np.array([d.site_xpos[idx[n]] for n in present])
+
+
+# ---------------------------------------------------------------------------
+# Rigid-segment body-scale estimator.
+#
+# Keypoints at the two ends of one rigid bone are a fixed distance apart no
+# matter how the fly moves (rotation/translation of the whole body cancels
+# out exactly, and -- unlike a trunk-marker Procrustes/norm-ratio fit -- so
+# does internal pose: a leg bending elsewhere doesn't change THIS bone's
+# length). Measured by hand: T1L_FeTi->T1L_TiTa (front-left tibia) has model
+# length 0.05103 model-units, observed median 4.495 data-units over 1174
+# frames (CV 2.9%), implied scale 0.011353 = model/observed. Pooling the
+# implied scale over every such pair and taking a robust median is a
+# pose-invariant DIRECT measurement, not a fit -- there is no `estimator`
+# choice (umeyama vs norm_ratio) the way there is for per_frame_scales.
+# ---------------------------------------------------------------------------
+
+LEG_NAMES = ("T1L", "T1R", "T2L", "T2R", "T3L", "T3R")
+# Consecutive joints along one leg's kinematic chain, thorax to tarsus tip.
+LEG_JOINT_CHAIN = ("ThxCx", "Tro", "FeTi", "TiTa", "TaT1")
+
+# Thorax-plate pairs, NOT included by default (include_thorax=False). Measured
+# on real data these imply a scale ~10.2% LARGER than the leg-chain scale --
+# i.e. the model's trunk proportions don't quite match the animal's. Since IK
+# joint angles are determined by the LEG chain (not the trunk plates), the
+# leg-only default is deliberate: it matches the kinematic chain STAC solves.
+THORAX_PAIRS: Tuple[Tuple[str, str], ...] = (
+    ("WingL_base", "WingR_base"),
+    ("Scutellum", "WingL_base"),
+    ("Scutellum", "WingR_base"),
+)
+
+# within_bone_cv threshold above which a fly's rigid-segment scale estimate
+# is flagged untrustworthy. Measured on real data (Session0, 4 bouts): male
+# (good keypoints) within-bone CV 3.6-6.2%, across-bone CV 6.0-6.7%, scale
+# stable 0.01142-0.01178 across bouts; female (known-bad keypoints)
+# within-bone CV 20-50%, across-bone CV 29-57%, scale swings 0.0081-0.0130
+# (60%). Total separation between the two populations -- 0.15 sits well
+# above the male ceiling (~0.062) and well below the female floor (~0.20).
+WITHIN_BONE_CV_WARN_THRESH = 0.15
+
+
+def rigid_segment_pairs(kp_names: List[str], *, include_thorax: bool = False
+                        ) -> List[Tuple[str, str]]:
+    """Consecutive-joint keypoint pairs spanning one rigid skeletal segment
+    each, restricted to pairs where BOTH names are present in ``kp_names``
+    (missing names -- e.g. the real v1 model has no ThxCx tracking site for
+    T2/T3 legs -- silently drop that one pair, not an error).
+
+    ``include_thorax=True`` adds the 3 thorax-plate pairs (see
+    ``THORAX_PAIRS``); default False since they imply a different (larger)
+    scale than the leg chain the IK solves against.
+    """
+    names = set(kp_names)
+    pairs: List[Tuple[str, str]] = []
+    for leg in LEG_NAMES:
+        chain = [f"{leg}_{joint}" for joint in LEG_JOINT_CHAIN]
+        for a, b in zip(chain[:-1], chain[1:]):
+            if a in names and b in names:
+                pairs.append((a, b))
+    if include_thorax:
+        for a, b in THORAX_PAIRS:
+            if a in names and b in names:
+                pairs.append((a, b))
+    return pairs
+
+
+def _segment_pair_measurements(kp3d: np.ndarray, kp_names: List[str], model_xml: str, *,
+                               include_thorax: bool = False
+                               ) -> List[Tuple[Tuple[str, str], np.ndarray, float]]:
+    """Shared internals for ``per_bout_segment_scale``/``segment_scale_diagnostics``.
+
+    For each usable rigid pair (both names present in ``kp_names`` AND the
+    model's tracking sites, >=1 finite observed-distance frame): the
+    per-frame observed distances (NaN frames dropped) and the model's
+    rest-pose distance between the same two tracking sites.
+
+    Returns a list of ``((name_a, name_b), finite_dists, model_dist)``.
+    Raises ValueError if no pair is usable.
+    """
+    pairs = rigid_segment_pairs(kp_names, include_thorax=include_thorax)
+    if not pairs:
+        raise ValueError(
+            f"_segment_pair_measurements: no rigid-segment pairs available "
+            f"for the given kp_names (include_thorax={include_thorax})")
+
+    name_to_idx = {n: i for i, n in enumerate(kp_names)}
+    tracking_site_idx = _tracking_site_idx(model_xml)
+    needed = sorted({n for pair in pairs for n in pair if n in tracking_site_idx})
+    ref_arr = _ref_positions(model_xml, needed)
+    ref_pos = dict(zip(needed, ref_arr))
+
+    P = np.asarray(kp3d, dtype=np.float64)
+    measurements: List[Tuple[Tuple[str, str], np.ndarray, float]] = []
+    for a, b in pairs:
+        if a not in ref_pos or b not in ref_pos:
+            continue  # not a real model tracking site -- can't get a model length
+        ia, ib = name_to_idx[a], name_to_idx[b]
+        d_obs = np.linalg.norm(P[:, ia, :] - P[:, ib, :], axis=-1)
+        finite = d_obs[np.isfinite(d_obs)]
+        if finite.size == 0:
+            continue
+        model_dist = float(np.linalg.norm(ref_pos[a] - ref_pos[b]))
+        if model_dist <= 0:
+            continue
+        measurements.append(((a, b), finite, model_dist))
+
+    if not measurements:
+        raise ValueError(
+            "_segment_pair_measurements: no rigid-segment pair had any finite "
+            "observed-distance frame")
+    return measurements
+
+
+def segment_scale_diagnostics(kp3d: np.ndarray, kp_names: List[str], model_xml: str, *,
+                              include_thorax: bool = False) -> dict:
+    """Physics-based keypoint-quality diagnostics from rigid-segment
+    measurements, for ONE bout-fly.
+
+    Two independent properties a rigid skeleton must have:
+
+      1. RIGIDITY -- one bone's length cannot change across frames.
+         ``within_bone_cv`` = mean over pairs of (std/mean of that pair's
+         observed distance across frames). High = keypoints are jittery/bad.
+      2. AGREEMENT -- different bones must all imply the same overall body
+         scale. ``across_bone_cv`` = std/mean of the per-pair implied scales.
+         High = keypoints are internally inconsistent (e.g. systematically
+         wrong on one limb) even if each individual bone looks rigid.
+
+    These are independent signals: per-frame jitter on one bone raises
+    ``within_bone_cv`` without moving ``across_bone_cv`` (the jitter's
+    across-frame median is unbiased); a systematically-wrong bone length
+    raises ``across_bone_cv`` without moving ``within_bone_cv`` (that bone is
+    still perfectly rigid, just the wrong rigid length). See
+    ``WITHIN_BONE_CV_WARN_THRESH`` for measured male-vs-female values.
+
+    Returns ``{"scale": float, "per_pair_scale": np.ndarray,
+    "within_bone_cv": float, "across_bone_cv": float, "n_pairs_used": int}``.
+    Raises ValueError if no pair is usable (propagated from
+    ``_segment_pair_measurements``).
+    """
+    measurements = _segment_pair_measurements(kp3d, kp_names, model_xml,
+                                              include_thorax=include_thorax)
+    per_pair_scale = []
+    within_cvs = []
+    for _pair, d_obs, model_dist in measurements:
+        mean = float(np.mean(d_obs))
+        if mean > 0:
+            within_cvs.append(float(np.std(d_obs)) / mean)
+        med = float(np.median(d_obs))
+        if med > 0:
+            per_pair_scale.append(model_dist / med)
+
+    if not per_pair_scale:
+        raise ValueError(
+            "segment_scale_diagnostics: every usable pair had a degenerate "
+            "(non-positive) median observed distance")
+
+    per_pair_scale = np.asarray(per_pair_scale, dtype=np.float64)
+    within_bone_cv = float(np.mean(within_cvs)) if within_cvs else float("nan")
+    mean_scale = float(np.mean(per_pair_scale))
+    across_bone_cv = float(np.std(per_pair_scale) / mean_scale) if mean_scale > 0 else float("nan")
+
+    return {
+        "scale": float(np.median(per_pair_scale)),
+        "per_pair_scale": per_pair_scale,
+        "within_bone_cv": within_bone_cv,
+        "across_bone_cv": across_bone_cv,
+        "n_pairs_used": int(per_pair_scale.size),
+    }
+
+
+def per_bout_segment_scale(kp3d: np.ndarray, kp_names: List[str], model_xml: str, *,
+                           include_thorax: bool = False) -> np.ndarray:
+    """Per-pair implied body-scale (data -> model) for ONE bout-fly, from
+    rigid leg-segment lengths (see module docstring above).
+
+    For each usable rigid pair (``rigid_segment_pairs``): the median-over-
+    frames observed distance between the two keypoints, and the model's
+    rest-pose distance between the same two tracking sites; implied scale =
+    model_distance / observed_median. NaN-safe (frames with a non-finite
+    marker are dropped per pair, not propagated); pairs with no finite
+    frames are dropped. Pose (per-frame rotation/translation, and any OTHER
+    joint bending) does not affect a pair's own implied scale.
+
+    Returns the 1-D array of per-pair implied scales. Raises ValueError if no
+    pair is usable. NOTE: there is no ``estimator`` argument -- a rigid
+    segment's length is measured directly, not fit by Procrustes/norm-ratio.
+    """
+    return segment_scale_diagnostics(kp3d, kp_names, model_xml,
+                                     include_thorax=include_thorax)["per_pair_scale"]
 
 
 def bout_kp3d_paths(run_root: Path, fly: int) -> List[Path]:
@@ -209,6 +412,14 @@ def robust_scale(per_bout: Dict[int, np.ndarray], *, mad_k: float = 3.0) -> dict
     else:
         spread_pct = 0.0
 
+    # Third stability signal (alongside spread_pct): plain CV (std/mean) of
+    # the per-bout medians, over the SAME population as spread_pct (all
+    # bouts, before outlier exclusion) -- "does this fly's scale hold steady
+    # across its bouts?" Generic to every scale_keypoints mode.
+    mean_of_medians = float(np.mean(medians))
+    scale_cv_across_bouts = (float(np.std(medians) / mean_of_medians)
+                             if len(medians) > 1 and mean_of_medians else 0.0)
+
     return {
         "scale": final_scale,
         "n_bouts": len(bout_idxs),
@@ -216,6 +427,7 @@ def robust_scale(per_bout: Dict[int, np.ndarray], *, mad_k: float = 3.0) -> dict
         "per_bout_median": per_bout_median,
         "outlier_bouts": outlier_bouts,
         "spread_pct": spread_pct,
+        "scale_cv_across_bouts": scale_cv_across_bouts,
     }
 
 
@@ -376,16 +588,32 @@ def _load_kp3d_by_fly_bout(run_root: Path, fly_ids: List[int]
 
 def _per_fly_scale_arrays(kp3d_by_fly_bout: Dict[int, Dict[int, np.ndarray]],
                           exclude_bouts: set, kp_names: List[str], model_xml: str,
-                          trunk_names: List[str], estimator: str
+                          trunk_names: List[str], estimator: str, *,
+                          scale_keypoints: str = "trunk", include_thorax: bool = False
                           ) -> Dict[int, Dict[int, np.ndarray]]:
+    """Per bout-fly scale arrays, feeding ``robust_scale``.
+
+    For ``scale_keypoints='rigid_segment'`` each bout-fly's array is its
+    per-pair implied scales (``per_bout_segment_scale``) -- so
+    ``robust_scale``'s own per-bout median of that array IS "the median of
+    that bout's per-pair implied scales", per spec. Every other mode keeps
+    the existing per-FRAME scale array (``per_frame_scales``).
+    """
     out: Dict[int, Dict[int, np.ndarray]] = {}
     for fly, per_bout in kp3d_by_fly_bout.items():
         scale_bouts = {}
         for idx, kp3d in per_bout.items():
             if idx in exclude_bouts:
                 continue
-            scales = per_frame_scales(kp3d, kp_names, model_xml,
-                                      trunk_names=trunk_names, estimator=estimator)
+            if scale_keypoints == "rigid_segment":
+                try:
+                    scales = per_bout_segment_scale(kp3d, kp_names, model_xml,
+                                                    include_thorax=include_thorax)
+                except ValueError:
+                    continue
+            else:
+                scales = per_frame_scales(kp3d, kp_names, model_xml,
+                                          trunk_names=trunk_names, estimator=estimator)
             if scales.size:
                 scale_bouts[idx] = scales
         if scale_bouts:
@@ -393,8 +621,49 @@ def _per_fly_scale_arrays(kp3d_by_fly_bout: Dict[int, Dict[int, np.ndarray]],
     return out
 
 
+def _per_fly_segment_diagnostics(kp3d_by_fly_bout: Dict[int, Dict[int, np.ndarray]],
+                                 exclude_bouts: set, kp_names: List[str], model_xml: str, *,
+                                 include_thorax: bool = False
+                                 ) -> Dict[int, Dict[int, dict]]:
+    """Per bout-fly ``segment_scale_diagnostics`` (within/across-bone CV),
+    only computed for ``scale_keypoints='rigid_segment'``."""
+    out: Dict[int, Dict[int, dict]] = {}
+    for fly, per_bout in kp3d_by_fly_bout.items():
+        bout_diags = {}
+        for idx, kp3d in per_bout.items():
+            if idx in exclude_bouts:
+                continue
+            try:
+                bout_diags[idx] = segment_scale_diagnostics(
+                    kp3d, kp_names, model_xml, include_thorax=include_thorax)
+            except ValueError:
+                continue
+        if bout_diags:
+            out[fly] = bout_diags
+    return out
+
+
+def _attach_segment_quality(diag: dict, bout_diags: Dict[int, dict]) -> None:
+    """Mutate a ``robust_scale`` result in place with rigid-segment
+    keypoint-quality aggregates (mean over the KEPT, non-outlier bouts).
+
+    Mirrors ``robust_scale``'s OWN fallback for its ``final_scale`` (``keep =
+    [...] or bout_idxs``): if every bout happened to be flagged an outlier
+    (e.g. near-zero real spread makes the MAD threshold degenerate), fall
+    back to using all bouts rather than aggregating over an empty set.
+    """
+    all_bouts = list(diag["per_bout_median"])
+    kept = [bi for bi in all_bouts if bi not in diag["outlier_bouts"]] or all_bouts
+    within = [bout_diags[bi]["within_bone_cv"] for bi in kept if bi in bout_diags]
+    across = [bout_diags[bi]["across_bone_cv"] for bi in kept if bi in bout_diags]
+    npairs = [bout_diags[bi]["n_pairs_used"] for bi in kept if bi in bout_diags]
+    diag["within_bone_cv"] = float(np.mean(within)) if within else float("nan")
+    diag["across_bone_cv"] = float(np.mean(across)) if across else float("nan")
+    diag["n_pairs_used"] = int(round(float(np.mean(npairs)))) if npairs else 0
+
+
 def estimate_run_root(run_root: Path, cfg, *, estimator: str = "umeyama",
-                      scale_keypoints: str = "trunk",
+                      scale_keypoints: str = "trunk", include_thorax: bool = False,
                       coincident_thresh: float = DEFAULT_COINCIDENT_FRAC_THRESH) -> dict:
     """Recording-level robust body-scale estimate.
 
@@ -420,6 +689,24 @@ def estimate_run_root(run_root: Path, cfg, *, estimator: str = "umeyama",
        a duplicated slot contains a real (just wrong) fly, so its per-frame
        scale looks normal and MAD rejection alone would not catch it.
 
+    ``scale_keypoints``:
+      - ``'trunk'``: rigid-trunk-marker Procrustes/norm-ratio fit (``estimator``
+        selects which), the historical default.
+      - ``'all'``: same fit, every keypoint.
+      - ``'rigid_segment'``: pose-invariant DIRECT rigid-segment-length
+        measurement (see module docstring / ``rigid_segment_pairs``) -- the
+        pipeline default as of Task 16, since it matches the LEG kinematic
+        chain STAC's IK actually solves and is not confounded by pose.
+        ``estimator`` is IGNORED for this mode (there is nothing to fit); a
+        ``UserWarning`` is raised if it was set to anything but the default
+        ``'umeyama'``, so a caller relying on it silently doesn't get fooled.
+        Additionally attaches physics-based keypoint-quality diagnostics
+        (``within_bone_cv``, ``across_bone_cv``, ``n_pairs_used`` -- see
+        ``segment_scale_diagnostics``) to each fly's (or the pooled) entry
+        under ``diagnostics``.
+      ``include_thorax`` (rigid_segment only): also use the 3 thorax-plate
+      pairs (default False -- see ``THORAX_PAIRS``).
+
     Returns::
 
         {"scale": float,                       # back-compat scalar
@@ -428,7 +715,15 @@ def estimate_run_root(run_root: Path, cfg, *, estimator: str = "umeyama",
          "method": "recording_robust",
          "identity": "canonical" | "unknown", "identity_reason": str,
          "duplicate_slot_bouts": [bout_idx, ...],
-         "diagnostics": {...}}                 # per-fly or {"pooled": ...}
+         "diagnostics": {...}}                 # per-fly or {"pooled": ...};
+                                                # each entry additionally has
+                                                # "scale_cv_across_bouts" (all
+                                                # modes) and, for
+                                                # scale_keypoints=
+                                                # 'rigid_segment',
+                                                # "within_bone_cv" /
+                                                # "across_bone_cv" /
+                                                # "n_pairs_used".
     """
     run_root = Path(run_root)
     kp_names = list(cfg.model.KP_NAMES)
@@ -438,10 +733,18 @@ def estimate_run_root(run_root: Path, cfg, *, estimator: str = "umeyama",
         trunk_names = list(DEFAULT_TRUNK_KEYPOINTS)
     elif scale_keypoints == "all":
         trunk_names = list(kp_names)
+    elif scale_keypoints == "rigid_segment":
+        trunk_names = None  # unused -- see the estimator-ignored warning below
+        if estimator != "umeyama":
+            warnings.warn(
+                "estimate_run_root: `estimator` is ignored for "
+                f"scale_keypoints='rigid_segment' (got estimator={estimator!r}) "
+                "-- a rigid segment's length is measured directly, not fit.",
+                UserWarning, stacklevel=2)
     else:
         raise ValueError(
-            f"estimate_run_root: scale_keypoints must be 'trunk' or 'all', "
-            f"got {scale_keypoints!r}")
+            f"estimate_run_root: scale_keypoints must be 'trunk', 'all', or "
+            f"'rigid_segment', got {scale_keypoints!r}")
 
     identity, identity_reason = _determine_identity(run_root)
     fly_ids = _fly_ids(run_root)
@@ -451,15 +754,23 @@ def estimate_run_root(run_root: Path, cfg, *, estimator: str = "umeyama",
 
     duplicate_slot_bouts = _find_duplicate_slot_bouts(
         kp3d_by_fly_bout, coincident_thresh=coincident_thresh)
+    exclude_bouts = set(duplicate_slot_bouts)
 
     per_fly_per_bout = _per_fly_scale_arrays(
-        kp3d_by_fly_bout, set(duplicate_slot_bouts), kp_names, model_xml,
-        trunk_names, estimator)
+        kp3d_by_fly_bout, exclude_bouts, kp_names, model_xml,
+        trunk_names, estimator, scale_keypoints=scale_keypoints,
+        include_thorax=include_thorax)
 
     if not per_fly_per_bout:
         raise ValueError(
             f"estimate_run_root: no usable bout-fly kp3d under {run_root} after "
             f"excluding duplicate-slot bouts {duplicate_slot_bouts}")
+
+    segment_diag_by_fly: Dict[int, Dict[int, dict]] = {}
+    if scale_keypoints == "rigid_segment":
+        segment_diag_by_fly = _per_fly_segment_diagnostics(
+            kp3d_by_fly_bout, exclude_bouts, kp_names, model_xml,
+            include_thorax=include_thorax)
 
     result = {
         "estimator": estimator,
@@ -475,6 +786,8 @@ def estimate_run_root(run_root: Path, cfg, *, estimator: str = "umeyama",
         diagnostics = {}
         for fly, per_bout in per_fly_per_bout.items():
             diag = robust_scale(per_bout)
+            if scale_keypoints == "rigid_segment":
+                _attach_segment_quality(diag, segment_diag_by_fly.get(fly, {}))
             scale_by_fly[str(fly)] = diag["scale"]
             diagnostics[str(fly)] = diag
         result["scale_by_fly"] = scale_by_fly
@@ -488,10 +801,16 @@ def estimate_run_root(run_root: Path, cfg, *, estimator: str = "umeyama",
         # "fly<F>:bout<idx>" strings keep any outlier_bouts diagnostic
         # readable instead of an opaque encoded int.
         pooled = {}
+        pooled_segment_diag = {}
         for fly, per_bout in per_fly_per_bout.items():
             for idx, arr in per_bout.items():
                 pooled[f"fly{fly}:bout{idx}"] = arr
+        for fly, bout_diags in segment_diag_by_fly.items():
+            for idx, d in bout_diags.items():
+                pooled_segment_diag[f"fly{fly}:bout{idx}"] = d
         diag = robust_scale(pooled)
+        if scale_keypoints == "rigid_segment":
+            _attach_segment_quality(diag, pooled_segment_diag)
         result["scale_by_fly"] = None
         result["scale"] = diag["scale"]
         result["diagnostics"] = {"pooled": diag}
@@ -517,13 +836,41 @@ def _load_anatomy_cfg(anatomy_path: str):
     return OmegaConf.merge(container, raw)
 
 
+def _print_scale_diag(label: str, s: Optional[float], diag: dict) -> None:
+    """Print one fly's (or "pooled") robust_scale diagnostics, including the
+    scale_cv_across_bouts signal (all modes) and, for scale_keypoints=
+    'rigid_segment', the within/across-bone-CV keypoint-quality signals plus
+    a WARNING when within_bone_cv exceeds WITHIN_BONE_CV_WARN_THRESH."""
+    scale_val = diag["scale"] if s is None else s
+    outliers = diag["outlier_bouts"]
+    print(f"  {label}: scale={scale_val:.6f} n_bouts={diag['n_bouts']} "
+          f"n_frames={diag['n_frames']} spread_pct={diag['spread_pct']:.2f}% "
+          f"scale_cv_across_bouts={diag.get('scale_cv_across_bouts', 0.0) * 100:.2f}%"
+          + (f" outlier_bouts={outliers}" if outliers else ""))
+    if "within_bone_cv" in diag:
+        print(f"    within_bone_cv={diag['within_bone_cv'] * 100:.2f}% "
+              f"across_bone_cv={diag['across_bone_cv'] * 100:.2f}% "
+              f"n_pairs_used={diag['n_pairs_used']}")
+        if diag["within_bone_cv"] > WITHIN_BONE_CV_WARN_THRESH:
+            print(f"    WARNING: {label} within_bone_cv "
+                  f"{diag['within_bone_cv'] * 100:.1f}% exceeds "
+                  f"{WITHIN_BONE_CV_WARN_THRESH * 100:.0f}% -- keypoints are "
+                  f"physically inconsistent (bone lengths not constant across "
+                  f"frames); this {label}'s scale estimate should not be trusted.")
+
+
 def main(argv=None) -> None:
     ap = argparse.ArgumentParser(
         description="Recording-level robust body-scale estimator "
                     "(replaces the scale-from-first-bout defect).")
     ap.add_argument("--run-root", required=True, help="<recording>/pose dir")
-    ap.add_argument("--estimator", default="umeyama", choices=["umeyama", "norm_ratio"])
-    ap.add_argument("--scale-keypoints", default="trunk", choices=["trunk", "all"])
+    ap.add_argument("--estimator", default="umeyama", choices=["umeyama", "norm_ratio"],
+                    help="ignored when --scale-keypoints=rigid_segment")
+    ap.add_argument("--scale-keypoints", default="rigid_segment",
+                    choices=["trunk", "all", "rigid_segment"])
+    ap.add_argument("--include-thorax", action="store_true",
+                    help="rigid_segment only: also use the 3 thorax-plate pairs "
+                         "(default: leg chain only, see THORAX_PAIRS)")
     ap.add_argument("--anatomy", default="configs/anatomy/v1.yaml",
                     help="anatomy config for KP_NAMES + mjcf path")
     ap.add_argument("--out", default=None, help="default <run-root>/scale.json")
@@ -533,7 +880,8 @@ def main(argv=None) -> None:
     run_root = Path(args.run_root)
     cfg = _load_anatomy_cfg(args.anatomy)
     result = estimate_run_root(run_root, cfg, estimator=args.estimator,
-                               scale_keypoints=args.scale_keypoints)
+                               scale_keypoints=args.scale_keypoints,
+                               include_thorax=args.include_thorax)
 
     out_path = Path(args.out) if args.out else run_root / "scale.json"
 
@@ -548,18 +896,12 @@ def main(argv=None) -> None:
         print("  WARNING: fly identity is not stable across this recording's bouts "
               "-- per-fly scales were NOT computed; using one pooled "
               "recording-level scale for all bout-flies instead.")
-        diag = result["diagnostics"]["pooled"]
-        print(f"  pooled: scale={diag['scale']:.6f} n_bouts={diag['n_bouts']} "
-              f"n_frames={diag['n_frames']} spread_pct={diag['spread_pct']:.2f}%"
-              + (f" outlier_bouts={diag['outlier_bouts']}" if diag["outlier_bouts"] else ""))
+        _print_scale_diag("pooled", None, result["diagnostics"]["pooled"])
     else:
         for fly in sorted(result["scale_by_fly"]):
             s = result["scale_by_fly"][fly]
             diag = result["diagnostics"][fly]
-            outliers = diag["outlier_bouts"]
-            print(f"  fly{fly}: scale={s:.6f} n_bouts={diag['n_bouts']} "
-                  f"n_frames={diag['n_frames']} spread_pct={diag['spread_pct']:.2f}%"
-                  + (f" outlier_bouts={outliers}" if outliers else ""))
+            _print_scale_diag(f"fly{fly}", s, diag)
     print(f"  overall scale (back-compat): {result['scale']:.6f}")
 
     if args.dry_run:
