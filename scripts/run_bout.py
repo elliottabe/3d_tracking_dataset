@@ -51,6 +51,10 @@ try:
     from scripts.scale_keypoints import resolve_scale_keypoints
 except ModuleNotFoundError:  # direct invocation: sys.path[0] is scripts/, not repo root
     from scale_keypoints import resolve_scale_keypoints
+try:
+    from scripts.sync_policy import stale_invalidation_enabled
+except ModuleNotFoundError:  # direct invocation: sys.path[0] is scripts/, not repo root
+    from sync_policy import stale_invalidation_enabled
 
 # Register the `basename` OmegaConf resolver used by configs/outputs/default.yaml
 # (out = .../${recording.name}/${basename:${recording.session_dir}}/pose). Done as
@@ -422,7 +426,11 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
     #    only clears the POSE artifacts derived from them. Session-shared
     #    offsets.h5/scale.json/segment_scales.json are deliberately left alone
     #    (they are per-fly body constants, not per-bout).
-    if os.path.exists(bout_npz) and masks_are_stale(bout_npz, sync_plan):
+    # cfg.sync.invalidate_stale (scripts.sync_policy) gates this cascade so
+    # benchmark/A-B runs can keep pre-seeded (frozen) artifacts instead of
+    # having them wiped and recomputed per-variant.
+    if (stale_invalidation_enabled(cfg)
+            and os.path.exists(bout_npz) and masks_are_stale(bout_npz, sync_plan)):
         print(f"[sync] bout {bout_idx} fly{fly}: masks stale for plan "
               f"status={getattr(sync_plan, 'status', None)} -- invalidating downstream artifacts")
         for _p in (kp2d_path, kp3d_path, kp3d_filt_path, stac_h5_path, qpos_path,

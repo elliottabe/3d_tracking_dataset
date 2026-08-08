@@ -109,6 +109,15 @@ filtering:
     window_length: 7    # key must be `window_length` (filter_keypoints reads that; `window` is ignored -> default 11)
     polyorder: 2
 
+# Stale-mask invalidation policy (scripts.sync_policy, gates run_bout.py's
+# staleness cascade). Production leaves this on: when a recording's sync plan
+# changes, pose artifacts derived from the old masks are stale and must
+# recompute. Benchmark/A-B runs set this to false so pre-seeded (frozen)
+# kp2d/kp3d/... survive and every variant keeps sharing identical 2D inputs --
+# see docs/benchmark/2026-08-07-scale-ab/comparison.md.
+sync:
+  invalidate_stale: true   # false = keep pre-seeded artifacts (benchmark reproducibility)
+
 # Hydra output organization. Mirrors configs/config.yaml's pattern (run.dir tied to a
 # stable location + override_dirname exclude_keys) but points at THIS pipeline's own
 # predictions dir (${outputs.out}) instead of the STAC ${paths.base_dir}. Without this
