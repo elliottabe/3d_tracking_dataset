@@ -68,8 +68,10 @@ def test_returns_real_bool_not_truthy_object():
 def test_string_false_is_treated_as_false():
     # A YAML-ish "false" string (e.g. from a CLI override that didn't get cast)
     # must not silently read as truthy just because it's a non-empty string.
-    # We special-case common falsy string spellings; anything else falls back
-    # to Python truthiness (a non-empty string is truthy).
+    # Only the recognised falsy spellings disable the cascade; every other
+    # string -- including "" -- falls back to the safe default True. (Falling
+    # back to Python truthiness instead is what made "" silently disable
+    # invalidation; see the fix in scripts/sync_policy.py.)
     cfg = {"sync": {"invalidate_stale": "false"}}
     assert stale_invalidation_enabled(cfg) is False
 
