@@ -12,9 +12,71 @@ from jarvis_jax.data.transforms import (
 )
 
 
+def _resolve_image_path(root, split, img_record, source_root):
+    """Resolve the on-disk path for one COCO image record.
+
+    New-style records (from `scripts/build_detector_dataset.py`, e.g. the
+    V4 unified detector dataset) reference images IN PLACE rather than
+    copying them: they carry explicit `subset`/`orig_split` fields and the
+    real file lives at `<source_root>/<subset>/<orig_split>/<file_name>`.
+    Old-style records (V3 and the per-subset general_model dirs) have
+    neither field and resolve as `<root>/<split>/<file_name>`, unchanged
+    from prior behaviour.
+
+    `orig_split` (not the dataset's own `split`) drives the new-style path
+    -- that is the whole point of the V4 re-split: a recording can land in
+    this dataset's "val" while its images still physically live under the
+    source subset's "train" directory.
+    """
+    subset = img_record.get("subset")
+    orig_split = img_record.get("orig_split")
+    if subset is not None or orig_split is not None:
+        if subset is None:
+            raise ValueError(
+                "image record has 'orig_split' but no 'subset' -- both "
+                "fields are required together for in-place (V4-style) "
+                f"image resolution: {img_record!r}")
+        if orig_split is None:
+            raise ValueError(
+                "image record has 'subset' but no 'orig_split' -- both "
+                "fields are required together for in-place (V4-style) "
+                f"image resolution: {img_record!r}")
+        if not source_root:
+            raise ValueError(
+                "image record has subset/orig_split (in-place V4-style "
+                "reference) but no 'source_root' is available -- pass "
+                "source_root=... to V3Dataset, or ensure the dataset JSON's "
+                f"info.source_root is set. record: {img_record!r}")
+        return os.path.join(source_root, subset, orig_split, img_record["file_name"])
+    return os.path.join(root, split, img_record["file_name"])
+
+
+def _resolve_mask_path(root, split, img_record, source_root):
+    """Resolve the sam3 mask .npz path matching `_resolve_image_path`'s
+    choice of image location: `<...>/sam3_masks/<split_dir>/<stem>.npz`
+    rooted at whichever tree (`root` or `<source_root>/<subset>`) the
+    image itself was resolved under."""
+    subset = img_record.get("subset")
+    orig_split = img_record.get("orig_split")
+    stem = os.path.splitext(img_record["file_name"])[0] + ".npz"
+    if subset is not None or orig_split is not None:
+        if subset is None or orig_split is None:
+            raise ValueError(
+                "image record has only one of 'subset'/'orig_split' -- "
+                f"both are required together: {img_record!r}")
+        if not source_root:
+            raise ValueError(
+                "image record has subset/orig_split (in-place V4-style "
+                "reference) but no 'source_root' is available -- pass "
+                "source_root=... to V3Dataset, or ensure the dataset JSON's "
+                f"info.source_root is set. record: {img_record!r}")
+        return os.path.join(source_root, subset, "sam3_masks", orig_split, stem)
+    return os.path.join(root, "sam3_masks", split, stem)
+
+
 class V3Dataset:
     def __init__(self, root, split, *, crop=448, heatmap_size=224, sigma=7.0,
-                 recordings=None):
+                 recordings=None, source_root=None):
         self.root = root
         self.split = split
         self.crop = crop
@@ -24,10 +86,13 @@ class V3Dataset:
         ann_path = os.path.join(root, "annotations", f"instances_{split}.json")
         with open(ann_path) as f:
             coco = json.load(f)
+        self.source_root = source_root or coco.get("info", {}).get("source_root")
         id2file = {im["id"]: im["file_name"] for im in coco["images"]}
+        id2img = {im["id"]: im for im in coco["images"]}
         id2wh = {im["id"]: (im["width"], im["height"]) for im in coco["images"]}
 
         self.file_names = []
+        self.img_records = []  # full COCO image dict (carries subset/orig_split, if any)
         self.bboxes = []
         self.keypoints = []
         self.ann_ids = []
@@ -40,6 +105,7 @@ class V3Dataset:
                 fn.startswith(r + "/") for r in recordings):
                 continue
             self.file_names.append(fn)
+            self.img_records.append(id2img[a["image_id"]])
             self.bboxes.append(np.asarray(a["bbox"], dtype=np.float32))
             self.keypoints.append(
                 np.asarray(a["keypoints"], dtype=np.float32).reshape(-1, 3))
@@ -64,10 +130,8 @@ class V3Dataset:
                 w[i] = float(factor)
         return w / w.sum()
 
-    def _load_mask(self, file_name, ann_id, img_w, img_h):
-        npz_path = os.path.join(
-            self.root, "sam3_masks", self.split,
-            os.path.splitext(file_name)[0] + ".npz")
+    def _load_mask(self, img_record, ann_id, img_w, img_h):
+        npz_path = _resolve_mask_path(self.root, self.split, img_record, self.source_root)
         if not os.path.exists(npz_path):
             return np.zeros((img_h, img_w), dtype=np.float32)
         try:
@@ -83,13 +147,14 @@ class V3Dataset:
             return np.zeros((img_h, img_w), dtype=np.float32)
 
     def __getitem__(self, i):
-        fn = self.file_names[i]
+        img_record = self.img_records[i]
         bbox = self.bboxes[i]
         img_w, img_h = self.img_wh[i]
 
-        with Image.open(os.path.join(self.root, self.split, fn)) as pil:
+        img_path = _resolve_image_path(self.root, self.split, img_record, self.source_root)
+        with Image.open(img_path) as pil:
             img = np.asarray(pil.convert("RGB"), dtype=np.uint8)   # (H,W,3) 0-255
-        mask = self._load_mask(fn, self.ann_ids[i], img_w, img_h)  # float32 0/1
+        mask = self._load_mask(img_record, self.ann_ids[i], img_w, img_h)  # float32 0/1
 
         x0, y0 = crop_origin(bbox, img_w, img_h, self.crop)
         rgb_crop = img[y0:y0 + self.crop, x0:x0 + self.crop]                 # uint8
