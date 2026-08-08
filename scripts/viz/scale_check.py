@@ -4,15 +4,36 @@ the animal?
 The pipeline's per-recording body scale used to be fit from ONE arbitrary
 bout (see the scale-from-first-bout defect); ``scripts/estimate_recording_scale.py``
 replaces that with a robust per-fly estimate. Numbers alone (span ratios) are
-easy to misread; this module renders the rest-pose MuJoCo model with the
-observed 3D keypoints overlaid under several candidate scales side by side so
-a human can see which one actually sits on the body.
+easy to misread; this module renders the MuJoCo model with the observed 3D
+keypoints overlaid under several candidate scales side by side so a human can
+see which one actually sits on the body.
+
+By default the model is rendered at its REST pose, in which case only the
+TRUNK row of the picture is trustworthy: legs are folded/extended
+differently in the rest pose than in any real frame, so a rest-pose leg
+span ratio conflates POSE with SIZE (a leg can look "too short" purely
+because the model's rest leg angle differs from the real fly's leg angle in
+that frame, independent of scale). Trunk sites are rigid relative to the
+thorax root, so the trunk row's size comparison is pose-invariant and is not
+subject to this confound.
+
+Passing ``qpos`` drives the model to the SAME fitted pose as the observed
+frame (see ``render_scale_check``'s ``qpos`` argument) before both reading
+the model's tracking-site positions and rendering the mesh, so the LEG (and
+wing) rows become a fair size comparison too -- the whole animal, not just
+the trunk. Caveat: that fitted ``qpos`` was itself solved (by STAC/IK) at
+whatever scale was used to produce it, so posed-mode ratios are not fully
+independent of the CURRENT scale used upstream. The model's own geometry
+(bone lengths, joint limits) is fixed by the XML regardless of which scale
+solved the pose, so this is still a fair comparison of the OBSERVED
+keypoints' size against the model -- just note the fitted pose itself
+carries a little of that scale's fingerprint.
 
 For each (scale, frame) the observed keypoints are:
   1. multiplied by the candidate scale, then
   2. rigidly aligned (rotation + translation ONLY, via Kabsch -- no scaling)
-     onto the model's rest-pose ``tracking[...]`` sites, using only the
-     TRUNK and LEG markers.
+     onto the model's ``tracking[...]`` sites (rest pose, or the fitted pose
+     when ``qpos`` is given), using only the TRUNK and LEG markers.
 
 Wing markers (``WingL_V12``/``WingL_V13``/``WingR_V12``/``WingR_V13``, per
 ``scripts.benchmark.metrics.kp_group``) are excluded from the alignment fit
@@ -29,17 +50,24 @@ inside (too large a scale) the mesh, even after alignment removes any
 rotation/translation ambiguity.
 
 Model sites are resolved via ``scripts.estimate_recording_scale``'s
-``_tracking_site_idx``/``_ref_positions`` (reused by import, not
-reimplemented) -- raw ``mj_name2id`` lookups on ``tracking[<name>]`` strings
-return -1 and ``site_xpos[-1]`` silently yields the wrong site.
+``_tracking_site_idx`` (reused by import, not reimplemented) -- raw
+``mj_name2id`` lookups on ``tracking[<name>]`` strings return -1 and
+``site_xpos[-1]`` silently yields the wrong site.
 
 CLI:
     python scripts/viz/scale_check.py \\
         --bout-dir <run_root>/bouts/bout_00014/fly1 \\
         --scales 0.010994,0.013242,0.012890 \\
         --labels current,trunk_umeyama,all_norm \\
+        --qpos-source stac \\
         [--frames 0,300,600] [--anatomy configs/anatomy/v1.yaml] \\
         --out docs/benchmark/scale-check/S0_bout14_fly1.png
+
+``--qpos-source`` selects which fitted pose (if any) drives the model:
+``stac`` (default) reads ``<bout-dir>/stac_ik.h5``'s ``qpos`` dataset,
+``refined`` reads ``<bout-dir>/qpos_refined.npz``'s ``qpos`` array, ``none``
+keeps the rest pose. A missing file falls back to rest pose with a warning
+rather than crashing.
 """
 from __future__ import annotations
 
@@ -58,7 +86,6 @@ if str(_REPO_ROOT) not in sys.path:
 
 from scripts.estimate_recording_scale import (  # noqa: E402
     _load_anatomy_cfg,
-    _ref_positions,
     _tracking_site_idx,
 )
 from scripts.benchmark.metrics import kp_group  # noqa: E402
@@ -176,6 +203,10 @@ def _add_sphere(scene, pos: np.ndarray, rgba: np.ndarray, size: float) -> None:
 def _render_panel(renderer, d, cam, aligned: np.ndarray,
                   name_to_idx: Dict[str, int], groups: Dict[str, str],
                   ref_by_name: Dict[str, np.ndarray], marker: float) -> np.ndarray:
+    """Render the model exactly as ``d`` currently holds it (rest pose, or
+    whatever pose the caller last forwarded it to) plus the overlay spheres.
+    ``ref_by_name`` are the model's own tracking-site positions in that same
+    pose (white spheres), for a direct visual size comparison."""
     renderer.update_scene(d, camera=cam)
     scn = renderer.scene
     for pos in ref_by_name.values():
@@ -208,22 +239,33 @@ def _label_strip(text: str, height: int, width: int = 190) -> Optional[np.ndarra
     return np.asarray(img, dtype=np.uint8)
 
 
-def _model_ref_and_groups(model_xml: str, kp_names: List[str]
-                          ) -> Tuple["mujoco.MjModel", Dict[str, np.ndarray], Dict[str, str]]:
+def _model_sites_and_groups(model_xml: str, kp_names: List[str]
+                            ) -> Tuple["mujoco.MjModel", Dict[str, int], List[str], Dict[str, str]]:
     site_idx = _tracking_site_idx(model_xml)
     mj = site_idx["__mj__"]
     present = [n for n in kp_names if n in site_idx]
-    ref_all = _ref_positions(model_xml, present)
-    ref_by_name = {n: ref_all[i] for i, n in enumerate(present)}
     groups = {n: kp_group(n) for n in present}
-    return mj, ref_by_name, groups
+    return mj, site_idx, present, groups
+
+
+def _posed_tracking_sites(mj, d, site_idx: Dict[str, int], present: List[str],
+                          qpos_frame: Optional[np.ndarray]) -> Dict[str, np.ndarray]:
+    """Model ``tracking[...]`` site positions with the model driven to
+    ``qpos_frame`` (or its rest pose, ``mj.qpos0``, when ``qpos_frame`` is
+    None). Mutates ``d`` in place -- also leaves it in the state the caller
+    wants to render immediately afterward, so both the overlay reference and
+    the rendered mesh are guaranteed to be the same pose."""
+    d.qpos[:] = qpos_frame if qpos_frame is not None else mj.qpos0
+    mujoco.mj_forward(mj, d)
+    return {n: d.site_xpos[site_idx[n]].copy() for n in present}
 
 
 def render_scale_check(kp3d: np.ndarray, kp_names: Sequence[str], model_xml: str,
                        scales: Sequence[float], frames: Sequence[int], out_png,
                        labels: Optional[Sequence[str]] = None,
                        size: Tuple[int, int] = (420, 420),
-                       marker: Optional[float] = None) -> List[Dict[str, float]]:
+                       marker: Optional[float] = None,
+                       qpos: Optional[np.ndarray] = None) -> List[Dict[str, float]]:
     """Render a scale x frame grid PNG and return per-scale span ratios.
 
     Args:
@@ -236,11 +278,23 @@ def render_scale_check(kp3d: np.ndarray, kp_names: Sequence[str], model_xml: str
         labels: optional per-scale text labels (parallel to ``scales``).
         size: (width, height) of each rendered panel, before row labels.
         marker: sphere radius; default scales with the model extent.
+        qpos: optional (T, nq) fitted joint configuration, same frame axis
+            as ``kp3d``. When given, EACH rendered frame drives the model to
+            ``qpos[frame]`` (``d.qpos[:] = qpos[frame]`` then
+            ``mujoco.mj_forward``) before both reading the tracking-site
+            reference positions and rendering the mesh, so leg/wing rows
+            become a fair size comparison instead of conflating pose with
+            size (see module docstring for the caveat this implies). When
+            None (default), behaviour is unchanged: rest pose throughout.
 
     Returns:
         List (parallel to ``scales``) of ``{"trunk": r, "leg": r, "wing": r}``
         span ratios (observed / model, median over ``frames``). A group
         missing >= 2 finite markers in every rendered frame gets ``nan``.
+        With ``qpos`` given, "model" here means the FITTED pose per frame,
+        not rest -- trunk ratios should barely move (trunk is rigid relative
+        to the thorax root); leg/wing ratios are the whole point of posed
+        mode and should be read as pose-fair.
     """
     kp3d = np.asarray(kp3d, dtype=np.float64)
     kp_names = list(kp_names)
@@ -248,19 +302,31 @@ def render_scale_check(kp3d: np.ndarray, kp_names: Sequence[str], model_xml: str
     if K != len(kp_names):
         raise ValueError(f"kp3d has K={K} but {len(kp_names)} kp_names given")
 
-    mj, ref_by_name, groups = _model_ref_and_groups(model_xml, kp_names)
+    mj, site_idx, present, groups = _model_sites_and_groups(model_xml, kp_names)
     name_to_idx = {n: i for i, n in enumerate(kp_names)}
-    align_names = [n for n in ref_by_name if groups.get(n) in _ALIGN_GROUPS]
-    ratio_names = {g: [n for n in ref_by_name if groups.get(n) == g] for g in _RATIO_GROUPS}
+    align_names = [n for n in present if groups.get(n) in _ALIGN_GROUPS]
+    ratio_names = {g: [n for n in present if groups.get(n) == g] for g in _RATIO_GROUPS}
+
+    if qpos is not None:
+        qpos = np.asarray(qpos, dtype=np.float64)
+        if qpos.shape[0] != T:
+            raise ValueError(f"qpos has {qpos.shape[0]} frames but kp3d has T={T}")
+        if qpos.shape[1] != mj.nq:
+            raise ValueError(f"qpos has nq={qpos.shape[1]} but model nq={mj.nq}")
 
     d = mujoco.MjData(mj)
     mujoco.mj_forward(mj, d)
 
+    # cam.lookat is re-centered per FRAME below (on that frame's own posed
+    # tracking-site mean) rather than fixed once here: a fitted qpos's free
+    # joint can translate the whole animal far from the origin (measured on
+    # real stac_ik.h5 qpos: root xyz ranging ~0.17-0.7 m against a model
+    # extent of ~0.65 m), so a camera fixed at the REST-pose center/extent
+    # would crop the animal out of frame entirely for a posed render.
     cam = mujoco.MjvCamera()
     mujoco.mjv_defaultFreeCamera(mj, cam)
     cam.azimuth, cam.elevation = 90.0, -25.0
     cam.distance = mj.stat.extent * 1.3
-    cam.lookat[:] = mj.stat.center
 
     width, height = size
     marker_r = marker if marker is not None else mj.stat.extent * 0.012
@@ -275,6 +341,9 @@ def render_scale_check(kp3d: np.ndarray, kp_names: Sequence[str], model_xml: str
             for frame in frames:
                 if frame < 0 or frame >= T:
                     raise IndexError(f"frame {frame} out of range for kp3d with T={T}")
+                qpos_frame = qpos[frame] if qpos is not None else None
+                ref_by_name = _posed_tracking_sites(mj, d, site_idx, present, qpos_frame)
+                cam.lookat[:] = np.mean(list(ref_by_name.values()), axis=0)
                 raw = kp3d[frame]
                 scaled = raw * scale
                 for g in _RATIO_GROUPS:
@@ -317,6 +386,35 @@ def _load_kp3d(fly_dir: Path) -> np.ndarray:
     raise FileNotFoundError(f"no kp3d_filt.npz or kp3d.npz found in {fly_dir}")
 
 
+def _resolve_qpos(bout_dir: Path, source: str) -> Tuple[Optional[np.ndarray], str]:
+    """Load the (T, nq) fitted qpos named by ``--qpos-source``.
+
+    Returns ``(qpos_or_None, description)`` -- ``description`` is a short,
+    human-readable string ("rest", "stac", "refined", or "rest
+    (<file> missing)") meant to be folded into each row's label so the
+    picture says which pose it's showing. A missing file prints a warning
+    and falls back to rest pose (``None``) rather than raising.
+    """
+    if source == "none":
+        return None, "rest"
+    if source == "stac":
+        p = bout_dir / "stac_ik.h5"
+        if not p.exists():
+            print(f"WARNING: {p} not found; falling back to rest pose", file=sys.stderr)
+            return None, "rest (stac_ik.h5 missing)"
+        import h5py
+        with h5py.File(p, "r") as f:
+            return np.asarray(f["qpos"], dtype=np.float64), "stac"
+    if source == "refined":
+        p = bout_dir / "qpos_refined.npz"
+        if not p.exists():
+            print(f"WARNING: {p} not found; falling back to rest pose", file=sys.stderr)
+            return None, "rest (qpos_refined.npz missing)"
+        with np.load(p) as z:
+            return np.asarray(z["qpos"], dtype=np.float64), "refined"
+    raise ValueError(f"unknown --qpos-source {source!r}")
+
+
 def _pick_default_frames(kp3d: np.ndarray, kp_names: List[str], model_xml: str,
                          n: int = 3) -> List[int]:
     """``n`` evenly spaced frame indices with full trunk+leg marker coverage,
@@ -354,6 +452,10 @@ def main(argv=None) -> int:
                     help="comma-separated frame indices; default: 3 evenly "
                          "spaced frames with full marker coverage")
     ap.add_argument("--anatomy", default="configs/anatomy/v1.yaml")
+    ap.add_argument("--qpos-source", choices=["none", "stac", "refined"], default="stac",
+                    help="drive the model to a fitted pose per frame instead "
+                         "of rest ('stac': stac_ik.h5, 'refined': "
+                         "qpos_refined.npz, 'none': rest pose)")
     ap.add_argument("--out", required=True, type=Path)
     args = ap.parse_args(argv)
 
@@ -369,17 +471,24 @@ def main(argv=None) -> int:
     else:
         frames = _pick_default_frames(kp3d, kp_names, model_xml)
 
-    print(f"[scale_check] bout_dir={args.bout_dir} T={kp3d.shape[0]} frames={frames}")
+    qpos, pose_desc = _resolve_qpos(args.bout_dir, args.qpos_source)
+    if labels is None:
+        labels = [f"pose={pose_desc}" for _ in scales]
+    else:
+        labels = [f"{lbl} (pose={pose_desc})" for lbl in labels]
+
+    print(f"[scale_check] bout_dir={args.bout_dir} T={kp3d.shape[0]} frames={frames} "
+          f"pose={pose_desc}")
 
     ratios = render_scale_check(kp3d, kp_names, model_xml, scales, frames, args.out,
-                                labels=labels)
+                                labels=labels, qpos=qpos)
 
-    header = f"{'label':<20}{'scale':>12}{'trunk':>10}{'leg':>10}{'wing':>10}"
+    header = f"{'label':<32}{'scale':>12}{'trunk':>10}{'leg':>10}{'wing':>10}"
     print(header)
     for i, s in enumerate(scales):
         lbl = labels[i] if labels else ""
         r = ratios[i]
-        print(f"{lbl:<20}{s:>12.6f}{r['trunk']:>10.3f}{r['leg']:>10.3f}{r['wing']:>10.3f}")
+        print(f"{lbl:<32}{s:>12.6f}{r['trunk']:>10.3f}{r['leg']:>10.3f}{r['wing']:>10.3f}")
     print(f"wrote {args.out}")
     return 0
 

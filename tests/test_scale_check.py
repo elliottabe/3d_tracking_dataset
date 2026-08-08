@@ -160,6 +160,85 @@ def test_nan_frame_does_not_raise(tmp_path):
 # 5. PNG is written, non-empty, and roughly the expected tiled size
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# 6. fitted-pose mode (qpos)
+# ---------------------------------------------------------------------------
+
+def test_qpos_rest_pose_reproduces_rest_ratios(tmp_path):
+    """Passing the model's own rest qpos explicitly must reproduce exactly
+    what qpos=None gives -- the rest-pose codepath is just qpos=mj.qpos0."""
+    _require_model()
+    import mujoco
+
+    from scripts.viz.scale_check import render_scale_check
+
+    kp_names, ref, model_xml = _kp_names_and_ref()
+    mj = mujoco.MjModel.from_xml_path(model_xml)
+    s_true = 0.0123
+    T = 3
+    kp3d = np.tile((ref / s_true)[None], (T, 1, 1))
+    frames = [0, 1, 2]
+
+    ratios_none = render_scale_check(kp3d, kp_names, model_xml, [s_true], frames,
+                                     tmp_path / "none.png")
+    qpos_rest = np.tile(mj.qpos0[None], (T, 1))
+    ratios_rest = render_scale_check(kp3d, kp_names, model_xml, [s_true], frames,
+                                     tmp_path / "rest.png", qpos=qpos_rest)
+
+    assert ratios_rest[0]["trunk"] == pytest.approx(ratios_none[0]["trunk"], abs=1e-6)
+    assert ratios_rest[0]["leg"] == pytest.approx(ratios_none[0]["leg"], abs=1e-6)
+
+
+def test_qpos_posed_moves_leg_ratio_not_trunk_ratio(tmp_path):
+    """A non-rest qpos (legs bent away from rest) changes the leg span ratio
+    but leaves the trunk ratio essentially unchanged -- trunk sites are rigid
+    relative to the thorax root, which is exactly the property that makes
+    the trunk row pose-invariant and therefore trustworthy at rest pose."""
+    _require_model()
+    import mujoco
+
+    from scripts.benchmark.metrics import LEG_QPOS_PREFIXES
+    from scripts.viz.scale_check import render_scale_check
+
+    kp_names, ref, model_xml = _kp_names_and_ref()
+    mj = mujoco.MjModel.from_xml_path(model_xml)
+    s_true = 0.0123
+    T = 2
+    kp3d = np.tile((ref / s_true)[None], (T, 1, 1))
+    frames = [0, 1]
+
+    leg_cols = []
+    for j in range(mj.njnt):
+        name = mujoco.mj_id2name(mj, mujoco.mjtObj.mjOBJ_JOINT, j)
+        if name and name.startswith(LEG_QPOS_PREFIXES):
+            leg_cols.append(mj.jnt_qposadr[j])
+    assert leg_cols, "expected leg joints in the v1 model"
+
+    qpos_rest = np.tile(mj.qpos0[None], (T, 1))
+    qpos_posed = qpos_rest.copy()
+    qpos_posed[:, leg_cols] += 0.4  # bend every leg joint well away from rest
+
+    ratios_rest = render_scale_check(kp3d, kp_names, model_xml, [s_true], frames,
+                                     tmp_path / "rest.png", qpos=qpos_rest)
+    ratios_posed = render_scale_check(kp3d, kp_names, model_xml, [s_true], frames,
+                                      tmp_path / "posed.png", qpos=qpos_posed)
+
+    # trunk pinned: rigid relative to the thorax root, unaffected by leg angle
+    assert ratios_posed[0]["trunk"] == pytest.approx(ratios_rest[0]["trunk"], abs=0.02)
+    # leg ratio must actually move -- otherwise this test is not exercising posed mode
+    assert abs(ratios_posed[0]["leg"] - ratios_rest[0]["leg"]) > 0.03
+
+
+def test_missing_stac_h5_falls_back_to_rest_with_warning(tmp_path, capsys):
+    from scripts.viz.scale_check import _resolve_qpos
+
+    qpos, desc = _resolve_qpos(tmp_path, "stac")
+    assert qpos is None
+    assert "missing" in desc
+    captured = capsys.readouterr()
+    assert "WARNING" in captured.err
+
+
 def test_png_written_and_tiled_size(tmp_path):
     _require_model()
     import imageio.v2 as imageio
