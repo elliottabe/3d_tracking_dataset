@@ -1,9 +1,9 @@
-"""Benchmark integrity check: did the four A/B variants really share identical
-2D (ViTPose kp2d) inputs?
+"""Benchmark integrity check: did the two A/B scale-estimator variants really
+share identical 2D (ViTPose kp2d) inputs?
 
 The benchmark freezes kp2d.npz/kp3d.npz/kp3d_filt.npz per bout-fly and
 hardlinks them into each variant root (see freeze_inputs.py, run_variant.py)
-so the four scale/calibration variants differ ONLY in downstream treatment.
+so the two scale-estimator variants differ ONLY in downstream treatment.
 But scripts/run_bout.py's staleness cascade (masks_are_stale()) deletes those
 same artifacts for bout-flies whose recording's sync_plan status is
 trim/reindex -- which means Stage A (ViTPose) reruns independently, per
@@ -25,8 +25,7 @@ import numpy as np
 
 from scripts.benchmark.manifest import entries, load_manifest
 
-VARIANTS = ("trunk_umeyama_segcal", "trunk_umeyama_nosegcal",
-            "all_norm_segcal", "all_norm_nosegcal")
+VARIANTS = ("trunk_umeyama", "all_norm")
 
 
 def _sha256(path: Path) -> str:

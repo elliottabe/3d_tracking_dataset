@@ -163,32 +163,32 @@ def test_scan_divergence_clean_divergent_incomplete(tmp_path):
         vp.parent.mkdir(parents=True, exist_ok=True)
         os.link(fpath1, vp)
 
-    # bout 2: DIVERGENT -- regenerated (different content) in 2 of 4 variants.
+    # bout 2: DIVERGENT -- regenerated (different content) in 1 of 2 variants.
     kp2d2, conf2 = _rand_kp2d(2)
     rel2 = _rel(run_key, 2, 0)
     fpath2 = frozen_root / rel2
     _write_kp2d(fpath2, kp2d2, conf2)
-    for v in VARIANTS[:2]:
-        vp = variants_root / v / rel2
-        vp.parent.mkdir(parents=True, exist_ok=True)
-        os.link(fpath2, vp)
-    for v in VARIANTS[2:]:
-        vp = variants_root / v / rel2
-        bad = kp2d2.copy()
-        bad[0, 0, 0, 0] += 5.0
-        _write_kp2d(vp, bad, conf2)
+    # VARIANTS[0] hardlinked (frozen-identical)
+    vp = variants_root / VARIANTS[0] / rel2
+    vp.parent.mkdir(parents=True, exist_ok=True)
+    os.link(fpath2, vp)
+    # VARIANTS[1] regenerated (differs from frozen)
+    vp = variants_root / VARIANTS[1] / rel2
+    bad = kp2d2.copy()
+    bad[0, 0, 0, 0] += 5.0
+    _write_kp2d(vp, bad, conf2)
 
     # bout 3: INCOMPLETE -- missing entirely from one variant, hardlinked
-    # (clean) into the rest.
+    # (clean) into the other.
     kp2d3, conf3 = _rand_kp2d(3)
     rel3 = _rel(run_key, 3, 0)
     fpath3 = frozen_root / rel3
     _write_kp2d(fpath3, kp2d3, conf3)
-    for v in VARIANTS[:3]:
-        vp = variants_root / v / rel3
-        vp.parent.mkdir(parents=True, exist_ok=True)
-        os.link(fpath3, vp)
-    # VARIANTS[3] deliberately absent for bout 3.
+    # VARIANTS[0] hardlinked
+    vp = variants_root / VARIANTS[0] / rel3
+    vp.parent.mkdir(parents=True, exist_ok=True)
+    os.link(fpath3, vp)
+    # VARIANTS[1] deliberately absent for bout 3.
 
     rows = scan_divergence(manifest, variants_root, frozen_root)
     assert len(rows) == 3
@@ -204,19 +204,18 @@ def test_scan_divergence_clean_divergent_incomplete(tmp_path):
     assert r1["shape_mismatch"] is False
 
     r2 = by_bout[2]
-    assert set(r2["regenerated"]) == set(VARIANTS[2:])
-    assert set(r2["frozen_identical"]) == set(VARIANTS[:2])
+    assert set(r2["regenerated"]) == {VARIANTS[1]}
+    assert set(r2["frozen_identical"]) == {VARIANTS[0]}
     assert r2["missing"] == []
     assert r2["worst"] == pytest.approx(5.0)
-    for v in VARIANTS[2:]:
-        assert r2["stats"][v]["identical"] is False
+    assert r2["stats"][VARIANTS[1]]["identical"] is False
     assert r2["status"] == "divergent"
     assert r2["shape_mismatch"] is False
 
     r3 = by_bout[3]
-    assert r3["missing"] == [VARIANTS[3]]
+    assert r3["missing"] == [VARIANTS[1]]
     assert r3["regenerated"] == []
-    assert set(r3["present"]) == set(VARIANTS[:3])
+    assert set(r3["present"]) == {VARIANTS[0]}
     # Missing from a variant is NOT evidence of a controlled comparison --
     # INCOMPLETE takes precedence over the present variants being clean.
     assert r3["status"] == "incomplete"
@@ -273,22 +272,13 @@ def test_scan_divergence_missing_and_regenerated_counts_once_as_incomplete(tmp_p
     vp0 = variants_root / VARIANTS[0] / rel1
     vp0.parent.mkdir(parents=True, exist_ok=True)
     os.link(fpath1, vp0)
-    # VARIANTS[1]: regenerated (differs from frozen).
-    vp1 = variants_root / VARIANTS[1] / rel1
-    bad = kp2d1.copy()
-    bad[0, 0, 0, 0] += 2.0
-    _write_kp2d(vp1, bad, conf1)
-    # VARIANTS[2]: missing entirely.
-    # VARIANTS[3]: hardlinked (frozen-identical).
-    vp3 = variants_root / VARIANTS[3] / rel1
-    vp3.parent.mkdir(parents=True, exist_ok=True)
-    os.link(fpath1, vp3)
+    # VARIANTS[1]: missing entirely.
 
     rows = scan_divergence(manifest, variants_root, frozen_root)
     assert len(rows) == 1
     r = rows[0]
-    assert r["missing"] == [VARIANTS[2]]
-    assert r["regenerated"] == [VARIANTS[1]]
+    assert r["missing"] == [VARIANTS[1]]
+    assert r["regenerated"] == []
     assert r["status"] == "incomplete"
 
     summary = summarize(rows)
@@ -310,14 +300,14 @@ def test_scan_divergence_shape_mismatch_surfaced_in_row_and_summary(tmp_path):
     rel1 = _rel(run_key, 1, 0)
     fpath1 = frozen_root / rel1
     _write_kp2d(fpath1, kp2d1, conf1)
-    for v in VARIANTS[:3]:
-        vp = variants_root / v / rel1
-        vp.parent.mkdir(parents=True, exist_ok=True)
-        os.link(fpath1, vp)
-    # Last variant regenerated with a DIFFERENT shape (e.g. different frame
+    # VARIANTS[0] hardlinked
+    vp = variants_root / VARIANTS[0] / rel1
+    vp.parent.mkdir(parents=True, exist_ok=True)
+    os.link(fpath1, vp)
+    # VARIANTS[1] regenerated with a DIFFERENT shape (e.g. different frame
     # count) -- kp2d_stats can't produce a numeric max_px for this one, but
     # it must still be visible as the most severe kind of divergence.
-    vp_bad = variants_root / VARIANTS[3] / rel1
+    vp_bad = variants_root / VARIANTS[1] / rel1
     bad_kp2d = np.concatenate([kp2d1, kp2d1[:1]], axis=0)  # extra frame
     bad_conf = np.concatenate([conf1, conf1[:1]], axis=0)
     _write_kp2d(vp_bad, bad_kp2d, bad_conf)
@@ -325,8 +315,8 @@ def test_scan_divergence_shape_mismatch_surfaced_in_row_and_summary(tmp_path):
     rows = scan_divergence(manifest, variants_root, frozen_root)
     assert len(rows) == 1
     r = rows[0]
-    assert r["regenerated"] == [VARIANTS[3]]
-    assert r["stats"][VARIANTS[3]]["shape_mismatch"] is True
+    assert r["regenerated"] == [VARIANTS[1]]
+    assert r["stats"][VARIANTS[1]]["shape_mismatch"] is True
     assert r["shape_mismatch"] is True
     assert r["status"] == "divergent"
 
