@@ -3,7 +3,19 @@ ckpt: ${paths.vit_runs_root}/v4_kp_maskaware_fc/final
 num_keypoints: 50
 crop: 448
 heatmap_size: 224
-conf_thresh: 0.3      # min 2D peak conf for a view to enter triangulation
+conf_thresh: 0.3      # min 2D peak conf for a KEYPOINT to enter triangulation
+# Min MEDIAN keypoint confidence for a whole (frame, camera) view to enter
+# triangulation. null = off. conf_thresh alone cannot reject a crop that
+# contains no fly: the detector fills all 50 channels regardless and reports
+# high per-keypoint confidence doing it, so a misplaced crop yields a
+# confident WRONG 3D point -- worse than a dropped view, because a NaN is
+# visibly missing downstream and a plausible wrong point is not.
+# Calibrated on 273 real views per class (scripts/calibrate_view_gate.py):
+# per-view median conf is 0.963 with a fly present vs 0.379 without, so 0.6
+# keeps 100% of genuine views and rejects ~92% of empty ones. Raising it to
+# 0.8 buys no extra rejection and starts costing real views. Not a cure: ~5%
+# of empty crops still score above 0.9.
+view_conf_thresh: 0.6
 decode_sharpen: 3.0   # soft-argmax sharpening power; 1.0 = original centroid.
                       # Set from the Task-4 wobble diagnostic (mean wobble soft
                       # s1=0.727 -> s3=0.573 px); matches the repo's existing

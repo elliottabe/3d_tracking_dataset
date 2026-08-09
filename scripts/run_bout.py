@@ -47,7 +47,8 @@ from jarvis_jax.tracking.resume import (
 from jarvis_jax.tracking.bout_masks import load_bout_masks, check_bout_camera_order
 from jarvis_jax.tracking.predict_2d import (
     load_detector, predict_bout_2d, reorder_detector_to_model)
-from jarvis_jax.tracking.triangulate import triangulate_keypoints
+from jarvis_jax.tracking.triangulate import (triangulate_keypoints,
+                                             view_median_conf)
 from jarvis_jax.tracking.filter import filter_bout_kp3d
 from jarvis_jax.tracking.scale import compute_trunk_scale
 from jarvis_jax.tracking.stac import fit_offsets_once, ik_only_bout
@@ -576,8 +577,22 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
 
     # -- Stage B: DLT triangulation ----------------------------------------------
     if not stage_done(kp3d_path):
+        # Per-view confidence gate: drop a whole (frame, camera) whose median
+        # keypoint confidence says the crop probably does not contain the fly.
+        # Absent from the config (None) is a strict no-op, so a config without
+        # the key triangulates exactly as before. See triangulate_keypoints.
+        _view_thresh = cfg.detector.get("view_conf_thresh", None)
+        _view_thresh = None if _view_thresh is None else float(_view_thresh)
+        if _view_thresh is not None:
+            _vmed = view_median_conf(conf)                       # (T,C)
+            _dropped = int((_vmed < _view_thresh).sum())
+            if _dropped:
+                print(f"[view-gate] bout {bout_idx} fly{fly}: dropped "
+                      f"{_dropped}/{_vmed.size} (frame,camera) views below "
+                      f"median conf {_view_thresh}")
         kp3d, conf3d = triangulate_keypoints(
-            kp2d, conf, cam_mats, conf_thresh=float(cfg.detector.conf_thresh))
+            kp2d, conf, cam_mats, conf_thresh=float(cfg.detector.conf_thresh),
+            view_conf_thresh=_view_thresh)
         # Gate frames with too few valid-camera masks to NaN instead of
         # triangulating from too few views (see mask-coverage comment above
         # masks_dict). cfg.masks.min_views absent (_min_views_cfg is None)
