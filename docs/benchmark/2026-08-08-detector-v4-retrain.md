@@ -81,3 +81,78 @@ Note: `configs/paths/hyak.yaml:vitpose_ckpt` points at
 `configs/detector/vitpose_v3.yaml` instead, so this is a stale path rather than
 a live break, but it is misleading and should be corrected when the new
 checkpoint is promoted.
+
+---
+
+# Visual inspection (2D overlays + triangulated 3D)
+
+Rendered with `scripts/viz/detector_predictions.py` against this checkpoint.
+Figures (not committed, 26MB): `docs/benchmark/detector-v4/*.png`. Each shows
+every camera of a frameset with GT (lime) and predicted (magenta) skeletons,
+the DLT-triangulated 3D from two angles, and reprojection error by body part.
+
+Motivated by the fact that val MPJPE cannot see the train-only categories at
+all — `wall` most of all, which the audit flagged as the hard case.
+
+## What the pictures show
+
+**Well-posed framesets are good.** With 6–7 annotated views: wall
+Frame_6822 2.4px median reprojection, courtship female 2.8–2.9px, amputated
+2.4–2.8px, S6male 1.5px. Predictions sit on the GT markers, and all 50
+keypoints triangulate.
+
+**Reprojection error localises the amputation.** On `S8_male_R_amp` the
+per-group bars put `legR` at 6.6px against `trunk` 1.2px and `head` 1.3px —
+5x the body's error, on exactly the amputated right T1 leg. The detector has
+50 output channels and must fill them, so it invents the missing limb, and
+the seven views disagree about where the invention is. Two consequences:
+
+  1. Multi-view disagreement is a usable *detector* of missing anatomy, needing
+     no labels — the same trick as `within_bone_cv`, one stage earlier.
+  2. The pipeline has no absence handling on this path (`prune_model_to_available`
+     lives in `run_stac.py`, not `run_bout.py`), so those invented keypoints
+     would currently be fed to IK as if real.
+
+**Sparse views degrade badly, and not for the obvious reason.** Wall framesets
+with only 2–4 annotated views land at 13–26px median reprojection versus 2.4px
+for the 6-view one. The cause is visible in the panels: the script places a
+crop in un-annotated cameras by reprojecting the 3D centroid from the views it
+has, and when few views constrain it that crop misses the fly — after which
+the detector returns a confident full skeleton drawn on bare wall, which then
+poisons the triangulation.
+
+## The detector never says "not here"
+
+Measured directly, on a verified-empty 448px crop (no fly, checked against the
+GT bbox and visually):
+
+| crop | median peak conf | fraction > 0.3 |
+|---|---|---|
+| centred on the fly | 0.994 | 100% |
+| empty wall | 0.332 | 72% |
+
+So `detector.conf_thresh: 0.3` (`configs/detector/vitpose_v3.yaml`) rejects
+almost nothing: 72% of keypoints predicted on empty background pass it. The
+per-keypoint distributions overlap too much for a per-keypoint gate to work.
+
+But at the **view** level the separation is clean — median 0.994 vs 0.332 —
+so the usable gate is per-view: take the median peak confidence across the 50
+keypoints and refuse to let that view enter triangulation below ~0.6.
+
+**This changes audit recommendation #2.** That recommendation was to fall back
+to a CenterDetect-style centroid wherever SAM3 has no mask, so a crop always
+exists. These figures show the failure mode that creates: a misplaced crop
+yields confident garbage, and garbage that triangulates is worse than a
+dropout that yields NaN — NaN is visibly missing, whereas a plausible wrong
+3D propagates silently into IK. The fallback is still worth having, but only
+behind the per-view confidence gate above. Ungated, it would trade the audit's
+"catastrophic tail" for a quieter and more dangerous one.
+
+## Caveats
+
+- The mis-placed crops are an artefact of *this script's* two-pass crop
+  placement, not of the production pipeline (which crops from SAM3 masks).
+  What transfers is the confidence measurement, which is a property of the
+  detector alone.
+- One frameset per category, hand-picked by annotated-view count. These are
+  illustrations, not statistics.
