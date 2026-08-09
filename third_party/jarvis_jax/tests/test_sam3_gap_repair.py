@@ -528,3 +528,94 @@ def test_low_support_never_manufactures_gap_work():
     rt = FakeRepro(C)
     codes = in_frame_codes(_cent_from(rt, val), val, rt, W=640, H=480)
     assert find_gap_cameras(val, codes, min_frames=10, min_frac=0.0) == []
+
+
+# ---------------------------------------------------------------------------
+# find_reflection_cameras
+# ---------------------------------------------------------------------------
+
+from jarvis_jax.predict.sam3_driver import find_reflection_cameras  # noqa: E402
+
+
+def _two_fly_centroids(C, T, sep=800.0, reflect_cam=None, refl_offset=140.0):
+    """(2,C,T,2) centroids: flies `sep` apart everywhere, except that in
+    `reflect_cam` slot0 hugs slot1 at `refl_offset` (a reflection)."""
+    cent = np.zeros((2, C, T, 2))
+    for k in range(C):
+        cent[1, k, :, 0] = 1000.0                    # fly1
+        cent[1, k, :, 1] = 200.0
+        if k == reflect_cam:
+            cent[0, k, :, 0] = 1000.0                # slot0 sits on fly1...
+            cent[0, k, :, 1] = 200.0 - refl_offset   # ...just above it
+        else:
+            cent[0, k, :, 0] = 1000.0 - sep
+            cent[0, k, :, 1] = 200.0
+    return cent
+
+
+def test_reflection_camera_is_flagged():
+    C, T = 7, 200
+    val = np.ones((2, C, T), bool)
+    cent = _two_fly_centroids(C, T, reflect_cam=1)
+    hits = find_reflection_cameras(cent, val)
+    assert [k for _, k, _, _ in hits] == [1]
+
+
+def test_clean_recording_flags_nothing():
+    C, T = 7, 200
+    val = np.ones((2, C, T), bool)
+    hits = find_reflection_cameras(_two_fly_centroids(C, T), val)
+    assert hits == []
+
+
+def test_reported_ratio_matches_the_measured_geometry():
+    # bout 22 numbers: 140 px apart in the bad camera vs 881 px elsewhere.
+    C, T = 7, 300
+    val = np.ones((2, C, T), bool)
+    cent = _two_fly_centroids(C, T, sep=881.0, reflect_cam=1, refl_offset=140.0)
+    (_, k, frac, ratio), = find_reflection_cameras(cent, val)
+    assert k == 1
+    assert ratio == pytest.approx(140.0 / 881.0, rel=0.05)
+    assert frac == 1.0
+
+
+def test_flies_genuinely_close_everywhere_is_not_a_reflection():
+    # When the animals really are close in EVERY camera, no camera is odd --
+    # the test is relative, so courtship contact must not trigger it.
+    C, T = 7, 200
+    val = np.ones((2, C, T), bool)
+    cent = _two_fly_centroids(C, T, sep=60.0)
+    assert find_reflection_cameras(cent, val) == []
+
+
+def test_too_few_comparable_frames_is_not_judged():
+    C, T = 7, 10
+    val = np.ones((2, C, T), bool)
+    cent = _two_fly_centroids(C, T, reflect_cam=1)
+    assert find_reflection_cameras(cent, val, min_frames=30) == []
+
+
+def test_needs_another_camera_seeing_both_flies():
+    # With no comparison camera there is no baseline separation, so nothing
+    # can be judged -- must not guess.
+    C, T = 7, 200
+    val = np.zeros((2, C, T), bool)
+    val[:, 1] = True                                  # only the suspect camera
+    cent = _two_fly_centroids(C, T, reflect_cam=1)
+    assert find_reflection_cameras(cent, val) == []
+
+
+def test_intermittent_hugging_below_min_frac_is_not_flagged():
+    C, T = 7, 200
+    val = np.ones((2, C, T), bool)
+    cent = _two_fly_centroids(C, T, reflect_cam=1)
+    cent[0, 1, 100:, 0] = 1000.0 - 800.0              # correct for half the bout
+    cent[0, 1, 100:, 1] = 200.0
+    assert find_reflection_cameras(cent, val, min_frac=0.8) == []
+    assert find_reflection_cameras(cent, val, min_frac=0.4) != []
+
+
+def test_single_animal_recording_is_a_no_op():
+    val = np.ones((1, 7, 100), bool)
+    cent = np.zeros((1, 7, 100, 2))
+    assert find_reflection_cameras(cent, val) == []

@@ -705,12 +705,51 @@ def repair_outlier_cameras(tracker, bm, repro_tool, video_paths, frame_start,
                         for k in range(C)])
         med = np.nanmedian(res)
         for k in range(C):
-            if (np.isfinite(res[k]) and res[k] > resid_thresh
-                    and (not np.isfinite(med) or res[k] > ratio * med)):
+            if not np.isfinite(res[k]):
+                continue
+            # The absolute threshold is now its OWN trigger. It used to be
+            # ANDed with `res > ratio * med`, which disables itself precisely
+            # when contamination is widespread: Session0 bout 22 has fly0
+            # residuals 581/765/1473 px against a 6-21 px norm, but their
+            # median is 765, so the relative bar was 2295 and NOTHING fired.
+            # A median-relative test assumes most cameras are good; when the
+            # majority are bad it silently votes with them.
+            absolute = res[k] > resid_thresh
+            # Relative trigger retained as an OR for cameras that are clear
+            # outliers while still under the absolute bar, floored so it can
+            # never fire on a healthy spread (median 7px would otherwise flag
+            # a perfectly good 22px camera).
+            relative = (np.isfinite(med) and med > 0
+                        and res[k] > ratio * med
+                        and res[k] > 0.5 * resid_thresh)
+            if absolute or relative:
                 outliers.add(k)
                 resid0[(k, f)] = float(res[k])
+    # Reflection check: catches the case the residual cannot, i.e. a slot
+    # sitting on the other animal in a camera where too few others see the fly
+    # for a leave-one-out residual to exist at all.
+    for f, k, frac, r in find_reflection_cameras(cent, val):
+        if k not in outliers:
+            print(f"[repair] cam{k} flagged by reflection test "
+                  f"(fly-fly separation {r:.2f}x that of other cameras "
+                  f"in {100*frac:.0f}% of frames)")
+        outliers.add(k)
+
     if not outliers:
         return []
+
+    # A repair reprojects the fly from the OTHER cameras, so it is only sound
+    # while a trustworthy MAJORITY remains. Once most cameras are flagged the
+    # reference is built from the same suspect data, and "repairing" would
+    # launder bad geometry into confident-looking masks. Session0 bout 12
+    # flags all 7 -- a uniform moderate elevation (69-254px) that looks more
+    # like a calibration or close-interaction problem than seven independent
+    # mis-tracks. Flag the bout and leave the masks alone.
+    if len(outliers) > C // 2:
+        print(f"[repair] {len(outliers)}/{C} cameras flagged -- too many to "
+              f"repair against (no trustworthy reference); marking all suspect "
+              f"and leaving masks untouched")
+        return sorted(outliers)
 
     H = W = 0
     for k in range(C):
@@ -1006,6 +1045,69 @@ def find_gap_cameras(val, codes, *, min_frames=30, min_frac=0.02):
             if n >= min_frames and n >= min_frac * T:
                 out.append((f, k, n))
     return sorted(out, key=lambda x: -x[2])
+
+
+def find_reflection_cameras(cent, val, *, sep_ratio=0.3, min_frac=0.5,
+                            min_frames=30):
+    """[(fly, cam, frac, ratio), ...] where a slot appears to track the OTHER
+    fly (or its reflection) rather than its own animal.
+
+    A reflection sits right next to the animal that casts it, so the giveaway
+    is a slot whose centroid hugs the OTHER slot in ONE camera while the two
+    animals are plainly far apart in the others. Session0 bout 22, Cam2012631:
+    slot0 sits a median 140 px from the male in that view, while the true
+    fly0-fly1 separation measured in Cam2012630 is 881 px -- a ratio of 0.16.
+
+    Complements the leave-one-out residual rather than duplicating it. The
+    residual asks "does this camera's slot0 agree with slot0 elsewhere?"; this
+    asks "is this camera's slot0 simply sitting on slot1?". The residual needs
+    >=2 other cameras to have the fly at all, which is exactly what fails on
+    the hard bouts; this needs only one other camera that sees both animals.
+
+    Args:
+        sep_ratio:  flag when this camera's fly-fly separation is below this
+                    fraction of the separation seen in other cameras.
+        min_frac:   fraction of comparable frames that must be below it.
+        min_frames: minimum comparable frames before judging at all.
+
+    CAVEAT: a camera looking along the line joining the two animals genuinely
+    sees them overlap, so this can false-positive on viewing geometry. It is a
+    flag for re-segmentation (which is accepted only if it improves the
+    residual), never a silent edit.
+    """
+    import numpy as np
+
+    cent = np.asarray(cent, float)
+    val = np.asarray(val, bool)
+    A, C, T = val.shape
+    if A < 2:
+        return []
+    out = []
+    for k in range(C):
+        both_k = val[0, k] & val[1, k]
+        if both_k.sum() < min_frames:
+            continue
+        others = [j for j in range(C) if j != k]
+        d_k, d_o = [], []
+        for t in np.where(both_k)[0]:
+            ref = [np.linalg.norm(cent[0, j, t] - cent[1, j, t])
+                   for j in others if val[0, j, t] and val[1, j, t]]
+            if not ref:
+                continue
+            d_k.append(np.linalg.norm(cent[0, k, t] - cent[1, k, t]))
+            d_o.append(np.median(ref))
+        if len(d_k) < min_frames:
+            continue
+        d_k = np.asarray(d_k); d_o = np.asarray(d_o)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            r = np.where(d_o > 0, d_k / d_o, np.nan)
+        frac = float(np.nanmean(r < sep_ratio))
+        if frac >= min_frac:
+            # Report against fly0 by convention: which slot is wrong cannot be
+            # told from proximity alone, and the repair re-segments the camera
+            # for both flies regardless.
+            out.append((0, k, frac, float(np.nanmedian(r))))
+    return sorted(out, key=lambda x: x[3])
 
 
 def _merge_fill_camera(bm, cam, num_animals, T, filled):
