@@ -817,6 +817,22 @@ class _JarvisReproAdapter:
         self.num_cameras = int(getattr(rt, "num_cameras",
                                        len(self.cameras) or 0))
 
+    @staticmethod
+    def _no_autocast(dev):
+        """Force fp32 for the geometry regardless of the ambient context.
+
+        SAM3's predictors enter a process-wide bf16 autocast and never exit it,
+        so torch.matmul/svd here would silently run in bfloat16 -- which both
+        destroys the sub-pixel residuals these routines exist to measure and
+        raises "mat1 and mat2 must have the same dtype" against fp32 inputs.
+        Guarding INSIDE the adapter (rather than disabling autocast around the
+        whole repair) is what lets the SAM3 re-segmentation in the same call
+        keep the bf16 context its weights require.
+        """
+        import torch
+        dt = "cuda" if str(dev).startswith("cuda") else "cpu"
+        return torch.autocast(device_type=dt, enabled=False)
+
     def reconstruct_point(self, points2d, cams_to_use=None):
         import numpy as np
         import torch
@@ -831,7 +847,8 @@ class _JarvisReproAdapter:
         w[use] = 1.0                                            # excluded -> 0
         t_pts = torch.tensor(pts.T, dtype=torch.float32, device=dev)   # (2,C)
         t_w = torch.tensor(w, dtype=torch.float32, device=dev)
-        X = self._rt.reconstructPoint(t_pts, t_w)
+        with self._no_autocast(dev):
+            X = self._rt.reconstructPoint(t_pts, t_w)
         return X.detach().cpu().numpy().astype(float)
 
     def reproject_point(self, p3d):
@@ -845,7 +862,8 @@ class _JarvisReproAdapter:
         # single point already comes back as (C,2) -- NOT the (N,3,C) its
         # intermediate shape suggests. reshape rather than index, so a squeezed
         # or unsqueezed result both land correctly.
-        out = self._rt.reprojectPoint(t).detach().cpu().numpy()
+        with self._no_autocast(dev):
+            out = self._rt.reprojectPoint(t).detach().cpu().numpy()
         return np.asarray(out, float).reshape(-1, 2)            # (C,2)
 
 
@@ -863,14 +881,24 @@ def as_numpy_repro(repro_tool):
         f"(reconstructPoint/reprojectPoint) reprojection API")
 
 
-def in_frame_codes(cent, val, repro_tool, W, H):
+def in_frame_codes(cent, val, repro_tool, W, H, *, min_support=3):
     """(A,C,T) int8 of IN_FRAME_* telling why each view is or isn't valid.
 
     A valid view is IN_FRAME_YES by definition. An invalid one is resolved by
-    triangulating the fly from the OTHER valid cameras and reprojecting here:
-    inside the image bounds -> IN_FRAME_YES (a genuine miss, recoverable),
-    outside -> IN_FRAME_NO (out of FOV, nothing to recover). Fewer than two
-    other valid cameras -> IN_FRAME_UNKNOWN rather than a guess.
+    triangulating the fly from the valid cameras and reprojecting here: inside
+    the image bounds -> IN_FRAME_YES (a genuine miss, recoverable), outside ->
+    IN_FRAME_NO (out of FOV, nothing to recover).
+
+    `min_support` is the number of valid cameras required before the answer is
+    trusted at all; below it the view is IN_FRAME_UNKNOWN rather than a guess.
+    The default of 3 is not conservatism for its own sake -- with exactly TWO
+    views the DLT is a ray-ray intersection whose depth is barely constrained,
+    so the triangulated point wanders and reprojects inside other cameras'
+    images spuriously. Measured on Session0 bout 22, where two runs of SAM3
+    differ only in whether a third camera tracked the female: 3 supporting
+    cameras give 605 in-frame misses, 2 give 3201. The fly did not move; only
+    the estimate did. Trusting the 2-view answer would send the gap repair
+    chasing ~3200 frames that are mostly not there.
     """
     import numpy as np
 
@@ -901,7 +929,8 @@ def in_frame_codes(cent, val, repro_tool, W, H):
            & (uv[..., 0] >= 0) & (uv[..., 0] < W)
            & (uv[..., 1] >= 0) & (uv[..., 1] < H))                  # (B,C)
 
-    resolved = (n_valid >= 2)[:, None] & np.isfinite(X).all(1)[:, None]
+    resolved = ((n_valid >= max(2, int(min_support)))[:, None]
+                & np.isfinite(X).all(1)[:, None])
     out = np.where(resolved,
                    np.where(inb, IN_FRAME_YES, IN_FRAME_NO),
                    IN_FRAME_UNKNOWN).astype(np.int8)
@@ -1307,10 +1336,12 @@ def run_sam3_masks(*, project, session_dir, bouts_csv, out, num_animals=2,
             suspect_cams = []
             if repair_outliers:
                 try:
-                    with torch.autocast(device_type="cuda", enabled=False):
-                        suspect_idx = repair_outlier_cameras(
-                            tracker, bm, repro_tool, video_paths, b["start"], b["n"],
-                            num_animals, resid_thresh=repair_resid_thresh)
+                    # NOT wrapped in autocast(enabled=False): these repairs
+                    # re-run SAM3, whose bf16 weights need the ambient autocast.
+                    # The geometry protects its own dtype inside the adapter.
+                    suspect_idx = repair_outlier_cameras(
+                        tracker, bm, repro_tool, video_paths, b["start"], b["n"],
+                        num_animals, resid_thresh=repair_resid_thresh)
                     cam_list = list(repro_tool.cameras)
                     suspect_cams = [cam_list[c] for c in suspect_idx]
                 except Exception as e:  # noqa: BLE001 -- repair is best-effort
@@ -1325,13 +1356,12 @@ def run_sam3_masks(*, project, session_dir, bouts_csv, out, num_animals=2,
             gap_report = []
             if repair_missing:
                 try:
-                    with torch.autocast(device_type="cuda", enabled=False):
-                        gap_report = repair_missing_cameras(
-                            tracker, bm, repro_tool, video_paths, b["start"],
-                            b["n"], num_animals,
-                            min_frames=repair_missing_min_frames,
-                            min_frac=repair_missing_min_frac,
-                            accept_resid=repair_missing_accept_resid)
+                    gap_report = repair_missing_cameras(
+                        tracker, bm, repro_tool, video_paths, b["start"],
+                        b["n"], num_animals,
+                        min_frames=repair_missing_min_frames,
+                        min_frac=repair_missing_min_frac,
+                        accept_resid=repair_missing_accept_resid)
                 except Exception as e:  # noqa: BLE001 -- repair is best-effort
                     print(f"[gap-repair] WARNING: gap repair failed "
                           f"({type(e).__name__}: {e}) -- saving masks as-is")

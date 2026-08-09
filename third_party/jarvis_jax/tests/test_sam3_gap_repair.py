@@ -172,7 +172,9 @@ def test_batched_result_matches_a_per_point_reference():
     A, C, T = 2, 5, 6
     val = rng.random((A, C, T)) > 0.35
     cent = _cent_from(rt, val) + rng.normal(0, 0.01, (A, C, T, 2))
-    got = in_frame_codes(cent, val, rt, W=640, H=480)
+    # min_support=2 to match the reference's `len(src) < 2` rule; the default
+    # of 3 is a separate policy decision, covered by its own tests.
+    got = in_frame_codes(cent, val, rt, W=640, H=480, min_support=2)
 
     exp = np.full((A, C, T), IN_FRAME_UNKNOWN, np.int8)
     for f in range(A):
@@ -479,3 +481,50 @@ def test_adapter_matches_the_numpy_tool_on_real_calibration():
     assert np.abs(ad.reconstruct_point(b, cams_to_use=[0, 2, 4])
                   - ref.reconstruct_point(b, cams_to_use=[0, 2, 4])).max() < 1e-2
     assert np.allclose(_camera_matrices(ad), _camera_matrices(ref))
+
+
+# ---------------------------------------------------------------------------
+# min_support: two views are not enough to judge visibility
+# ---------------------------------------------------------------------------
+
+def test_two_views_are_unknown_by_default():
+    # With exactly 2 valid cameras the DLT is a ray-ray intersection whose
+    # depth is barely constrained, so the reprojection is not trustworthy.
+    rt = FakeRepro(5)
+    val = np.zeros((1, 5, 1), bool); val[0, :2, 0] = True
+    codes = in_frame_codes(_cent_from(rt, val), val, rt, W=640, H=480)
+    assert (codes[0, 2:, 0] == IN_FRAME_UNKNOWN).all()
+
+
+def test_three_views_resolve():
+    rt = FakeRepro(5)
+    val = np.zeros((1, 5, 1), bool); val[0, :3, 0] = True
+    codes = in_frame_codes(_cent_from(rt, val), val, rt, W=640, H=480)
+    assert (codes[0, 3:, 0] != IN_FRAME_UNKNOWN).all()
+
+
+def test_min_support_is_tunable_down_to_two():
+    rt = FakeRepro(5)
+    val = np.zeros((1, 5, 1), bool); val[0, :2, 0] = True
+    codes = in_frame_codes(_cent_from(rt, val), val, rt, W=640, H=480,
+                           min_support=2)
+    assert (codes[0, 2:, 0] != IN_FRAME_UNKNOWN).all()
+
+
+def test_min_support_never_drops_below_two():
+    # One view cannot triangulate at all, whatever min_support says.
+    rt = FakeRepro(5)
+    val = np.zeros((1, 5, 1), bool); val[0, 0, 0] = True
+    codes = in_frame_codes(_cent_from(rt, val), val, rt, W=640, H=480,
+                           min_support=1)
+    assert (codes[0, 1:, 0] == IN_FRAME_UNKNOWN).all()
+
+
+def test_low_support_never_manufactures_gap_work():
+    # The cost guard: unreliable classifications must not send the GPU chasing
+    # frames that are probably not there (bout 22 rerun: 3201 phantom frames).
+    A, C, T = 1, 5, 200
+    val = np.zeros((A, C, T), bool); val[0, :2] = True     # only 2 supporting
+    rt = FakeRepro(C)
+    codes = in_frame_codes(_cent_from(rt, val), val, rt, W=640, H=480)
+    assert find_gap_cameras(val, codes, min_frames=10, min_frac=0.0) == []
