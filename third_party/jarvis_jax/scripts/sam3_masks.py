@@ -65,6 +65,11 @@ def main_from_cfg(cfg):
         overlay_frames=int(s.get("overlay_frames", 300)),
         repair_outliers=bool(s.get("repair_outliers", True)),
         repair_resid_thresh=float(s.get("repair_resid_thresh", 40.0)),
+        repair_missing=bool(s.get("repair_missing", True)),
+        repair_missing_min_frames=int(s.get("repair_missing_min_frames", 30)),
+        repair_missing_min_frac=float(s.get("repair_missing_min_frac", 0.02)),
+        repair_missing_accept_resid=float(
+            s.get("repair_missing_accept_resid", 25.0)),
         **common)
 
 

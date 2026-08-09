@@ -772,11 +772,256 @@ def repair_outlier_cameras(tracker, bm, repro_tool, video_paths, frame_start,
     return suspect
 
 
+# ---------------------------------------------------------------------------
+# Visibility bookkeeping + mid-bout gap repair.
+#
+# `valid=False` alone conflates two opposite situations: the fly was OUTSIDE
+# this camera's field of view (nothing to segment, nothing to fix) versus the
+# fly was in frame and SAM3 missed it (a real, fixable miss). Measured on
+# Session0, 5.1% of views are the former and 1.4% the latter -- and reading
+# the two as one number is what made the mask dropouts look like a segmentation
+# crisis when most of it is arena geometry.
+#
+# The fixable part has a single dominant cause: SAM3VideoTracker prompts at
+# frame_index 0 and propagates 'forward' only, so a fly that walks into a
+# camera's view mid-bout is never picked up there. Session0 bout 22 is the
+# clean example -- the female enters four cameras at t~1200 of 1393 and every
+# one of them reports 0% valid for the whole bout.
+# ---------------------------------------------------------------------------
+
+IN_FRAME_NO = 0        # reprojects outside this camera's image -- out of FOV
+IN_FRAME_YES = 1       # in frame (either segmented, or reprojected inside it)
+IN_FRAME_UNKNOWN = 2   # < 2 other valid cameras -- position not determinable
+
+
+def in_frame_codes(cent, val, repro_tool, W, H):
+    """(A,C,T) int8 of IN_FRAME_* telling why each view is or isn't valid.
+
+    A valid view is IN_FRAME_YES by definition. An invalid one is resolved by
+    triangulating the fly from the OTHER valid cameras and reprojecting here:
+    inside the image bounds -> IN_FRAME_YES (a genuine miss, recoverable),
+    outside -> IN_FRAME_NO (out of FOV, nothing to recover). Fewer than two
+    other valid cameras -> IN_FRAME_UNKNOWN rather than a guess.
+    """
+    import numpy as np
+
+    cent = np.asarray(cent, float)
+    val = np.asarray(val, bool)
+    if cent.ndim != 4 or val.ndim != 3:
+        raise ValueError(f"in_frame_codes expects cent (A,C,T,2) and val (A,C,T), "
+                         f"got {cent.shape} and {val.shape}")
+    A, C, T = val.shape
+    codes = np.full((A, C, T), IN_FRAME_UNKNOWN, np.int8)
+    for f in range(A):
+        for t in range(T):
+            others = [i for i in range(C) if val[f, i, t]]
+            for k in range(C):
+                if val[f, k, t]:
+                    codes[f, k, t] = IN_FRAME_YES
+                    continue
+                src = [i for i in others if i != k]
+                if len(src) < 2:
+                    continue
+                pts = np.zeros((C, 2))
+                for i in src:
+                    pts[i] = cent[f, i, t]
+                rp = repro_tool.reproject_point(
+                    repro_tool.reconstruct_point(pts, cams_to_use=src))[k]
+                if not np.isfinite(rp).all():
+                    continue
+                codes[f, k, t] = (IN_FRAME_YES
+                                  if (0 <= rp[0] < W and 0 <= rp[1] < H)
+                                  else IN_FRAME_NO)
+    return codes
+
+
+def find_gap_cameras(val, codes, *, min_frames=30, min_frac=0.02):
+    """[(fly, cam, n_recoverable), ...] worth re-segmenting, largest gap first.
+
+    A gap is a view that is invalid while the fly is IN FRAME -- SAM3 simply
+    missed it. Pairs are returned only when the gap is big enough to be worth
+    a re-segmentation pass (>= `min_frames` AND >= `min_frac` of the bout), so
+    a couple of stray frames don't trigger a GPU job.
+    """
+    import numpy as np
+
+    val = np.asarray(val, bool)
+    codes = np.asarray(codes)
+    if val.shape != codes.shape:
+        raise ValueError(f"find_gap_cameras: val {val.shape} != codes {codes.shape}")
+    A, C, T = val.shape
+    out = []
+    for f in range(A):
+        for k in range(C):
+            n = int(((~val[f, k]) & (codes[f, k] == IN_FRAME_YES)).sum())
+            if n >= min_frames and n >= min_frac * T:
+                out.append((f, k, n))
+    return sorted(out, key=lambda x: -x[2])
+
+
+def _merge_fill_camera(bm, cam, num_animals, T, filled):
+    """Rewrite `cam`'s masks fly-keyed, keeping originals and adding `filled`.
+
+    `filled`: {fly: [mask|None per frame]}. Unlike `repair_outlier_cameras`,
+    which replaces a camera wholesale because its masks are WRONG, a gap repair
+    must preserve every mask SAM3 already got right and only fill the holes.
+    """
+    import numpy as np
+
+    id_map = bm.identity_map[cam] or {}
+    newframe = [{} for _ in range(T)]
+    for t in range(T):
+        frame_data = bm.masks[cam][t]
+        for obj_id, fly in id_map.items():
+            if obj_id in frame_data and fly < num_animals:
+                newframe[t][fly] = frame_data[obj_id]
+    n_added = 0
+    for fly, masks in filled.items():
+        for t in range(T):
+            if fly in newframe[t]:
+                continue                       # never overwrite a real mask
+            m = masks[t] if masks is not None else None
+            if m is not None and m.any():
+                ys, xs = np.where(m)
+                newframe[t][fly] = {"mask": m,
+                                    "centroid": np.array([xs.mean(), ys.mean()]),
+                                    "score": 1.0}
+                n_added += 1
+    bm.masks[cam] = newframe
+    bm.identity_map[cam] = {f: f for f in range(num_animals)}
+    return n_added
+
+
+def repair_missing_cameras(tracker, bm, repro_tool, video_paths, frame_start,
+                           num_frames, num_animals, *, min_frames=30,
+                           min_frac=0.02, accept_resid=25.0, box_px=(200, 160),
+                           text="insect"):
+    """Fill mid-bout gaps: re-segment cameras that MISSED an in-frame fly.
+
+    Complements `repair_outlier_cameras` (which fixes masks that are present
+    but WRONG). Here the masks are ABSENT while the fly is in view, which
+    `_loo_residual` cannot even score -- it returns NaN with no valid frames,
+    and the outlier trigger requires a finite residual, so these cameras were
+    never considered for repair at all.
+
+    Accepted on an ABSOLUTE residual (`accept_resid`), since there is no prior
+    residual to improve upon. Filled frames only; existing masks are kept.
+    Returns a per-repair report list. Never raises out.
+    """
+    import numpy as np
+
+    if bm.identity_map[0] is None:
+        return []
+    cent, val = _bout_cent_val(bm, num_animals)
+    C, T = bm.num_cameras, bm.num_frames
+
+    H = W = 0
+    for k in range(C):
+        for fi in range(T):
+            if bm.masks[k][fi]:
+                H, W = next(iter(bm.masks[k][fi].values()))["mask"].shape
+                break
+        if H:
+            break
+    if not H:
+        return []
+
+    codes = in_frame_codes(cent, val, repro_tool, W, H)
+    gaps = find_gap_cameras(val, codes, min_frames=min_frames, min_frac=min_frac)
+    if not gaps:
+        return []
+    print(f"[gap-repair] {len(gaps)} (fly,camera) gap(s): "
+          + ", ".join(f"cam{k}/fly{f}={n}fr" for f, k, n in gaps))
+
+    by_cam = {}
+    for f, k, n in gaps:
+        by_cam.setdefault(k, []).append((f, n))
+
+    report = []
+    for cam, flies in sorted(by_cam.items()):
+        cam_name = os.path.splitext(os.path.basename(video_paths[cam]))[0]
+        filled = {}
+        for fly, n_gap in flies:
+            tgt = _reproj_target(cent, val, repro_tool, fly, cam)
+            # Anchor only on frames that are actually recoverable -- a frame
+            # where the fly is out of FOV would anchor the box on empty arena.
+            recoverable = (~val[fly, cam]) & (codes[fly, cam] == IN_FRAME_YES)
+            tgt_masked = tgt.copy()
+            tgt_masked[~recoverable] = np.nan
+            masks, ncent, anchor = _resegment_camera_box(
+                tracker, video_paths[cam], frame_start, num_frames, tgt_masked,
+                W, H, box_px=box_px, text=text)
+            if masks is None:
+                print(f"[gap-repair] cam{cam}({cam_name}) fly{fly}: "
+                      f"no in-frame anchor -- skip")
+                continue
+            new_frames = [t for t in range(T)
+                          if (not val[fly, cam, t]) and masks[t] is not None
+                          and masks[t].any()]
+            if not new_frames:
+                print(f"[gap-repair] cam{cam}({cam_name}) fly{fly}: "
+                      f"re-segment produced nothing -- skip")
+                continue
+            cand_cent, cand_val = cent.copy(), val.copy()
+            for t in new_frames:
+                cand_cent[fly, cam, t] = ncent[t]
+                cand_val[fly, cam, t] = True
+            resid = _loo_residual(cand_cent, cand_val, repro_tool, fly, cam,
+                                  new_frames)
+            ok = np.isfinite(resid) and resid <= accept_resid
+            print(f"[gap-repair] cam{cam}({cam_name}) fly{fly}: "
+                  f"{len(new_frames)}/{n_gap} frames recovered, anchor={anchor}, "
+                  f"residual {resid:.1f}px (accept <= {accept_resid}) -> "
+                  f"{'ACCEPT' if ok else 'REJECT'}")
+            report.append({"camera": cam_name, "fly": int(fly),
+                           "gap_frames": int(n_gap),
+                           "recovered_frames": int(len(new_frames)),
+                           "residual_px": (float(resid) if np.isfinite(resid)
+                                            else None),
+                           "accepted": bool(ok)})
+            if ok:
+                filled[fly] = masks
+        if filled:
+            n_added = _merge_fill_camera(bm, cam, num_animals, T, filled)
+            print(f"[gap-repair] cam{cam}({cam_name}): filled {n_added} "
+                  f"(fly,frame) masks (existing masks preserved)")
+    return report
+
+
+def _append_array_to_npz(npz_path, name, arr):
+    """Append/replace a single array entry in an existing .npz (re-run safe)."""
+    import io
+    import shutil
+    import zipfile
+
+    import numpy as np
+
+    entry = f"{name}.npy"
+    with zipfile.ZipFile(npz_path, mode="r") as zf:
+        names = zf.namelist()
+    if entry in names:
+        tmpf = npz_path + f".{name}.tmp"
+        with zipfile.ZipFile(npz_path) as zin, zipfile.ZipFile(
+                tmpf, "w", zipfile.ZIP_DEFLATED, allowZip64=True) as zout:
+            for n in names:
+                if n != entry:
+                    zout.writestr(n, zin.read(n))
+        shutil.move(tmpf, npz_path)
+    buf = io.BytesIO()
+    np.save(buf, np.asarray(arr))
+    with zipfile.ZipFile(npz_path, mode="a", allowZip64=True,
+                         compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr(entry, buf.getvalue())
+
+
 def run_sam3_masks(*, project, session_dir, bouts_csv, out, num_animals=2,
                    limit=0, bout_ids=None, reuse_masks=True, sam3=None,
                    jarvis_root=None, manifest_name="manifest.json", lowmem=True,
                    overlay=True, overlay_cams=3, overlay_frames=300,
-                   repair_outliers=True, repair_resid_thresh=40.0):
+                   repair_outliers=True, repair_resid_thresh=40.0,
+                   repair_missing=True, repair_missing_min_frames=30,
+                   repair_missing_min_frac=0.02,
+                   repair_missing_accept_resid=25.0):
     """Run SAM3 video tracking + identity over a session's bouts, writing a
     per-bout sam3_masks.npz + a session manifest.
 
@@ -811,6 +1056,8 @@ def run_sam3_masks(*, project, session_dir, bouts_csv, out, num_animals=2,
     import json
     import sys
     import time
+
+    import numpy as np
 
     sam3 = dict(sam3 or {})
 
@@ -948,6 +1195,25 @@ def run_sam3_masks(*, project, session_dir, bouts_csv, out, num_animals=2,
                 except Exception as e:  # noqa: BLE001 -- repair is best-effort
                     print(f"[repair] WARNING: outlier repair failed "
                           f"({type(e).__name__}: {e}) -- saving original masks")
+            # Gap repair: cameras that MISSED an in-frame fly (SAM3 prompts at
+            # frame 0 and propagates forward only, so a fly entering a camera
+            # mid-bout is never picked up there). Distinct from outlier repair
+            # above: those masks are wrong, these are absent -- and absent
+            # cameras score a NaN residual, so the outlier trigger never fires
+            # on them. Best-effort; never fatal.
+            gap_report = []
+            if repair_missing:
+                try:
+                    with torch.autocast(device_type="cuda", enabled=False):
+                        gap_report = repair_missing_cameras(
+                            tracker, bm, repro_tool, video_paths, b["start"],
+                            b["n"], num_animals,
+                            min_frames=repair_missing_min_frames,
+                            min_frac=repair_missing_min_frac,
+                            accept_resid=repair_missing_accept_resid)
+                except Exception as e:  # noqa: BLE001 -- repair is best-effort
+                    print(f"[gap-repair] WARNING: gap repair failed "
+                          f"({type(e).__name__}: {e}) -- saving masks as-is")
             pmod.save_bout_masks(bm, bout_out, num_animals)
             # Record the C-axis camera identity (see append_cameras_to_npz)
             # so this mask file is self-identifying and a future camera-order
@@ -962,6 +1228,29 @@ def run_sam3_masks(*, project, session_dir, bouts_csv, out, num_animals=2,
                       f"{suspect_cams} (repair could not improve them)")
             if num_animals == 2:
                 _append_sex_meta_to_npz(npz_path, dict(male_slot=1, status=sex_status, **sex_info))
+            # Visibility bookkeeping: record WHY each invalid view is invalid,
+            # so downstream can tell "out of the camera's FOV" (nothing to fix,
+            # exclude the bout) from "in frame and missed" (a real, fixable
+            # failure). Computed AFTER both repairs so it describes what was
+            # actually saved. See in_frame_codes / IN_FRAME_*.
+            try:
+                _lm = pmod.LoadedBoutMasks(npz_path)
+                _cent, _val = np.asarray(_lm.centroids), np.asarray(_lm.valid)
+                _H, _W = (int(x) for x in _lm.shape[:2])
+                _codes = in_frame_codes(_cent, _val, repro_tool, _W, _H)
+                _append_array_to_npz(npz_path, "in_frame", _codes)
+                if gap_report:
+                    _append_array_to_npz(
+                        npz_path, "gap_repair",
+                        np.array(json.dumps(gap_report)))
+                _miss = int(((~_val) & (_codes == IN_FRAME_YES)).sum())
+                _oof = int(((~_val) & (_codes == IN_FRAME_NO)).sum())
+                print(f"[visibility] bout {b['bout_idx']}: {_miss} in-frame "
+                      f"misses, {_oof} out-of-FOV views (of {int((~_val).sum())} "
+                      f"invalid)")
+            except Exception as e:  # noqa: BLE001 -- metadata is best-effort
+                print(f"[visibility] WARNING: could not record in_frame "
+                      f"({type(e).__name__}: {e})")
             lm = pmod.LoadedBoutMasks(npz_path)
 
         st = bout_stats(lm, num_animals)

@@ -29,6 +29,21 @@ overlay_frames: 300
 # is 100px+). Set repair_outliers: false to skip.
 repair_outliers: true
 repair_resid_thresh: 40.0
+# Mid-bout GAP repair: cameras that MISSED a fly that was in frame. Distinct
+# from repair_outliers above -- those masks are present but wrong, these are
+# absent, and an absent camera scores a NaN leave-one-out residual so the
+# outlier trigger never fires on it. Root cause: SAM3VideoTracker prompts at
+# frame_index 0 and propagates 'forward' only, so a fly that walks into a
+# camera's view mid-bout is never picked up there (Session0 bout 22: the
+# female enters 4 cameras at t~1200/1393 and all 4 report 0% valid). The
+# repair box-prompts at the reprojected position on an anchor frame where she
+# IS in view and propagates BOTH directions, filling only the missing frames.
+# Accepted on an ABSOLUTE reprojection residual, since there is no prior
+# residual to improve on. Set repair_missing: false to skip.
+repair_missing: true
+repair_missing_min_frames: 30    # don't fire a GPU pass for a handful of frames
+repair_missing_min_frac: 0.02    # ...and it must be >=2% of the bout
+repair_missing_accept_resid: 25.0  # px; baseline good-camera residual is ~10px
 gpus: null         # null/[] = use all visible GPUs (CUDA_VISIBLE_DEVICES, else
                    # torch.cuda.device_count()); a list like [0,1] overrides.
                    # >1 GPU -> bouts are fanned out one subprocess per GPU.
