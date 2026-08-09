@@ -5,7 +5,7 @@ runs_root:           /gscratch/portia/${paths.user}/data/Johnson_lab/jax_cached3
 vit_runs_root:       /gscratch/portia/${paths.user}/data/Johnson_lab/jax_vitpose_runs
 hybridnet_runs_root: /gscratch/portia/${paths.user}/data/Johnson_lab/jax_hybridnet_runs
 processed_root:      /gscratch/portia/${paths.user}/data/Johnson_lab/processed
-vitpose_ckpt:   /gscratch/portia/${paths.user}/data/Johnson_lab/jax_vitpose_runs/v3_8gpu_20260620/final
+vitpose_ckpt:   /gscratch/portia/${paths.user}/data/Johnson_lab/jax_vitpose_runs/v4_8gpu_20260808/final
 mae_npz:        /gscratch/portia/${paths.user}/data/Johnson_lab/mae_vitb.npz
 body_model_dir: /gscratch/portia/${paths.user}/Research/MyRepos/fruitfly_body_models/
 project_dir:    /gscratch/portia/${paths.user}/Research/MyRepos/

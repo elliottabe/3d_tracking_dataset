@@ -1,5 +1,16 @@
 # @package detector
-ckpt: ${paths.vit_runs_root}/v4_kp_maskaware_fc/final
+# Retrained on red_data_unified_V4 (2026-08-08). Validated on 3 bouts against
+# v4_kp_maskaware_fc with stop_after=triangulate: median within-bone CV 9.91%
+# -> 4.36% over 6 bout-flies, better in 5 of 6, conf3d 0.899 -> 0.934. The
+# headline case (15_25_51 b8 fly0, 298.96% -> 4.62%) was confirmed visually --
+# the old checkpoint scattered keypoints into empty space at confidence
+# 0.60-0.66. See docs/benchmark/2026-08-08-detector-v4-retrain.md and
+# docs/qc/detector-ab/.
+# KNOWN WEAKNESS: on frames where the two flies OVERLAP it is ~6% worse (and
+# 41% better when they are apart); 92% of the frames it loses are
+# close-interaction. Cause is the JAX port omitting JARVIS's distractor-fly
+# RGB gray-fill, not this checkpoint.
+ckpt: ${paths.vit_runs_root}/v4_8gpu_20260808/final
 num_keypoints: 50
 crop: 448
 heatmap_size: 224
