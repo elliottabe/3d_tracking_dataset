@@ -1,0 +1,1931 @@
+{
+  "n_bouts": 160,
+  "n_keep": 148,
+  "n_drop": 12,
+  "by_basis": {
+    "kp2d": 132,
+    "mask": 28
+  },
+  "bouts": [
+    {
+      "recording": "2025_10_20_13_20_04",
+      "bout": 1,
+      "basis": "mask",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session0"
+    },
+    {
+      "recording": "2025_10_20_13_20_04",
+      "bout": 2,
+      "basis": "mask",
+      "fractions": [
+        0.8222,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 0.822)",
+      "session": "Session0"
+    },
+    {
+      "recording": "2025_10_20_13_20_04",
+      "bout": 3,
+      "basis": "mask",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session0"
+    },
+    {
+      "recording": "2025_10_20_13_20_04",
+      "bout": 4,
+      "basis": "mask",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session0"
+    },
+    {
+      "recording": "2025_10_20_13_20_04",
+      "bout": 5,
+      "basis": "mask",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session0"
+    },
+    {
+      "recording": "2025_10_20_13_20_04",
+      "bout": 6,
+      "basis": "mask",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session0"
+    },
+    {
+      "recording": "2025_10_20_13_20_04",
+      "bout": 7,
+      "basis": "mask",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session0"
+    },
+    {
+      "recording": "2025_10_20_13_20_04",
+      "bout": 8,
+      "basis": "mask",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session0"
+    },
+    {
+      "recording": "2025_10_20_13_20_04",
+      "bout": 9,
+      "basis": "mask",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session0"
+    },
+    {
+      "recording": "2025_10_20_13_20_04",
+      "bout": 10,
+      "basis": "mask",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session0"
+    },
+    {
+      "recording": "2025_10_20_13_20_04",
+      "bout": 11,
+      "basis": "mask",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session0"
+    },
+    {
+      "recording": "2025_10_20_13_20_04",
+      "bout": 12,
+      "basis": "mask",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session0"
+    },
+    {
+      "recording": "2025_10_20_13_20_04",
+      "bout": 13,
+      "basis": "mask",
+      "fractions": [
+        0.5048,
+        1.0
+      ],
+      "keep": false,
+      "reason": "below 0.80: fly0=0.505",
+      "session": "Session0"
+    },
+    {
+      "recording": "2025_10_20_13_20_04",
+      "bout": 14,
+      "basis": "mask",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session0"
+    },
+    {
+      "recording": "2025_10_20_13_20_04",
+      "bout": 15,
+      "basis": "mask",
+      "fractions": [
+        0.2106,
+        1.0
+      ],
+      "keep": false,
+      "reason": "below 0.80: fly0=0.211",
+      "session": "Session0"
+    },
+    {
+      "recording": "2025_10_20_13_20_04",
+      "bout": 16,
+      "basis": "mask",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session0"
+    },
+    {
+      "recording": "2025_10_20_13_20_04",
+      "bout": 17,
+      "basis": "mask",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session0"
+    },
+    {
+      "recording": "2025_10_20_13_20_04",
+      "bout": 18,
+      "basis": "mask",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session0"
+    },
+    {
+      "recording": "2025_10_20_13_20_04",
+      "bout": 19,
+      "basis": "mask",
+      "fractions": [
+        0.8886,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 0.889)",
+      "session": "Session0"
+    },
+    {
+      "recording": "2025_10_20_13_20_04",
+      "bout": 20,
+      "basis": "mask",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session0"
+    },
+    {
+      "recording": "2025_10_20_13_20_04",
+      "bout": 21,
+      "basis": "mask",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session0"
+    },
+    {
+      "recording": "2025_10_20_13_20_04",
+      "bout": 22,
+      "basis": "mask",
+      "fractions": [
+        0.0,
+        1.0
+      ],
+      "keep": false,
+      "reason": "below 0.80: fly0=0.000",
+      "session": "Session0"
+    },
+    {
+      "recording": "2025_10_20_13_20_04",
+      "bout": 23,
+      "basis": "mask",
+      "fractions": [
+        0.8045,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 0.805)",
+      "session": "Session0"
+    },
+    {
+      "recording": "2025_10_20_13_20_04",
+      "bout": 24,
+      "basis": "mask",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session0"
+    },
+    {
+      "recording": "2025_10_20_13_20_04",
+      "bout": 25,
+      "basis": "mask",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session0"
+    },
+    {
+      "recording": "2025_10_20_13_20_04",
+      "bout": 26,
+      "basis": "mask",
+      "fractions": [
+        0.8209,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 0.821)",
+      "session": "Session0"
+    },
+    {
+      "recording": "2025_10_20_13_20_04",
+      "bout": 27,
+      "basis": "mask",
+      "fractions": [
+        0.6614,
+        1.0
+      ],
+      "keep": false,
+      "reason": "below 0.80: fly0=0.661",
+      "session": "Session0"
+    },
+    {
+      "recording": "2025_10_20_13_20_04",
+      "bout": 28,
+      "basis": "kp2d",
+      "fractions": [
+        0.99,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 0.990)",
+      "session": "Session0"
+    },
+    {
+      "recording": "2025_10_20_13_20_04",
+      "bout": 29,
+      "basis": "mask",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session0"
+    },
+    {
+      "recording": "2025_10_20_13_20_04",
+      "bout": 30,
+      "basis": "kp2d",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session0"
+    },
+    {
+      "recording": "2026_04_02_12_11_50",
+      "bout": 1,
+      "basis": "kp2d",
+      "fractions": [
+        0.959,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 0.959)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_12_11_50",
+      "bout": 2,
+      "basis": "kp2d",
+      "fractions": [
+        0.3904,
+        1.0
+      ],
+      "keep": false,
+      "reason": "below 0.80: fly0=0.390",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_12_11_50",
+      "bout": 3,
+      "basis": "kp2d",
+      "fractions": [
+        0.8922,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 0.892)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_12_11_50",
+      "bout": 4,
+      "basis": "kp2d",
+      "fractions": [
+        1.0,
+        0.9637
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 0.964)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_12_11_50",
+      "bout": 5,
+      "basis": "kp2d",
+      "fractions": [
+        0.8934,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 0.893)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_12_11_50",
+      "bout": 6,
+      "basis": "kp2d",
+      "fractions": [
+        0.9336,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 0.934)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_12_11_50",
+      "bout": 7,
+      "basis": "kp2d",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_12_11_50",
+      "bout": 8,
+      "basis": "kp2d",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_12_11_50",
+      "bout": 9,
+      "basis": "kp2d",
+      "fractions": [
+        0.9933,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 0.993)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_12_11_50",
+      "bout": 10,
+      "basis": "kp2d",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_12_11_50",
+      "bout": 11,
+      "basis": "kp2d",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_14_54_28",
+      "bout": 1,
+      "basis": "kp2d",
+      "fractions": [
+        0.9003,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 0.900)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_14_54_28",
+      "bout": 2,
+      "basis": "kp2d",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_14_54_28",
+      "bout": 3,
+      "basis": "kp2d",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_14_54_28",
+      "bout": 4,
+      "basis": "kp2d",
+      "fractions": [
+        0.8655,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 0.865)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_14_54_28",
+      "bout": 5,
+      "basis": "kp2d",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_14_54_28",
+      "bout": 6,
+      "basis": "kp2d",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_14_54_28",
+      "bout": 7,
+      "basis": "kp2d",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_14_54_28",
+      "bout": 8,
+      "basis": "kp2d",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_14_54_28",
+      "bout": 9,
+      "basis": "kp2d",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_14_54_28",
+      "bout": 10,
+      "basis": "kp2d",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_14_54_28",
+      "bout": 11,
+      "basis": "kp2d",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_14_54_28",
+      "bout": 12,
+      "basis": "kp2d",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_14_54_28",
+      "bout": 13,
+      "basis": "kp2d",
+      "fractions": [
+        0.8407,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 0.841)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_14_54_28",
+      "bout": 14,
+      "basis": "kp2d",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_14_54_28",
+      "bout": 15,
+      "basis": "kp2d",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_14_54_28",
+      "bout": 16,
+      "basis": "kp2d",
+      "fractions": [
+        0.9442,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 0.944)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_14_54_28",
+      "bout": 17,
+      "basis": "kp2d",
+      "fractions": [
+        0.8269,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 0.827)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_14_54_28",
+      "bout": 18,
+      "basis": "kp2d",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_14_54_28",
+      "bout": 19,
+      "basis": "kp2d",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_15_25_51",
+      "bout": 1,
+      "basis": "kp2d",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_15_25_51",
+      "bout": 2,
+      "basis": "kp2d",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_15_25_51",
+      "bout": 3,
+      "basis": "kp2d",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_15_25_51",
+      "bout": 4,
+      "basis": "kp2d",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_15_25_51",
+      "bout": 5,
+      "basis": "kp2d",
+      "fractions": [
+        0.8944,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 0.894)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_15_25_51",
+      "bout": 6,
+      "basis": "kp2d",
+      "fractions": [
+        0.0698,
+        1.0
+      ],
+      "keep": false,
+      "reason": "below 0.80: fly0=0.070",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_15_25_51",
+      "bout": 7,
+      "basis": "kp2d",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_15_25_51",
+      "bout": 8,
+      "basis": "kp2d",
+      "fractions": [
+        0.7699,
+        1.0
+      ],
+      "keep": false,
+      "reason": "below 0.80: fly0=0.770",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_15_25_51",
+      "bout": 9,
+      "basis": "kp2d",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_15_25_51",
+      "bout": 10,
+      "basis": "kp2d",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_15_25_51",
+      "bout": 11,
+      "basis": "kp2d",
+      "fractions": [
+        0.9145,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 0.914)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_15_25_51",
+      "bout": 12,
+      "basis": "kp2d",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_15_25_51",
+      "bout": 13,
+      "basis": "kp2d",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_15_25_51",
+      "bout": 14,
+      "basis": "kp2d",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_15_25_51",
+      "bout": 15,
+      "basis": "kp2d",
+      "fractions": [
+        0.9972,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 0.997)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_15_25_51",
+      "bout": 16,
+      "basis": "kp2d",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_15_25_51",
+      "bout": 17,
+      "basis": "kp2d",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_15_25_51",
+      "bout": 18,
+      "basis": "kp2d",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_15_25_51",
+      "bout": 19,
+      "basis": "kp2d",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_15_25_51",
+      "bout": 20,
+      "basis": "kp2d",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_15_25_51",
+      "bout": 21,
+      "basis": "kp2d",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_15_25_51",
+      "bout": 22,
+      "basis": "kp2d",
+      "fractions": [
+        0.9469,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 0.947)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_15_25_51",
+      "bout": 23,
+      "basis": "kp2d",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_15_25_51",
+      "bout": 24,
+      "basis": "kp2d",
+      "fractions": [
+        0.9048,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 0.905)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_15_25_51",
+      "bout": 25,
+      "basis": "kp2d",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_15_25_51",
+      "bout": 26,
+      "basis": "kp2d",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_15_25_51",
+      "bout": 27,
+      "basis": "kp2d",
+      "fractions": [
+        0.8029,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 0.803)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_15_25_51",
+      "bout": 28,
+      "basis": "kp2d",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_15_25_51",
+      "bout": 29,
+      "basis": "kp2d",
+      "fractions": [
+        0.7994,
+        1.0
+      ],
+      "keep": false,
+      "reason": "below 0.80: fly0=0.799",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_15_25_51",
+      "bout": 30,
+      "basis": "kp2d",
+      "fractions": [
+        0.4923,
+        1.0
+      ],
+      "keep": false,
+      "reason": "below 0.80: fly0=0.492",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_15_44_42",
+      "bout": 1,
+      "basis": "kp2d",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_15_44_42",
+      "bout": 2,
+      "basis": "kp2d",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_15_44_42",
+      "bout": 3,
+      "basis": "kp2d",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_15_44_42",
+      "bout": 4,
+      "basis": "kp2d",
+      "fractions": [
+        1.0,
+        0.8995
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 0.900)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_15_44_42",
+      "bout": 5,
+      "basis": "kp2d",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_15_44_42",
+      "bout": 6,
+      "basis": "kp2d",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_15_44_42",
+      "bout": 7,
+      "basis": "kp2d",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_15_44_42",
+      "bout": 8,
+      "basis": "kp2d",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_16_03_48",
+      "bout": 1,
+      "basis": "kp2d",
+      "fractions": [
+        0.8445,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 0.844)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_16_03_48",
+      "bout": 2,
+      "basis": "kp2d",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_16_03_48",
+      "bout": 3,
+      "basis": "kp2d",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_16_03_48",
+      "bout": 4,
+      "basis": "kp2d",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_16_03_48",
+      "bout": 5,
+      "basis": "kp2d",
+      "fractions": [
+        0.8314,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 0.831)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_16_03_48",
+      "bout": 6,
+      "basis": "kp2d",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_16_03_48",
+      "bout": 7,
+      "basis": "kp2d",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_16_21_32",
+      "bout": 1,
+      "basis": "kp2d",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_16_21_32",
+      "bout": 2,
+      "basis": "kp2d",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_16_21_32",
+      "bout": 3,
+      "basis": "kp2d",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_16_21_32",
+      "bout": 4,
+      "basis": "kp2d",
+      "fractions": [
+        1.0,
+        0.9946
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 0.995)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_16_21_32",
+      "bout": 5,
+      "basis": "kp2d",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_16_21_32",
+      "bout": 6,
+      "basis": "kp2d",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_16_21_32",
+      "bout": 7,
+      "basis": "kp2d",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_16_21_32",
+      "bout": 8,
+      "basis": "kp2d",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_16_21_32",
+      "bout": 9,
+      "basis": "kp2d",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_16_21_32",
+      "bout": 10,
+      "basis": "kp2d",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_16_21_32",
+      "bout": 11,
+      "basis": "kp2d",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_16_39_56",
+      "bout": 1,
+      "basis": "kp2d",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_16_39_56",
+      "bout": 2,
+      "basis": "kp2d",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_16_39_56",
+      "bout": 3,
+      "basis": "kp2d",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_16_39_56",
+      "bout": 4,
+      "basis": "kp2d",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_16_39_56",
+      "bout": 5,
+      "basis": "kp2d",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_16_39_56",
+      "bout": 6,
+      "basis": "kp2d",
+      "fractions": [
+        0.9098,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 0.910)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_16_39_56",
+      "bout": 7,
+      "basis": "kp2d",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_16_39_56",
+      "bout": 8,
+      "basis": "kp2d",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_16_39_56",
+      "bout": 9,
+      "basis": "kp2d",
+      "fractions": [
+        0.7355,
+        1.0
+      ],
+      "keep": false,
+      "reason": "below 0.80: fly0=0.736",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_16_39_56",
+      "bout": 10,
+      "basis": "kp2d",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_16_39_56",
+      "bout": 11,
+      "basis": "kp2d",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_16_39_56",
+      "bout": 12,
+      "basis": "kp2d",
+      "fractions": [
+        0.8529,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 0.853)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_16_39_56",
+      "bout": 13,
+      "basis": "kp2d",
+      "fractions": [
+        0.8392,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 0.839)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_16_39_56",
+      "bout": 14,
+      "basis": "kp2d",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_16_39_56",
+      "bout": 15,
+      "basis": "kp2d",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_16_39_56",
+      "bout": 16,
+      "basis": "kp2d",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_16_39_56",
+      "bout": 17,
+      "basis": "kp2d",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_16_39_56",
+      "bout": 18,
+      "basis": "kp2d",
+      "fractions": [
+        0.8708,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 0.871)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_16_56_37",
+      "bout": 1,
+      "basis": "kp2d",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_16_56_37",
+      "bout": 2,
+      "basis": "kp2d",
+      "fractions": [
+        0.9463,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 0.946)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_16_56_37",
+      "bout": 3,
+      "basis": "kp2d",
+      "fractions": [
+        0.74,
+        1.0
+      ],
+      "keep": false,
+      "reason": "below 0.80: fly0=0.740",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_16_56_37",
+      "bout": 4,
+      "basis": "kp2d",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_16_56_37",
+      "bout": 5,
+      "basis": "kp2d",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_16_56_37",
+      "bout": 6,
+      "basis": "kp2d",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_16_56_37",
+      "bout": 7,
+      "basis": "kp2d",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_16_56_37",
+      "bout": 8,
+      "basis": "kp2d",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_17_28_34",
+      "bout": 1,
+      "basis": "kp2d",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_17_28_34",
+      "bout": 2,
+      "basis": "kp2d",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_17_28_34",
+      "bout": 3,
+      "basis": "kp2d",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_17_28_34",
+      "bout": 4,
+      "basis": "kp2d",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_17_28_34",
+      "bout": 5,
+      "basis": "kp2d",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_17_28_34",
+      "bout": 6,
+      "basis": "kp2d",
+      "fractions": [
+        0.9972,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 0.997)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_17_28_34",
+      "bout": 7,
+      "basis": "kp2d",
+      "fractions": [
+        0.6927,
+        1.0
+      ],
+      "keep": false,
+      "reason": "below 0.80: fly0=0.693",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_17_28_34",
+      "bout": 8,
+      "basis": "kp2d",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_17_28_34",
+      "bout": 9,
+      "basis": "kp2d",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_17_28_34",
+      "bout": 10,
+      "basis": "kp2d",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_17_28_34",
+      "bout": 11,
+      "basis": "kp2d",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_17_28_34",
+      "bout": 12,
+      "basis": "kp2d",
+      "fractions": [
+        0.999,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 0.999)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_17_28_34",
+      "bout": 13,
+      "basis": "kp2d",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_17_28_34",
+      "bout": 14,
+      "basis": "kp2d",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_17_28_34",
+      "bout": 15,
+      "basis": "kp2d",
+      "fractions": [
+        0.9921,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 0.992)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_17_52_50",
+      "bout": 1,
+      "basis": "kp2d",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_17_52_50",
+      "bout": 2,
+      "basis": "kp2d",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session1"
+    },
+    {
+      "recording": "2026_04_02_17_52_50",
+      "bout": 3,
+      "basis": "kp2d",
+      "fractions": [
+        1.0,
+        1.0
+      ],
+      "keep": true,
+      "reason": "all flies >= 0.80 (worst 1.000)",
+      "session": "Session1"
+    }
+  ]
+}
