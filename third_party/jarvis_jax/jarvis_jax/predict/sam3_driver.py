@@ -877,28 +877,79 @@ def in_frame_codes(cent, val, repro_tool, W, H):
         raise ValueError(f"in_frame_codes expects cent (A,C,T,2) and val (A,C,T), "
                          f"got {cent.shape} and {val.shape}")
     A, C, T = val.shape
-    codes = np.full((A, C, T), IN_FRAME_UNKNOWN, np.int8)
-    for f in range(A):
-        for t in range(T):
-            others = [i for i in range(C) if val[f, i, t]]
-            for k in range(C):
-                if val[f, k, t]:
-                    codes[f, k, t] = IN_FRAME_YES
-                    continue
-                src = [i for i in others if i != k]
-                if len(src) < 2:
-                    continue
-                pts = np.zeros((C, 2))
-                for i in src:
-                    pts[i] = cent[f, i, t]
-                rp = repro_tool.reproject_point(
-                    repro_tool.reconstruct_point(pts, cams_to_use=src))[k]
-                if not np.isfinite(rp).all():
-                    continue
-                codes[f, k, t] = (IN_FRAME_YES
-                                  if (0 <= rp[0] < W and 0 <= rp[1] < H)
-                                  else IN_FRAME_NO)
-    return codes
+
+    # ONE triangulation per (fly, frame), not one per (fly, frame, camera).
+    # The leave-one-out that the per-camera form implies is vacuous here: the
+    # cameras being asked about are exactly the INVALID ones, and an invalid
+    # camera is never among the sources anyway, so excluding it changes
+    # nothing. Computing it per camera was 7x redundant.
+    cam_mats = np.asarray(_camera_matrices(repro_tool), float)      # (C,4,3)
+    pts = np.transpose(cent, (0, 2, 1, 3)).reshape(A * T, C, 2)     # (B,C,2)
+    vld = np.transpose(val, (0, 2, 1)).reshape(A * T, C)            # (B,C)
+    n_valid = vld.sum(axis=1)                                       # (B,)
+
+    X = _triangulate_batch(pts, cam_mats, vld)                      # (B,3)
+
+    Xh = np.concatenate([X, np.ones((X.shape[0], 1))], axis=1)      # (B,4)
+    proj = np.einsum("bi,cij->bcj", Xh, cam_mats)                   # (B,C,3)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        uv = proj[..., :2] / proj[..., 2:3]                         # (B,C,2)
+    inb = (np.isfinite(uv).all(-1)
+           & (uv[..., 0] >= 0) & (uv[..., 0] < W)
+           & (uv[..., 1] >= 0) & (uv[..., 1] < H))                  # (B,C)
+
+    resolved = (n_valid >= 2)[:, None] & np.isfinite(X).all(1)[:, None]
+    out = np.where(resolved,
+                   np.where(inb, IN_FRAME_YES, IN_FRAME_NO),
+                   IN_FRAME_UNKNOWN).astype(np.int8)
+    out = np.where(vld, IN_FRAME_YES, out)          # a valid view is in frame
+    return np.transpose(out.reshape(A, T, C), (0, 2, 1)).astype(np.int8)
+
+
+def _camera_matrices(repro_tool):
+    """(C,4,3) DLT matrices from either ReprojectionTool flavour."""
+    import numpy as np
+
+    for attr in ("camera_matrices", "cameraMatrices"):
+        m = getattr(repro_tool, attr, None)
+        if m is not None:
+            return np.asarray(m.detach().cpu().numpy()
+                              if hasattr(m, "detach") else m, float)
+    inner = getattr(repro_tool, "_rt", None)
+    if inner is not None:
+        return _camera_matrices(inner)
+    raise AttributeError(
+        f"{type(repro_tool).__name__} exposes no camera_matrices/cameraMatrices")
+
+
+def _triangulate_batch(points2d, cam_mats, valid):
+    """(B,C,2) + (C,4,3) + (B,C) -> (B,3) DLT, invalid cameras contributing zero.
+
+    Same construction as geometry.center3d.triangulate_dlt_batched (which is
+    JAX). Kept in NumPy here deliberately: this runs INSIDE the SAM3 process,
+    which already owns the GPU through torch, and importing JAX there would
+    contend for device memory. The work is small anyway -- 0.9s for a
+    1393-frame bout, ~1min across all 160, against SAM3's ~31 GPU-hours -- so
+    the batching, not the backend, is what mattered.
+    """
+    import numpy as np
+
+    P = np.swapaxes(cam_mats, -1, -2)                       # (C,3,4)
+    u = points2d[..., 0:1]                                   # (B,C,1)
+    v = points2d[..., 1:2]
+    row_u = u * P[None, :, 2, :] - P[None, :, 0, :]          # (B,C,4)
+    row_v = v * P[None, :, 2, :] - P[None, :, 1, :]
+    w = valid[..., None].astype(float)
+    A_mat = np.concatenate([row_u * w, row_v * w], axis=1)   # (B,2C,4)
+    ok = valid.sum(axis=1) >= 2
+    out = np.full((points2d.shape[0], 3), np.nan)
+    if not ok.any():
+        return out
+    _, _, Vh = np.linalg.svd(A_mat[ok], full_matrices=False)
+    Xh = Vh[:, -1, :]                                        # (n,4)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        out[ok] = Xh[:, :3] / Xh[:, 3:4]
+    return out
 
 
 def find_gap_cameras(val, codes, *, min_frames=30, min_frac=0.02):

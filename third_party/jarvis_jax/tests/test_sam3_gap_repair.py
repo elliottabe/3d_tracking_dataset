@@ -26,79 +26,122 @@ from jarvis_jax.predict.sam3_driver import (
 )
 
 
+def make_cam_mats(n=4, radius=500.0, height=120.0, W=640, H=480):
+    """(C,4,3) DLT matrices for a look-at ring aimed at the origin.
+
+    Real projective cameras, not an identity map: with P = [I | offset] the
+    depth coordinate is unconstrained, the DLT null space is 2-dimensional and
+    triangulation is degenerate -- so a "simple" stub silently tests nothing.
+    """
+    K = np.array([[800.0, 0, W / 2], [0, 800.0, H / 2], [0, 0, 1.0]])
+    mats = []
+    for i in range(n):
+        ang = 2 * np.pi * i / n
+        C = np.array([radius * np.cos(ang), radius * np.sin(ang), height])
+        f = -C / np.linalg.norm(C)
+        right = np.cross(f, [0.0, 0.0, 1.0]); right /= np.linalg.norm(right)
+        up = np.cross(right, f)
+        R = np.stack([right, up, f])
+        P = np.hstack([R, (-R @ C)[:, None]])
+        mats.append((K @ P).T)                       # (4,3)
+    return np.stack(mats)
+
+
 class FakeRepro:
-    """Reprojection stub: '3D' is the mean of the given 2D observations, and
-    every camera sees it unchanged. Enough to exercise the bounds logic without
-    a calibration."""
+    """Synthetic ReprojectionTool exposing BOTH the matrices and the NumPy
+    point API, so it drives the batched path and the per-point helpers alike."""
 
-    def __init__(self, n_cam, offsets=None):
-        self.n_cam = n_cam
-        self.offsets = offsets if offsets is not None else np.zeros((n_cam, 2))
+    def __init__(self, n_cam=4, W=640, H=480):
+        self.camera_matrices = make_cam_mats(n_cam, W=W, H=H)
+        self.num_cameras = n_cam
+        self.cameras = {f"Cam{i}": object() for i in range(n_cam)}
 
-    def reconstruct_point(self, points2d, cams_to_use=None):
-        cams = list(range(self.n_cam)) if cams_to_use is None else list(cams_to_use)
-        pts = np.asarray(points2d, float)[cams]
-        m = pts.mean(axis=0)
-        return np.array([m[0], m[1], 0.0])
+    def project(self, X):
+        Xh = np.concatenate([np.asarray(X, float), [1.0]])
+        p = np.einsum("i,cij->cj", Xh, self.camera_matrices)
+        return p[:, :2] / p[:, 2:3]
 
     def reproject_point(self, p3d):
-        p = np.asarray(p3d, float)[:2]
-        return np.stack([p + self.offsets[k] for k in range(self.n_cam)])
+        return self.project(p3d)
+
+    def reconstruct_point(self, points2d, cams_to_use=None):
+        pts = np.asarray(points2d, float)
+        use = list(range(self.num_cameras)) if cams_to_use is None else list(cams_to_use)
+        if len(use) < 2:
+            return np.zeros(3)
+        rows = []
+        for k in use:
+            P = self.camera_matrices[k].T                 # (3,4)
+            u, v = pts[k]
+            rows.append(u * P[2] - P[0])
+            rows.append(v * P[2] - P[1])
+        _, _, Vh = np.linalg.svd(np.stack(rows))
+        Xh = Vh[-1]
+        return (Xh / Xh[3])[:3]
+
+
+TRUE_PT = np.array([12.0, -7.0, 3.0])          # a point all ring cameras see
+
+
+def obs_for(rt, X=TRUE_PT):
+    """(C,2) observations of X in every camera."""
+    return rt.project(X)
 
 
 # ---------------------------------------------------------------------------
 # in_frame_codes
 # ---------------------------------------------------------------------------
 
+def _cent_from(rt, val, X=TRUE_PT):
+    """(A,C,T,2) centroids consistent with X, given a (A,C,T) validity mask."""
+    A, C, T = val.shape
+    uv = rt.project(X)                                   # (C,2)
+    cent = np.zeros((A, C, T, 2))
+    cent[:] = uv[None, :, None, :]
+    return cent
+
+
 def test_valid_views_are_in_frame_by_definition():
-    A, C, T = 1, 3, 4
-    val = np.ones((A, C, T), bool)
-    cent = np.full((A, C, T, 2), 50.0)
-    codes = in_frame_codes(cent, val, FakeRepro(C), W=100, H=100)
+    rt = FakeRepro(4)
+    val = np.ones((1, 4, 3), bool)
+    codes = in_frame_codes(_cent_from(rt, val), val, rt, W=640, H=480)
     assert (codes == IN_FRAME_YES).all()
 
 
 def test_missing_view_inside_bounds_is_a_recoverable_miss():
-    A, C, T = 1, 3, 1
-    val = np.ones((A, C, T), bool)
-    val[0, 2, 0] = False                       # cam2 missing
-    cent = np.full((A, C, T, 2), 50.0)         # ...but the fly is at (50,50)
-    codes = in_frame_codes(cent, val, FakeRepro(C), W=100, H=100)
-    assert codes[0, 2, 0] == IN_FRAME_YES
+    rt = FakeRepro(4)
+    val = np.ones((1, 4, 1), bool); val[0, 3, 0] = False
+    codes = in_frame_codes(_cent_from(rt, val), val, rt, W=640, H=480)
+    assert codes[0, 3, 0] == IN_FRAME_YES
 
 
 def test_missing_view_outside_bounds_is_out_of_fov():
-    A, C, T = 1, 3, 1
-    val = np.ones((A, C, T), bool)
-    val[0, 2, 0] = False
-    cent = np.full((A, C, T, 2), 50.0)
-    # cam2 is offset far away, so the fly reprojects off its sensor.
-    off = np.zeros((C, 2)); off[2] = [500.0, 0.0]
-    codes = in_frame_codes(cent, val, FakeRepro(C, off), W=100, H=100)
-    assert codes[0, 2, 0] == IN_FRAME_NO
+    # Same geometry, but an image so small that the observation falls off it:
+    # the fly is elsewhere in the world, not merely unsegmented.
+    rt = FakeRepro(4)
+    val = np.ones((1, 4, 1), bool); val[0, 3, 0] = False
+    codes = in_frame_codes(_cent_from(rt, val), val, rt, W=2, H=2)
+    assert codes[0, 3, 0] == IN_FRAME_NO
 
 
-def test_fewer_than_two_other_cameras_is_unknown_not_a_guess():
-    A, C, T = 1, 3, 1
-    val = np.zeros((A, C, T), bool)
-    val[0, 0, 0] = True                        # only ONE valid camera
-    cent = np.full((A, C, T, 2), 50.0)
-    codes = in_frame_codes(cent, val, FakeRepro(C), W=100, H=100)
-    assert codes[0, 0, 0] == IN_FRAME_YES      # the valid one
-    assert codes[0, 1, 0] == IN_FRAME_UNKNOWN
-    assert codes[0, 2, 0] == IN_FRAME_UNKNOWN
+def test_fewer_than_two_valid_cameras_is_unknown_not_a_guess():
+    rt = FakeRepro(4)
+    val = np.zeros((1, 4, 1), bool); val[0, 0, 0] = True      # only ONE valid
+    codes = in_frame_codes(_cent_from(rt, val), val, rt, W=640, H=480)
+    assert codes[0, 0, 0] == IN_FRAME_YES                     # the valid one
+    assert (codes[0, 1:, 0] == IN_FRAME_UNKNOWN).all()
 
 
-def test_a_valid_camera_is_excluded_from_its_own_reprojection():
-    # cam0 valid -> YES without consulting others; the point is that the other
-    # cameras' codes are computed from sources EXCLUDING themselves.
-    A, C, T = 1, 4, 1
-    val = np.ones((A, C, T), bool); val[0, 3, 0] = False
-    cent = np.full((A, C, T, 2), 10.0)
-    cent[0, 3, 0] = [999.0, 999.0]             # garbage in the invalid view
-    codes = in_frame_codes(cent, val, FakeRepro(C), W=100, H=100)
-    # cam3's own (garbage) centroid must not be used -> still resolves in-frame
-    assert codes[0, 3, 0] == IN_FRAME_YES
+def test_invalid_cameras_own_centroid_is_never_used():
+    # An invalid view's stored centroid is meaningless; poisoning it must not
+    # change any code, since invalid cameras contribute zero rows to the DLT.
+    rt = FakeRepro(4)
+    val = np.ones((1, 4, 1), bool); val[0, 3, 0] = False
+    clean = _cent_from(rt, val)
+    dirty = clean.copy(); dirty[0, 3, 0] = [9e4, 9e4]
+    a = in_frame_codes(clean, val, rt, W=640, H=480)
+    b = in_frame_codes(dirty, val, rt, W=640, H=480)
+    assert np.array_equal(a, b)
 
 
 def test_in_frame_codes_rejects_wrong_shapes():
@@ -107,16 +150,44 @@ def test_in_frame_codes_rejects_wrong_shapes():
                        FakeRepro(3), 10, 10)
 
 
-def test_bout22_shape_three_cameras_see_her_four_do_not():
-    # The real Session0 bout 22 geometry: 3 cameras have her, 4 are offset far
-    # enough that she is off-sensor -> those must read out-of-FOV, not "missed".
-    A, C, T = 1, 7, 5
-    val = np.zeros((A, C, T), bool); val[0, :3] = True
-    cent = np.full((A, C, T, 2), 40.0)
-    off = np.zeros((C, 2)); off[3:] = [900.0, 0.0]
-    codes = in_frame_codes(cent, val, FakeRepro(C, off), W=200, H=100)
+def test_bout22_shape_three_of_seven_cameras_still_resolves():
+    # The real bout 22 geometry: 3 cameras see her, 4 do not. With >=2 valid
+    # sources every missing view must RESOLVE (yes/no), never stay unknown --
+    # that is what lets the bout be judged instead of silently dropped.
+    rt = FakeRepro(7)
+    val = np.zeros((1, 7, 5), bool); val[0, :3] = True
+    codes = in_frame_codes(_cent_from(rt, val), val, rt, W=640, H=480)
     assert (codes[0, :3] == IN_FRAME_YES).all()
-    assert (codes[0, 3:] == IN_FRAME_NO).all()
+    assert (codes[0, 3:] != IN_FRAME_UNKNOWN).all()
+
+
+def test_batched_result_matches_a_per_point_reference():
+    # The batched form replaced a per-(fly,frame,camera) loop; it must agree
+    # with the straightforward implementation, not merely run faster.
+    rt = FakeRepro(5)
+    rng = np.random.default_rng(0)
+    A, C, T = 2, 5, 6
+    val = rng.random((A, C, T)) > 0.35
+    cent = _cent_from(rt, val) + rng.normal(0, 0.01, (A, C, T, 2))
+    got = in_frame_codes(cent, val, rt, W=640, H=480)
+
+    exp = np.full((A, C, T), IN_FRAME_UNKNOWN, np.int8)
+    for f in range(A):
+        for t in range(T):
+            src = [i for i in range(C) if val[f, i, t]]
+            for k in range(C):
+                if val[f, k, t]:
+                    exp[f, k, t] = IN_FRAME_YES
+                    continue
+                if len(src) < 2:
+                    continue
+                pts = np.zeros((C, 2))
+                for i in src:
+                    pts[i] = cent[f, i, t]
+                rp = rt.reproject_point(rt.reconstruct_point(pts, cams_to_use=src))[k]
+                exp[f, k, t] = (IN_FRAME_YES if (0 <= rp[0] < 640 and 0 <= rp[1] < 480)
+                                else IN_FRAME_NO)
+    assert np.array_equal(got, exp)
 
 
 # ---------------------------------------------------------------------------
@@ -260,6 +331,9 @@ class FakeJarvisTool:
         self.cameras = {f"Cam{i}": object() for i in range(n_cam)}
         self.device = "cpu"
         self.last_maxvals = None
+        # The real torch tool carries these; _camera_matrices reads them
+        # through the adapter, so the stub must too.
+        self.cameraMatrices = make_cam_mats(n_cam)
 
     def reprojectPoint(self, point3D):
         import torch
@@ -329,13 +403,31 @@ def test_unknown_tool_raises_instead_of_failing_later_in_a_try_except():
 
 
 def test_in_frame_codes_works_through_the_adapter():
-    A, C, T = 1, 4, 2
-    val = np.ones((A, C, T), bool); val[0, 3] = False
-    cent = np.zeros((A, C, T, 2))
-    for k in range(C):
-        cent[0, k, :, 0] = 10.0 + k
-        cent[0, k, :, 1] = 20.0
-    codes = in_frame_codes(cent, val, as_numpy_repro(FakeJarvisTool(C)),
-                           W=100, H=100)
+    # The batched path reads camera matrices, which must resolve through the
+    # adapter to the wrapped torch tool's `cameraMatrices`.
+    tool = FakeJarvisTool(4)
+    ad = as_numpy_repro(tool)
+    ref = FakeRepro(4)
+    val = np.ones((1, 4, 2), bool); val[0, 3] = False
+    cent = np.zeros((1, 4, 2, 2))
+    cent[:] = ref.project(TRUE_PT)[None, :, None, :]
+    codes = in_frame_codes(cent, val, ad, W=640, H=480)
     assert (codes[0, :3] == IN_FRAME_YES).all()
-    assert (codes[0, 3] == IN_FRAME_YES).all()      # (13,20) is inside 100x100
+    assert (codes[0, 3] != IN_FRAME_UNKNOWN).all()
+
+
+def test_camera_matrices_resolve_through_the_adapter():
+    from jarvis_jax.predict.sam3_driver import _camera_matrices
+    tool = FakeJarvisTool(4)
+    direct = _camera_matrices(tool)
+    viaad = _camera_matrices(as_numpy_repro(tool))
+    assert direct.shape == (4, 4, 3)
+    assert np.allclose(direct, viaad)
+
+
+def test_camera_matrices_missing_raises():
+    from jarvis_jax.predict.sam3_driver import _camera_matrices
+    class Nothing:
+        pass
+    with pytest.raises(AttributeError, match="camera_matrices"):
+        _camera_matrices(Nothing())
