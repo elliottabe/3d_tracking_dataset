@@ -8,8 +8,14 @@ num_animals: 2
 limit: 0           # 0 = all bouts
 bout_ids: ''       # '' = all; else comma-separated bout_idx
 reuse_masks: true  # skip bouts whose sam3_masks.npz already exists
-lowmem: true       # bound GPU memory on long bouts: offload SAM3 per-frame
-                   # outputs to CPU + trim past memory (set False to disable)
+# Offload SAM3 per-frame outputs to CPU. This BOUNDS GPU memory at the cost of
+# PCIe traffic on every frame -- it is a memory/speed trade, not a speed-up.
+# Measured on Session0 bout 22 (1393 frames, chunk_len=1000): peak ~27 GB, and
+# turning this OFF was 5% faster (3184s vs 3358s).
+# SET IT BACK TO true on cards smaller than ~32 GB, or if chunk_len is raised:
+# 27 GB is comfortable on the 46 GB L40S this was measured on and is not on,
+# say, a 24 GB card.
+lowmem: false
 sam3_version: sam3.1
 sam3_gpu: 0
 # Standard per-bout SAM-mask QC overlay video (viz.views.maskvid): stacks the
@@ -50,7 +56,17 @@ gpus: null         # null/[] = use all visible GPUs (CUDA_VISIBLE_DEVICES, else
 manifest_name: manifest.json   # internal: multi-GPU workers write per-GPU
                                # partials (manifest.gpu<id>.json); the parent
                                # merges them into manifest.json.
-sam3_compile: false
+# torch.compile the multiplex backbones. Costs ~235s ONCE per process and then
+# runs ~10% faster per frame, so it is a loss on short jobs and a win on long
+# ones -- break-even is around 1400 frames, i.e. roughly one bout. Measured on
+# bouts 4/19/25 in a single process: first bout 948s -> 1183s (the overhead),
+# steady state 1.71 -> 1.54 s/frame.
+# A single-bout benchmark shows this as 23% SLOWER and is misleading; the
+# tracker is constructed once per process and reused across every bout it
+# handles, so the overhead is paid once. Over the 119k-frame courtship set the
+# 0.17 s/frame saving is ~5.6 GPU-hours.
+# SET false for one-off/short runs (a handful of bouts), where it only costs.
+sam3_compile: true
 sam3_text: insect
 sam3_checkpoint: null
 # Long-bout chunking (bounds GPU memory): bouts > chunk_len frames are tracked
