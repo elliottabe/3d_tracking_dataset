@@ -13,6 +13,9 @@ picked up there. See docs and configs/sam3/default.yaml.
 """
 from __future__ import annotations
 
+import os
+import sys
+
 import numpy as np
 import pytest
 
@@ -316,7 +319,8 @@ def test_merge_fill_drops_flies_beyond_num_animals():
 # as_numpy_repro: two ReprojectionTool classes, two incompatible APIs
 # ---------------------------------------------------------------------------
 
-from jarvis_jax.predict.sam3_driver import as_numpy_repro  # noqa: E402
+from jarvis_jax.predict.sam3_driver import (  # noqa: E402
+    _camera_matrices, as_numpy_repro)
 
 
 class FakeJarvisTool:
@@ -336,14 +340,19 @@ class FakeJarvisTool:
         self.cameraMatrices = make_cam_mats(n_cam)
 
     def reprojectPoint(self, point3D):
+        # The real tool ends with `[:, :2].permute(0, 2, 1).squeeze()`, so a
+        # SINGLE point comes back as (C,2), not (N,3,C). The first version of
+        # this fake returned the un-squeezed intermediate shape -- the tests
+        # passed and production raised IndexError. A fake that does not match
+        # the real return contract tests nothing.
         import torch
         p = point3D.reshape(-1, 3)
         n = p.shape[0]
-        out = torch.zeros((n, 3, self.num_cameras))
+        out = torch.zeros((n, self.num_cameras, 2))
         for k in range(self.num_cameras):
-            out[:, 0, k] = p[:, 0] + k
-            out[:, 1, k] = p[:, 1]
-        return out
+            out[:, k, 0] = p[:, 0] + k
+            out[:, k, 1] = p[:, 1]
+        return out.squeeze()
 
     def reconstructPoint(self, points, maxvals):
         import torch
@@ -431,3 +440,42 @@ def test_camera_matrices_missing_raises():
         pass
     with pytest.raises(AttributeError, match="camera_matrices"):
         _camera_matrices(Nothing())
+
+
+def test_adapter_reproject_returns_C_by_2():
+    # Pins the shape contract that broke in production: the real tool squeezes
+    # to (C,2) for a single point.
+    ad = as_numpy_repro(FakeJarvisTool(7))
+    out = ad.reproject_point(np.array([1.0, 2.0, 3.0]))
+    assert out.shape == (7, 2)
+
+
+REAL_CAL = ('/gscratch/portia/eabe/data/Johnson_lab/Video_recordings/courtship/'
+            'Session0/2025_10_20_13_20_04/calibration')
+
+
+@pytest.mark.skipif(not os.path.isdir(REAL_CAL), reason="calibration not present")
+def test_adapter_matches_the_numpy_tool_on_real_calibration():
+    """Both ReprojectionTool flavours must agree on real calibration.
+
+    The unit tests above run against stubs; this pins the two REAL
+    implementations together, which is where the API mismatch actually bit.
+    """
+    import glob
+    sys.path.insert(0, '/mmfs1/gscratch/portia/eabe/Research/MyRepos/'
+                       '3d_tracking_dataset/third_party/JARVIS-HybridNet')
+    from jarvis.utils.reprojection import ReprojectionTool as JarvisRT
+    from jarvis_jax.geometry.reprojection_tool import ReprojectionTool as JaxRT
+    names = {os.path.splitext(os.path.basename(p))[0]: os.path.basename(p)
+             for p in sorted(glob.glob(REAL_CAL + '/Cam*.yaml'))}
+    ad = as_numpy_repro(JarvisRT(root_dir=REAL_CAL, calib_paths=names, device='cpu'))
+    ref = JaxRT(REAL_CAL)
+
+    X = np.array([200.0, 15.0, 20.0])
+    a, b = ad.reproject_point(X), ref.reproject_point(X)
+    assert a.shape == b.shape == (ref.num_cameras, 2)
+    assert np.abs(a - b).max() < 1e-2
+    assert np.abs(ad.reconstruct_point(b) - ref.reconstruct_point(b)).max() < 1e-2
+    assert np.abs(ad.reconstruct_point(b, cams_to_use=[0, 2, 4])
+                  - ref.reconstruct_point(b, cams_to_use=[0, 2, 4])).max() < 1e-2
+    assert np.allclose(_camera_matrices(ad), _camera_matrices(ref))

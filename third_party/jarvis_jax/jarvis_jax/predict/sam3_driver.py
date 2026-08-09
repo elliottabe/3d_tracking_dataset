@@ -841,9 +841,12 @@ class _JarvisReproAdapter:
         dev = getattr(self._rt, "device", "cpu")
         t = torch.tensor(np.asarray(p3d, float).reshape(1, 3),
                          dtype=torch.float32, device=dev)
-        out = self._rt.reprojectPoint(t)          # (N,3,C); rows 0,1 are x,y
-        out = out.detach().cpu().numpy()
-        return np.stack([out[0, 0, :], out[0, 1, :]], axis=1)   # (C,2)
+        # reprojectPoint ends with `[:, :2].permute(0, 2, 1).squeeze()`, so a
+        # single point already comes back as (C,2) -- NOT the (N,3,C) its
+        # intermediate shape suggests. reshape rather than index, so a squeezed
+        # or unsqueezed result both land correctly.
+        out = self._rt.reprojectPoint(t).detach().cpu().numpy()
+        return np.asarray(out, float).reshape(-1, 2)            # (C,2)
 
 
 def as_numpy_repro(repro_tool):
@@ -1352,9 +1355,13 @@ def run_sam3_masks(*, project, session_dir, bouts_csv, out, num_animals=2,
             # failure). Computed AFTER both repairs so it describes what was
             # actually saved. See in_frame_codes / IN_FRAME_*.
             try:
-                _lm = pmod.LoadedBoutMasks(npz_path)
-                _cent, _val = np.asarray(_lm.centroids), np.asarray(_lm.valid)
-                _H, _W = (int(x) for x in _lm.shape[:2])
+                # Read straight from the npz just written: LoadedBoutMasks
+                # does not expose the frame shape, and the arrays are the
+                # authoritative record of what was saved anyway.
+                with np.load(npz_path, allow_pickle=True) as _z:
+                    _cent = np.asarray(_z["centroids"])
+                    _val = np.asarray(_z["valid"], bool)
+                    _H, _W = (int(x) for x in np.asarray(_z["shape"])[:2])
                 _codes = in_frame_codes(_cent, _val,
                                         as_numpy_repro(repro_tool), _W, _H)
                 _append_array_to_npz(npz_path, "in_frame", _codes)
