@@ -95,10 +95,15 @@ def run(args):
     ref = next(iter(present.values()))
     H, W = int(ref["H"]), int(ref["W"])
     T = min(int(m["T"]) for m in present.values())
-    N = min(n_cap, T)
+    # start_t offsets BOTH the mask index and the video seek; shifting only one
+    # would silently draw each mask on a different frame than it came from.
+    t0 = max(0, int(getattr(args, "start_t", 0) or 0))
+    if t0 >= T:
+        raise ValueError(f"--start-t {t0} is beyond bout {bout} (T={T})")
+    N = min(n_cap, T - t0)
     if N <= 0:
         raise ValueError(f"no frames to render for bout {bout} (usable T={T})")
-    seg = slice(0, N)
+    seg = slice(t0, t0 + N)
 
     # --- choose cameras: explicit --cams, else top n_cams by total mask pixels ---
     want = list(args.cams) if getattr(args, "cams", None) else None
@@ -117,10 +122,11 @@ def run(args):
         order = [i for i in np.argsort(pix)[::-1] if pix[i] > 0]
         if not order:
             order = list(range(len(all_cameras)))  # nothing had pixels; fall back
-        chosen = [all_cameras[i] for i in order[:max(1, n_cams)]]
+        chosen = ([c for c in all_cameras] if n_cams >= len(all_cameras)
+                  else [all_cameras[i] for i in order[:max(1, n_cams)]])
     cam_idx = {c: all_cameras.index(c) for c in chosen}
     print(f"[maskvid] bout {bout}: flies {sorted(present)}; cams {chosen}; "
-          f"segment t[0:{N}] of T={T}")
+          f"segment t[{t0}:{t0 + N}] of T={T}")
 
     # --- ONE fixed crop window over the segment (union of both flies' mask
     #     bboxes across the chosen cams) so every panel is a constant size ---
@@ -152,6 +158,7 @@ def run(args):
         start_abs = bout_start_frame(_compose_cfg(), bout)
 
     def _panel(bgr, cam, t):
+        t = t0 + t                       # stream index -> absolute bout index
         for f, m in present.items():
             ci = cam_idx[cam]
             if np.asarray(m["valid"])[t, ci]:
@@ -166,7 +173,13 @@ def run(args):
     top_band = layout.banner(panel_w, legend_items)
 
     frames_out = []
-    stream = vio.read_frames(session_dir, chosen, start_abs, N)
+    # Sync-aware: cameras drop frames independently, so a positional read
+    # overlays masks on the wrong frame for any camera that dropped one before
+    # this bout. Mask GENERATION is already sync-aware (positions_per_cam), so
+    # a positional read here would disagree with the very masks it is drawing.
+    # 25 courtship bouts start after a recorded drop slot. Falls back to
+    # positional when no plan exists, so clean recordings are unaffected.
+    stream = vio.read_frames_synced(session_dir, chosen, start_abs + t0, N)
     for k, imgs in enumerate(stream):
         blocks = [top_band]
         for cam, rgb in zip(chosen, imgs):

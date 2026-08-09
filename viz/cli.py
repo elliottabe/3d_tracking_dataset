@@ -94,6 +94,10 @@ def build_parser():
     m.add_argument("--run", help="predictions dir (…/Predictions_3D_*), holds bout_NNNNN/sam3_masks.npz")
     m.add_argument("--bout", type=int, required=True)
     m.add_argument("--n", type=int, default=300, help="max frames rendered (default 300)")
+    m.add_argument("--start-t", dest="start_t", type=int, default=0,
+                   help="offset INTO the bout to start at (default 0). Shifts "
+                        "the video seek and the mask index together, so they "
+                        "stay aligned.")
     m.add_argument("--n-cams", dest="n_cams", type=int, default=3,
                    help="number of top-mask-pixel cameras to stack (default 3)")
     m.add_argument("--cams", nargs="*", default=None,

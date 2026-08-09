@@ -46,6 +46,81 @@ def read_frames(session_dir, cameras, start, count):
     finally:
         for cap in caps: cap.release()
 
+def sync_positions(session_dir, cameras, start_slot, count):
+    """[(positions, present)] per camera for canonical slots [start_slot, +count).
+
+    Cameras drop frames independently, so the Nth decoded frame of one mp4 is
+    not necessarily the same instant as the Nth of another. `sync_plan.json`
+    records, per camera, which canonical slot each decoded frame belongs to;
+    this maps slots -> mp4 frame indices, with None where that camera dropped
+    the slot entirely.
+
+    No plan (or a camera absent from it) -> positional identity, i.e. exactly
+    the pre-sync behaviour. Session0 has no Cam*_meta.csv at all, so it always
+    takes this path; 2 of 10 Session1 recordings genuinely reindex.
+    """
+    plan = None
+    try:
+        import sys as _sys
+        _pkg = os.path.join(os.path.dirname(os.path.dirname(
+            os.path.dirname(os.path.abspath(__file__)))), "third_party", "jarvis_jax")
+        if _pkg not in _sys.path:
+            _sys.path.insert(0, _pkg)
+        from jarvis_jax.predict.synced_reader import load_plan, slot_positions
+        plan = load_plan(session_dir)
+    except Exception as e:                 # viz must never hard-fail on sync
+        # ...but say so. A malformed/unreadable plan silently degrading to
+        # positional is indistinguishable from a genuinely clean recording,
+        # which is exactly how a wrong-schema plan can pass unnoticed.
+        print(f"[viz.sync] WARNING: no usable sync plan for {session_dir} "
+              f"({type(e).__name__}: {e}) -- falling back to positional reads")
+        plan = None
+    out = []
+    for c in cameras:
+        if plan is None:
+            out.append(([int(start_slot + i) for i in range(int(count))],
+                        [True] * int(count)))
+            continue
+        try:
+            pos, pres = slot_positions(plan, c, int(start_slot), int(count))
+        except ValueError:                 # camera not in the plan
+            pos = [int(start_slot + i) for i in range(int(count))]
+            pres = [True] * int(count)
+        out.append((list(pos), list(pres)))
+    return out
+
+
+def read_frames_synced(session_dir, cameras, start_slot, count):
+    """Like `read_frames`, but aligned on canonical slots rather than position.
+
+    Yields one list per slot, entry None where that camera dropped the slot or
+    the read failed. Identical output to `read_frames` when no plan exists, so
+    it is safe as a drop-in.
+    """
+    plans = sync_positions(session_dir, cameras, start_slot, count)
+    caps = [cv2.VideoCapture(os.path.join(session_dir, f"{c}.mp4")) for c in cameras]
+    cur = [None] * len(cameras)
+    try:
+        for i in range(int(count)):
+            imgs = []
+            for ci, cap in enumerate(caps):
+                pos, pres = plans[ci]
+                target = pos[i] if pres[i] else None
+                if target is None:
+                    imgs.append(None)
+                    continue
+                if cur[ci] != target:      # seek only when not already there
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, int(target))
+                    cur[ci] = target
+                ok, bgr = cap.read()
+                cur[ci] = target + 1
+                imgs.append(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB) if ok else None)
+            yield imgs
+    finally:
+        for cap in caps:
+            cap.release()
+
+
 def load_data3d_csv(csv_path):
     """Load a per-bout dense 3D-keypoint CSV (`bout_NNNNN/fly{0,1}.csv`).
 
