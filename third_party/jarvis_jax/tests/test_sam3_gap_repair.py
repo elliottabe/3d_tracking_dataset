@@ -239,3 +239,103 @@ def test_merge_fill_drops_flies_beyond_num_animals():
     bm = FakeBM(1, T, masks, [{7: 0, 9: 5}])   # obj 9 maps outside num_animals
     _merge_fill_camera(bm, 0, num_animals=2, T=T, filled={})
     assert set(bm.masks[0][0]) == {0}
+
+
+# ---------------------------------------------------------------------------
+# as_numpy_repro: two ReprojectionTool classes, two incompatible APIs
+# ---------------------------------------------------------------------------
+
+from jarvis_jax.predict.sam3_driver import as_numpy_repro  # noqa: E402
+
+
+class FakeJarvisTool:
+    """Mimics jarvis.utils.reprojection.ReprojectionTool's torch API.
+
+    Camera k observes (x + k, y): a shift per camera, so reprojection is
+    invertible and camera SELECTION (via zeroed maxvals) is observable.
+    """
+
+    def __init__(self, n_cam=4):
+        self.num_cameras = n_cam
+        self.cameras = {f"Cam{i}": object() for i in range(n_cam)}
+        self.device = "cpu"
+        self.last_maxvals = None
+
+    def reprojectPoint(self, point3D):
+        import torch
+        p = point3D.reshape(-1, 3)
+        n = p.shape[0]
+        out = torch.zeros((n, 3, self.num_cameras))
+        for k in range(self.num_cameras):
+            out[:, 0, k] = p[:, 0] + k
+            out[:, 1, k] = p[:, 1]
+        return out
+
+    def reconstructPoint(self, points, maxvals):
+        import torch
+        self.last_maxvals = maxvals.detach().cpu().numpy().reshape(-1)
+        w = maxvals.reshape(-1)
+        idx = torch.nonzero(w > 0).flatten()
+        xs = torch.stack([points[0, k] - k for k in idx])
+        ys = torch.stack([points[1, k] for k in idx])
+        return torch.stack([xs.mean(), ys.mean(), torch.tensor(0.0)])
+
+
+def test_numpy_tool_passes_through_unchanged():
+    rt = FakeRepro(3)
+    assert as_numpy_repro(rt) is rt
+
+
+def test_jarvis_tool_is_adapted_to_the_numpy_api():
+    ad = as_numpy_repro(FakeJarvisTool(4))
+    assert hasattr(ad, "reconstruct_point") and hasattr(ad, "reproject_point")
+    assert ad.num_cameras == 4
+
+
+def test_adapter_roundtrips_a_point():
+    ad = as_numpy_repro(FakeJarvisTool(4))
+    obs = np.stack([[10.0 + k, 20.0] for k in range(4)])       # (C,2)
+    X = ad.reconstruct_point(obs)
+    assert np.allclose(X[:2], [10.0, 20.0], atol=1e-4)
+    rp = ad.reproject_point(X)
+    assert rp.shape == (4, 2)
+    assert np.allclose(rp, obs, atol=1e-4)
+
+
+def test_adapter_camera_selection_zeroes_excluded_maxvals():
+    # JARVIS selects cameras by ZEROING maxvals, not by an index list -- the
+    # leave-one-out residual depends on that translation being right.
+    tool = FakeJarvisTool(4)
+    ad = as_numpy_repro(tool)
+    obs = np.stack([[10.0 + k, 20.0] for k in range(4)])
+    ad.reconstruct_point(obs, cams_to_use=[0, 2])
+    assert list(tool.last_maxvals) == [1.0, 0.0, 1.0, 0.0]
+
+
+def test_adapter_returns_zeros_below_two_cameras():
+    ad = as_numpy_repro(FakeJarvisTool(4))
+    obs = np.zeros((4, 2))
+    assert np.allclose(ad.reconstruct_point(obs, cams_to_use=[1]), 0.0)
+
+
+def test_unknown_tool_raises_instead_of_failing_later_in_a_try_except():
+    # Both repair paths are best-effort try/except, so an API mismatch that
+    # only shows up mid-run reads as a warning and silently disables the
+    # feature -- which is exactly how repair_outlier_cameras went unnoticed.
+    class Nothing:
+        pass
+    with pytest.raises(TypeError, match="neither the NumPy"):
+        as_numpy_repro(Nothing())
+
+
+def test_in_frame_codes_works_through_the_adapter():
+    A, C, T = 1, 4, 2
+    val = np.ones((A, C, T), bool); val[0, 3] = False
+    cent = np.zeros((A, C, T, 2))
+    for k in range(C):
+        cent[0, k, :, 0] = 10.0 + k
+        cent[0, k, :, 1] = 20.0
+    codes = in_frame_codes(cent, val, as_numpy_repro(FakeJarvisTool(C)),
+                           W=100, H=100)
+    assert (codes[0, :3] == IN_FRAME_YES).all()
+    assert (codes[0, 3] == IN_FRAME_YES).all()      # (13,20) is inside 100x100

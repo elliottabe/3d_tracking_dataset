@@ -694,6 +694,7 @@ def repair_outlier_cameras(tracker, bm, repro_tool, video_paths, frame_start,
 
     if bm.identity_map[0] is None:
         return []
+    repro_tool = as_numpy_repro(repro_tool)
     cent, val = _bout_cent_val(bm, num_animals)
     C, T = bm.num_cameras, bm.num_frames
     det_frames = np.arange(0, T, max(1, T // n_detect_frames))
@@ -792,6 +793,71 @@ def repair_outlier_cameras(tracker, bm, repro_tool, video_paths, frame_start,
 IN_FRAME_NO = 0        # reprojects outside this camera's image -- out of FOV
 IN_FRAME_YES = 1       # in frame (either segmented, or reprojected inside it)
 IN_FRAME_UNKNOWN = 2   # < 2 other valid cameras -- position not determinable
+
+
+class _JarvisReproAdapter:
+    """NumPy `reconstruct_point`/`reproject_point` over JARVIS's torch tool.
+
+    Two ReprojectionTool classes are in play and they do NOT share an API:
+    `jarvis_jax.geometry.reprojection_tool` is NumPy with snake_case
+    `reconstruct_point(points2d, cams_to_use=)` / `reproject_point(p3d)`, while
+    `jarvis.utils.reprojection` (what `get_repro_tool` actually returns at
+    runtime) is a torch nn.Module with camelCase `reconstructPoint(points,
+    maxvals)` / `reprojectPoint(point3D)` and selects cameras by ZEROING
+    `maxvals` rather than by index list.
+
+    Because both repair paths are wrapped in best-effort try/except, calling
+    the wrong one surfaced only as a warning -- which is why
+    `repair_outlier_cameras` had been silently doing nothing in production.
+    """
+
+    def __init__(self, rt):
+        self._rt = rt
+        self.cameras = getattr(rt, "cameras", {})
+        self.num_cameras = int(getattr(rt, "num_cameras",
+                                       len(self.cameras) or 0))
+
+    def reconstruct_point(self, points2d, cams_to_use=None):
+        import numpy as np
+        import torch
+
+        dev = getattr(self._rt, "device", "cpu")
+        pts = np.asarray(points2d, float)                       # (C,2)
+        C = pts.shape[0]
+        use = (list(range(C)) if cams_to_use is None else list(cams_to_use))
+        if len(use) < 2:
+            return np.zeros(3)
+        w = np.zeros((C, 1, 1))
+        w[use] = 1.0                                            # excluded -> 0
+        t_pts = torch.tensor(pts.T, dtype=torch.float32, device=dev)   # (2,C)
+        t_w = torch.tensor(w, dtype=torch.float32, device=dev)
+        X = self._rt.reconstructPoint(t_pts, t_w)
+        return X.detach().cpu().numpy().astype(float)
+
+    def reproject_point(self, p3d):
+        import numpy as np
+        import torch
+
+        dev = getattr(self._rt, "device", "cpu")
+        t = torch.tensor(np.asarray(p3d, float).reshape(1, 3),
+                         dtype=torch.float32, device=dev)
+        out = self._rt.reprojectPoint(t)          # (N,3,C); rows 0,1 are x,y
+        out = out.detach().cpu().numpy()
+        return np.stack([out[0, 0, :], out[0, 1, :]], axis=1)   # (C,2)
+
+
+def as_numpy_repro(repro_tool):
+    """Return `repro_tool` exposing the NumPy snake_case reprojection API."""
+    if hasattr(repro_tool, "reproject_point") and hasattr(
+            repro_tool, "reconstruct_point"):
+        return repro_tool
+    if hasattr(repro_tool, "reprojectPoint") and hasattr(
+            repro_tool, "reconstructPoint"):
+        return _JarvisReproAdapter(repro_tool)
+    raise TypeError(
+        f"repro_tool {type(repro_tool).__name__} exposes neither the NumPy "
+        f"(reconstruct_point/reproject_point) nor the JARVIS torch "
+        f"(reconstructPoint/reprojectPoint) reprojection API")
 
 
 def in_frame_codes(cent, val, repro_tool, W, H):
@@ -912,6 +978,7 @@ def repair_missing_cameras(tracker, bm, repro_tool, video_paths, frame_start,
 
     if bm.identity_map[0] is None:
         return []
+    repro_tool = as_numpy_repro(repro_tool)
     cent, val = _bout_cent_val(bm, num_animals)
     C, T = bm.num_cameras, bm.num_frames
 
@@ -1237,7 +1304,8 @@ def run_sam3_masks(*, project, session_dir, bouts_csv, out, num_animals=2,
                 _lm = pmod.LoadedBoutMasks(npz_path)
                 _cent, _val = np.asarray(_lm.centroids), np.asarray(_lm.valid)
                 _H, _W = (int(x) for x in _lm.shape[:2])
-                _codes = in_frame_codes(_cent, _val, repro_tool, _W, _H)
+                _codes = in_frame_codes(_cent, _val,
+                                        as_numpy_repro(repro_tool), _W, _H)
                 _append_array_to_npz(npz_path, "in_frame", _codes)
                 if gap_report:
                     _append_array_to_npz(

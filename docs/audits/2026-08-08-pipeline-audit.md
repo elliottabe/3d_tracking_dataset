@@ -47,6 +47,35 @@ evidence from the current pipeline: her 2D keypoint confidence is 0.70–0.89 vs
 the male's 0.96–0.97, and across 28 bout-flies, 2D confidence correlates with
 bad 3D at r = −0.85 (camera coverage only −0.63).
 
+> **CORRECTION (2026-08-08, later the same day).** Finding 3 below identifies a
+> real symptom but MISATTRIBUTES its cause, and its recommendation (#2) was
+> unsafe as written. Measurements across all 28 Session0 bouts:
+>
+> - SAM3 segments the fly in **93.5%** of (fly, camera, frame) views, and
+>   **85.2%** of fly-frames have all 7 cameras. Coverage is good.
+> - Of the missing views, **5.1% are physically OUTSIDE the camera's field of
+>   view** and only **1.4%** are in frame and unsegmented. In bout 22 the female
+>   is out of frame ~89% of the time in the four "failing" cameras — she is at
+>   the end of a long narrow arena that those cameras do not cover. SAM3
+>   reporting "not found" there is CORRECT.
+> - The bad 3D is therefore a **camera-coverage** problem (rig geometry), not a
+>   segmentation one. `masks.min_views: 4`, shipped before this audit was
+>   written, already gates those frames.
+> - The 1.4% that IS fixable has a specific cause found later: SAM3 prompts at
+>   `frame_index 0` and propagates forward only, so a fly entering a camera
+>   mid-bout is never picked up there (bout 22: she enters 4 cameras at t≈1200
+>   of 1393). Fixed by `repair_missing_cameras` (commit f0077ec).
+> - Recommendation #2 ("fall back to a CenterDetect-style centroid so a crop
+>   always exists") is **unsafe ungated**: on a verified-empty crop the detector
+>   still reports median confidence 0.332 with 72% of keypoints above
+>   `conf_thresh=0.3`. A misplaced crop yields confident garbage, and garbage
+>   that triangulates is worse than a dropout that yields NaN. See
+>   `docs/benchmark/2026-08-08-detector-v4-retrain.md` and the per-view gate
+>   (commit e1a4ae4).
+>
+> Retained below unedited, since the reasoning it records is what the later
+> measurements were built to test.
+
 ## Finding 3 — SAM3 adds a catastrophic tail
 
 The medians are equivalent, but the tails are not. Bout 22: JARVIS 48.8%, JAX
