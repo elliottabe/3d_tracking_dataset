@@ -560,3 +560,9 @@ model:
     # T3R_TaT1: 0.5
     # T3R_TaT3: 0.5
     # T3R_TaTip: 0.5
+
+# CSE visual mesh. NOT BUILT YET for this anatomy -- only the v1 mesh
+# exists under fruitfly_cse/. Left pointing at the correct-by-convention
+# path so a run fails loudly on the missing file rather than silently
+# using v1 geometry with a non-v1 skeleton.
+cse_mesh_npz: "${paths.body_model_dir}/fruitfly_cse/fly_v2_3_visual_canonical_wings.npz"

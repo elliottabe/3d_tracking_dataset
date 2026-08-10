@@ -1,6 +1,15 @@
 # @package silhouette
-mesh_npz: ${paths.body_model_dir}/fruitfly_cse/fly_v1_visual_canonical_wings.npz
-xml: ${paths.body_model_dir}/fruitfly_v1/fruitfly_v1_free.xml
+# Also follows the anatomy. Only a v1 CSE mesh exists today, so the non-v1
+# anatomy configs point at a path that is NOT present -- deliberately, so a
+# v2 run fails with a missing-file error instead of quietly FK-ing a v2
+# skeleton through v1 geometry. Build the v2 mesh before running anatomy=v2.
+mesh_npz: ${anatomy.cse_mesh_npz}
+# Follows the selected anatomy. Was pinned to fruitfly_v1, which made
+# `anatomy=v2` silently WRONG rather than unsupported: STAC/IK solved against
+# the v2 MJCF while the rigid-segment scale (run_bout.py:670,680) and Stage E's
+# FK (:765) kept using v1. Identical to the old literal when anatomy=v1, so
+# this is a no-op for the default.
+xml: ${anatomy.mjcf_path}
 # Stage-D optimizer for the silhouette refinement:
 #   adam  -- gradient-based (optax) refinement of the appendage DOFs only, root+
 #            body frozen at the keypoint fit. This is the working path: jaxls

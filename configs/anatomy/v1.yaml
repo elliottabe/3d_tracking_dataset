@@ -592,3 +592,6 @@ model:
     # T3R_TaT1: 0.5
     # T3R_TaT3: 0.5
     # T3R_TaTip: 0.5
+
+# CSE visual mesh used by the silhouette/FK path.
+cse_mesh_npz: "${paths.body_model_dir}/fruitfly_cse/fly_v1_visual_canonical_wings.npz"
