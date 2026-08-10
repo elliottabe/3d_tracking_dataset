@@ -134,11 +134,19 @@ def record_decision(root: Path, manifest: dict, bout_key: str,
     """Record one review decision: update manifest (atomic) + bout sex.json.
 
     sex.json is only written for confirmed/swapped — an 'unsure' bout has no
-    trustworthy identity to record.
+    trustworthy identity to record, and a 'bad' one has no trustworthy TRACKING
+    at all.
+
+    'bad' is a quality verdict, not an identity one: the reviewer is saying the
+    pose in this bout is not usable (typically the female is mistracked), which
+    is a different judgement from "I cannot tell which fly is male". Recording
+    it here means the exclusion travels with the data instead of living in
+    someone's notes -- combine_ik_outputs and the reconstructability gate can
+    both honour it.
     """
     if bout_key not in manifest["bouts"]:
         raise KeyError(bout_key)
-    if status not in ("confirmed", "swapped", "unsure"):
+    if status not in ("confirmed", "swapped", "unsure", "bad"):
         raise ValueError(f"bad status: {status}")
     if reviewed_male_fly not in (0, 1):
         raise ValueError(f"bad reviewed_male_fly: {reviewed_male_fly}")
@@ -151,7 +159,7 @@ def record_decision(root: Path, manifest: dict, bout_key: str,
     # male_fly==1 recovery guard keeps a no-op re-confirm safe either way).
     entry["applied"] = False
     save_manifest(root, manifest)
-    if status != "unsure":
+    if status not in ("unsure", "bad"):
         _write_sex_json(bout_dir_from_key(root, bout_key), entry)
     return entry
 
@@ -327,6 +335,7 @@ PAGE_HTML = """<!doctype html>
   #status { font-weight:600; }
   .st-confirmed { color:#5dbb63; } .st-swapped { color:#e2a93b; }
   .st-unsure { color:#d05c5c; } .st-pending { color:#888; }
+  .st-bad { color:#b04ad0; font-weight:600; }
   select { background:#222; color:#ddd; border:1px solid #444; }
   kbd { background:#2a2a2a; border-radius:3px; padding:0 4px; }
 </style></head>
@@ -347,7 +356,7 @@ PAGE_HTML = """<!doctype html>
 </main>
 <footer>
  <kbd>Enter</kbd>/<kbd>&rarr;</kbd> confirm &middot; <kbd>S</kbd> swap &middot;
- <kbd>U</kbd> unsure &middot; <kbd>&larr;</kbd> back &middot;
+ <kbd>U</kbd> unsure &middot; <kbd>B</kbd> bad tracking &middot; <kbd>&larr;</kbd> back &middot;
  <kbd>J</kbd> next unresolved &middot; <kbd>Space</kbd> pause &middot;
  <kbd>R</kbd> replay &middot; <kbd>1</kbd>/<kbd>2</kbd> speed
 </footer>
@@ -411,10 +420,12 @@ document.addEventListener("keydown", async ev => {
       await decide(assign[key] === bouts[key].original_male_fly ? "confirmed" : "swapped");
       break;
     case "u": case "U": await decide("unsure"); break;
+    case "b": case "B": await decide("bad"); break;
     case "ArrowLeft": idx -= 1; render(); break;
     case "j": case "J": {
       const next = vis.findIndex((k, i) => i > idx &&
         (bouts[k].status === "pending" || bouts[k].status === "unsure"));
+      // 'bad' is a decision, so J skips it like confirmed/swapped.
       if (next >= 0) { idx = next; render(); }
       break;
     }

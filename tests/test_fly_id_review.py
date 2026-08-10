@@ -386,3 +386,47 @@ def test_main_scans_and_saves_manifest_before_serving(tmp_path, monkeypatch):
     mod.main(["--root", str(tmp_path), "--port", "0"])
     assert "Session1/recA/bout_00001" in served["manifest"]["bouts"]
     assert load_manifest(tmp_path) is not None  # manifest persisted before serving
+
+
+# ---------------------------------------------------------------------------
+# 'bad' quality verdict
+# ---------------------------------------------------------------------------
+
+KEY = "Session1/recA/bout_00001"
+
+
+def test_bad_status_is_accepted(tmp_path):
+    """'bad' = the TRACKING is unusable, distinct from 'unsure' = cannot tell
+    which fly is male. A review pass found many female flies still mistracked
+    and had no way to record it."""
+    m = _fresh(tmp_path)
+    e = record_decision(tmp_path, m, KEY, 1, "bad")
+    assert e["status"] == "bad"
+
+
+def test_bad_does_not_write_sex_json(tmp_path):
+    # Like 'unsure': a bout whose tracking is unusable has no trustworthy
+    # identity to persist downstream.
+    m = _fresh(tmp_path)
+    record_decision(tmp_path, m, KEY, 1, "bad")
+    assert read_sex_json(bout_dir_from_key(tmp_path, KEY)) is None
+
+
+def test_bad_survives_a_manifest_round_trip(tmp_path):
+    m = _fresh(tmp_path)
+    record_decision(tmp_path, m, KEY, 0, "bad")
+    assert load_manifest(tmp_path)["bouts"][KEY]["status"] == "bad"
+
+
+def test_unsure_and_bad_are_distinct_verdicts(tmp_path):
+    m = _fresh(tmp_path)
+    record_decision(tmp_path, m, KEY, 1, "unsure")
+    assert load_manifest(tmp_path)["bouts"][KEY]["status"] == "unsure"
+    record_decision(tmp_path, m, KEY, 1, "bad")
+    assert load_manifest(tmp_path)["bouts"][KEY]["status"] == "bad"
+
+
+def test_unknown_status_still_rejected(tmp_path):
+    m = _fresh(tmp_path)
+    with pytest.raises(ValueError, match="bad status"):
+        record_decision(tmp_path, m, KEY, 1, "terrible")
