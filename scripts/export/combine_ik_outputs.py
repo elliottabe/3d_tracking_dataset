@@ -75,10 +75,24 @@ def main(argv=None):
 
     failing = set()
     qc = Path(a.qc_report)
-    if a.skip_failing and qc.is_file():
+    if a.skip_failing:
+        # Fail loudly rather than silently gating nothing. docs/qc/ is not
+        # tracked (regenerable artifacts), so a missing report is the LIKELY
+        # case on a fresh checkout -- and an earlier run of this script
+        # reported "0 bouts skipped" against a report that had no
+        # `dropped_bouts` key, quietly including all 10 unusable bouts.
+        if not qc.is_file():
+            raise SystemExit(
+                f"--skip-failing needs {qc}, which does not exist.\n"
+                f"Regenerate it with:\n"
+                f"  python scripts/qc/verify_regeneration.py --new sam3_masks")
         rep = json.loads(qc.read_text())
-        for entry in rep.get("dropped_bouts", []):
-            failing.add(entry)                       # "Sess/rec#bout"
+        if "dropped_bouts" not in rep:
+            raise SystemExit(
+                f"{qc} has no `dropped_bouts` key -- wrong report type. "
+                f"Use the output of scripts/qc/verify_regeneration.py, not "
+                f"bout_reconstructable.py (whose verdicts live under `bouts`).")
+        failing.update(rep["dropped_bouts"])         # "Sess/rec#bout"
         print(f"reconstructability gate: {len(failing)} bouts will be skipped")
 
     flies = [0, 1] if a.fly == "both" else [int(a.fly)]
