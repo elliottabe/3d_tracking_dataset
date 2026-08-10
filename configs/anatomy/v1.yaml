@@ -212,7 +212,11 @@ model:
   # M-step), persists them to <run_root>/segment_scales.json, and sets
   # cfg.model.SEGMENT_SCALES so stac_mjx morphs the model before fitting offsets
   # and running IK (halves the IK site-error). Set false to disable.
-  # Benchmark 2026-08-08 showed segment_calibration off better-or-equal on every cohort; see docs/benchmark/2026-08-07-scale-ab/comparison.md.
+  # Benchmark 2026-08-08: segment_calibration OFF was better-or-equal on
+  # every cohort (free-running, courtship-male, courtship-female; both the
+  # apart and close-interaction splits), so it stays off. Regenerate the
+  # comparison with scripts/benchmark/run_variant.py -- the scorecards it
+  # writes are untracked artifacts, not files in the repo.
   segment_calibration: false
 
   N_FRAMES_PER_CLIP: 500 # 1000 environments

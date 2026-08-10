@@ -4,8 +4,8 @@
 # -> 4.36% over 6 bout-flies, better in 5 of 6, conf3d 0.899 -> 0.934. The
 # headline case (15_25_51 b8 fly0, 298.96% -> 4.62%) was confirmed visually --
 # the old checkpoint scattered keypoints into empty space at confidence
-# 0.60-0.66. See docs/benchmark/2026-08-08-detector-v4-retrain.md and
-# docs/qc/detector-ab/.
+# 0.60-0.66. Reproduce the side-by-side overlay with
+# scripts/viz/compare_detectors.py (its PNGs are untracked artifacts).
 # KNOWN WEAKNESS: on frames where the two flies OVERLAP it is ~6% worse (and
 # 41% better when they are apart); 92% of the frames it loses are
 # close-interaction. Cause is the JAX port omitting JARVIS's distractor-fly

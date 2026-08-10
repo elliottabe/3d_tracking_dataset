@@ -62,8 +62,9 @@ preprocessing:
 # change no matter how the fly moves, so it isn't confounded by pose the way
 # a Procrustes/norm-ratio cloud-spread fit is) AND it matches the kinematic
 # chain the IK actually solves (the LEGS, not the trunk plates) -- measured
-# on real data the trunk-derived scale is ~10.2% off the leg-chain scale (see
-# docs/benchmark/scale-check/). `estimator` below is ignored for this mode
+# on real data the trunk-derived scale is ~10.2% off the leg-chain scale
+# (render the check with scripts/viz/scale_check.py). `estimator` below is
+# ignored for this mode
 # (a rigid segment's length is measured, not fit; scripts/run_bout.py warns
 # and marks scale.json's `estimator` field "ignored (rigid_segment)" rather
 # than echoing an unused configured value).
@@ -158,8 +159,8 @@ filtering:
 # staleness cascade). Production leaves this on: when a recording's sync plan
 # changes, pose artifacts derived from the old masks are stale and must
 # recompute. Benchmark/A-B runs set this to false so pre-seeded (frozen)
-# kp2d/kp3d/... survive and every variant keeps sharing identical 2D inputs --
-# see docs/benchmark/2026-08-07-scale-ab/comparison.md.
+# kp2d/kp3d/... survive and every variant keeps sharing identical 2D inputs
+# (scripts/benchmark/run_variant.py).
 sync:
   invalidate_stale: true   # false = keep pre-seeded artifacts (benchmark reproducibility)
 
