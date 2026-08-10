@@ -182,8 +182,15 @@ def main(argv=None):
                         f"{ent.get('remap_note', '')}",
             }, indent=2))
             written += 1
+    # MUST be the GUI's schema: {root, convention, bouts}. A bare
+    # {bout_key: entry} mapping made fly_id_review's load_manifest see no prior
+    # decisions and overwrite the file with 160 pending entries.
     out = Path(a.root) / f"id_review_{a.new_pose}.json"
-    out.write_text(json.dumps(new_manifest, indent=2))
+    out.write_text(json.dumps({
+        "root": str(a.root),
+        "convention": {"female": 0, "male": 1},
+        "bouts": new_manifest,
+    }, indent=2, sort_keys=True))
     print(f"\nwrote {written} sex.json into {a.new_pose}/ and {out}")
     return new_manifest
 

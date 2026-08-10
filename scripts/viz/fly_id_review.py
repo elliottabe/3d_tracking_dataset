@@ -132,7 +132,18 @@ def load_manifest(root: Path) -> dict | None:
     path = root / _manifest_name()
     if not path.is_file():
         return None
-    return json.loads(path.read_text())
+    data = json.loads(path.read_text())
+    # A non-empty file without "bouts" is a SCHEMA MISMATCH, not an empty
+    # manifest. Returning it anyway made build_manifest see zero prior
+    # decisions and save_manifest then overwrite the file with 160 pending
+    # entries -- silently discarding a whole review pass. Refuse instead.
+    if isinstance(data, dict) and "bouts" not in data and data:
+        raise SystemExit(
+            f"{path} has no 'bouts' key -- refusing to overwrite it.\n"
+            f"It looks like a bare {{bout_key: entry}} mapping. Wrap it as\n"
+            f"  {{'root': ..., 'convention': {{'female': 0, 'male': 1}}, 'bouts': {{...}}}}\n"
+            f"or move it aside first.")
+    return data
 
 
 # ---------------------------------------------------------------------------
