@@ -30,6 +30,11 @@ from urllib.parse import unquote
 
 DEFAULT_MALE_FLY = 1  # fly1 = male, fly0 = female
 MANIFEST_NAME = "id_review.json"
+# Which pose tree to review. Set once by main() from --pose-dir. A non-default
+# tree gets its own manifest (id_review_<dir>.json) so reviewing a rerun cannot
+# clobber the decisions recorded against the previous one -- those 159 earlier
+# decisions were only recoverable because they lived in a separate file.
+POSE_DIR = "pose"
 VIDEO_NAME = "sidebyside.mp4"
 DEFAULT_ROOT = Path("/gscratch/portia/eabe/data/Johnson_lab/processed/courtship")
 
@@ -39,19 +44,19 @@ DEFAULT_ROOT = Path("/gscratch/portia/eabe/data/Johnson_lab/processed/courtship"
 # ---------------------------------------------------------------------------
 
 def bout_dir_from_key(root: Path, key: str) -> Path:
-    """'Session1/recA/bout_00001' -> <root>/Session1/recA/pose/bouts/bout_00001."""
+    """'Session1/recA/bout_00001' -> <root>/Session1/recA/<POSE_DIR>/bouts/bout_00001."""
     session, rec, bout = key.split("/")
-    return root / session / rec / "pose" / "bouts" / bout
+    return root / session / rec / POSE_DIR / "bouts" / bout
 
 
 def scan_bouts(root: Path) -> dict[str, dict]:
-    """Find bout dirs under <root>/Session*/<rec>/pose/bouts/bout_*.
+    """Find bout dirs under <root>/Session*/<rec>/<POSE_DIR>/bouts/bout_*.
 
     A bout missing a fly dir or its video gets a warning (shown in the UI,
     excluded from apply).
     """
     bouts: dict[str, dict] = {}
-    for bout_dir in sorted(root.glob("Session*/*/pose/bouts/bout_*")):
+    for bout_dir in sorted(root.glob(f"Session*/*/{POSE_DIR}/bouts/bout_*")):
         if not bout_dir.is_dir():
             continue
         rec = bout_dir.parents[2].name
@@ -111,15 +116,20 @@ def build_manifest(root: Path, existing: dict | None = None) -> dict:
     return {"root": str(root), "convention": {"female": 0, "male": 1}, "bouts": bouts}
 
 
+def _manifest_name() -> str:
+    """id_review.json for the default tree, id_review_<dir>.json otherwise."""
+    return MANIFEST_NAME if POSE_DIR == "pose" else f"id_review_{POSE_DIR}.json"
+
+
 def save_manifest(root: Path, manifest: dict) -> None:
-    path = root / MANIFEST_NAME
+    path = root / _manifest_name()
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(json.dumps(manifest, indent=2, sort_keys=True))
     os.replace(tmp, path)
 
 
 def load_manifest(root: Path) -> dict | None:
-    path = root / MANIFEST_NAME
+    path = root / _manifest_name()
     if not path.is_file():
         return None
     return json.loads(path.read_text())
@@ -223,7 +233,7 @@ class ReviewHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         path = unquote(self.path.split("?", 1)[0])
         if path == "/":
-            self._send(HTTPStatus.OK, "text/html; charset=utf-8", PAGE_HTML.encode())
+            self._send(HTTPStatus.OK, "text/html; charset=utf-8", page_html().encode())
         elif path == "/api/bouts":
             with self.server.lock:
                 body = json.dumps(self.server.manifest).encode()
@@ -317,7 +327,7 @@ class ReviewServer(ThreadingHTTPServer):
         self.lock = threading.Lock()
 
 
-PAGE_HTML = """<!doctype html>
+PAGE_HTML_TMPL = """<!doctype html>
 <html><head><meta charset="utf-8"><title>Fly ID Review</title>
 <style>
   body { margin:0; font:14px system-ui, sans-serif; background:#111; color:#ddd; }
@@ -370,7 +380,7 @@ prefetch.forEach(v => { v.preload = "auto"; v.muted = true; });
 
 function mediaUrl(key, fly) {
   const [s, r, b] = key.split("/");
-  return `/media/${s}/${r}/pose/bouts/${b}/fly${fly}/sidebyside.mp4`;
+  return `/media/${s}/${r}/${POSE_DIR}/bouts/${b}/fly${fly}/sidebyside.mp4`;
 }
 function visibleKeys() {
   const f = $("filter").value;
@@ -465,13 +475,22 @@ v0.addEventListener("timeupdate", () => {
 # main
 # ---------------------------------------------------------------------------
 
+def page_html() -> str:
+    """Inject the active pose dir into the page (the JS builds media URLs)."""
+    return PAGE_HTML_TMPL.replace("${POSE_DIR}", POSE_DIR)
+
+
 def main(argv=None):
+    global POSE_DIR
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--root", type=Path, default=DEFAULT_ROOT,
                         help="processed courtship root (default: %(default)s)")
+    parser.add_argument("--pose-dir", default="pose",
+                        help="pose tree under each recording (default: %(default)s)")
     parser.add_argument("--port", type=int, default=8642)
     args = parser.parse_args(argv)
+    POSE_DIR = args.pose_dir
     root = args.root.resolve()
     manifest = build_manifest(root, load_manifest(root))
     save_manifest(root, manifest)
@@ -479,7 +498,8 @@ def main(argv=None):
     n_pending = sum(1 for e in manifest["bouts"].values() if e["status"] == "pending")
     server = ReviewServer(("127.0.0.1", args.port), root, manifest)
     port = server.server_address[1]
-    print(f"{n_bouts} bouts ({n_pending} pending) under {root}")
+    print(f"{n_bouts} bouts ({n_pending} pending) under {root}/*/*/{POSE_DIR}")
+    print(f"manifest: {root / _manifest_name()}")
     print(f"open   http://localhost:{port}")
     print(f"remote? ssh -L {port}:localhost:{port} <this-host>  (VS Code auto-forwards)")
     try:

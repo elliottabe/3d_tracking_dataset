@@ -3,6 +3,13 @@
 import os
 from hydra import initialize_config_dir, compose
 
+# Registers the `basename` OmegaConf resolver (on import) that
+# configs/outputs/default.yaml AND recording/session{0,1}.yaml's
+# predictions_dir depend on. Without it, composing `pipeline` here raises
+# UnsupportedInterpolationType -- viz composes its own config independently of
+# scripts/run_bout.py, which registers the resolver itself.
+from utils import path_utils as _path_utils  # noqa: F401
+
 _CFG_DIR = os.path.join(os.path.dirname(__file__), "..", "configs")
 
 def courtship_recording(config_name="pipeline", overrides=None):

@@ -89,6 +89,16 @@ python scripts/run_bout.py paths=hyak recording=<name> \
 - **`DONE` markers**: `run_bout` skips any bout that has one. After changing
   masks or the detector, write to a NEW output root — otherwise the run
   "succeeds" in seconds having done nothing.
+- **`predictions_dir` must point where the masks were actually written.** This
+  cost two full pipeline runs. It is now derived the same way as `outputs.out`
+  (`${paths.processed_root}/.../${basename:${recording.session_dir}}/sam3_masks`)
+  so the two cannot drift. Consequence: any process that composes the `pipeline`
+  config must register the `basename` OmegaConf resolver — `viz` does so by
+  importing `utils.path_utils`.
+- **Audit assignment after any mask or detector change**:
+  `python scripts/qc/audit_fly_assignment.py`. It is the only check that caught
+  the above; per-bout QC, reprojection error and within-bone CV were all clean
+  while 19.7% of fly-frames tracked the wrong animal.
 - **Shared per-recording artifacts**: `scale.json` and `offsets.h5` are fit
   once per recording on a "whoever gets there first" basis, so a recording's
   bouts cannot be split across workers until those exist. Seed one bout per
@@ -119,11 +129,27 @@ one consistent stack: regenerated SAM3 masks + the V4-retrained detector.
 | product | path | size |
 |---|---|---|
 | SAM3 masks + identity | `<processed>/courtship/<sess>/<rec>/sam3_masks/` | 1.9 GB |
-| pose through IK | `.../pose_v2/` | 4.6 GB |
-| previous pose (old detector/masks, 2026-07) | `.../pose/` | 14 GB |
+| pose through IK | `.../pose_v3/` | 4.6 GB |
+| combined IK for analysis | `courtship/Data_analysis/analysis/v2_2026-08-10/` | 1.8 GB |
+| superseded pose (see below) | `.../pose/`, `.../pose_v2/` | 19 GB |
 | previous masks (Session0 only) | `.../sam3_masks_old/` | 380 MB |
 
-Per bout-fly in `pose_v2/bouts/bout_<NNNNN>/fly<N>/`:
+**`pose/` and `pose_v2/` are both invalid — do not use them.** Both were built
+while `recording.predictions_dir` pointed at a hand-named `Predictions_3D_*`
+directory in the VIDEO tree, while mask regeneration wrote to the PROCESSED
+tree. Pose therefore consumed a different mask set than identity was assigned
+on, and every stage still reported success. Measured with
+`scripts/qc/audit_fly_assignment.py` over all 160 bouts:
+
+| tree | fly-frames where keypoints sit on the OTHER fly's mask | bouts >10% wrong |
+|---|---|---|
+| `pose/` | **19.7%** | 57 of 160 |
+| `pose_v3/` | **2.3%** | 12 of 160 |
+
+The residual 2.3% is concentrated in cameras already flagged in
+`suspect_cameras` (reflection tracking); no bout has a whole-bout identity swap.
+
+Per bout-fly in `pose_v3/bouts/bout_<NNNNN>/fly<N>/`:
 
 | file | contents |
 |---|---|
@@ -139,21 +165,30 @@ Per bout-fly in `pose_v2/bouts/bout_<NNNNN>/fly<N>/`:
 
 ## 2.2 Caveats a recipient must know
 
-- **`pose_v2` is not promoted.** `pose/` still holds the July outputs from the
-  old detector and old masks. Use `pose_v2`.
+- **`pose_v3` is not promoted** to `pose/`; use it by name. Promotion is held
+  until the 61 bouts below are re-reviewed, so the human decisions recorded
+  against each tree stay separable.
 - **10 of 160 bouts fail reconstructability** (a fly observable by <4 cameras
   for >20% of frames) and should be excluded:
   S0 #13,15,22,26,27; S1/12_11_50 #2,5; S1/15_25_51 #6,30; S1/17_28_34 #7.
-  `scripts/qc/bout_reconstructable.py --apply` marks them.
+  `scripts/qc/bout_reconstructable.py --apply` marks them; `combine_ik_outputs.py
+  --skip-failing` drops them. No `EXCLUDED.json` has been written yet.
 - **2 bouts carry a reflection-tracking camera** (S0 #8, #26, both Cam2012631);
   flagged in `suspect_cameras`.
-- **Identity is heuristic, not verified.** All 160 bouts have `sex_meta` from a
-  mask-area vote (male = larger silhouette). Only **38 of 160** have a
-  human-verified `pose/.../sex.json`. Any analysis that depends on which fly is
-  which needs the review GUI pass first (`scripts/viz/fly_id_review.py`).
+- **Identity: 99 of 160 bouts carry a human-verified `sex.json`**, remapped from
+  the review pass done against `pose/` (see `scripts/qc/remap_review_to_new_masks.py`
+  for why a remap rather than a copy was required). The remaining **61 need
+  re-review** and are marked `unsure` in `id_review_pose_v3.json`: 41 because
+  the old review video's crop followed keypoints that switched flies mid-bout
+  (agreement ~0.50, so the original decision is unrecoverable), 17 because both
+  old flies' keypoints collapsed onto one animal, 3 marked `unsure` originally.
+  In the combined h5 an unverified bout reports `male_fly = -1` rather than the
+  mask-area heuristic's guess.
 - **Known detector weakness**: on frames where the two flies overlap it is ~6%
-  worse than the old checkpoint (and 41% better when apart). Cause is the JAX
-  port omitting JARVIS's distractor-fly RGB gray-fill.
+  worse than the old checkpoint (and 41% better when apart). JARVIS's
+  distractor-fly RGB gray-fill is now wired in (`predict_bout_2d(distractor_masks=...)`),
+  but measurement showed it was NOT the cause of the mis-assignment — with
+  correct masks, fly-to-mask assignment is right with gray-fill both on and off.
 
 ## 2.3 Not processed
 

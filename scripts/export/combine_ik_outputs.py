@@ -70,6 +70,14 @@ def main(argv=None):
     # no `dropped_bouts` key (its verdicts live under `bouts`), and its numbers
     # predate the mask regeneration. Pointing at it silently gated nothing.
     ap.add_argument("--qc-report", default="docs/qc/regeneration_report.json")
+    # The GUI's `bad` verdict is a TRACKING-quality judgement ("the female is
+    # mistracked here"), separate from the reconstructability gate (a geometric
+    # coverage test) and from `unsure` (identity unknown but pose may be fine).
+    # A bad bout is excluded under --skip-failing; an unsure one is kept, with
+    # male_fly = -1 so no analysis can silently assume a sex for it.
+    ap.add_argument("--review-manifest", default=None,
+                    help="id_review manifest (default: <root>/id_review_<pose-dir>.json, "
+                         "falling back to <root>/id_review.json)")
     ap.add_argument("--out", required=True)
     a = ap.parse_args(argv)
 
@@ -98,14 +106,31 @@ def main(argv=None):
     flies = [0, 1] if a.fly == "both" else [int(a.fly)]
     root = Path(a.root)
 
+    # Review verdicts, keyed 'Session0/rec/bout_00001'.
+    rm = Path(a.review_manifest) if a.review_manifest else None
+    if rm is None:
+        for cand in (root / f"id_review_{a.pose_dir}.json", root / "id_review.json"):
+            if cand.is_file():
+                rm = cand
+                break
+    review = {}
+    if rm and rm.is_file():
+        raw = json.loads(rm.read_text())
+        review = raw.get("bouts", raw)
+        print(f"review manifest: {rm} ({len(review)} bouts)")
+    else:
+        print("review manifest: NONE FOUND -- review_status will be 'unreviewed' "
+              "for every bout and no bout can be excluded as bad")
+
     out = {}
     info = {k: [] for k in ("clip_lengths", "fly_ids", "source_flies", "bucket",
                             "recordings", "bout_indices", "start_frames",
                             "end_frames", "fly_slots", "male_fly",
-                            "sex_verified", "reconstructable")}
+                            "sex_verified", "reconstructable", "review_status")}
     shared = {}
     n = 0
     skipped = 0
+    skipped_bad = 0
 
     for sess in sorted(p.name for p in root.iterdir() if p.is_dir()):
         sdir = root / sess
@@ -123,9 +148,14 @@ def main(argv=None):
                 except (IndexError, ValueError):
                     continue
                 tag = f"{sess}/{rec}#{bidx}"
+                rstat = review.get(f"{sess}/{rec}/{bdir.name}", {}).get(
+                    "status", "unreviewed")
                 ok = tag not in failing
                 if a.skip_failing and not ok:
                     skipped += 1
+                    continue
+                if a.skip_failing and rstat == "bad":
+                    skipped_bad += 1
                     continue
                 sexp = bdir / "sex.json"
                 male, verified = -1, False
@@ -136,6 +166,11 @@ def main(argv=None):
                         verified = j.get("confidence") == "user"
                     except Exception:
                         pass
+                # An unreviewed/unsure bout has no trustworthy identity: report
+                # -1 rather than the mask-area heuristic's guess, so downstream
+                # code cannot mistake a vote for a verified sex.
+                if rstat in ("unsure", "bad", "unreviewed") and not verified:
+                    male = -1
                 start, end = bout_start_end(csv, sd, bidx)
                 for fly in flies:
                     ik = bdir / f"fly{fly}" / "stac_ik.h5"
@@ -178,6 +213,7 @@ def main(argv=None):
                     info["male_fly"].append(male)
                     info["sex_verified"].append(bool(verified))
                     info["reconstructable"].append(bool(ok))
+                    info["review_status"].append(str(rstat))
                     n += 1
 
     if not n:
@@ -191,6 +227,9 @@ def main(argv=None):
     mb = outp.stat().st_size / 1e6
     print(f"wrote {outp}  ({n} bout-flies, {sum(info['clip_lengths'])} frames, {mb:.1f} MB)")
     print(f"  skipped (reconstructability): {skipped}")
+    print(f"  skipped (review status=bad):  {skipped_bad}")
+    from collections import Counter
+    print(f"  review status: {dict(Counter(info['review_status']))}")
     print(f"  sex verified: {sum(info['sex_verified'])}/{n}")
     return out
 
