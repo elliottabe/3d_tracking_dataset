@@ -75,6 +75,13 @@ def main(argv=None):
     # coverage test) and from `unsure` (identity unknown but pose may be fine).
     # A bad bout is excluded under --skip-failing; an unsure one is kept, with
     # male_fly = -1 so no analysis can silently assume a sex for it.
+    # Per-FLY quality, from scripts/qc/per_fly_quality.py. Human review gave one
+    # verdict per bout, but the defect is per fly: in 35 bouts the female is
+    # unusable while the male is fine. Excluding those bouts wholesale would throw
+    # away 35 good male fits, so --skip-unusable drops the FLY, not the bout.
+    ap.add_argument("--quality-report", default="docs/qc/per_fly_quality.json")
+    ap.add_argument("--skip-unusable", action="store_true",
+                    help="omit individual flies that fail the per-fly quality gate")
     ap.add_argument("--review-manifest", default=None,
                     help="id_review manifest (default: <root>/id_review_<pose-dir>.json, "
                          "falling back to <root>/id_review.json)")
@@ -103,6 +110,24 @@ def main(argv=None):
         failing.update(rep["dropped_bouts"])         # "Sess/rec#bout"
         print(f"reconstructability gate: {len(failing)} bouts will be skipped")
 
+    unusable = {}
+    if a.skip_unusable:
+        qp = Path(a.quality_report)
+        if not qp.is_file():
+            raise SystemExit(
+                f"--skip-unusable needs {qp}, which does not exist.\n"
+                f"Regenerate it with:\n"
+                f"  python scripts/qc/per_fly_quality.py --pose-dir {a.pose_dir} "
+                f"--json-out {qp}")
+        qrep = json.loads(qp.read_text())
+        if qrep.get("pose_dir") != a.pose_dir:
+            raise SystemExit(
+                f"{qp} was built for pose_dir={qrep.get('pose_dir')!r} but this "
+                f"run uses {a.pose_dir!r} -- the verdicts would not match the data.")
+        unusable = {k: v["reasons"] for k, v in qrep["flies"].items()
+                    if not v["usable"]}
+        print(f"per-fly quality gate: {len(unusable)} flies will be skipped")
+
     flies = [0, 1] if a.fly == "both" else [int(a.fly)]
     root = Path(a.root)
 
@@ -126,11 +151,13 @@ def main(argv=None):
     info = {k: [] for k in ("clip_lengths", "fly_ids", "source_flies", "bucket",
                             "recordings", "bout_indices", "start_frames",
                             "end_frames", "fly_slots", "male_fly",
-                            "sex_verified", "reconstructable", "review_status")}
+                            "sex_verified", "reconstructable", "review_status",
+                            "tracking_usable")}
     shared = {}
     n = 0
     skipped = 0
     skipped_bad = 0
+    skipped_fly = 0
 
     for sess in sorted(p.name for p in root.iterdir() if p.is_dir()):
         sdir = root / sess
@@ -173,6 +200,10 @@ def main(argv=None):
                     male = -1
                 start, end = bout_start_end(csv, sd, bidx)
                 for fly in flies:
+                    fkey = f"{sess}/{rec}/{bdir.name}/fly{fly}"
+                    if fkey in unusable:
+                        skipped_fly += 1
+                        continue
                     ik = bdir / f"fly{fly}" / "stac_ik.h5"
                     outs = bdir / f"fly{fly}" / "outputs.h5"
                     if not ik.is_file():
@@ -214,6 +245,7 @@ def main(argv=None):
                     info["sex_verified"].append(bool(verified))
                     info["reconstructable"].append(bool(ok))
                     info["review_status"].append(str(rstat))
+                    info["tracking_usable"].append(fkey not in unusable)
                     n += 1
 
     if not n:
@@ -228,6 +260,7 @@ def main(argv=None):
     print(f"wrote {outp}  ({n} bout-flies, {sum(info['clip_lengths'])} frames, {mb:.1f} MB)")
     print(f"  skipped (reconstructability): {skipped}")
     print(f"  skipped (review status=bad):  {skipped_bad}")
+    print(f"  skipped (per-fly quality):    {skipped_fly}")
     from collections import Counter
     print(f"  review status: {dict(Counter(info['review_status']))}")
     print(f"  sex verified: {sum(info['sex_verified'])}/{n}")

@@ -184,6 +184,19 @@ Per bout-fly in `pose_v3/bouts/bout_<NNNNN>/fly<N>/`:
   old flies' keypoints collapsed onto one animal, 3 marked `unsure` originally.
   In the combined h5 an unverified bout reports `male_fly = -1` rather than the
   mask-area heuristic's guess.
+- **Tracking quality is per FLY, and the female is the failure mode.** Human
+  review of all 160 bouts reported bad female tracking in several bouts with the
+  male fine throughout; `scripts/qc/per_fly_quality.py` quantifies it and gates
+  on LOO reprojection > 30 px (or a NaN reproj median): **35 of 160 females fail,
+  2 of 160 males**. In all 35 the male is clean, so `combine_ik_outputs.py
+  --skip-unusable` drops the FLY, not the bout — which keeps 26 good male fits
+  that a per-bout exclusion would have discarded. The gate was set against
+  rendered frames (`figures/2026-08-10-per-fly-quality/`), not the distribution:
+  a 25 px per-camera-reproj cut looked defensible from the male distribution
+  alone (male max is 22.6 px) but rejected a 28 px female whose keypoints sit
+  correctly on the animal. LOO separates the real failures because it measures
+  cross-camera disagreement, which is what a keypoint stranded on a wall
+  reflection produces.
 - **Known detector weakness**: on frames where the two flies overlap it is ~6%
   worse than the old checkpoint (and 41% better when apart). JARVIS's
   distractor-fly RGB gray-fill is now wired in (`predict_bout_2d(distractor_masks=...)`),
