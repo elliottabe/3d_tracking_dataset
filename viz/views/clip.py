@@ -91,7 +91,7 @@ def _montage_stream(session_dir, cameras, start, count, tag="clip"):
     lockstep rather than desyncing the stack) -- but that drop is printed
     (mirroring reproj_video.py's per-frame "warning: frame {t} unreadable
     ...; skipping" pattern) so silent data loss is visible."""
-    for t, imgs in enumerate(vio.read_frames(session_dir, cameras, start, count)):
+    for t, imgs in enumerate(vio.read_frames_synced(session_dir, cameras, start, count)):
         missing = [cam for cam, img in zip(cameras, imgs) if img is None]
         if missing:
             print(f"[{tag}] warning: timestep {start + t} unreadable for camera(s) "
@@ -154,7 +154,7 @@ def _cut(args):
                 fps = 30.0
 
         def _gen(cam=cam, count=count):
-            for imgs in vio.read_frames(session_dir, [cam], start, count):
+            for imgs in vio.read_frames_synced(session_dir, [cam], start, count):
                 img = imgs[0]
                 if img is None:
                     continue

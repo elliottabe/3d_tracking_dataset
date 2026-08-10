@@ -227,7 +227,15 @@ def run(args):
     left_title = f"{left_cam} video + SAM mask + ViTPose 2D skeleton"
     right_title = f"MuJoCo IK render ({render_cam}) + 3D sites"
     frames_out = []
-    left_stream = vio.read_frames(session_dir, [left_cam], start_abs + T0, N)
+    # Sync-aware, like maskvid: cameras drop frames independently, so a
+    # positional read shows the mask/keypoint overlay on the WRONG frame for
+    # any camera that dropped one earlier in the recording. The pipeline's own
+    # frame reads (run_bout) are already sync-aware, so a positional read here
+    # disagreed with the very data it draws -- and this is the video the
+    # fly-ID review GUI shows, so a reviewer saw masks that appeared out of
+    # sync with the video. 25 courtship bouts start after a recorded drop.
+    # Falls back to positional where no sync plan exists (all of Session0).
+    left_stream = vio.read_frames_synced(session_dir, [left_cam], start_abs + T0, N)
     for k, imgs in enumerate(left_stream):
         rgb = imgs[0]
         bgr = (cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR) if rgb is not None

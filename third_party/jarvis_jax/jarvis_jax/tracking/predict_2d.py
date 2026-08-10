@@ -81,13 +81,24 @@ def _forward(vit, crops4_u8, *, decode_sharpen=1.0):
 
 
 def predict_bout_2d(vitpose, frames_iter, masks, centroids, valid, cam_mats,
-                    *, crop: int = 448, batch: int = 64, decode_sharpen: float = 1.0):
+                    *, crop: int = 448, batch: int = 64, decode_sharpen: float = 1.0,
+                    distractor_masks=None):
     """Per (frame,cam): crop -> ViTPose -> full-frame 2-D kp + conf.
 
     frames_iter: iterable of length T, each -> (C,H,W,3) uint8 RGB (all cameras
     for that frame). masks (T,C,H,W) bool, centroids (T,C,2), valid (T,C),
     cam_mats (C,4,3). Returns kp2d (T,C,K,2) full-frame, conf (T,C,K) (0 where
     the frame had <2 valid views or the crop was empty).
+
+    distractor_masks (T,C,H,W) bool | None: the OTHER animal(s)' masks. Passed
+    through to build_frameset, which replaces those pixels with the crop mean
+    so the detector sees one clean fly plus the target-mask channel -- matching
+    JARVIS's dataset2D training crop. This was NOT wired up, and build_frameset's
+    own docstring warns that omitting it "feeds two overlapping flies on
+    courtship frames and collapses the 3D reconstruction". Measured on the
+    courtship set: with both flies in the crop and nothing marking the target,
+    keypoints landed on the WRONG fly in >90% of unambiguous frames in 5 bouts
+    and 10-90% in 33 more. None for single-animal assays.
     """
     T = masks.shape[0]; C = masks.shape[1]
     K = None                                         # discovered from first forward
@@ -95,7 +106,10 @@ def predict_bout_2d(vitpose, frames_iter, masks, centroids, valid, cam_mats,
     per_frame = []                                  # (t, centerHM) for reassembly
     for t, frame_imgs in enumerate(frames_iter):
         c4, centerHM, nval = build_frameset(
-            np.asarray(frame_imgs), masks[t], centroids[t], valid[t], cam_mats, crop=crop)
+            np.asarray(frame_imgs), masks[t], centroids[t], valid[t], cam_mats,
+            crop=crop,
+            distractor_masks=(None if distractor_masks is None
+                              else distractor_masks[t]))
         if c4 is None:
             per_frame.append((t, None, None))
             continue

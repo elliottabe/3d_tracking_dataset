@@ -1,7 +1,14 @@
 # @package recording
 name: Session0
 session_dir: ${paths.data_dir_johnson}/Video_recordings/courtship/Session0/2025_10_20_13_20_04
-predictions_dir: ${recording.session_dir}/Predictions_3D_sam3_all30   # current full-session SAM3 run: 30 bouts, camera-named masks (correct order) + sex_meta. (Predictions_3D_36233268_fixed was removed; legacy Predictions_3D_36233268 lacks camera names / was swapped.)
+# Masks live in the PROCESSED tree, mirroring outputs.out's pattern -- this is
+# where scripts/sam3_masks.py writes (sam3.out: auto -> <processed_dir>/sam3_masks).
+# It used to point into the VIDEO tree at a hand-named Predictions_3D_* dir, which
+# silently decoupled the pipeline from mask regeneration: the 2026-08-09 regen wrote
+# to processed/.../sam3_masks while run_bout kept reading 2026-07 masks from the
+# video tree. The two mask sets disagree on which SLOT is which fly, so pose output
+# had keypoints on the wrong animal in many bouts while every stage reported success.
+predictions_dir: ${paths.processed_root}/${dataset.name}/${recording.name}/${basename:${recording.session_dir}}/sam3_masks
 bouts_csv: ${recording.session_dir}/courtship_bouts_unified_summary.csv
 calib_dir: ${recording.session_dir}/calibration
 num_animals: 2

@@ -123,7 +123,7 @@ def run(args):
         immediately -- nothing beyond the current frame is held in memory,
         avoiding the ~9GB all-cameras-all-frames buffer this view used to
         build before writing anything out."""
-        for t, imgs in enumerate(vio.read_frames(session_dir, [cam], start, count)):
+        for t, imgs in enumerate(vio.read_frames_synced(session_dir, [cam], start, count)):
             rgb = imgs[0]
             if rgb is None:
                 print(f"[reproj-video] warning: frame {start + t} unreadable for {cam}; skipping")

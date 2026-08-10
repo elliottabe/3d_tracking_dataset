@@ -546,11 +546,26 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
                     cfg.recording.session_dir, cameras, sync_plan, start, T):
                 yield _frames
 
+        # Distractor gray-fill: the OTHER fly's pixels are replaced with the
+        # crop mean so the detector sees one clean animal + the target-mask
+        # channel (JARVIS's dataset2D training crop). Without it, a crop
+        # containing both flies gives the detector no signal about which is the
+        # target -- measured on this dataset, keypoints landed on the WRONG fly
+        # in >90% of unambiguous frames in 5 bouts and 10-90% in 33 more.
+        # Single-animal recordings pass None and are unaffected.
+        _distractor = None
+        if int(cfg.recording.num_animals) == 2:
+            _other = load_bout_masks(bout_npz, 1 - fly, expected_cameras=cameras)
+            _distractor = _other["masks"]
+            print(f"[gray-fill] bout {bout_idx} fly{fly}: using fly{1 - fly} masks "
+                  f"as distractor ({int(_other['valid'].sum())} valid views)")
         vit = load_detector(cfg.detector.ckpt, num_keypoints=int(cfg.detector.num_keypoints))
         kp2d, conf = predict_bout_2d(
             vit, _frames_iter(), masks_dict["masks"], centroids, masks_dict["valid"], cam_mats,
             crop=int(cfg.detector.crop), batch=int(cfg.detector.get("batch", 64)),
-            decode_sharpen=float(cfg.detector.get("decode_sharpen", 1.0)))
+            decode_sharpen=float(cfg.detector.get("decode_sharpen", 1.0)),
+            distractor_masks=_distractor)
+        _distractor = None          # free the (T,C,H,W) mask array promptly
         # The detector emits channels in its training (tracking/COCO) order, which
         # is NOT the XML/model order the rest of the pipeline (triangulation, STAC,
         # silhouette IK, QC) assumes. Reorder O -> model order here so kp2d.npz and
