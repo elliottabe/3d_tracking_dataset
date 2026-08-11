@@ -23,9 +23,9 @@ so this is safe to re-run and resumes after an interruption.
 
 Usage:
     # every bout missing a video (default)
-    python scripts/viz/render_review_videos.py --pose-dir pose_v3
+    python scripts/viz/render_review_videos.py --pose-dir pose
     # only the bouts still queued for review
-    python scripts/viz/render_review_videos.py --pose-dir pose_v3 \
+    python scripts/viz/render_review_videos.py --pose-dir pose \
         --statuses unsure,bad,pending
 """
 from __future__ import annotations
@@ -55,7 +55,7 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--root", default=PROC)
-    ap.add_argument("--pose-dir", default="pose_v3")
+    ap.add_argument("--pose-dir", default="pose")
     ap.add_argument("--statuses", default="all",
                     help="comma-separated review statuses to cover, or 'all'")
     ap.add_argument("--workers", type=int, default=8)

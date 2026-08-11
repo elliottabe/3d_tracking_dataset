@@ -84,7 +84,9 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--root", default="/gscratch/portia/eabe/data/Johnson_lab/processed/courtship")
-    ap.add_argument("--pose-dirs", nargs="+", default=["pose", "pose_v3"])
+    # Pass two trees to A/B a rerun against the one it replaces, e.g.
+    #   --pose-dirs pose pose_new
+    ap.add_argument("--pose-dirs", nargs="+", default=["pose"])
     ap.add_argument("--sep", type=float, default=200.0)
     ap.add_argument("--margin", type=float, default=0.35,
                     help="keypoints must be within margin*sep of the nearer mask")

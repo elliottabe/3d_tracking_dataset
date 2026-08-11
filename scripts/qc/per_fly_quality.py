@@ -31,8 +31,8 @@ Across the set it flags 36 of 160 females and 2 of 160 males, matching the
 reported asymmetry.
 
 Usage:
-    python scripts/qc/per_fly_quality.py --pose-dir pose_v3
-    python scripts/qc/per_fly_quality.py --pose-dir pose_v3 --json-out docs/qc/per_fly_quality.json
+    python scripts/qc/per_fly_quality.py --pose-dir pose
+    python scripts/qc/per_fly_quality.py --pose-dir pose --json-out docs/qc/per_fly_quality.json
 """
 from __future__ import annotations
 
@@ -81,7 +81,7 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--root", default=PROC)
-    ap.add_argument("--pose-dir", default="pose_v3")
+    ap.add_argument("--pose-dir", default="pose")
     ap.add_argument("--loo-max", type=float, default=30.0)
     ap.add_argument("--json-out", default=None)
     a = ap.parse_args(argv)

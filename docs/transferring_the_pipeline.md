@@ -129,27 +129,26 @@ one consistent stack: regenerated SAM3 masks + the V4-retrained detector.
 | product | path | size |
 |---|---|---|
 | SAM3 masks + identity | `<processed>/courtship/<sess>/<rec>/sam3_masks/` | 1.9 GB |
-| pose through IK | `.../pose_v3/` | 4.6 GB |
-| combined IK for analysis | `courtship/Data_analysis/analysis/v2_2026-08-10/` | 1.8 GB |
-| superseded pose (see below) | `.../pose/`, `.../pose_v2/` | 19 GB |
+| pose through IK | `.../pose/` | 4.6 GB |
+| combined IK for analysis | `courtship/Data_analysis/analysis/v2_2026-08-10/` | 1.6 GB |
 | previous masks (Session0 only) | `.../sam3_masks_old/` | 380 MB |
 
-**`pose/` and `pose_v2/` are both invalid — do not use them.** Both were built
-while `recording.predictions_dir` pointed at a hand-named `Predictions_3D_*`
-directory in the VIDEO tree, while mask regeneration wrote to the PROCESSED
-tree. Pose therefore consumed a different mask set than identity was assigned
-on, and every stage still reported success. Measured with
+`pose/` is the promoted, corrected tree (2026-08-10). The pose outputs it
+replaced were built while `recording.predictions_dir` pointed at a hand-named
+`Predictions_3D_*` directory in the VIDEO tree while mask regeneration wrote to
+the PROCESSED tree, so pose consumed a different mask set than identity was
+assigned on -- and every stage still reported success. Measured with
 `scripts/qc/audit_fly_assignment.py` over all 160 bouts:
 
 | tree | fly-frames where keypoints sit on the OTHER fly's mask | bouts >10% wrong |
 |---|---|---|
-| `pose/` | **19.7%** | 57 of 160 |
-| `pose_v3/` | **2.3%** | 12 of 160 |
+| old (deleted 2026-08-10) | **19.7%** | 57 of 160 |
+| current `pose/` | **2.3%** | 12 of 160 |
 
 The residual 2.3% is concentrated in cameras already flagged in
 `suspect_cameras` (reflection tracking); no bout has a whole-bout identity swap.
 
-Per bout-fly in `pose_v3/bouts/bout_<NNNNN>/fly<N>/`:
+Per bout-fly in `pose/bouts/bout_<NNNNN>/fly<N>/`:
 
 | file | contents |
 |---|---|
@@ -165,9 +164,6 @@ Per bout-fly in `pose_v3/bouts/bout_<NNNNN>/fly<N>/`:
 
 ## 2.2 Caveats a recipient must know
 
-- **`pose_v3` is not promoted** to `pose/`; use it by name. Promotion is held
-  until the 61 bouts below are re-reviewed, so the human decisions recorded
-  against each tree stay separable.
 - **10 of 160 bouts fail reconstructability** (a fly observable by <4 cameras
   for >20% of frames) and should be excluded:
   S0 #13,15,22,26,27; S1/12_11_50 #2,5; S1/15_25_51 #6,30; S1/17_28_34 #7.
@@ -175,15 +171,14 @@ Per bout-fly in `pose_v3/bouts/bout_<NNNNN>/fly<N>/`:
   --skip-failing` drops them. No `EXCLUDED.json` has been written yet.
 - **2 bouts carry a reflection-tracking camera** (S0 #8, #26, both Cam2012631);
   flagged in `suspect_cameras`.
-- **Identity: 99 of 160 bouts carry a human-verified `sex.json`**, remapped from
-  the review pass done against `pose/` (see `scripts/qc/remap_review_to_new_masks.py`
-  for why a remap rather than a copy was required). The remaining **61 need
-  re-review** and are marked `unsure` in `id_review_pose_v3.json`: 41 because
-  the old review video's crop followed keypoints that switched flies mid-bout
-  (agreement ~0.50, so the original decision is unrecoverable), 17 because both
-  old flies' keypoints collapsed onto one animal, 3 marked `unsure` originally.
-  In the combined h5 an unverified bout reports `male_fly = -1` rather than the
-  mask-area heuristic's guess.
+- **Identity is human-verified for every bout**: 132 confirmed + 27 swapped +
+  1 marked bad, in `<processed>/courtship/id_review.json`, with a `sex.json` per
+  bout. 99 were carried over from the review done against the old tree
+  (`scripts/qc/remap_review_to_new_masks.py` explains why a remap rather than a
+  copy was required -- the GUI crops to keypoints, so the reviewer judged the
+  animal the KEYPOINTS were on, not the animal in mask slot k); the other 61
+  were re-reviewed. In the combined h5 an unverified bout would report
+  `male_fly = -1` rather than the mask-area heuristic's guess.
 - **Tracking quality is per FLY, and the female is the failure mode.** Human
   review of all 160 bouts reported bad female tracking in several bouts with the
   male fine throughout; `scripts/qc/per_fly_quality.py` quantifies it and gates
