@@ -50,6 +50,7 @@ different packaging convention, not a sign that `sam3` needs the same fix.
 """
 import argparse
 import contextlib
+import json
 import os
 import sys
 import time
@@ -163,7 +164,7 @@ def run_masks(clip: str, *, limit_frames: int = 0, jarvis_root: str | None = Non
             overlay=True, overlay_cams=3, overlay_frames=min(300, limit_frames or 300),
         )
     dt = time.time() - t0
-    n = limit_frames or n_frames_full(clip)
+    n = limit_frames or prepare_clip.n_frames(clip)
     print(f"[timing] SAM3 {n} frames x 7 cams in {dt:.1f}s "
           f"({dt / max(n, 1):.3f} s/frame)")
     if limit_frames:
@@ -171,10 +172,6 @@ def run_masks(clip: str, *, limit_frames: int = 0, jarvis_root: str | None = Non
         print(f"[timing] extrapolated full run ({full} frames): "
               f"{dt / limit_frames * full / 60:.1f} min")
     return manifest, dt
-
-
-def n_frames_full(clip: str) -> int:
-    return prepare_clip.n_frames(clip)
 
 
 def mask_npz_path(clip: str) -> Path:
@@ -185,14 +182,54 @@ def mask_npz_path(clip: str) -> Path:
     return hits[0]
 
 
+def _longest_invalid_run(valid_1d: np.ndarray) -> int:
+    """Longest run of consecutive False values in a 1D bool array."""
+    run = best = 0
+    for v in valid_1d:
+        run = run + 1 if not v else 0
+        best = max(best, run)
+    return best
+
+
+def whole_run_mask_summary(bm: dict, names: list) -> dict:
+    """Whole-run mask validity summary from `bm["valid"]` (T,C), by camera NAME.
+
+    The 3 sampled QC frames can't see a mid-run mask collapse between
+    samples; this covers every frame SAM3 actually ran on. Reports:
+      - overall valid fraction (all frames x all cameras)
+      - per-camera valid fraction (real camera names, not indices)
+      - count of frames with fewer than 2 valid cameras (triangulation needs
+        >=2, so those frames are unrecoverable downstream)
+      - the longest run of consecutive frames in which any single camera is
+        invalid (the specific "mid-run collapse" shape the sampled frames miss)
+    """
+    valid = np.asarray(bm["valid"], bool)                       # (T,C)
+    n_frames_lt2 = int(np.sum(valid.sum(axis=1) < 2))
+    per_cam_frac = {cam: float(valid[:, i].mean()) for i, cam in enumerate(names)}
+    per_cam_runs = {cam: _longest_invalid_run(valid[:, i]) for i, cam in enumerate(names)}
+    worst_cam = max(per_cam_runs, key=per_cam_runs.get)
+    return {
+        "overall_valid_frac": float(valid.mean()),
+        "per_camera_valid_frac": per_cam_frac,
+        "n_frames_lt2_valid_cams": n_frames_lt2,
+        "longest_invalid_run": {"camera": worst_cam, "length": per_cam_runs[worst_cam]},
+    }
+
+
 def qc_masks(clip: str, frames=(120, 450, 780)):
-    """Mask QC montage.
+    """Mask QC montage, gated by a whole-run validity check.
 
     EXPECTATION if masks are good: exactly ONE connected fly-sized blob per
     camera per frame, covering the fly and not the arena wall or its
-    reflection, present in all 7 views at every sampled frame.
+    reflection, present in all 7 views at every sampled frame -- AND, over
+    the full run (not just the 3 sampled frames), an overall valid fraction
+    >=0.95 with no frame dropping below 2 valid cameras (triangulation's
+    minimum) and no long single-camera dropout run.
     FALSIFICATION: blobs on arena features, multiple competing blobs, or an
-    empty view -> the 2D stage will read garbage from crop channel 3.
+    empty view in the montage; OR, in the whole-run summary, an overall valid
+    fraction below 0.95, any frame with <2 valid cameras, or a long
+    consecutive invalid run on one camera (a mid-run collapse the 3 sampled
+    frames cannot see) -> the 2D/triangulation stages will read garbage.
     """
     import cv2
     from jarvis_jax.tracking.bout_masks import load_bout_masks
@@ -205,6 +242,41 @@ def qc_masks(clip: str, frames=(120, 450, 780)):
     # it the mask camera axis can silently disagree with the calibration (see
     # scripts/fix_mask_camera_order.py and tests/test_mask_camera_order.py).
     bm = load_bout_masks(str(mask_npz_path(clip)), 0, expected_cameras=names)
+
+    # Whole-run summary BEFORE the montage: the 3 sampled frames below can't
+    # see a mid-run collapse between samples, but bm["valid"] already covers
+    # every frame SAM3 ran on.
+    summary = whole_run_mask_summary(bm, names)
+    print(f"[qc_masks] overall valid fraction: {summary['overall_valid_frac']:.4f} "
+          f"over {bm['valid'].shape[0]} frames x {len(names)} cameras")
+    for cam in names:
+        print(f"[qc_masks]   {cam}: valid_frac={summary['per_camera_valid_frac'][cam]:.4f}")
+    print(f"[qc_masks] frames with <2 valid cameras: {summary['n_frames_lt2_valid_cams']}")
+    lir = summary["longest_invalid_run"]
+    print(f"[qc_masks] longest single-camera invalid run: {lir['length']} frames "
+          f"(camera {lir['camera']})")
+
+    qc_json_path = d["qc"] / "qc.json"
+    payload = {}
+    if qc_json_path.exists():
+        with open(qc_json_path) as fh:
+            payload = json.load(fh)
+    payload["masks"] = summary
+    with open(qc_json_path, "w") as fh:
+        json.dump(payload, fh, indent=2)
+    print(f"wrote {qc_json_path}")
+
+    if summary["overall_valid_frac"] < 0.95:
+        raise ValueError(
+            f"mask QC failed: overall valid fraction "
+            f"{summary['overall_valid_frac']:.4f} < 0.95 -- masks gate every "
+            f"downstream stage")
+    if summary["n_frames_lt2_valid_cams"] > 0:
+        raise ValueError(
+            f"mask QC failed: {summary['n_frames_lt2_valid_cams']} frame(s) have "
+            f"fewer than 2 valid cameras -- triangulation needs >=2 and masks "
+            f"gate every downstream stage")
+
     panels = []
     for f in frames:
         row = []

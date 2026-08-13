@@ -198,6 +198,28 @@ def write_jarvis_calibration(clip: str, out_dir) -> list:
     return written
 
 
+def assert_calibration_roundtrip(clip: str, calib_dir, tol: float = 1e-4) -> float:
+    """Re-read the staged Cam*.yaml and confirm it reproduces load_dlt's matrices.
+
+    A silent format error in write_jarvis_calibration would place every SAM3
+    crop on the wrong pixels while every downstream shape stayed correct, so
+    this runs on every staging, not just once by hand. Returns the max abs diff.
+    """
+    from jarvis_jax.geometry.reprojection_tool import ReprojectionTool
+    expected, names = load_dlt(str(Path(clip) / "calibration"))
+    rt = ReprojectionTool(str(calib_dir))
+    got_names = [c.name for c in rt._camera_list]
+    if got_names != list(names):
+        raise ValueError(
+            f"staged calibration camera order {got_names} != source order {list(names)}")
+    diff = float(np.max(np.abs(np.asarray(rt.camera_matrices, np.float64)
+                               - np.asarray(expected, np.float64))))
+    if not diff < tol:
+        raise ValueError(
+            f"staged Cam*.yaml does not round-trip: max abs diff {diff:.3e} >= {tol:.0e}")
+    return diff
+
+
 def stage_session_dir(clip: str) -> Path:
     """Build the JARVIS-shaped session dir SAM3 needs, without touching raw input.
 
@@ -210,6 +232,11 @@ def stage_session_dir(clip: str) -> Path:
     verified by hand that keeping the raw suffix makes that lookup raise
     FileNotFoundError. The camera name is the same one `write_jarvis_calibration`
     uses, so both stay keyed off `load_dlt`'s names.
+
+    After writing the calibration, this asserts it round-trips (see
+    `assert_calibration_roundtrip`) -- a silent format error here would place
+    every SAM3 crop on the wrong pixels while every downstream shape stayed
+    correct, so it is checked on every staging, not just once by hand.
     """
     tag = str(clip).rstrip("/").split("/")[-2:]
     root = out_dirs(clip)["root"] / "session" / tag[0] / tag[1]
@@ -218,7 +245,14 @@ def stage_session_dir(clip: str) -> Path:
     for name in names:
         src = Path(video_path(clip, name))
         link = root / f"{name}.mp4"
-        if not link.exists():
+        # Path.exists() follows symlinks, so a DANGLING symlink (target
+        # missing/moved) reports False here and symlink_to would then raise
+        # FileExistsError on the leftover link inode. Check is_symlink() too.
+        if not link.is_symlink() and not link.exists():
             link.symlink_to(src)
-    write_jarvis_calibration(clip, root / "calibration")
+    calib_dir = root / "calibration"
+    write_jarvis_calibration(clip, calib_dir)
+    diff = assert_calibration_roundtrip(clip, calib_dir)
+    print(f"[stage_session_dir] calibration round-trip max abs diff: {diff:.3e} "
+          f"(tol 1e-4) at {calib_dir}")
     return root
