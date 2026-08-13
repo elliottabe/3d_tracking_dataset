@@ -7,6 +7,7 @@ PALETTE = {
     "fly0": (255, 255, 0),   # cyan
     "fly1": (0, 165, 255),   # orange
     "head": (0, 0, 255),     # red
+    "thorax": (0, 255, 255),  # yellow; completes head/thorax/abdomen alongside
     "tail": (255, 0, 0),     # blue
     "detector": (255, 255, 0),
     "fit": (0, 255, 0),      # green

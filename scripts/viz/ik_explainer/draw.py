@@ -16,7 +16,7 @@ sys.path.insert(0, str(_REPO))
 from viz.core.colors import PALETTE, keypoint_groups, leg_chains   # noqa: E402
 
 _GROUP_COLOR = {"head": PALETTE["head"], "abdomen": PALETTE["tail"],
-                "thorax": (0, 255, 255), "legs": PALETTE["fly0"]}
+                "thorax": PALETTE["thorax"], "legs": PALETTE["fly0"]}
 
 
 def fade(img_a, img_b, t: float):
