@@ -49,10 +49,12 @@ def run_detect(clip: str, *, ckpt: str = CKPT, batch: int = 64,
         try:
             for _t in range(N):
                 imgs = []
-                for r in readers:
+                for cam_name, r in zip(cam_names, readers):
                     ok, img = r.read()
                     if not ok:
-                        raise IOError("video ended early")
+                        raise IOError(
+                            f"video ended early: {cam_name} at frame {_t} "
+                            f"(expected {N} frames)")
                     imgs.append(img[:, :, ::-1])          # BGR -> RGB
                 yield np.stack(imgs)
         finally:
@@ -92,16 +94,13 @@ def qc_kp2d(clip: str, frames=(120, 450, 780)):
     across the body => detector->model reorder is broken.
     """
     import cv2
-    from viz.core.colors import PALETTE, keypoint_groups, leg_chains
+    from scripts.viz.ik_explainer import draw
 
     d = clip_io.out_dirs(clip)
     z = np.load(d["predictions"] / "02_kp2d.npz", allow_pickle=True)
     kp2d, conf = z["kp2d"], z["conf"]
     cam_names = [str(c) for c in z["cam_names"]]
     kp_names = [str(n) for n in z["kp_names"]]
-    groups, chains = keypoint_groups(kp_names), leg_chains(kp_names)
-    gcol = {"head": PALETTE["head"], "abdomen": PALETTE["tail"],
-            "thorax": (0, 255, 255), "legs": PALETTE["fly0"]}
 
     rows = []
     for f in frames:
@@ -114,25 +113,14 @@ def qc_kp2d(clip: str, frames=(120, 450, 780)):
             y0 = int(np.clip(cy - 150, 0, img.shape[0] - 300))
             crop = img[y0:y0 + 300, x0:x0 + 420].copy()
             q = p - np.array([x0, y0])
-            for _leg, ch in chains.items():
-                for a, b in zip(q[ch][:-1], q[ch][1:]):
-                    if np.all(np.isfinite([a, b])):
-                        cv2.line(crop, tuple(a.astype(int)), tuple(b.astype(int)),
-                                 PALETTE["fly0"], 1, cv2.LINE_AA)
-            for g, idxs in groups.items():
-                for i in idxs:
-                    if np.all(np.isfinite(q[i])):
-                        r = 2 if c[i] >= 0.3 else 1
-                        cv2.circle(crop, tuple(q[i].astype(int)), r, gcol[g], -1,
-                                   cv2.LINE_AA)
+            crop = draw.draw_leg_chains(crop, q, kp_names)
+            crop = draw.draw_keypoints(crop, q, kp_names, conf=c, radius=2)
             for lab in ("Antenna_Base", "Abd_tip"):
                 i = kp_names.index(lab)
                 if np.all(np.isfinite(q[i])):
-                    cv2.putText(crop, lab, tuple((q[i] + [4, -4]).astype(int)),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.32, (255, 255, 255), 1,
-                                cv2.LINE_AA)
-            cv2.putText(crop, f"{cam} f{f} medconf={np.median(c):.2f}", (6, 16),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.42, (255, 255, 255), 1, cv2.LINE_AA)
+                    crop = draw.label(crop, lab, q[i] + [4, -4], scale=0.32)
+            crop = draw.label(crop, f"{cam} f{f} medconf={np.median(c):.2f}",
+                              (6, 16), scale=0.42)
             row.append(crop)
         rows.append(np.hstack(row))
     out = d["qc"] / "02_kp2d_overlay.png"
