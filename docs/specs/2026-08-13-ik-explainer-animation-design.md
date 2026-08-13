@@ -131,9 +131,12 @@ mm.** No unit conversion enters the animation's chain.
 
 The shipped CSV is in units of **0.1 mm** while the DLTs expect mm. Projecting
 it raw puts `u ∈ [7927, 10705]` on a 1936-px frame — **0% of keypoints in
-frame**. Scaling XYZ by 0.1 puts **100% in frame across all 7 cameras and all
-frames**, with a body length (`Antenna_Base`→`Abd_tip`) of **2.39 mm**, correct
-for *Drosophila*. Two independent confirmations:
+frame**. Scaling XYZ by 0.1 puts **99.958% in frame** (134 of 322,700
+projections outside), with a body length (`Antenna_Base`→`Abd_tip`) of
+**2.39 mm**, correct for *Drosophila*. The 134 excursions are all on
+`Cam2012630` (the vertical camera), all distal right-leg tips, leaving the
+bottom edge by at most 15.7 px — real field-of-view clipping on a 448-px-tall
+strip, not a calibration fault. Two independent confirmations:
 
 - `third_party/jarvis_jax/tests/test_identity_link.py:17` holds `P_REAL`, a real
   rig DLT, at linear-term scale ~8.1 where this clip's is ~81.2 — a clean 10×.
