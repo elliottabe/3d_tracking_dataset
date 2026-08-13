@@ -134,3 +134,38 @@ def out_dirs(clip: str = CLIP_DEFAULT) -> dict:
     for p in d.values():
         p.mkdir(parents=True, exist_ok=True)
     return d
+
+
+# --- Keypoint orders -------------------------------------------------------
+# TWO orders exist and they differ. Mixing them scrambles anatomy while every
+# numeric QC stays green (CLAUDE.md records exactly this bug).
+#   DETECTOR order: configs/detector/vitpose_v3.yaml:kp_names == data/fly50.json
+#                   == the shipped data3D csv header.
+#   MODEL order:    configs/anatomy/v1.yaml:KP_NAMES == MuJoCo XML site order.
+# Everything downstream of the detector is MODEL order.
+
+
+def _yaml(path):
+    import yaml
+    with open(path) as fh:
+        return yaml.safe_load(fh)
+
+
+def detector_kp_names() -> list:
+    cfg = _yaml(_REPO_ROOT / "configs" / "detector" / "vitpose_v3.yaml")
+    return list(cfg["kp_names"])
+
+
+def model_kp_names() -> list:
+    cfg = _yaml(_REPO_ROOT / "configs" / "anatomy" / "v1.yaml")
+    return list(cfg["model"]["KP_NAMES"])
+
+
+def detector_to_model_index() -> np.ndarray:
+    """(50,) int such that `arr[detector_to_model_index()]` is in MODEL order."""
+    det, mod = detector_kp_names(), model_kp_names()
+    missing = set(mod) - set(det)
+    if missing:
+        raise ValueError(f"model keypoints absent from detector order: {sorted(missing)}")
+    pos = {n: i for i, n in enumerate(det)}
+    return np.array([pos[n] for n in mod], np.int64)
