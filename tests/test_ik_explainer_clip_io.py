@@ -36,12 +36,29 @@ def test_shipped_kp3d_is_millimetres_and_detector_order():
     assert 1.5 < body_mm < 4.0, f"body length {body_mm:.2f} mm — unit error"
 
 
-def test_projection_puts_every_keypoint_in_frame():
+def test_projection_lands_in_frame_and_never_wildly_outside():
+    """Guards the 0.1mm/mm unit trap.
+
+    MEASURED ground truth for this clip: 99.958% of all 322,700 keypoint
+    projections land inside 1936x448. The 134 that do not are ALL on
+    Cam2012630 (the vertical/top camera) and are all distal right-leg tips
+    (T2R_TaTip, T1R_TaTip, T1R_TaT3, T2R_TaT3) leaving the bottom edge by at
+    most 15.7 px -- genuine field-of-view clipping on a 448-px-tall strip, not
+    a calibration error.
+
+    The excursion bound is what makes this a unit-trap test: feeding the raw
+    0.1mm CSV puts u in [7927, 10705], thousands of px outside, so the 32 px
+    margin fails instantly.
+    """
     cam_mats, _ = clip_io.load_dlt(os.path.join(CLIP, "calibration"))
     xyz, _, _ = clip_io.load_shipped_kp3d_mm(clip_io.shipped_csv_path(CLIP))
-    uv = np.stack([clip_io.project(cam_mats, xyz[t]) for t in (0, 400, 900)])
-    assert np.all(uv[..., 0] >= 0) and np.all(uv[..., 0] < 1936)
-    assert np.all(uv[..., 1] >= 0) and np.all(uv[..., 1] < 448)
+    uv = np.stack([clip_io.project(cam_mats, xyz[t]) for t in range(xyz.shape[0])])
+    u, v = uv[..., 0], uv[..., 1]
+    inside = (u >= 0) & (u < 1936) & (v >= 0) & (v < 448)
+    assert inside.mean() > 0.999, f"only {100 * inside.mean():.3f}% in frame"
+    margin = 32.0
+    assert u.min() > -margin and u.max() < 1936 + margin
+    assert v.min() > -margin and v.max() < 448 + margin
 
 
 def test_camera_view_dirs_form_a_30_degree_arc():
