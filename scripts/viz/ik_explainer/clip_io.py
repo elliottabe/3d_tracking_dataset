@@ -169,3 +169,56 @@ def detector_to_model_index() -> np.ndarray:
         raise ValueError(f"model keypoints absent from detector order: {sorted(missing)}")
     pos = {n: i for i, n in enumerate(det)}
     return np.array([pos[n] for n in mod], np.int64)
+
+
+# --- SAM3 staging (Task 4) --------------------------------------------------
+# SAM3 needs a JARVIS-format calibration dir (Cam*.yaml); this clip ships
+# Cam*_dlt.csv. See masks.py module docstring for the discovered prerequisite.
+
+
+def write_jarvis_calibration(clip: str, out_dir) -> list:
+    """DLT csvs -> OpenCV FileStorage Cam*.yaml with a `projectionMatrix` node.
+
+    JARVIS's get_repro_tool (jarvis/utils/reprojection.py:152) requires
+    Cam<id>.yaml; this clip ships Cam<id>_dlt.csv. The 3x4 matrix is the same
+    object either way, so this is a format change, not a recalibration.
+    """
+    import cv2
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    cam_mats, names = load_dlt(str(Path(clip) / "calibration"))
+    written = []
+    for M, name in zip(cam_mats, names):
+        P = np.asarray(M, np.float64).T                      # (4,3) -> (3,4)
+        path = out_dir / f"{name}.yaml"
+        fs = cv2.FileStorage(str(path), cv2.FILE_STORAGE_WRITE)
+        fs.write("projectionMatrix", P)
+        fs.release()
+        written.append(path)
+    return written
+
+
+def stage_session_dir(clip: str) -> Path:
+    """Build the JARVIS-shaped session dir SAM3 needs, without touching raw input.
+
+    Named <...>/Session6/<timestamp> so session_tag_for() yields the same tag
+    the bouts CSV already uses.
+
+    Symlinks are named `<cam>.mp4` (not the raw `Cam<id>_frames_*.mp4`
+    filename): `sam3_driver.video_paths_for` looks up
+    `<session_dir>/<cam>.mp4` for each camera name in the calibration, and
+    verified by hand that keeping the raw suffix makes that lookup raise
+    FileNotFoundError. The camera name is the same one `write_jarvis_calibration`
+    uses, so both stay keyed off `load_dlt`'s names.
+    """
+    tag = str(clip).rstrip("/").split("/")[-2:]
+    root = out_dirs(clip)["root"] / "session" / tag[0] / tag[1]
+    root.mkdir(parents=True, exist_ok=True)
+    _mats, names = load_dlt(str(Path(clip) / "calibration"))
+    for name in names:
+        src = Path(video_path(clip, name))
+        link = root / f"{name}.mp4"
+        if not link.exists():
+            link.symlink_to(src)
+    write_jarvis_calibration(clip, root / "calibration")
+    return root
