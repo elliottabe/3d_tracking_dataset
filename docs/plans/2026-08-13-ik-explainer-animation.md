@@ -467,7 +467,7 @@ silent reordering regression fails here rather than as scrambled anatomy."
 
 **Interfaces:**
 - Consumes: `clip_io.load_dlt`, `clip_io.n_video_frames`, `clip_io.video_path`, `clip_io.out_dirs`.
-- Produces: `write_bouts_csv(clip: str) -> Path` writing `<CLIP>/ik_explainer/bouts.csv` with header `fly_id,bout_idx,start_frame,end_frame,n_frames` and exactly one row covering `[0, N-1]`.
+- Produces: `write_bouts_csv(clip: str, *, n_override: int = 0, name: str = "bouts.csv") -> Path` writing `<CLIP>/ik_explainer/<name>` with header `fly_id,bout_idx,start_frame,end_frame,n_frames` and exactly one row covering `[0, N-1]`. `n_override > 0` truncates the bout — the only way to run a short SAM3 pilot, since `run_sam3_masks`'s `limit` counts bouts, not frames.
 
 **Why:** `sam3_driver.run_sam3_masks` requires a bouts CSV; this clip has none. `scripts/data_prep/convert_underview_to_jarvis.py` sets the precedent of synthesising "one bout spanning every frame".
 
@@ -503,13 +503,19 @@ def n_frames(clip: str) -> int:
     return min(counts)
 
 
-def write_bouts_csv(clip: str = clip_io.CLIP_DEFAULT) -> Path:
+def write_bouts_csv(clip: str = clip_io.CLIP_DEFAULT, *, n_override: int = 0,
+                    name: str = "bouts.csv") -> Path:
+    """Write a one-bout summary. n_override>0 truncates the bout (pilot runs).
+
+    run_sam3_masks has NO frame limit -- its `limit` counts BOUTS -- so the only
+    way to time a short slice is to hand it a bout that covers fewer frames.
+    """
     d = clip_io.out_dirs(clip)
-    n = n_frames(clip)
+    n = int(n_override) if n_override else n_frames(clip)
     # fly_id must equal the session tag '<Session>/<timestamp>' that
     # sam3_driver.parse_bouts filters on (see its docstring).
     session_tag = "/".join(str(clip).rstrip("/").split("/")[-2:])
-    out = d["root"] / "bouts.csv"
+    out = d["root"] / name
     with open(out, "w", newline="") as fh:
         w = csv.writer(fh)
         w.writerow(["fly_id", "bout_idx", "start_frame", "end_frame", "n_frames"])
@@ -617,13 +623,22 @@ def run_masks(clip: str, *, limit_frames: int = 0, jarvis_root: str | None = Non
     from jarvis_jax.predict.sam3_driver import run_sam3_masks
 
     d = clip_io.out_dirs(clip)
-    bouts = prepare_clip.write_bouts_csv(clip)
+    # A pilot MUST use a truncated bout and its OWN output dir: run_sam3_masks
+    # has no frame limit (`limit` counts bouts), and reuse_masks=True would
+    # otherwise let a 40-frame pilot npz stand in for the full run.
+    if limit_frames:
+        bouts = prepare_clip.write_bouts_csv(clip, n_override=limit_frames,
+                                             name="bouts_pilot.csv")
+        out_dir = d["predictions"] / "sam3_pilot"
+    else:
+        bouts = prepare_clip.write_bouts_csv(clip)
+        out_dir = d["predictions"] / "sam3"
     t0 = time.time()
     manifest = run_sam3_masks(
         project=project,
         session_dir=str(clip),
         bouts_csv=str(bouts),
-        out=str(d["predictions"] / "sam3"),
+        out=str(out_dir),
         num_animals=1,
         reuse_masks=True,
         jarvis_root=jarvis_root or os.environ.get("JARVIS_ROOT"),
@@ -631,8 +646,18 @@ def run_masks(clip: str, *, limit_frames: int = 0, jarvis_root: str | None = Non
         overlay=True, overlay_cams=3, overlay_frames=min(300, limit_frames or 300),
     )
     dt = time.time() - t0
-    print(f"[timing] SAM3 wall time {dt:.1f}s")
+    n = limit_frames or n_frames_full(clip)
+    print(f"[timing] SAM3 {n} frames x 7 cams in {dt:.1f}s "
+          f"({dt / max(n, 1):.3f} s/frame)")
+    if limit_frames:
+        full = prepare_clip.n_frames(clip)
+        print(f"[timing] extrapolated full run ({full} frames): "
+              f"{dt / limit_frames * full / 60:.1f} min")
     return manifest, dt
+
+
+def n_frames_full(clip: str) -> int:
+    return prepare_clip.n_frames(clip)
 
 
 def main():
@@ -656,7 +681,7 @@ cd /home/eabe/Research/MyRepos/3d_tracking_dataset
 env -u JAX_PLATFORMS python scripts/viz/ik_explainer/masks.py --pilot 40
 ```
 
-**Record the wall time and extrapolate to 921 frames before continuing.** If the extrapolation exceeds ~2 hours, stop and report to the user with the measured number rather than proceeding — the spec names this the main schedule risk, and the user should decide whether to sub-range the clip.
+The pilot prints its own extrapolation to the full 921 frames. **Record it before continuing.** If the extrapolation exceeds ~2 hours, stop and report to the user with the measured number rather than proceeding — the spec names this the main schedule risk, and the user should decide whether to sub-range the clip.
 
 `run_sam3_masks` needs a JARVIS *project* directory (`projects/`). If it raises about a missing project, locate one with
 `ls /home/eabe/Research/MyRepos/JARVIS-HybridNet/projects` and pass `--jarvis-root`. Do not invent a project name.
