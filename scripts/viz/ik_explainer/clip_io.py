@@ -12,10 +12,17 @@ Everything else in the explainer is already mm.
 import csv
 import glob
 import os
+import sys
 from pathlib import Path
 
 import cv2
 import numpy as np
+
+# jarvis_jax is not pip-installed; the repo convention is an explicit path
+# insert (scripts/slurm_bout_array.py:55,390). camera_view_dirs needs it.
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+if str(_REPO_ROOT / "third_party" / "jarvis_jax") not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT / "third_party" / "jarvis_jax"))
 
 CLIP_DEFAULT = ("/data2/users/eabe/datasets/3d_tracking/clips/Session6/"
                 "2025_10_12_15_06_46")
@@ -78,7 +85,8 @@ def load_shipped_kp3d_mm(csv_path: str):
 
     Applies the only x0.1 (0.1 mm -> mm) conversion in this package.
     """
-    rows = list(csv.reader(open(csv_path)))
+    with open(csv_path) as fh:
+        rows = list(csv.reader(fh))
     names = [rows[0][i] for i in range(0, len(rows[0]), 4)]
     arr = np.array(
         [[np.nan if v in ("", "nan", "NaN") else float(v) for v in r]
@@ -101,7 +109,7 @@ def n_video_frames(path: str) -> int:
 
 
 def read_frames(path: str, indices) -> np.ndarray:
-    """Read the given frame indices (BGR uint8). Sequential-friendly."""
+    """Read the given frame indices (BGR uint8)."""
     cap = cv2.VideoCapture(path)
     out, want = [], sorted(set(int(i) for i in indices))
     pos = {}

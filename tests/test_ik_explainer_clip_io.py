@@ -85,3 +85,12 @@ def test_read_frames_returns_requested_frames():
     imgs = clip_io.read_frames(clip_io.video_path(CLIP, names[0]), [0, 5, 900])
     assert imgs.shape == (3, 448, 1936, 3)
     assert imgs.dtype == np.uint8
+
+
+def test_out_dirs_creates_the_layout_under_ik_explainer():
+    d = clip_io.out_dirs(CLIP)
+    assert set(d) == {"root", "predictions", "qc", "frames"}
+    assert d["root"] == Path(CLIP) / "ik_explainer"
+    for key in ("predictions", "qc", "frames"):
+        assert d[key].is_dir()
+        assert d[key].parent == d["root"]
