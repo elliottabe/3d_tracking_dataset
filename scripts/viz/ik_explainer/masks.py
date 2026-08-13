@@ -24,6 +24,29 @@ Also: `third_party/JARVIS-HybridNet` (this repo's submodule, used only for
 `import jarvis.*`) has NO `projects/` dir, so `jarvis_root` must point at the
 separate checkout that owns `projects/` -- passed explicitly below rather than
 relying on the `JARVIS_ROOT` env var.
+
+REQUIRED INTERPRETER: run this module with
+`/home/eabe/miniconda3/envs/sam3/bin/python`, NOT the `3d_tracking` env's
+python that runs every other stage of this plan. `3d_tracking`'s torch
+(2.11.0+cu130) cannot use CUDA on this workstation at all -- the installed
+driver (570.207) has a CUDA-12.8 ceiling, one major version short of what a
+cu130 wheel needs (`torch.cuda.is_available()` is False there, confirmed).
+`sam3`'s torch (2.7.0+cu126) is driver-compatible and `cuda_available=True`.
+(The `jarvis` env's torch is also cu128/driver-compatible, but its `cv2`
+fails to import there on a `CXXABI_1.3.15` mismatch, so it isn't an option.)
+This split is natural, not a hack: SAM3 is a separate PyTorch process, while
+every other stage in this plan is JAX, which works fine in `3d_tracking`
+because it uses `jax-cuda12-plugin` rather than torch's own CUDA. See
+`_require_cuda_torch` below, which fails fast rather than silently falling
+back to a CPU run that could take days.
+
+No `LD_PRELOAD`/`LD_LIBRARY_PATH` overrides were needed to run this in the
+`sam3` env (verified): torch there already finds its CUDA libraries under
+each `nvidia/<component>/lib` (e.g. `nvidia/cudnn/lib`, `nvidia/cublas/lib`)
+without help. This differs from the `3d_tracking` env's documented prelude
+(`LD_LIBRARY_PATH=.../nvidia/cu13/lib`), which exists because that env's
+nvidia wheels are the newer combined per-CUDA-major package layout -- a
+different packaging convention, not a sign that `sam3` needs the same fix.
 """
 import argparse
 import contextlib
@@ -50,6 +73,24 @@ from scripts.viz.ik_explainer import clip_io, prepare_clip   # noqa: E402
 # this is the separate checkout that does. See module docstring.
 JARVIS_ROOT_DEFAULT = "/home/eabe/Research/MyRepos/JARVIS-HybridNet"
 PROJECT_DEFAULT = "unified_V2_masked"
+SAM3_PYTHON = "/home/eabe/miniconda3/envs/sam3/bin/python"
+
+
+def _require_cuda_torch():
+    """Fail fast rather than let a CUDA-less torch silently fall back to a
+    CPU run that could take days -- see the module docstring for why this
+    module must run under the `sam3` conda env's interpreter, not
+    `3d_tracking`'s."""
+    import torch
+    if not torch.cuda.is_available():
+        raise RuntimeError(
+            f"SAM3 needs CUDA-capable torch; this interpreter "
+            f"({sys.executable}) has torch {torch.__version__} with "
+            f"cuda_available=False. Run this stage with "
+            f"{SAM3_PYTHON} -- the 3d_tracking env "
+            f"ships a cu130 build the 570.207 driver (CUDA 12.8 ceiling) "
+            f"cannot use."
+        )
 
 
 @contextlib.contextmanager
@@ -92,6 +133,7 @@ def run_masks(clip: str, *, limit_frames: int = 0, jarvis_root: str | None = Non
     for the duration of the call, with one built directly from this clip's
     staged calibration -- see `_repro_tool_from_staged_calib`.
     """
+    _require_cuda_torch()
     from jarvis_jax.predict.sam3_driver import run_sam3_masks
 
     d = clip_io.out_dirs(clip)
