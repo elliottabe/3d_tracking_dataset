@@ -604,6 +604,79 @@ and refuses to proceed if the 7 cameras disagree on frame count by >1."
 
 **This is the plan's main schedule risk** (spec Risk 1): SAM3 over 7 × 921 = 6,447 frames, cost unmeasured. Step 1 measures a 40-frame slice *before* committing to the full run.
 
+**Discovered prerequisite — SAM3 needs a JARVIS-format calibration dir.**
+
+`sam3_driver.run_sam3_masks` calls `get_repro_tool(cfg, <session_dir>/calibration)`
+(`sam3_driver.py:1358-1360`), and JARVIS's loader builds `calibPaths[cam] =
+"<cam>.yaml"` (`jarvis/utils/reprojection.py:152-156`). It requires **OpenCV
+FileStorage `Cam*.yaml` files with a `projectionMatrix` node holding the 3×4
+matrix** (`jarvis_jax/geometry/reprojection_tool.py:36-55`). This clip ships
+`Cam*_dlt.csv`, so SAM3 cannot read it as-is.
+
+The conversion is exact, not approximate: our 11 DLT coefficients ARE that 3×4
+matrix, rows `[L1..L4]`, `[L5..L8]`, `[L9,L10,L11,1]` — the same packing
+`clip_io.load_dlt` already does before transposing.
+
+Because `<CLIP>/calibration/` is read-only raw input, build a **staging session
+dir** instead, named so the session tag is preserved:
+
+```
+<CLIP>/ik_explainer/session/Session6/2025_10_12_15_06_46/
+    Cam*.mp4              -> symlinks to the 7 raw videos
+    calibration/Cam*.yaml -> written from the DLT csvs
+```
+
+`sam3_driver.session_tag_for` takes the last two path components, so this path
+yields `Session6/2025_10_12_15_06_46` — exactly the `fly_id` Task 3's
+`write_bouts_csv` already writes. No change to the bouts CSV is needed.
+
+Add to `clip_io.py`:
+
+```python
+def write_jarvis_calibration(clip: str, out_dir) -> list:
+    """DLT csvs -> OpenCV FileStorage Cam*.yaml with a `projectionMatrix` node.
+
+    JARVIS's get_repro_tool (jarvis/utils/reprojection.py:152) requires
+    Cam<id>.yaml; this clip ships Cam<id>_dlt.csv. The 3x4 matrix is the same
+    object either way, so this is a format change, not a recalibration.
+    """
+    import cv2
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    cam_mats, names = load_dlt(str(Path(clip) / "calibration"))
+    written = []
+    for M, name in zip(cam_mats, names):
+        P = np.asarray(M, np.float64).T                      # (4,3) -> (3,4)
+        path = out_dir / f"{name}.yaml"
+        fs = cv2.FileStorage(str(path), cv2.FILE_STORAGE_WRITE)
+        fs.write("projectionMatrix", P)
+        fs.release()
+        written.append(path)
+    return written
+
+
+def stage_session_dir(clip: str) -> Path:
+    """Build the JARVIS-shaped session dir SAM3 needs, without touching raw input.
+
+    Named <...>/Session6/<timestamp> so session_tag_for() yields the same tag
+    the bouts CSV already uses.
+    """
+    tag = str(clip).rstrip("/").split("/")[-2:]
+    root = out_dirs(clip)["root"] / "session" / tag[0] / tag[1]
+    root.mkdir(parents=True, exist_ok=True)
+    for src in sorted(Path(clip).glob("Cam*.mp4")):
+        link = root / src.name
+        if not link.exists():
+            link.symlink_to(src)
+    write_jarvis_calibration(clip, root / "calibration")
+    return root
+```
+
+**Verify the staging dir round-trips before running SAM3:** load it back with
+`ReprojectionTool(str(root / "calibration"))` and assert its `camera_matrices`
+match `clip_io.load_dlt`'s to within 1e-4. A silent format error here would
+place every crop on the wrong pixels.
+
 - [ ] **Step 1: Time a 40-frame pilot**
 
 Write `scripts/viz/ik_explainer/masks.py`:
@@ -635,7 +708,7 @@ from scripts.viz.ik_explainer import clip_io, prepare_clip   # noqa: E402
 
 
 def run_masks(clip: str, *, limit_frames: int = 0, jarvis_root: str | None = None,
-              project: str = "fly50"):
+              project: str = "red_data_unified"):
     """Run SAM3 over the clip's single bout. limit_frames>0 => pilot slice."""
     from jarvis_jax.predict.sam3_driver import run_sam3_masks
 
@@ -653,13 +726,14 @@ def run_masks(clip: str, *, limit_frames: int = 0, jarvis_root: str | None = Non
     t0 = time.time()
     manifest = run_sam3_masks(
         project=project,
-        session_dir=str(clip),
+        session_dir=str(clip_io.stage_session_dir(clip)),
         bouts_csv=str(bouts),
         out=str(out_dir),
         num_animals=1,
         reuse_masks=True,
         jarvis_root=jarvis_root or os.environ.get("JARVIS_ROOT"),
-        sam3={"text_prompt": "insect", "sam3_version": "sam3.1", "gpu_id": 0},
+        sam3={"text_prompt": "insect", "sam3_version": "sam3.1", "gpu_id": 0,
+              "compile": False},
         overlay=True, overlay_cams=3, overlay_frames=min(300, limit_frames or 300),
     )
     dt = time.time() - t0
