@@ -602,6 +602,21 @@ and refuses to proceed if the 7 cameras disagree on frame count by >1."
 - Consumes: `prepare_clip.write_bouts_csv`, `clip_io`.
 - Produces: `<CLIP>/ik_explainer/predictions/01_sam3_masks.npz` and `<CLIP>/ik_explainer/qc/01_masks.png`.
 
+**Run this stage with the `sam3` conda env's interpreter:**
+`/home/eabe/miniconda3/envs/sam3/bin/python`.
+
+Measured on this machine: the NVIDIA driver is **570.207** (CUDA 12.8 ceiling),
+but `3d_tracking` ships torch **2.11.0+cu130**, so `torch.cuda.is_available()`
+is **False** there and SAM3 cannot reach the GPU. JAX is unaffected (it uses
+`jax-cuda12-plugin`), which is why every other stage stays in `3d_tracking`.
+The `sam3` env has torch **2.7.0+cu126** with CUDA available, and imports
+`torch`, `cv2`, `numpy`, `yaml`, `huggingface_hub`, `sam3`, `jarvis` and
+`jarvis_jax` cleanly. Using it requires **no change to any environment**.
+
+`masks.py` must fail fast and loudly if run under an interpreter whose torch
+cannot see the GPU, naming the correct one — a silent CPU fallback would take
+days rather than minutes.
+
 **This is the plan's main schedule risk** (spec Risk 1): SAM3 over 7 × 921 = 6,447 frames, cost unmeasured. Step 1 measures a 40-frame slice *before* committing to the full run.
 
 **Discovered prerequisite — SAM3 needs a JARVIS-format calibration dir.**
