@@ -48,11 +48,13 @@ side-by-side):
    `qpos_root -> qpos_prod[anchor]` solve) and a merged Phase B/C
    (240-899: side-by-side for all 660 remaining frames, left = the MuJoCo IK
    render, right = the real camera frame). UNCHANGED by this merge: the
-   frame count (900 total, 660 in the merged phase), the playback wrap/hold
-   at the `frame_for_stills -> T-1 -> 0` seam (see PLAYBACK START below), and
-   the seam at f=240 -- only the panel LAYOUT during 240-899 changes (every
-   frame is now side-by-side, not just the last 120), never the frame's own
-   source-index mapping.
+   frame count (900 total, 660 in the merged phase) and the seam at f=240 --
+   only the panel LAYOUT during 240-899 changes (every frame is now
+   side-by-side, not just the last 120), never the frame's own source-index
+   mapping. **STALE as of TASK-24**: the playback wrap/hold this point
+   originally described (at the `frame_for_stills -> T-1 -> 0` seam, "see
+   PLAYBACK START below") no longer exists -- TASK-24 removed it entirely.
+   See the TASK-24 section below.
 4. **The right panel no longer reprojects the FK'd marker sites** (the old
    green dots, `clip_io.project` through the DLT). It now draws the
    DETECTOR's own 2D keypoints (`02_kp2d.npz`, already loaded as `kp2d`
@@ -106,22 +108,150 @@ mean ~8.5 px / max ~24 px). Colours/helpers are UNCHANGED from TASK-19
 (`kp_colors.jarvis_kp_colors`, `draw.draw_keypoints`/`draw.draw_leg_chains`,
 no `conf` dimming) -- only the SOURCE of `obs_uv` changes.
 
+TASK-24 (fixes the wrap/replayed-tail bug the user reported -- "why is there
+an added 10 seconds almost at the end of act 4? there is something that
+jumps around 41 seconds and it seems like the replay restarts?"; read this
+before touching PLAYBACK_ANCHOR, `t_for_output_frame`, or the "TWO PHASES" /
+"PLAYBACK START" sections below, both of which this task supersedes):
+
+MEASURED (in the fully assembled 1530-frame video, before this fix): Act 4
+begins at output frame 630 (21.0 s); Phase B/C playback begins at output
+frame 870 (29.0 s); the wrap `qpos_prod[920] -> qpos_prod[0]` fired at
+output frame 1208 (40.3 s) -- a REAL 2.021 model-unit root translation and
+39.3 deg heading change between consecutive rendered frames (typical
+frame-to-frame translation elsewhere in the same sequence: ~0.00273, so the
+wrap was ~740x a normal step). Everything after the wrap (10.7 s) was
+`qpos_prod[0:frame_for_stills]` playing a SECOND time, on top of frames the
+video had already shown once during Phase A/early Phase B -- this is the
+"added 10 seconds" and "replay restarts" the user saw.
+
+ROOT CAUSE: Phase A always interpolated `qpos_root -> qpos_prod[anchor]`
+where `anchor` was `06_stages.npz`'s own `frame_for_stills` (450). To keep
+the Phase A -> B boundary (f=239/240) continuous, the pre-TASK-24 playback
+was made to *start* at that same anchor (450) -- which forced it to WRAP
+`450 -> 920 -> 0 -> 449` to cover the whole 921-frame clip in one pass,
+producing both the 39.3 deg jump (at the wrap) and the replayed tail (the
+`0..449` stretch playing a second time, after already appearing once via the
+wrap's continuation).
+
+FIX: set the playback anchor to source frame 0 instead (`PLAYBACK_ANCHOR`
+below) -- NOT by editing `06_stages.npz`'s stored `frame_for_stills` (still
+450 there, left untouched; that field is a genuine, separate provenance
+fact -- see stage_ik.py's own `frame=frame_for_stills` root_optimization call
+-- not a free knob for this act to repoint). With `PLAYBACK_ANCHOR=0`:
+  - Phase A now interpolates `qpos_root -> qpos_prod[0]` (not `qpos_prod[450]`).
+    Measured (replacing the old 34.79 deg / 3.95 DOF-L2 numbers below, which
+    described the anchor=450 pair): `qpos_root -> qpos_prod[0]` rotates
+    **11.49 deg** with a **1.026** model-unit translation and a **3.77**
+    joint-DOF L2 delta -- still comfortably above the `root_pose_angle_deg
+    < 1.0` guard's threshold, so Act 4's "the orienting beat lives here"
+    premise still holds (measured, not assumed -- the guard asserts this at
+    runtime).
+  - Phase B/C playback runs source frames `0 -> 920` MONOTONICALLY (see
+    `t_for_output_frame` below) -- no wrap, no hold, no replayed tail. The
+    old `WRAP_HOLD_FRAMES`/wrap-arithmetic machinery is DELETED, not left
+    unreachable.
+  - Phase A's end (f=239, `qpos_prod[0]`/`kp_data_prod[0]`) and Phase B's
+    start (f=240, source frame 0) now render the IDENTICAL recorded qpos and
+    cloud target -- a real zero-gap match, since both sides are now anchored
+    at the same frame, by construction, not by coincidence.
+
+SANITY-CHECKED before rendering (per this task's own "measure before
+assuming" mandate): `qpos_prod[0]`'s pose was rendered and read directly --
+a normally postured, in-frame standing fly (all six legs articulated, wings
+folded, head/antennae markers in place; see the task-24 report for the
+image) -- and its production fit residual (0.0230 mm) sits inside the
+first-100-frame range (mean 0.0252 mm, 0.0200-0.0340 mm), i.e. an ordinary
+fit quality, not an outlier frame that would have been a reason to pick a
+different anchor.
+
+ALSO MEASURED, two further consequences of moving Phase A's target from
+frame 450 to frame 0 -- one required an actual fix (a), the other is
+reported as a known, out-of-scope side effect (b):
+  (a) Phase A is no longer close to a pure rotation. `qpos_root` is a
+      translation snapshot solved AT frame 450 (see stage_ik.py's
+      `root_optimization(..., frame=frame_for_stills)` call), so it sat
+      near `qpos_prod[450]`'s position by construction; it does NOT sit
+      near `qpos_prod[0]`'s position (a real ~1.03-model-unit gap -- the fly
+      walks during the clip). Phase A's live-recomputed residual now runs
+      1.041 -> 0.012 mm (was 0.118 -> 0.011 mm pre-TASK-24) -- a real,
+      substantially bigger swing, because Phase A now closes a genuine
+      translation gap in addition to the rotation it always closed.
+      TASK-24 CLIPPING FIX (found by rendering and looking, not assumed):
+      the FIRST version of this fix kept Phase A's camera lookat FROZEN at
+      `mesh_ctr_final` (`qpos_root`'s own FK centroid) for the whole act,
+      unchanged from pre-TASK-24 -- this was safe before because the OLD
+      anchor (450) kept the mesh's actual end-of-Phase-A position
+      near-coincident with `mesh_ctr_final` by construction. With the NEW
+      anchor (0), it is NOT: rendering and reading the frames directly
+      showed the mesh mask touching the canvas's LEFT edge from f~=200
+      onward, shrinking to a bounding box of x:[0,289] (out of 1920) by
+      f=239 -- exactly the "fly walks out of a frozen frame" failure this
+      module's own docstring already names as the trigger to stop and fix
+      rather than ship (see the CAMERA section and the task-24 report for
+      the frame that first surfaced this). FIX: `lookat` now eases
+      `mesh_ctr_final` (f=0) -> `mesh_ctr_anchor` (FK of `qpos_anchor`, f=239)
+      using the SAME smoothstep progress `p` already driving the qpos SLERP
+      -- not a separate schedule, so camera and content never disagree on
+      how far along Phase A is. This reproduces `mesh_ctr_final` EXACTLY at
+      p=0 (preserving the Act3->Act4 seam, unaffected) while properly
+      framing the mesh's true end position by p=1. Re-rendered and
+      re-checked after the fix: the mesh mask stays fully inside the canvas
+      at every frame sampled (f=0/50/100/150/200/220/230/239), never
+      touching an edge. See `_wide_camera_for_aspect`'s own docstring
+      ("Distance is LIVE") for the same residual numbers in that context.
+  (b) The Phase A->B camera-FORMULA gap (frozen `act3_frozen_camera` vs. the
+      live `_wide_camera_for_aspect`, previously measured pre-TASK-24 at
+      ~76 px mesh-centre shift / 1.18x area ratio at f=239/240, called out in
+      this task's own verification checklist as a "known separate issue")
+      changed after the clipping fix above: re-measured post-fix
+      (normalizing for task-19's side-by-side panel width so the f=239
+      full-1920 canvas and f=240 960-wide left panel are compared on equal
+      terms) at ~2 px mesh-centre shift / 1.93x area ratio -- the centre
+      shift actually IMPROVED (the eased lookat, ending exactly on the
+      mesh's true position, hands off to the live camera from a
+      well-centred point), while the area ratio is somewhat higher than the
+      old ~1.18x, attributable to the frozen camera's FIXED distance
+      (`ACT3_CAM_DISTANCE`=0.93) vs. the live camera's ADAPTIVE
+      spread-based distance -- these two distance FORMULAS simply don't
+      agree in general, independent of lookat. This remaining gap is
+      content-CONTINUOUS (f=239/f=240 render the identical qpos/cloud,
+      TASK-24's whole point) but camera-FORMULA-discontinuous, exactly the
+      pre-existing, explicitly out-of-scope category this task asked to be
+      reported on, not fixed.
+
+KNOWN, DELIBERATE LIMITATION -- Act 3 does NOT make the matching anchor
+change: see `act3_align.py`'s own TASK-24 section for why (in short: Act 3's
+static mesh, `qpos_root`, is a snapshot baked by `root_optimization(frame=
+450)` in `06_stages.npz` and cannot be moved to frame 0 without re-running
+that solve, which is out of scope here; measured and rendered directly,
+re-anchoring Act 3's skeleton target alone to frame 0 leaves the skeleton
+~1.04 model units from the static mesh at the "converged" hold, visibly
+never touching it -- worse than the problem it would fix). Act 3 therefore
+keeps reading `kp_data_prod[frame_for_stills]` (450) for its own skeleton
+target. Consequence: the Act3(f89) -> Act4(f0) MESH handoff remains exactly
+continuous (mesh is `qpos_root` on both sides regardless of anchor, so this
+is unaffected by anything above), but the KEYPOINT CLOUD/skeleton overlay
+shows a real, measured jump at that exact cut (the same ~1.04-model-unit gap)
+-- reported as a known trade-off, not silently patched over.
+
 This act carries the ORIENTING beat of the whole explainer. Act 3 covered
 scale + translation only: `root_optimization` measured 0.0000 deg of
 rotation (`TRUNK_OPTIMIZATION_KEYPOINTS` is empty in `configs/anatomy/v1.yaml`,
 so its keypoint-fit loss is uniformly zero; see `act3_align.py`'s docstring).
 ALL the rotation happens here, in `pose_optimization`. Measured on the
-PRODUCTION solve at `frame_for_stills=450` (the "anchor" frame, asserted at
-runtime, not just claimed): the quaternion rotates **34.79 deg** from
-`qpos_root` to `qpos_prod[anchor]`, and `qpos[7:]` (joint DOF) moves an L2
-norm of **3.95** -- simultaneously, from one full trajectory solve that also
-fit marker offsets (TASK-18: essentially unchanged from the pre-task-18
-34.73 deg / 2.74 measurement on the staged, non-offset `qpos_pose` -- not to
-be confused with the SMALLER 1.0595-model-unit / 26.02-deg gap between
-`qpos_prod[0]` and `qpos_prod[anchor]` used in PLAYBACK START below, a
-different pair of states). The first 240 frames of this act are where the fly
-visibly swings into its true heading AND its limbs snap onto the keypoints,
-together -- not two separate beats.
+PRODUCTION solve at the playback anchor (TASK-24: `PLAYBACK_ANCHOR=0`, source
+frame 0 -- previously `frame_for_stills=450`; asserted at runtime, not just
+claimed): the quaternion rotates **11.49 deg** from `qpos_root` to
+`qpos_prod[anchor]`, and `qpos[7:]` (joint DOF) moves an L2 norm of **3.77**
+(TASK-24: see the TASK-24 section above for how this replaces the pre-TASK-24
+34.79 deg / 3.95 measurement taken at the OLD anchor, 450 -- both numbers
+describe the same real solve, just at different frames; the SMALLER
+1.0595-model-unit / 26.02-deg gap the old "PLAYBACK START" section measured
+between `qpos_prod[0]` and `qpos_prod[anchor=450]` is now, with anchor=0,
+EXACTLY ZERO by construction -- see TASK-24 above). The first 240 frames of
+this act are where the fly visibly swings into its true heading AND its
+limbs snap onto the keypoints, together -- not two separate beats.
 
 The rotation is a real, per-frame solve, not a staged pose: root heading
 varies over the 921-frame production sequence (`qpos_prod`), so Phase B's
@@ -131,7 +261,9 @@ TWO PHASES (900 frames, 30 fps -> 30 s; TASK-19 merges the old Phase B/Phase
 C split into one side-by-side phase spanning the entire playback -- see the
 TASK-19 section above):
   0-239   (Phase A) qpos interpolates qpos_root -> qpos_prod[anchor] (the
-          production fit at the single `frame_for_stills`/anchor frame, 450),
+          production fit at the single `PLAYBACK_ANCHOR` frame -- TASK-24:
+          source frame 0, previously `frame_for_stills`=450; see the TASK-24
+          section above),
           quaternion SLERPed (`_slerp_qpos`, reused unmodified from
           `act3_align.py` -- it was written there specifically so this act's
           real rotation would have a SLERP, not a lerp, ready for it). The
@@ -155,13 +287,16 @@ TASK-19 section above):
           solve) plays back, continuously mapped onto these 660 output
           frames (same `t = round(rel * (T-1) / REL_MAX)` style Act 1 uses
           to span a longer source clip onto fewer output frames), starting
-          at `frame_for_stills` (the anchor) and WRAPPING back around through
-          the end of the clip -- `frame_for_stills -> T-1 -> 0 ->
-          frame_for_stills-1` -- instead of starting at source frame 0 (see
-          PLAYBACK START below for why), with `WRAP_HOLD_FRAMES` held on the
-          last source frame at the wrap. UNCHANGED by task-19: the frame
-          count (660), the source-frame mapping/wrap/hold, and the seam at
-          f=240. CHANGED by task-19 (presentation only): every one of these
+          at `PLAYBACK_ANCHOR` (source frame 0) and running MONOTONICALLY
+          through to source frame T-1 -- TASK-24 removed the wrap/hold this
+          paragraph previously described (`frame_for_stills -> T-1 -> 0 ->
+          frame_for_stills-1`, see the now-superseded "PLAYBACK START"
+          section below) entirely: with the anchor at 0, playback already
+          starts where the clip itself starts, so there is nothing left to
+          wrap around. UNCHANGED by task-19: the frame count (660) and the
+          seam at f=240 (now a true zero-gap match, not merely
+          camera-matched -- see TASK-24 above). CHANGED by task-19
+          (presentation only): every one of these
           660 frames, not just the closing 120, is now drawn side-by-side --
           left is the mesh+cloud render (narrower, 960 px wide, the SAME
           `_wide_camera_for_aspect` live camera the old Phase B rendered at
@@ -197,7 +332,16 @@ tolerance against the same DLTs) -- confirming `site_xpos / shared_scale` is
 the right quantity to feed `clip_io.project`, not `site_xpos` itself.
 
 PLAYBACK START (task-17 follow-up -- NOT a camera fix; TASK-18 re-measured
-this on the production arrays, see below): the first attempt at a seamless
+this on the production arrays, see below) -- **SUPERSEDED BY TASK-24**: this
+whole section (through "Two honest options" below) is kept as a historical
+record of the wrap/hold design TASK-24 REMOVES, not a description of current
+behaviour -- `WRAP_HOLD_FRAMES`, the wrap arithmetic, and the "moves the
+discontinuity" analysis below no longer exist in the code (see the TASK-24
+section above for why: anchoring Phase A's target AND Phase B's playback
+start at the SAME frame, 0, removes the original Phase A->B gap this section
+describes INSTEAD of moving it elsewhere, so there is no discontinuity left
+to wrap around or hold through). Read this only to understand why the wrap
+existed in the first place: the first attempt at a seamless
 Act3/Act4 cut matched the CAMERA at f=0-239 but left the Phase A->B seam
 (f=239/f=240) mismatched, because Phase B started playback at source frame 0
 while Phase A always ends its interpolation at `qpos_prod[frame_for_stills]`
@@ -250,6 +394,8 @@ below implements this by inserting `WRAP_HOLD_FRAMES` extra logical slots at
 the wrap point in the same rel->logical->source-frame mapping, rather than
 changing the total frame budget, spacing scheme, or anything upstream of it.
 
+--- END of the TASK-24-superseded "PLAYBACK START" record above. ---
+
 CAMERA (mesh panels): reuses `act3_align._wide_camera` (never the model's
 `hero` camera, which frames the mesh only and drops the far-away keypoint
 cloud out of view) for lookat/distance construction; azimuth/elevation are
@@ -257,18 +403,37 @@ FIXED at `act3_align.AZ_START`/`ELEV` (120/-20 deg) for the whole act,
 continuing Act 3's own fixed values so the two acts don't visually "jump"
 cameras at the cut, and -- as in Act 3 -- so a moving VIEWER azimuth is never
 misread as the mesh itself rotating, which matters even more here since the
-mesh really DOES rotate 34.79 deg on its own (TASK-18: measured `qpos_root`
--> `qpos_prod[anchor]`, essentially unchanged from the pre-task-18 34.73 deg
-measurement).
+mesh really DOES rotate 11.49 deg on its own (TASK-24: measured `qpos_root`
+-> `qpos_prod[anchor]` at the current `PLAYBACK_ANCHOR=0`; the pre-TASK-24
+anchor, 450, measured 34.79 deg for the same `qpos_root -> qpos_prod[anchor]`
+pair -- both are real measurements of the same solve, just at different
+anchor frames; see the TASK-24 section above).
 
 Distance is LIVE here (recomputed every frame), a DELIBERATE difference from
 Act 3's post-review fix (checked explicitly, not assumed -- see the task-11
 review this act inherited: a live per-frame distance there was CANCELLING an
 intentional cloud-size reveal, since the camera zoomed in exactly as fast as
-the cloud shrank). Act 4 has no analogous reveal: Phase A is a pure rotation
-(mesh/cloud stay near-coincident throughout -- live-recomputed residual
-0.118->0.011 mm, TASK-18 -- so live vs. frozen spread is nearly identical
-there anyway), and Phases B/C
+the cloud shrank). Act 4 has no analogous reveal: Phase A was, pre-TASK-24,
+close to a pure rotation (mesh/cloud stayed near-coincident throughout --
+live-recomputed residual 0.118->0.011 mm at the old anchor, 450 -- so live
+vs. frozen spread was nearly identical there anyway). **TASK-24 UPDATE**:
+with `PLAYBACK_ANCHOR=0`, Phase A now ALSO closes a real ~1.03-model-unit
+translation gap (`qpos_root`, a snapshot solved at frame 450, does not sit
+near `qpos_prod[0]`'s position the way it sat near `qpos_prod[450]`'s) --
+measured live-recomputed residual is now **1.041 -> 0.012 mm** over the same
+240 frames, a much bigger swing than the pre-TASK-24 number, because Phase A
+is no longer purely rotational: it now visibly repositions the mesh too.
+Rendered and checked directly (not assumed from the residual alone): the
+FIRST version of this fix kept Phase A's camera `lookat` frozen at
+`mesh_ctr_final` for the whole act (unchanged from pre-TASK-24) and this
+~1-unit world-space displacement turned out NOT to run harmlessly along the
+viewing axis -- it left the mesh mask touching the canvas's LEFT edge from
+f~=200 onward, clipped to a x:[0,289] bounding box by f=239. See the
+"TASK-24 CLIPPING FIX" paragraph above (and `_wide_camera_for_aspect`'s own
+docstring, below) for the fix: `lookat` now eases `mesh_ctr_final` (f=0) ->
+`mesh_ctr_anchor` (f=239) via the qpos SLERP's own progress `p`. Re-checked
+after the fix: the mesh mask stays fully inside the canvas at every frame
+sampled (f=0/50/100/150/200/220/230/239), never touching an edge. Phases B/C
 play back 921 frames of REAL fly motion, where adaptive per-frame framing is
 the wide camera's actual job (a single frozen distance sized for one part of
 the clip could crop a wide leg swing elsewhere, or leave a compact pose
@@ -307,13 +472,34 @@ camera UNMODIFIED -- not eased in from the frozen value. An eased hand-off
 over the first ~30 frames of Phase B) was tried FIRST, per this task's own
 "hold through Phase A, ease over the first second of Phase B" suggestion,
 and rejected after measuring and LOOKING at the result, not on suspicion:
-`qpos_prod[anchor]` (frame_for_stills=450, what f=239 renders) and
-`qpos_prod[0]` (playback's own first real frame, what f=240 renders) differ
-by a REAL 1.0595 model-unit root translation and 26.02 deg of rotation
-(TASK-18: measured on `qpos_prod`) -- Phase A solves toward
-one specific mid-clip frame while Phase B immediately starts playing back
-the trajectory from t=0, a genuine content discontinuity in the DATA, not an
-artifact of this fix. A camera that is still mostly at the FROZEN value
+at the time (pre-TASK-24, anchor=`frame_for_stills`=450), `qpos_prod[anchor]`
+(what f=239 rendered) and `qpos_prod[0]` (playback's own first real frame,
+what f=240 rendered) differed by a REAL 1.0595 model-unit root translation
+and 26.02 deg of rotation (TASK-18: measured on `qpos_prod`) -- Phase A
+solved toward one specific mid-clip frame while Phase B immediately started
+playing back the trajectory from t=0, a genuine content discontinuity in the
+DATA, not an artifact of this fix.
+
+**TASK-24 UPDATE**: with `PLAYBACK_ANCHOR=0`, `qpos_prod[anchor]` IS
+`qpos_prod[0]` -- the content discontinuity this paragraph measured is now
+EXACTLY ZERO, not merely smaller (see the TASK-24 section above). This does
+NOT reopen the eased-camera question, though: the decision below (resume the
+live camera unmodified, no easing) is kept as-is, because a SEPARATE,
+camera-FORMULA discontinuity remains at this exact cut regardless of content
+-- Phase A renders with the FROZEN `act3_frozen_camera` (matching Act 3's own
+camera exactly) while Phase B renders with the LIVE `_wide_camera_for_aspect`
+formula, and those two formulas do not, in general, agree even when pointed
+at the identical mesh/cloud. This frozen-vs-live camera FORMULA gap
+(previously measured, pre-TASK-24, at ~76 px mesh-centre shift / 1.18x area
+ratio at f=239/240) is a KNOWN, SEPARATE issue, explicitly out of scope for
+this task -- re-measured after TASK-24 to confirm it is still just that (see
+the task-24 report). The rest of this section's reasoning (why an eased
+hand-off was rejected in favour of an abrupt live-camera resume) is otherwise
+UNCHANGED: even with zero content discontinuity, an ease would still spend
+its first several frames looking at Phase B's already-adaptive content
+through Phase A's frozen lookat/distance, which is exactly what previously
+produced the clipped-frame failure below. A camera that is still mostly at
+the FROZEN value
 (as any smooth ease necessarily is for its first several frames, by
 construction -- `e` starts at 0 at f=240 no matter how short the window) has
 to view that already-relocated content through the OLD, un-adapted
@@ -369,9 +555,12 @@ task-19 are not reinstated (task-19's colour-matched design is kept;
 only the point SOURCE reverts).
 
 EXPECTATION: by f=239 the mesh's limbs lie along the keypoint chains and the
-body has visibly rotated from Act 3's ending heading; residual (live-
-recomputed, no offset applied to the rendered sites, printed to the console
--- not shown on screen since task-19) reads ~0.011 mm. Through 240-899 (all
+body has visibly rotated (and, since TASK-24, repositioned) from Act 3's
+ending heading/position; residual (live-recomputed, no offset applied to
+the rendered sites, printed to the console -- not shown on screen since
+task-19) reads ~0.012 mm (TASK-24: starting from ~1.041 mm at f=0, not the
+pre-TASK-24 ~0.118 mm -- see the "Distance is LIVE" section above for why
+the starting gap grew). Through 240-899 (all
 side-by-side since task-19), `resid_prod_mm` (the real, offset-adjusted
 production fit quality, still printed) stays in its measured ~0.014-0.041 mm
 range, tarsal tips TRACK the observed keypoints through leg swing -- the mesh
@@ -458,12 +647,24 @@ PHASE_A_END = 239                 # inclusive: qpos_root -> qpos_prod[anchor], o
 # side-by-side phase (see module docstring's TASK-19 section); there is no
 # longer an internal boundary within it to name.
 
+# TASK-24 (see module docstring's TASK-24 section for the full story): the
+# playback ANCHOR -- the single production-solve frame Phase A interpolates
+# TO, and the frame Phase B/C playback STARTS from -- is now hardcoded to
+# source frame 0, deliberately overriding `06_stages.npz`'s own
+# `frame_for_stills` (450, left un-edited in that file -- see below and the
+# TASK-24 docstring section for why). With the anchor at 0, playback's
+# `rel -> source index` mapping (below) runs 0 -> T-1 monotonically with NO
+# wrap and NO hold: the two are no longer needed at all, and are removed
+# (not left unreachable) from this module.
+PLAYBACK_ANCHOR = 0
+
 XML_PATH = _REPO / "models" / "fruitfly_v1" / "fruitfly_v1_free.xml"
 
 # Continuous t-mapping for the whole merged 240-899 side-by-side phase, so it
-# never skips or repeats time: rel=0 at f=240 maps to source frame 0 (before
-# the frame_for_stills offset/wrap below is applied), rel=REL_MAX at f=899
-# maps to the clip's last frame.
+# never skips or repeats time: rel=0 at f=240 maps to source frame
+# PLAYBACK_ANCHOR (0), rel=REL_MAX at f=899 maps to the clip's last frame
+# (T-1). TASK-24: since the anchor IS 0, this mapping needs no offset/wrap
+# any more -- rel maps directly onto the source index.
 REL_MAX = (N_OUT - 1) - (PHASE_A_END + 1)   # 899 - 240 = 659
 
 # Chosen for the closing 2-up: brief names Cam2012862/Cam2012630 as reading
@@ -497,10 +698,18 @@ def _wide_camera_for_aspect(mesh_ctr, cloud_pts, model_extent, azimuth, aspect):
     LIVE per-frame distance there exactly cancelled an intentional cloud-SIZE
     reveal (the camera zoomed in as fast as the cloud shrank, so the shrink
     never became visible on screen). Act 4 has no analogous reveal to hide:
-    Phase A is a pure ROTATION (residual stays tiny -- 0.118->0.011 mm,
-    live-recomputed, TASK-18 -- throughout, so mesh/cloud spread is already
-    near-constant; a live-vs-
-    frozen distance makes no visible difference for a rotation), and Phases
+    Phase A was, pre-TASK-24, close to a pure ROTATION (residual stayed tiny
+    -- 0.118->0.011 mm, live-recomputed, TASK-18 -- throughout, so mesh/cloud
+    spread was already near-constant); TASK-24 makes Phase A close a real
+    ~1.03-model-unit translation too (residual now 1.041->0.012 mm -- see the
+    module docstring's "Distance is LIVE" section), so `cam_spread` is no
+    longer near-constant across Phase A the way it was pre-TASK-24 -- this
+    function's LIVE-recompute design (never frozen) already accommodates that
+    correctly; nothing here needed to change, only this comment. Live-vs-
+    frozen distance still makes little visible difference within any single
+    frame (both would size markers similarly for that instant); it is the
+    across-frame LIVE recompute, already present, that keeps up with the
+    now-larger swing, and Phases
     B/C play back the fly's REAL trajectory over 921 frames, where adaptive
     framing is the wide camera's actual job (a single frozen distance sized
     for one part of the clip could crop a wide leg-swing elsewhere, or leave
@@ -578,10 +787,19 @@ def render_act4(clip: str = clip_io.CLIP_DEFAULT, start_frame: int = 0) -> Path:
             "keypoint orders (CLAUDE.md's keypoint-order bug class).")
 
     T = qpos_prod.shape[0]
-    anchor = frame_for_stills
+    # TASK-24: the playback anchor is now PLAYBACK_ANCHOR (source frame 0),
+    # NOT 06_stages.npz's own `frame_for_stills` (450, read above and still
+    # printed below for provenance -- that file is deliberately left
+    # unedited). Anchoring Phase A's interpolation target AND Phase B/C's
+    # playback start at the SAME frame 0 is what removes the wrap: see
+    # module docstring's TASK-24 section.
+    anchor = PLAYBACK_ANCHOR
     if not (0 <= anchor < T):
-        raise ValueError(f"frame_for_stills={anchor} out of range for production T={T}")
+        raise ValueError(f"PLAYBACK_ANCHOR={anchor} out of range for production T={T}")
     qpos_anchor = qpos_prod[anchor]
+    print(f"[act4] TASK-24: playback anchor = PLAYBACK_ANCHOR={anchor} (source frame 0) -- "
+          f"06_stages.npz's own frame_for_stills={frame_for_stills} is UNRELATED to playback "
+          f"since TASK-24 (kept only as Act 3's mesh-solve provenance; see module docstring)")
 
     # Per-frame production fit residual (mm): |marker_sites - kp_data|,
     # mean over the 50 sites -- the REAL, offset-adjusted fit quality the
@@ -693,81 +911,86 @@ def render_act4(clip: str = clip_io.CLIP_DEFAULT, start_frame: int = 0) -> Path:
           f"unmodified at f={PHASE_A_END + 1} (see module docstring's CAMERA "
           f"section for why an eased hand-off was tried and reverted)")
 
+    # TASK-24 (see module docstring's TASK-24 CLIPPING FIX section): with
+    # PLAYBACK_ANCHOR=0, Phase A's mesh travels ~1.03 model units from
+    # qpos_root's position toward qpos_anchor's -- a REAL, measured,
+    # RENDERED consequence (not assumed): keeping Phase A's camera lookat
+    # frozen at `mesh_ctr_final` (qpos_root's own centroid) for the WHOLE
+    # act, as task-17 originally set it up, leaves the mesh clipped against
+    # the canvas's LEFT edge for the closing ~40 frames (measured: mesh mask
+    # touches x=0 from f~=200 onward, bounding box shrinking to x:[0,289] by
+    # f=239) -- the exact "fly walks out of a frozen frame" failure this
+    # module's own docstring already names as the trigger to stop and fix
+    # rather than ship. `mesh_ctr_anchor` (FK of `qpos_anchor`, the mesh's
+    # OWN true position at Phase A's end) is computed here so the render
+    # loop can EASE the lookat from `mesh_ctr_final` (f=0, matching Act 3
+    # exactly -- preserves the Act3->Act4 seam) to `mesh_ctr_anchor` (f=239,
+    # properly centred on where the mesh actually ends up) using the SAME
+    # smoothstep progress `p` that already drives the qpos interpolation --
+    # not a separately-tuned ease curve, so the camera and the mesh always
+    # agree on "how far along" Phase A is.
+    d_anchor_ref = mujoco.MjData(mj_model)
+    d_anchor_ref.qpos[:] = qpos_anchor
+    mujoco.mj_forward(mj_model, d_anchor_ref)
+    mesh_ctr_anchor = np.asarray(d_anchor_ref.site_xpos[body_site_idxs]).mean(axis=0)
+    print(f"[act4] TASK-24: Phase A lookat eases mesh_ctr_final={mesh_ctr_final} "
+          f"(f=0, matches Act 3 exactly) -> mesh_ctr_anchor={mesh_ctr_anchor} "
+          f"(f={PHASE_A_END}, the mesh's own FK centroid at qpos_anchor) via the "
+          f"same progress `p` as the qpos SLERP -- distance/azimuth/elevation "
+          f"stay the fixed {ACT3_CAM_DISTANCE}/{AZ_START}/{ELEV} throughout, "
+          f"only lookat eases; gap={float(np.linalg.norm(mesh_ctr_anchor - mesh_ctr_final)):.4f} "
+          f"model units (this is why the frozen lookat alone clipped the mesh)")
+
     # --- side-by-side prerequisites: smoothed crop centring + real video ---
     # frames (task-19: needed for the WHOLE 240-899 merged phase now, not
     # just the old closing Phase C).
     x0_full = _smoothed_crop_x0(kp2d[:, cam2up_idx], SRC_FRAME_W)   # (T,)
 
-    # Task-17 follow-up: playback starts at `frame_for_stills` (the anchor),
-    # not source frame 0, and wraps around through T-1 back to
-    # `frame_for_stills - 1` -- see module docstring's PLAYBACK START section
-    # for why (Phase A ends EXACTLY on `qpos_prod[anchor]`; starting Phase B
-    # at t=0 instead left a real, measured qpos jump at f=240 that no camera
-    # fix could remove, since it wasn't a camera problem). TASK-18: this now
-    # measures on the PRODUCTION `qpos_prod` (1.0595 model-unit translation /
-    # 26.02 deg rotation between `qpos_prod[0]` and `qpos_prod[anchor]`) --
-    # essentially unchanged from the pre-task-18 06_stages.npz-based gap
-    # (1.06 model units / ~25 deg) since both describe the same clip.
-    #
-    # Measured after wrapping (not assumed): the NEW seam this creates, where
-    # source frame T-1 meets source frame 0, is a REAL 2.02 model-unit/39.3
-    # deg qpos gap (measured on `qpos_prod`, task-18 -- essentially unchanged
-    # from the pre-task-18 2.02/38.5 measurement) -- larger than the gap this
-    # fix removes. Looked at the rendered result
-    # directly: the mesh stays correctly framed on both sides (the live
-    # camera re-centres regardless of pose, unlike the frozen-vs-live
-    # mismatch the Act3/Act4 cut had), but the pose itself visibly snaps.
-    # Chosen mitigation: hold on source frame T-1 for `WRAP_HOLD_FRAMES`
-    # output frames before continuing from source frame 0, rather than
-    # truncating playback to end at T-1 (which would drop source frames
-    # 0..frame_for_stills-1 -- nearly half the real trajectory -- from the
-    # video entirely). The hold repeats an already-real, recorded frame
-    # (`qpos_prod[T-1]` itself); nothing is invented, and all 921 source
-    # frames still appear somewhere in the output.
-    WRAP_HOLD_FRAMES = 15   # 0.5 s @ 30 fps
-
-    _wrap_lin = T - frame_for_stills   # lin value at which the source index wraps
-    _logical_max = (T - 1) + WRAP_HOLD_FRAMES
-
-    def _logical_for_output_frame(f: int) -> int:
-        rel = f - (PHASE_A_END + 1)
-        return int(round(rel * _logical_max / REL_MAX))
-
+    # TASK-24 (replaces the old "Task-17 follow-up" wrap/hold entirely -- see
+    # module docstring's TASK-24 section for the bug report and root cause):
+    # playback now starts at PLAYBACK_ANCHOR (source frame 0) and runs
+    # MONOTONICALLY through to source frame T-1, with NO wrap and NO hold.
+    # This is possible only because Phase A's interpolation target is ALSO
+    # PLAYBACK_ANCHOR (`qpos_anchor = qpos_prod[PLAYBACK_ANCHOR]` above) --
+    # Phase A's last frame (f=239) and Phase B's first frame (f=240) now
+    # render the IDENTICAL recorded qpos/cloud (`qpos_prod[0]`/
+    # `kp_data_prod[0]`), a real zero-gap match, not just a close one:
+    # previously (anchor=frame_for_stills=450) this was a REAL, measured
+    # 1.0595 model-unit / 26.02 deg gap that motivated the old wrap in the
+    # first place, and wrapping around to close THAT gap created a WORSE one
+    # (2.02 model units / 39.3 deg) where source frame T-1 met source frame 0
+    # roughly 2/3 of the way through playback -- this was the jump/"restart"
+    # the user reported. Anchoring both ends at 0 removes the original gap
+    # by construction instead of moving it elsewhere, so there is no
+    # remaining discontinuity to wrap around or hold through.
     def t_for_output_frame(f: int) -> int:
-        logical = _logical_for_output_frame(f)
-        if logical < _wrap_lin:
-            lin = logical
-        elif logical < _wrap_lin + WRAP_HOLD_FRAMES:
-            lin = _wrap_lin - 1                    # hold at source frame T-1
-        else:
-            lin = logical - WRAP_HOLD_FRAMES        # resume from source frame 0
-        return (frame_for_stills + lin) % T
+        """Direct (unwrapped) source-frame index for output frame `f` in the
+        merged 240-899 side-by-side phase: source frame PLAYBACK_ANCHOR (0)
+        at f=240, source frame T-1 at f=899, monotonically increasing in
+        between -- the same `rel -> round(rel * (T-1) / REL_MAX)` style
+        Act 1 uses for compressing a longer source clip onto fewer output
+        frames. All 921 source frames still appear somewhere in the output
+        (nearby output frames may round to the same source index under this
+        660-into-921 compression, but the index never repeats a frame it
+        already skipped PAST, and never goes backward)."""
+        rel = f - (PHASE_A_END + 1)
+        return int(round(rel * (T - 1) / REL_MAX))
 
-    logical_playback = np.array(
-        [_logical_for_output_frame(f) for f in range(PHASE_A_END + 1, N_OUT)])
-    assert np.all(np.diff(logical_playback) >= 0), (
-        "playback's underlying logical index must be non-decreasing (the "
-        "wrap-around offset/hold is applied AFTER this check, so this still "
-        "catches any real mapping-arithmetic regression)")
     t_playback = np.array([t_for_output_frame(f) for f in range(PHASE_A_END + 1, N_OUT)])
-    assert t_playback[0] == frame_for_stills, (
-        f"Phase B must start exactly at frame_for_stills ({frame_for_stills}) "
-        f"so it picks up exactly where Phase A's qpos_prod[anchor] left off; "
-        f"got {t_playback[0]}")
-    _wrap_idx = np.nonzero(np.diff(t_playback) < 0)[0]
-    assert len(_wrap_idx) == 1, (
-        f"expected exactly one wrap-around in the reordered playback, found "
-        f"{len(_wrap_idx)}")
-    _wrap_out_frame = (PHASE_A_END + 1) + int(_wrap_idx[0])
-    _hold_len = int(np.sum(t_playback == T - 1))
-    print(f"[act4] Phase B/C playback reordered to start at frame_for_stills="
-          f"{frame_for_stills} (matches qpos_prod[anchor] exactly -- zero jump "
-          f"at f={PHASE_A_END + 1}), wraps {frame_for_stills}->{T - 1}->0->"
-          f"{frame_for_stills - 1} over {len(t_playback)} output frames, "
-          f"holding {_hold_len} output frames on source frame {T - 1} at the "
-          f"wrap (requested WRAP_HOLD_FRAMES={WRAP_HOLD_FRAMES}); wrap point is "
-          f"at output frame {_wrap_out_frame}/{_wrap_out_frame + 1} "
-          f"(source {t_playback[_wrap_idx[0]]}->{t_playback[_wrap_idx[0] + 1]})")
+    assert np.all(np.diff(t_playback) >= 0), (
+        "playback source-frame index must be non-decreasing -- any decrease "
+        "would mean a wrap has crept back in (TASK-24 removed it deliberately)")
+    assert t_playback[0] == PLAYBACK_ANCHOR == 0, (
+        f"Phase B must start exactly at PLAYBACK_ANCHOR (0) so it picks up "
+        f"exactly where Phase A's qpos_prod[anchor] left off; got {t_playback[0]}")
+    assert t_playback[-1] == T - 1, (
+        f"Phase B/C must play through to the clip's last source frame "
+        f"(T-1={T - 1}); got {t_playback[-1]}")
+    print(f"[act4] TASK-24: Phase B/C playback runs source frame "
+          f"{t_playback[0]} -> {t_playback[-1]} monotonically over "
+          f"{len(t_playback)} output frames -- no wrap, no hold, no replayed "
+          f"tail; Phase A's last frame and Phase B's first frame render the "
+          f"identical qpos_prod[0]/kp_data_prod[0] (zero-gap handoff)")
 
     # TASK-19: video is now preloaded for the ENTIRE merged side-by-side phase
     # (all 660 frames of `t_playback`, f=240..899) rather than just the old
@@ -849,7 +1072,11 @@ def render_act4(clip: str = clip_io.CLIP_DEFAULT, start_frame: int = 0) -> Path:
             # only their on-screen caption. See module docstring's TASK-19
             # section.
             if (f + 1) % 25 == 0 or f == start_frame:
-                print(f"[act4] wrote frame {f} ({phase}) t_src={t_src} "
+                # TASK-24: t_src now truthfully counts the SOURCE frame
+                # (0..T-1==920, monotonic, no wrap) -- print it against T-1
+                # so this progress line doubles as the "source frame N/920"
+                # counter (no wrap/hold artifacts left to describe).
+                print(f"[act4] wrote frame {f} ({phase}) t_src={t_src}/{T - 1} "
                       f"residual={resid:.4f} mm ({time.time() - t0:.1f}s elapsed)",
                       flush=True)
 
@@ -859,15 +1086,36 @@ def render_act4(clip: str = clip_io.CLIP_DEFAULT, start_frame: int = 0) -> Path:
                     mesh_ctr, cloud_pts, mj_model.stat.extent, AZ_START, aspect)
                 # Task-17: Phase A no longer uses the live camera computed
                 # above for FRAMING (only `spread`, still live, for marker/
-                # bone sizing) -- it renders with the EXACT frozen camera
-                # Act 3's last frame used, so the Act3->Act4 cut does not
-                # jump. The merged BC phase resumes this SAME live `cam`
-                # unmodified -- see module docstring's CAMERA section for why
-                # an eased (rather than immediate) hand-off was tried and
-                # reverted: measured directly, it left the mesh clipped
-                # against the frame's left edge for a visible stretch of
-                # playback.
-                cam = act3_frozen_camera(mesh_ctr_final)
+                # bone sizing) -- it renders with `act3_frozen_camera`, the
+                # SAME distance/azimuth/elevation Act 3's last frame used, so
+                # the Act3->Act4 cut does not jump. The merged BC phase
+                # resumes the live `cam` (computed above) unmodified -- see
+                # module docstring's CAMERA section for why an eased (rather
+                # than immediate) hand-off was tried and reverted AT THAT
+                # SEAM: measured directly, it left the mesh clipped against
+                # the frame's left edge for a visible stretch of playback.
+                #
+                # TASK-24 CLIPPING FIX (a DIFFERENT eased hand-off than the
+                # one above -- this one is INTERNAL to Phase A, not at the
+                # Phase A/B seam): `lookat` now eases mesh_ctr_final (f=0) ->
+                # mesh_ctr_anchor (f=239) via the SAME `p` already driving
+                # the qpos SLERP, rather than staying frozen at
+                # `mesh_ctr_final` for all 240 frames. Measured, rendered,
+                # and required: with PLAYBACK_ANCHOR=0, the mesh's own true
+                # position at Phase A's end (`qpos_anchor`) is ~1.03 model
+                # units from `mesh_ctr_final` (unlike the pre-TASK-24 anchor,
+                # 450, which was near-coincident with it) -- a frozen lookat
+                # left the mesh mask touching the canvas's left edge from
+                # f~=200 onward, clipped to bbox x:[0,289] by f=239 (see
+                # module docstring's TASK-24 CLIPPING FIX section). Easing
+                # with the qpos's OWN progress `p` (not a separate schedule)
+                # keeps camera and content in lockstep throughout, and still
+                # reproduces `mesh_ctr_final` EXACTLY at p=0 (f=0), so the
+                # Act3->Act4 seam this task's own verification requires is
+                # unaffected. distance/azimuth/elevation are UNCHANGED
+                # (still the fixed ACT3_CAM_DISTANCE/AZ_START/ELEV).
+                lookat_a = (1.0 - p) * mesh_ctr_final + p * mesh_ctr_anchor
+                cam = act3_frozen_camera(lookat_a)
                 marker_r = max(spread * 0.03, mj_model.stat.extent * 0.006)
                 bone_r = marker_r * BONE_RADIUS_FRACTION
 

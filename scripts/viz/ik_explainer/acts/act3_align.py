@@ -215,7 +215,53 @@ swap changes PROVENANCE (what array is read) without changing what is drawn
 in any visually meaningful way. It does guarantee exact equality with Act 4's
 own opening frame (both now read the identical `kp_data[frame_for_stills]`),
 which the previous `04_kp3d_filt.npz`-sourced cloud only matched to that same
-~0.002 mm noise floor.
+~0.002 mm noise floor. **STALE as of TASK-24**: Act 4's opening frame no
+longer reads `kp_data[frame_for_stills]` -- see the TASK-24 section
+immediately below for why this act does NOT follow it there.
+
+TASK-24 (`act4_solve.py` fixed a wrap/replayed-tail bug the user reported in
+Act 4's playback -- read `act4_solve.py`'s own TASK-24 section first for the
+full bug report; this section covers ONLY its consequence for Act 3, which
+does NOT change as a result): the fix re-anchors Act 4's Phase A target and
+Phase B playback start from `frame_for_stills` (450) to source frame 0
+(`act4_solve.PLAYBACK_ANCHOR`). Act 4's own docstring argues this act's
+skeleton target should, in principle, move to the same anchor for a
+perfectly seamless keypoint-cloud handoff at the Act3->Act4 cut. **This act
+deliberately does NOT make that change**, for a measured, rendered reason:
+
+This act's MESH (`qpos_root`, above) is a snapshot baked by
+`stage_ik.py`'s `root_optimization(..., frame=frame_for_stills)` call --
+i.e. `qpos_root` is itself a fit SPECIFICALLY to frame 450's keypoints, not
+a frame-independent "root only" pose. Re-pointing only the SKELETON target
+to `kp_data_prod[0]` while leaving `qpos_root` as-is (it cannot be
+re-solved at frame 0 without re-running the actual STAC optimization --
+out of scope for a playback bugfix, and would invalidate the many other
+measured numbers this module's docstring and `residual_root`/`residual_mm`
+depend on) was tried and rendered before deciding against it, not assumed
+bad: `mesh_ctr_final` (FK of `qpos_root`) sits at
+`[1.634, 0.250, 0.198]`; `C_true` computed from `kp_data_prod[0]` instead of
+`kp_data_prod[450]` sits at `[0.598, 0.235, 0.146]` -- **1.038 model units**
+away (roughly 3.6x the model's own ~0.289-unit body length), versus the
+~0.05-model-unit near-coincidence this act's whole staging premise depends
+on (see the WORLD-COORDINATE STORY section above). Rendered directly
+(`f=89`, the hold): the skeleton sits in the frame's far corner, clipped,
+never touching the mesh -- flatly contradicting this act's own EXPECTATION
+("by f=59 ... skeleton and mesh are co-located") and FALSIFICATION
+("skeleton growing/shrinking or not reaching the mesh means the blend does
+not reach p=1") criteria above. That is a WORSE, more visible failure than
+the keypoint-cloud jump at the Act3->Act4 cut it would have fixed.
+
+DECISION: this act keeps reading `kp_data_prod[frame_for_stills]` (450,
+matching `qpos_root`'s own solve frame) for its skeleton target --
+UNCHANGED by TASK-24. Consequence, measured and reported rather than hidden:
+the Act3(f=89)->Act4(f=0) MESH handoff remains exactly continuous (the mesh
+is `qpos_root` on both sides regardless of which frame either act's
+KEYPOINT target uses, so this is unaffected), but the keypoint
+cloud/skeleton overlay now shows a real, measured jump at that exact cut (the
+same 1.038-model-unit gap above, since Act 4's Phase A target moved to
+`kp_data_prod[0]` while this act's target stays at `kp_data_prod[450]`) --
+see `act4_solve.py`'s own TASK-24 section and the task-24 report for the
+measured on-screen numbers.
 
 Timeline (90 frames, 3 s @ 30 fps -- task-16: cut down from the 180-frame/
 6s task-15 v2 cut per the user's direct "just the second half... swings in
@@ -578,6 +624,14 @@ def render_act3(clip: str = clip_io.CLIP_DEFAULT) -> Path:
             f"{h5_path} kp_names != 06_stages.npz kp_names -- refusing to mix "
             "keypoint orders (CLAUDE.md's keypoint-order bug class).")
 
+    # TASK-24: deliberately still `frame_for_stills` (450), NOT
+    # `act4_solve.PLAYBACK_ANCHOR` (0) -- `qpos_root` below is itself a
+    # snapshot solved AT frame_for_stills, so this act's skeleton target must
+    # match IT, not Act 4's (separately anchored) playback. See this
+    # module's own TASK-24 docstring section for the measured, rendered
+    # reason (re-anchoring here to 0 leaves the skeleton ~1.04 model units
+    # from the static mesh, never converging) and the resulting Act3->Act4
+    # keypoint-cloud seam trade-off this choice accepts.
     kp3d_raw_frame = kp_data_prod[frame_for_stills] / shared_scale  # (50,3) mm, MODEL order, RAW (unscaled)
     print(f"[act3] frame_for_stills={frame_for_stills}, shared_scale={shared_scale:.4f} "
           f"(FIXED for this act -- root_optimization only, task-15 v2/task-16)")
