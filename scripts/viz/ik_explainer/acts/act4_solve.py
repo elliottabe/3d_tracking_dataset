@@ -36,10 +36,15 @@ THREE PHASES (900 frames, 30 fps -> 30 s):
   240-779 (Phase B) `qpos_seq` (921 frames) plays back, continuously mapped
           onto 540 output frames (same `t = round(rel * (T-1) / REL_MAX)`
           style Act 1 uses to span a longer source clip onto fewer output
-          frames). The keypoint cloud (`kp3d[t] * shared_scale`, coloured per
-          limb chain, JARVIS scheme -- `kp_colors.jarvis_kp_colors_rgb01`,
-          shared with Act 3) advances in lock-step with the mesh, and
-          residual is recomputed every frame the same way as Phase A.
+          frames), but starting at `frame_for_stills` and WRAPPING back
+          around through the end of the clip -- `frame_for_stills -> T-1 ->
+          0 -> frame_for_stills-1` -- instead of starting at source frame 0.
+          See PLAYBACK START below for why. The keypoint cloud
+          (`kp3d[t] * shared_scale`, coloured per limb chain, JARVIS scheme --
+          `kp_colors.jarvis_kp_colors_rgb01`, shared with Act 3) advances in
+          lock-step with the mesh (indexed by the SAME wrapped `t`, never
+          independently), and residual is recomputed every frame the same
+          way as Phase A.
   780-899 (Phase C) the closing 2-up, continuing the SAME t-mapping from
           Phase B (no jump): left is the mesh+cloud render (narrower, 960 px
           wide); right is one real camera's video, cropped and centred the
@@ -59,6 +64,55 @@ projecting reproduces the OBSERVED 2D keypoints (`02_kp2d.npz`) to a mean
 ~8.5 px, max ~24 px (comparable to Act 2's own 28.5 px worst-case reprojection
 tolerance against the same DLTs) -- confirming `site_xpos / shared_scale` is
 the right quantity to feed `clip_io.project`, not `site_xpos` itself.
+
+PLAYBACK START (task-17 follow-up -- NOT a camera fix): the first attempt at
+a seamless Act3/Act4 cut matched the CAMERA at f=0-239 but left the
+Phase A->B seam (f=239/f=240) mismatched, because Phase B started playback
+at source frame 0 while Phase A always ends its interpolation at
+`qpos_seq[frame_for_stills]` (450) -- a REAL, measured 1.06 model-unit
+translation and ~25 deg rotation gap between those two states that no camera
+change can remove, because it isn't a camera problem: the mesh's actual pose
+genuinely differs. Fix: Phase B/C's source-frame mapping now starts at
+`frame_for_stills` and WRAPS through the rest of the clip --
+`frame_for_stills -> T-1 -> 0 -> frame_for_stills-1` -- so its very first
+frame (output f=240) IS `qpos_seq[frame_for_stills]`, bit-identical to what
+Phase A just rendered at f=239. All 921 source frames still play, in the
+same relative spacing/compression the old `t = round(rel*(T-1)/REL_MAX)`
+mapping already used (Act 1's own style for spanning a longer clip onto
+fewer output frames) -- only the START OFFSET is new, applied by wrapping
+with `% T` after computing the same linear index. The keypoint cloud is
+indexed by the identical wrapped `t`, never independently, so it cannot
+desynchronise from the mesh.
+
+This moves the discontinuity, it does not delete it: `qpos_seq[T-1]` and
+`qpos_seq[0]` (the NEW wrap point, roughly 2/3 of the way through Phase B, at
+output frame ~577/578) differ by a REAL 2.02 model-unit translation and
+~38.5 deg rotation -- LARGER than the gap this fix removes. Measured and
+LOOKED AT directly before deciding what to do about it (not assumed small):
+opening `f00577.png`/`f00578.png` shows the mesh stays correctly framed on
+BOTH sides -- because Phase B's camera is the live/adaptive one on both
+sides of this internal seam (unlike the frozen-vs-live mismatch the
+Act3/Act4 cut had), `_wide_camera_for_aspect` re-centres on whatever content
+is on screen every frame regardless of how far the mesh actually moved, so
+the wrap does NOT reproduce the earlier clipped-frame failure (that came
+from a camera CEASING to track, not from a large qpos jump per se) -- but it
+IS a real, visible, sudden reorientation (the fly is shown almost top-down
+at f=577, side-on at f=578).
+
+Two honest options were weighed: (a) shorten playback to end at source frame
+T-1 rather than wrap, which would drop source frames 0..frame_for_stills-1
+(nearly HALF of the real 921-frame trajectory) from the video entirely; (b)
+hold briefly on source frame T-1 before continuing from source frame 0.
+Chose (b), `WRAP_HOLD_FRAMES=15` (0.5 s @ 30 fps): it keeps ALL 921 source
+frames somewhere in the output (consistent with "Phases B/C play back 921
+frames of REAL fly motion" being the whole point of this section), invents
+nothing (the held frames are `qpos_seq[T-1]` itself, already-real recorded
+data, just shown for longer than its one-slot "fair share" under the linear
+compression), and gives the eye a beat to register a deliberate pause-then-
+resume rather than reading the snap as a glitch mid-motion. The render loop
+below implements this by inserting `WRAP_HOLD_FRAMES` extra logical slots at
+the wrap point in the same rel->logical->source-frame mapping, rather than
+changing the total frame budget, spacing scheme, or anything upstream of it.
 
 CAMERA (mesh panels): reuses `act3_align._wide_camera` (never the model's
 `hero` camera, which frames the mesh only and drops the far-away keypoint
@@ -452,15 +506,70 @@ def render_act4(clip: str = clip_io.CLIP_DEFAULT, start_frame: int = 0) -> Path:
     # --- Phase C prerequisites: smoothed crop centring + real video frames -
     x0_full = _smoothed_crop_x0(kp2d[:, cam2up_idx], SRC_FRAME_W)   # (T,)
 
-    def t_for_output_frame(f: int) -> int:
-        rel = f - (PHASE_A_END + 1)
-        return int(round(rel * (T - 1) / REL_MAX))
+    # Task-17 follow-up: playback starts at `frame_for_stills`, not source
+    # frame 0, and wraps around through T-1 back to `frame_for_stills - 1` --
+    # see module docstring's PLAYBACK START section for why (Phase A ends
+    # EXACTLY on qpos_seq[frame_for_stills]; starting Phase B at t=0 instead
+    # left a real, measured 1.06 model-unit/25 deg qpos jump at f=240 that no
+    # camera fix could remove, since it wasn't a camera problem).
+    #
+    # Measured after wrapping (not assumed): the NEW seam this creates, where
+    # source frame T-1 meets source frame 0, is a REAL 2.02 model-unit/38.5
+    # deg qpos gap -- larger than the gap this fix removes. Looked at the
+    # rendered result directly: the mesh stays correctly framed on both sides
+    # (the live camera re-centres regardless of pose, unlike the frozen-vs-
+    # live mismatch the Act3/Act4 cut had), but the pose itself visibly snaps.
+    # Chosen mitigation: hold on source frame T-1 for `WRAP_HOLD_FRAMES`
+    # output frames before continuing from source frame 0, rather than
+    # truncating playback to end at T-1 (which would drop source frames
+    # 0..frame_for_stills-1 -- nearly half the real trajectory -- from the
+    # video entirely). The hold repeats an already-real, recorded frame
+    # (qpos_seq[T-1] itself); nothing is invented, and all 921 source frames
+    # still appear somewhere in the output.
+    WRAP_HOLD_FRAMES = 15   # 0.5 s @ 30 fps
 
+    _wrap_lin = T - frame_for_stills   # lin value at which the source index wraps
+    _logical_max = (T - 1) + WRAP_HOLD_FRAMES
+
+    def _logical_for_output_frame(f: int) -> int:
+        rel = f - (PHASE_A_END + 1)
+        return int(round(rel * _logical_max / REL_MAX))
+
+    def t_for_output_frame(f: int) -> int:
+        logical = _logical_for_output_frame(f)
+        if logical < _wrap_lin:
+            lin = logical
+        elif logical < _wrap_lin + WRAP_HOLD_FRAMES:
+            lin = _wrap_lin - 1                    # hold at source frame T-1
+        else:
+            lin = logical - WRAP_HOLD_FRAMES        # resume from source frame 0
+        return (frame_for_stills + lin) % T
+
+    logical_playback = np.array(
+        [_logical_for_output_frame(f) for f in range(PHASE_A_END + 1, N_OUT)])
+    assert np.all(np.diff(logical_playback) >= 0), (
+        "playback's underlying logical index must be non-decreasing (the "
+        "wrap-around offset/hold is applied AFTER this check, so this still "
+        "catches any real mapping-arithmetic regression)")
     t_playback = np.array([t_for_output_frame(f) for f in range(PHASE_A_END + 1, N_OUT)])
-    assert np.all(np.diff(t_playback) >= 0), "playback time mapping must be non-decreasing"
-    print(f"[act4] Phase B/C playback spans source frames "
-          f"{t_playback.min()}-{t_playback.max()} of {T} over "
-          f"{len(t_playback)} output frames")
+    assert t_playback[0] == frame_for_stills, (
+        f"Phase B must start exactly at frame_for_stills ({frame_for_stills}) "
+        f"so it picks up exactly where Phase A's qpos_pose left off; got "
+        f"{t_playback[0]}")
+    _wrap_idx = np.nonzero(np.diff(t_playback) < 0)[0]
+    assert len(_wrap_idx) == 1, (
+        f"expected exactly one wrap-around in the reordered playback, found "
+        f"{len(_wrap_idx)}")
+    _wrap_out_frame = (PHASE_A_END + 1) + int(_wrap_idx[0])
+    _hold_len = int(np.sum(t_playback == T - 1))
+    print(f"[act4] Phase B/C playback reordered to start at frame_for_stills="
+          f"{frame_for_stills} (matches qpos_pose exactly -- zero jump at "
+          f"f={PHASE_A_END + 1}), wraps {frame_for_stills}->{T - 1}->0->"
+          f"{frame_for_stills - 1} over {len(t_playback)} output frames, "
+          f"holding {_hold_len} output frames on source frame {T - 1} at the "
+          f"wrap (requested WRAP_HOLD_FRAMES={WRAP_HOLD_FRAMES}); wrap point is "
+          f"at output frame {_wrap_out_frame}/{_wrap_out_frame + 1} "
+          f"(source {t_playback[_wrap_idx[0]]}->{t_playback[_wrap_idx[0] + 1]})")
 
     phase_c_t = t_playback[(PHASE_B_END + 1) - (PHASE_A_END + 1):]
     video_frames = clip_io.read_frames(clip_io.video_path(clip, CAM_2UP), phase_c_t)
