@@ -62,28 +62,35 @@ which depends only on 3D ray directions and viewing distance, not on where
 the image plane's origin sits or (per the re-measurement above) on this
 narrow an FOV.
 
-Timeline (300 frames, 30 fps):
-  f   0- 89  panels detach from the Act 1 grid (same row/col cell Act 1 used)
+TASK-29 (user: shorten the whole explainer to ~30 s total; Act 2's budget
+halves 300 -> 150 frames): all four phases below (fly-out, ray-extend, cloud-
+materialise, fade-out) are scaled by the SAME 150/300 = 0.5 factor, so the
+sequence keeps the same proportions and reads at a uniformly faster pace
+rather than truncating any one phase; the easing (`_smoothstep`, applied via
+each phase's own progress fraction) is untouched -- it is already
+parametrised on the phase-boundary constants below, so halving them alone
+compresses the identical 0->1 curve into a shorter window.
+
+Timeline (150 frames, 30 fps; TASK-29: was 300 frames):
+  f   0- 59  panels detach from the Act 1 grid (same row/col cell Act 1 used)
              and fly out (ease-in-out position + orientation slerp) to their
              true rig pose; 2D keypoint constellations fade in EARLY here
              (task-14 round 4: "keypoints projected on the frames from the
              start of Act 2", not held back until the panels finish moving)
              -- video is still fully opaque, so keypoints are drawn directly
              on the real video texture, same as Act 1's own overlay.
-  f  90-119  keypoints fully visible (constellation fade-in complete);
-             panels still finishing their fly-out to the true rig pose.
-  f 120-199  video fades out to a dim translucent plate (keypoints, already
+  f  60- 99  video fades out to a dim translucent plate (keypoints, already
              visible, persist through the crossfade); parallel rays extend
              inward from the panel toward the (not-yet-visible) cloud.
-  f 200-259  the 3D keypoint cloud materialises (alpha ramp) exactly where the
+  f 100-129  the 3D keypoint cloud materialises (alpha ramp) exactly where the
              ray bundles meet.
-  f 260-299  panels + rays fade out; cloud remains.
+  f 130-149  panels + rays fade out; cloud remains.
 
 EXPECTATION: f=0 shows the Act 1 grid tiles, video only, no keypoints yet
-(alpha still ramping from 0); f=90 shows keypoint constellations fully
-visible directly on the video, mid-fly-out; f=150 shows panels on the true
+(alpha still ramping from 0); f=45 shows keypoint constellations fully
+visible directly on the video, mid-fly-out; f=75 shows panels on the true
 180 deg arc, translucent, with keypoint constellations and partially-extended
-PARALLEL rays; f=299 shows only the fly-shaped cloud, no panels.
+PARALLEL rays; f=149 shows only the fly-shaped cloud, no panels.
 FALSIFICATION: rays fanning to a shared point (not staying parallel within a
 camera's own bundle) means a perspective model leaked into the rig geometry;
 a cloud not sitting where the rays end means a wrong transform.
@@ -150,16 +157,18 @@ from viz.core.colors import PALETTE  # noqa: E402
 
 # --- canvas / timeline ----------------------------------------------------
 CANVAS_W, CANVAS_H = 1920, 1080
-N_OUT = 300
-FLY_START, FLY_END = 0, 119          # 0-119 inclusive: detach + fly out
-KP_EARLY_END = 89                    # task-14 round 4: keypoints fade in EARLY
+N_OUT = 150                          # TASK-29: was 300 -- all four phases
+                                      # below scaled by the same 0.5 factor.
+FLY_START, FLY_END = 0, 59           # 0-59 inclusive: detach + fly out (TASK-29: was 0-119)
+KP_EARLY_END = 44                    # task-14 round 4: keypoints fade in EARLY
                                       # (independent of the panel fly-out), so
                                       # Act 2 shows "keypoints projected on the
                                       # frames" from near the start, not only
                                       # once panels reach their arc pose.
-RAY_START, RAY_END = 120, 199        # 120-199 inclusive: video->constellation, rays extend
-CLOUD_START, CLOUD_END = 200, 259    # 200-259 inclusive: cloud alpha ramp
-FADE_START, FADE_END = 260, 299      # 260-299 inclusive: panels+rays fade out
+                                      # TASK-29: was 89, scaled by the same 0.5.
+RAY_START, RAY_END = 60, 99          # 60-99 inclusive: video->constellation, rays extend (TASK-29: was 120-199)
+CLOUD_START, CLOUD_END = 100, 129    # 100-129 inclusive: cloud alpha ramp (TASK-29: was 200-259)
+FADE_START, FADE_END = 130, 149      # 130-149 inclusive: panels+rays fade out (TASK-29: was 260-299)
 
 # --- rig / crop constants (match Act 1's conventions) ----------------------
 CROP_W, FRAME_H = 430, 448
@@ -203,7 +212,7 @@ _FILL_FRACTION = 0.85                # fraction of half-canvas-height the scene 
 # --- composition target (task-10 fix): where the arc/rays/cloud should sit,
 # leaving the top-left caption block and the bottom-left frame counter clear.
 _CAPTION_CLEAR_Y = 280.0   # px; stay clear of the 3-line on-screen caveat + camera labels
-_BOTTOM_CLEAR_Y = 1010.0   # px; stay clear of the "frame N/300" label
+_BOTTOM_CLEAR_Y = 1010.0   # px; stay clear of the "frame N/150" label (TASK-29: was N/300)
 _SIDE_MARGIN_PX = 90.0
 _TARGET_CX = CANVAS_W / 2.0
 _TARGET_CY = (_CAPTION_CLEAR_Y + _BOTTOM_CLEAR_Y) / 2.0
@@ -449,7 +458,8 @@ def _scene_radius(f, wide_radius):
     to fill most of the canvas -- see render_act2) through the panel/ray
     phases; dolly IN (not a focal zoom -- see
     `PresentationCamera.set_scene_radius`) toward a tight cloud-only framing
-    only once panels/rays are already fading out (260-299), so the fly-shaped
+    only once panels/rays are already fading out (130-149, TASK-29: was
+    260-299), so the fly-shaped
     cloud is actually legible in the final frames instead of a several-px blob
     at the wide, whole-arc scale. `_CLOUD_RADIUS_MM` (the dolly's endpoint) is
     untouched by the wide-shot recalibration: it only depends on `target_px`/
@@ -661,12 +671,13 @@ def render_act2(clip: str = clip_io.CLIP_DEFAULT) -> Path:
         # already-correct Act-1-style grid framing; full by f=FLY_END, held
         # through the ray-extend/cloud-materialise phases so the arc+rays
         # never drift once settled), then ramps back OUT in lockstep with
-        # `_panel_overall_alpha`'s existing 260-299 fade/dolly: the arc's
+        # `_panel_overall_alpha`'s existing 130-149 fade/dolly (TASK-29: was
+        # 260-299): the arc's
         # bbox centre is not where the cloud (= the fly centroid, which always
         # projects to the principal point, at any dist) naturally sits, so
         # holding the arc's offset through the pure-cloud ending would drag
         # the already-correctly-centred cloud off centre for no reason. Both
-        # camera moves (recentre-out, dolly-in) share one 260-299 window and
+        # camera moves (recentre-out, dolly-in) share one 130-149 window and
         # ease together as a single final camera move.
         panel_a = _panel_overall_alpha(f)
         t_center = _smoothstep(fly_p) * _smoothstep(panel_a)

@@ -297,6 +297,25 @@ frame-to-frame translation bound (~0.0073 model units, no wrap) are both
 independent of PHASE_A_END/N_OUT and were re-verified unchanged after this
 edit (see the task-27 report).
 
+TASK-29 (user: shorten the whole explainer to ~30 s total budget; Act 4's
+share drops 780 -> 540 frames): PHASE_A_END is explicitly UNCHANGED at 119 --
+the user already asked for, and got, the 120-frame solve phase in TASK-27,
+and this task does not touch it. Only the merged side-by-side PLAYBACK
+(Phase B/C) shrinks, 660 -> 420 frames, now spanning output f=120-539
+instead of f=120-779. It still plays `qpos_prod`/`kp_data_prod` back
+MONOTONICALLY from source frame `PLAYBACK_ANCHOR` (0) through source frame
+T-1 (920) -- TASK-24's no-wrap fix is untouched, `t_for_output_frame` (below)
+is unchanged code, only `N_OUT` (hence `REL_MAX`) is smaller, so the SAME
+921 source frames are compressed onto fewer output frames -- i.e. playback
+simply advances through the clip faster, not differently. Act 4's own total
+is therefore 780 -> 540 frames (26s -> 18s); the assembled video's total
+shortens to 210+150+90+540-3*30 = 900 frames = 30.0s (was 1410 = 47.0s).
+Re-rendered and read back directly (f00300.png, mid-playback of the NEW
+timeline) to confirm the side-by-side still reads correctly at the faster
+pace; the Act3->Act4 seam and the playback's frame-to-frame translation
+bound (~0.0073 model units, no wrap) were re-verified unchanged (see the
+task-29 report).
+
 This act carries the ORIENTING beat of the whole explainer. Act 3 covered
 scale + translation only: `root_optimization` measured 0.0000 deg of
 rotation (`TRUNK_OPTIMIZATION_KEYPOINTS` is empty in `configs/anatomy/v1.yaml`,
@@ -320,8 +339,9 @@ The rotation is a real, per-frame solve, not a staged pose: root heading
 varies over the 921-frame production sequence (`qpos_prod`), so Phase B's
 playback shows genuinely solved per-frame rotation.
 
-TWO PHASES (780 frames, 30 fps -> 26 s; TASK-27: was 900 frames/30s before
-Phase A halved, see the TASK-27 section above; TASK-19 merges the old Phase
+TWO PHASES (540 frames, 30 fps -> 18 s; TASK-29: was 780 frames/26s, see the
+TASK-29 section above; TASK-27: was 900 frames/30s before Phase A halved,
+see the TASK-27 section above; TASK-19 merges the old Phase
 B/Phase C split into one side-by-side phase spanning the entire playback --
 see the TASK-19 section above):
   0-119   (Phase A, TASK-27: was 0-239) qpos interpolates
@@ -347,11 +367,12 @@ see the TASK-19 section above):
           `resid_prod_mm` below -- see TASK-18 note above and the render
           loop's own comments. Rendered full-width (1920x1080), 3D only, no
           real-camera panel -- unchanged by task-19.
-  120-779 (Phase B/C, merged by TASK-19; TASK-27: was 240-899) side-by-side
-          for the ENTIRE rest of
-          the act, 660 frames (unchanged by TASK-27 -- only Phase A shrank):
+  120-539 (Phase B/C, merged by TASK-19; TASK-29: was 120-779; TASK-27: was
+          240-899) side-by-side for the ENTIRE rest of
+          the act, 420 frames (TASK-29: was 660, see the TASK-29 section
+          above -- PHASE_A_END itself did not move):
           `qpos_prod` (921 frames, the production
-          solve) plays back, continuously mapped onto these 660 output
+          solve) plays back, continuously mapped onto these 420 output
           frames (same `t = round(rel * (T-1) / REL_MAX)` style Act 1 uses
           to span a longer source clip onto fewer output frames), starting
           at `PLAYBACK_ANCHOR` (source frame 0) and running MONOTONICALLY
@@ -360,11 +381,11 @@ see the TASK-19 section above):
           frame_for_stills-1`, see the now-superseded "PLAYBACK START"
           section below) entirely: with the anchor at 0, playback already
           starts where the clip itself starts, so there is nothing left to
-          wrap around. UNCHANGED by task-19: the frame count (660) and the
-          seam at f=120 (TASK-27: was f=240; now a true zero-gap match, not merely
+          wrap around. UNCHANGED by TASK-29/task-19: the seam at f=120
+          (TASK-27: was f=240; still a true zero-gap match, not merely
           camera-matched -- see TASK-24 above). CHANGED by task-19
           (presentation only): every one of these
-          660 frames, not just the closing 120, is now drawn side-by-side --
+          frames (420, TASK-29: was 660), not just the closing 120, is now drawn side-by-side --
           left is the mesh+cloud render (narrower, 960 px wide, the SAME
           `_wide_camera_for_aspect` live camera the old Phase B rendered at
           full width, coloured per limb chain, JARVIS scheme --
@@ -591,7 +612,7 @@ is measurably the better of the two options: it matches the ORIGINAL,
 already-shown-to-work design (a live camera re-centres on WHATEVER content
 is on screen every frame, so it was already seamless at this exact seam
 before Phase A was ever frozen), and it keeps the mesh framed correctly for
-every one of Phase B's 660 frames. The cost is a bounded, small mismatch
+every one of Phase B's frames (420, TASK-29: was 660). The cost is a bounded, small mismatch
 right at the f=239/f=240 cut itself (Phase A's frozen f=239 no longer
 perfectly tracks its own content the way a live f=239 would have, so it
 doesn't line up quite as tightly with Phase B's now-fully-adaptive f=240) --
@@ -600,7 +621,8 @@ smaller than either the original Act3/Act4 jump this task fixes or the
 858 px/clipped-frame failure the slow-ease alternative produced, but it is
 not literally zero; reported as the deliberate trade-off it is, not hidden.
 
-The side-by-side's left panel (120-779, task-19 -- previously only the
+The side-by-side's left panel (120-539, TASK-29: was 120-779; task-19 --
+previously only the
 closing 120-frame Phase C; TASK-27: was 240-899) is rendered at a narrower (960x1080, not
 1920x1080) aspect than Acts 3/A; `_wide_camera_for_aspect` scales the
 distance by `1/aspect` for aspect < 1 so the same mesh+cloud content that fit
@@ -637,7 +659,8 @@ task-19) reads ~0.012 mm (TASK-24: starting from ~1.041 mm at f=0, not the
 pre-TASK-24 ~0.118 mm -- see the "Distance is LIVE" section above for why
 the starting gap grew; TASK-27 halves the number of frames this residual
 drop plays out over but not the underlying solve, so the same start/end
-values are expected, just reached twice as fast). Through 120-779 (TASK-27:
+values are expected, just reached twice as fast). Through 120-539 (TASK-29:
+was 120-779; TASK-27:
 was 240-899; all
 side-by-side since task-19), `resid_prod_mm` (the real, offset-adjusted
 production fit quality, still printed) stays in its measured ~0.014-0.041 mm
@@ -730,8 +753,18 @@ CANVAS_W, CANVAS_H = 1920, 1080
 # REL_MAX (below) is derived from N_OUT/PHASE_A_END, so it recomputes to the
 # SAME 659 automatically (899-240 == 779-120), preserving the playback's
 # 660-frame/921-source-frame compression ratio unchanged.
-N_OUT = 780
-PHASE_A_END = 119                 # inclusive: qpos_root_f0 -> qpos_prod[anchor], one frame
+#
+# TASK-29 (user: shorten the whole explainer to ~30 s total; Act 4's budget
+# drops 780 -> 540 frames): PHASE_A_END is explicitly UNCHANGED at 119 -- the
+# user already asked for the 120-frame solve phase in TASK-27 and this task
+# does not touch it. Only the merged side-by-side PLAYBACK shrinks, 660 ->
+# 420 frames, now spanning output f=120-539 instead of f=120-779; it still
+# covers source frames 0 -> 920 (T-1) monotonically, with NO wrap (TASK-24's
+# fix is untouched) -- it simply advances through the clip faster. REL_MAX
+# recomputes automatically from N_OUT/PHASE_A_END (see below), so no other
+# constant needed to change for this.
+N_OUT = 540                       # TASK-29: was 780 (see TASK-29 note above)
+PHASE_A_END = 119                 # inclusive: qpos_root_f0 -> qpos_prod[anchor], one frame -- UNCHANGED by TASK-29
 # TASK-19: the old PHASE_B_END=779 split (full-width playback 240-779, then a
 # closing 780-899 2-up) is retired -- 240..899 inclusive is now ONE merged,
 # side-by-side phase (see module docstring's TASK-19 section); there is no
@@ -750,13 +783,14 @@ PLAYBACK_ANCHOR = 0
 
 XML_PATH = _REPO / "models" / "fruitfly_v1" / "fruitfly_v1_free.xml"
 
-# Continuous t-mapping for the whole merged 120-779 side-by-side phase (TASK-
-# 27: was 240-899 before Phase A halved), so it never skips or repeats time:
+# Continuous t-mapping for the whole merged 120-539 side-by-side phase
+# (TASK-29: was 120-779; TASK-27: was 240-899 before Phase A halved), so it
+# never skips or repeats time:
 # rel=0 at f=120 maps to source frame PLAYBACK_ANCHOR (0), rel=REL_MAX at
-# f=779 maps to the clip's last frame (T-1). TASK-24: since the anchor IS 0,
+# f=539 maps to the clip's last frame (T-1). TASK-24: since the anchor IS 0,
 # this mapping needs no offset/wrap any more -- rel maps directly onto the
 # source index.
-REL_MAX = (N_OUT - 1) - (PHASE_A_END + 1)   # 779 - 120 = 659 (unchanged by TASK-27)
+REL_MAX = (N_OUT - 1) - (PHASE_A_END + 1)   # 539 - 120 = 419 (TASK-29: was 659/779-120)
 
 # Chosen for the closing 2-up: brief names Cam2012862/Cam2012630 as reading
 # clearly in earlier acts (Cam2012857 explicitly called out as the hardest/
@@ -1078,15 +1112,17 @@ def render_act4(clip: str = clip_io.CLIP_DEFAULT, start_frame: int = 0) -> Path:
     # remaining discontinuity to wrap around or hold through.
     def t_for_output_frame(f: int) -> int:
         """Direct (unwrapped) source-frame index for output frame `f` in the
-        merged 120-779 side-by-side phase (TASK-27: was 240-899 before Phase A
-        halved): source frame PLAYBACK_ANCHOR (0) at f=120, source frame T-1
-        at f=779, monotonically increasing in between -- the same `rel ->
+        merged 120-539 side-by-side phase (TASK-29: was 120-779; TASK-27:
+        was 240-899 before Phase A halved): source frame PLAYBACK_ANCHOR (0)
+        at f=120, source frame T-1
+        at f=539, monotonically increasing in between -- the same `rel ->
         round(rel * (T-1) / REL_MAX)` style
         Act 1 uses for compressing a longer source clip onto fewer output
         frames. All 921 source frames still appear somewhere in the output
         (nearby output frames may round to the same source index under this
-        660-into-921 compression, but the index never repeats a frame it
-        already skipped PAST, and never goes backward)."""
+        420-into-921 compression -- TASK-29: was 660-into-921 -- but the
+        index never repeats a frame it already skipped PAST, and never goes
+        backward)."""
         rel = f - (PHASE_A_END + 1)
         return int(round(rel * (T - 1) / REL_MAX))
 
@@ -1107,7 +1143,8 @@ def render_act4(clip: str = clip_io.CLIP_DEFAULT, start_frame: int = 0) -> Path:
           f"identical qpos_prod[0]/kp_data_prod[0] (zero-gap handoff)")
 
     # TASK-19: video is now preloaded for the ENTIRE merged side-by-side phase
-    # (all 660 frames of `t_playback`, f=120..779, TASK-27: was f=240..899)
+    # (all 420 frames of `t_playback`, f=120..539, TASK-29: was f=120..779;
+    # TASK-27: was f=240..899)
     # rather than just the old closing 120-frame Phase C -- the side-by-side
     # spans the whole rest of the act now, so its right panel needs a real
     # frame for every one of those output frames.
@@ -1333,7 +1370,7 @@ def main():
                                   formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--clip", default=clip_io.CLIP_DEFAULT)
     ap.add_argument("--start-frame", type=int, default=0,
-                     help="resume rendering from this output frame (0..779); "
+                     help="resume rendering from this output frame (0..539); "
                           "frames before it are assumed already written")
     args = ap.parse_args()
     render_act4(args.clip, start_frame=args.start_frame)

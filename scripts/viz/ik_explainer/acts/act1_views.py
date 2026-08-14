@@ -3,56 +3,71 @@
 raw-vs-reprojected crossfade.
 
 4x2 grid (7 fly-centred camera panels + 1 title/legend cell) at 1920x1080,
-330 output frames (11 s @ 30 fps). Source video frame for output frame `f` is
+210 output frames (7 s @ 30 fps). Source video frame for output frame `f` is
 `WINDOW_START + int(f * WINDOW_LEN / N_OUT)`, i.e. a CONTIGUOUS sub-range of
 the clip's 921 frames (`WINDOW_START..WINDOW_START+WINDOW_LEN-1`), not the
 whole clip -- see `WINDOW_START`/`WINDOW_LEN` below for why this window and
 not another, and the speed-label derivation.
 
-Timeline (rescaled proportionally from the original 450-frame/921-frame
-version -- same fractions of the act, just fewer frames):
-  f   0- 53  video only, panels labelled camera name + true elevation.
-  f  54-125  2D keypoints fade in, alpha = (f-54)/72; low-confidence markers
+TASK-29 (user: shorten the whole explainer to ~30 s total; Act 1's budget
+drops 330 -> 210 frames): the user asked to "cut some of the end of act 1"
+while explicitly keeping the reprojection reveal (the raw-2D ->
+reprojected-3D crossfade, TASK-20). The 120 cut frames come entirely out of
+the long static raw-overlay hold (was 144 frames, 126-269; now 54 frames,
+96-149) -- the closing reveal (below) is UNCHANGED IN LENGTH, still 60
+frames. `WINDOW_START`/`WINDOW_LEN` (the source-frame span) are untouched,
+so the same real footage is shown, just compressed into fewer output frames
+(see the speed-label derivation below for the consequence of that).
+
+Timeline (rescaled from the 330-frame version by cutting the raw-overlay
+hold only):
+  f   0- 35  video only, panels labelled camera name + true elevation.
+  f  36- 95  2D keypoints fade in, alpha = (f-36)/60; low-confidence markers
              are drawn dimmer (`draw.draw_keypoints(..., conf=...)` shrinks
              their radius itself).
-  f 126-269  full raw-detector overlay, video advancing.
-  f 270-329  TASK-20 closing beat: raw detector 2D crossfades into the
-             reprojection of the ALREADY-TRIANGULATED 3D (`04_kp3d_filt.npz`,
-             projected back through each camera's own DLT -- no re-triangulation
-             here), across all seven panels at once. Hold on raw 270-279,
-             `_smoothstep`-eased crossfade 280-319 (40 frames), hold on
-             reprojected 320-329. `Cam2012857`/`Cam2012861` (elev -0.6/+0.6
+  f  96-149  full raw-detector overlay, video advancing -- this is the
+             stretch TASK-29 shrank (was 126-269/144 frames; now 96-149/54
+             frames).
+  f 150-209  TASK-20 closing beat, length UNCHANGED by TASK-29 (still 60
+             frames): raw detector 2D crossfades into the reprojection of the
+             ALREADY-TRIANGULATED 3D (`04_kp3d_filt.npz`, projected back
+             through each camera's own DLT -- no re-triangulation here),
+             across all seven panels at once. Hold on raw 150-159,
+             `_smoothstep`-eased crossfade 160-199 (40 frames), hold on
+             reprojected 200-209. `Cam2012857`/`Cam2012861` (elev -0.6/+0.6
              deg) are viewed edge-on, where the six leg chains project nearly
              on top of each other and the raw detector visibly flips
              assignments frame to frame; triangulation shares information
              across all 7 views so the SAME 3D point reprojects consistently
              even into the bad view. A one-line caption appears only for
-             f 270-329 explaining the switch (the on-screen text is otherwise
+             f 150-209 explaining the switch (the on-screen text is otherwise
              stripped to title/legend/fps per task-19 -- see
              `_build_title_panel`).
 
 EXPECTATION if this is right: f=0 shows raw video with no markers anywhere;
-f=90 shows markers at ~50% opacity on all 7 panels; f=240 shows markers ON
-the fly (not off to one side) in every panel, including the wall-adjacent
-Cam2012857 where the leg keypoints are genuinely the messiest -- that messiness
-is real per-view failure, not a bug, and is the setup for why Act 2 needs
-seven cameras.
+f=66 (fade midpoint) shows markers at ~50% opacity on all 7 panels; f=120
+shows markers ON the fly (not off to one side) in every panel, including the
+wall-adjacent Cam2012857 where the leg keypoints are genuinely the messiest --
+that messiness is real per-view failure, not a bug, and is the setup for why
+Act 2 needs seven cameras.
 FALSIFICATION: markers visible at f=0 (fade math inverted), or markers
 sitting off the fly in some panel (crop centre wrong for that camera / smoothing
 lost track of the centroid).
 
-EXPECTATION for the closing beat: f=280 (crossfade not yet started) looks
-identical to f=269 -- same jittery raw markers, same tangle on `Cam2012861`.
-By f=329 (fully reprojected) every panel's markers sit at the SAME rough
-location as the raw ones (median raw<->reprojected offset measured at only
-1.9-3.4 px -- this denoises, it does not override) but are visibly steadier;
-`Cam2012861`'s edge-on leg tangle should visibly resolve into separated leg
-chains, while the well-conditioned cameras (e.g. the near-vertical
-`Cam2012630`) barely move, because they were already tracking well. Measured
-per-camera jitter of what is actually drawn: reprojected end ~=0.28 px on
-every camera (5.1x better than raw on `Cam2012861`); raw stays 1.04-1.46 px
-and varies with elevation.
-FALSIFICATION: markers snapping instantly at f=280 (crossfade not eased), or
+EXPECTATION for the closing beat: f=160 (crossfade not yet started) looks
+identical to f=149 -- same jittery raw markers, same tangle on `Cam2012861`.
+By f=209 (fully reprojected, the act's last frame) every panel's markers sit
+at the SAME rough location as the raw ones (this act's TASK-20 measurement --
+raw<->reprojected offset is a few px, denoising rather than overriding) but
+are visibly steadier; `Cam2012861`'s edge-on leg tangle should visibly
+resolve into separated leg chains, while the well-conditioned cameras (e.g.
+the near-vertical `Cam2012630`) barely move, because they were already
+tracking well. (TASK-29 note: the crossfade region now samples a wider
+source-frame span than before -- same 60 output frames, but a coarser
+output/source ratio -- so exact per-camera jitter numbers from the original
+330-frame cadence are not assumed to carry over unchanged; the qualitative
+behaviour above is what TASK-29's own render was checked against.)
+FALSIFICATION: markers snapping instantly at f=160 (crossfade not eased), or
 the reprojected markers landing far from the raw ones in any panel (would
 mean a keypoint-order or camera-order mismatch between `02_kp2d.npz` and
 `04_kp3d_filt.npz`/the DLTs -- exactly the class of bug CLAUDE.md warns is
@@ -95,7 +110,8 @@ from scripts.viz.ik_explainer.kp_colors import (     # noqa: E402
 )
 
 # --- layout ------------------------------------------------------------
-N_OUT = 330
+N_OUT = 210   # TASK-29: was 330 -- cut from the raw-overlay hold only, see
+              # module docstring's TASK-29 section.
 
 # --- Change 4 (task-14): a contiguous sub-range of the clip, not the whole
 # 921 frames -- keeps the slow-motion factor (real-world seconds per output
@@ -132,19 +148,24 @@ SMOOTH_SIGMA = 12.0                  # frames (~15 ms @ 800 fps): removes
                                       # without lagging real fly motion
 
 # --- timeline ------------------------------------------------------------
-# Rescaled proportionally from the original (90, 210) @ 450 frames by the
-# same 270/450 = 0.6 ratio: 90*0.6=54, 210*0.6=126.
-FADE_START, FADE_END = 54, 126       # alpha ramps over frames [54, 126)
+# TASK-29 (was FADE_START, FADE_END = 54, 126 @ 330 frames): rescaled to
+# the suggested new (0-35 video only / 36-95 keypoints fade in / 96-149 raw
+# overlay) timeline -- the fade-in itself shortens slightly (72 -> 60
+# frames) as part of the overall 330 -> 210 compression, per the module
+# docstring's TASK-29 section; the raw-overlay hold that follows absorbs
+# the rest of the cut.
+FADE_START, FADE_END = 36, 96        # alpha ramps over frames [36, 96)
 PX_PER_MM = 80.7
 
 # --- TASK-20 closing beat: raw 2D -> reprojected-3D crossfade -----------
-# f 270-279 hold raw, 280-319 crossfade (smoothstep-eased), 320-329 hold
-# reprojected. 60 frames total (330-270), matching the brief's "~40 frames"
-# crossfade with a short hold on each end so the cut isn't abrupt either
-# direction.
-REPRO_BEAT_START = 270
-REPRO_FADE_START = 280
-REPRO_FADE_END = 320
+# f 150-159 hold raw, 160-199 crossfade (smoothstep-eased), 200-209 hold
+# reprojected. 60 frames total (210-150), UNCHANGED by TASK-29 (the user
+# explicitly asked to keep this reveal roughly this long while cutting time
+# from the raw-overlay hold instead) -- same internal 10/40/10 split as the
+# pre-TASK-29 330-frame version, just renumbered onto the new, shorter act.
+REPRO_BEAT_START = 150
+REPRO_FADE_START = 160
+REPRO_FADE_END = 200
 assert N_OUT - REPRO_BEAT_START == 60
 assert REPRO_BEAT_START <= REPRO_FADE_START < REPRO_FADE_END <= N_OUT
 
