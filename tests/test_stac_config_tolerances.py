@@ -33,6 +33,7 @@ def test_anatomy_config_declares_tolerances(path):
     model = yaml.safe_load(path.read_text())["model"]
     assert float(model["JAXLS_GRADIENT_TOLERANCE"]) == 1e-8
     assert float(model["JAXLS_PARAMETER_TOLERANCE"]) == 1e-10
+    assert float(model["JAXLS_COST_TOLERANCE"]) == 1e-5
 
 
 def test_stac_forwards_tolerance_defaults_when_keys_absent():

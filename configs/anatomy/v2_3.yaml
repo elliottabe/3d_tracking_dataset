@@ -505,6 +505,11 @@ model:
   # keypoints on Session6/2025_10_12_15_06_46.
   JAXLS_GRADIENT_TOLERANCE: 1.0e-8
   JAXLS_PARAMETER_TOLERANCE: 1.0e-10
+  # jaxls cost tolerance. Left at jaxls' own default -- FTOL is NOT mapped here:
+  # FTOL is 5.0e-03, which would be 500x looser than this and would make the cost
+  # criterion fire before the gradient criterion, silently disabling
+  # JAXLS_GRADIENT_TOLERANCE. FTOL governs the ProjectedGradient path only.
+  JAXLS_COST_TOLERANCE: 1.0e-5
   JAXLS_SMOOTH_WEIGHT: 0.01
   JAXLS_LINEAR_SOLVER: "auto"
   JAXLS_USE_SE3_ROOT: true
