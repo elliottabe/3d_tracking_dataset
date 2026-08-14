@@ -1,31 +1,34 @@
 #!/usr/bin/env python3
 """Assemble the four acts into the deliverable: mp4, README, manifest.
 
-Concatenates `frames/act{1..4}_*/f%05d.png` in story order with 15-frame
-crossfades at each of the 3 act boundaries, encodes 1920x1080 @ 30 fps H.264
-(silent) via `viz.core.io.write_video` (imageio + ffmpeg, the repo's shared
-encoder), then writes `README.md` and `manifest.json` beside it.
+Concatenates `frames/act{1..4}_*/f%05d.png` in story order with 30-frame
+(1 s) crossfades at each of the 3 act boundaries, encodes 1920x1080 @ 30 fps
+H.264 (silent) via `viz.core.io.write_video` (imageio + ffmpeg, the repo's
+shared encoder), then writes `README.md` and `manifest.json` beside it.
 
-EXPECTED TOTAL FRAMES: 270 + 300 + 600 + 900 - 3*15 = 2025 (67.5 s @ 30 fps).
-(Task-14 shortened Act 1 from 450 to 270 frames -- 15s to 9s -- and re-sourced
-it from a contiguous ~40% sub-range of the clip rather than the whole 921
-frames; see `act1_views.py`'s module docstring. Every other act is unchanged.)
-This is asserted TWICE: once per-act (`_list_frames` requires each act
-directory to hold EXACTLY its expected count -- neither short nor padded with
-extras), and once on the assembled edit plan before any frame is written to
-ffmpeg. Act 4 previously died mid-render at 700/900 and had to be resumed;
-this check exists so a truncated act fails loudly here rather than shipping a
+EXPECTED TOTAL FRAMES: 270 + 300 + 600 + 900 - 3*30 = 1980 (66.0 s @ 30 fps).
+(Task-14 shortened Act 1 from 450 to 270 frames -- 15s to 9s -- and
+re-sourced it from a contiguous ~40% sub-range of the clip rather than the
+whole 921 frames; see `act1_views.py`'s module docstring. A later task-14
+round lengthened the crossfades themselves from 15 to 30 frames per the
+user's "smoother transitions" request -- see `N_CROSS` below.) This is
+asserted TWICE: once per-act (`_list_frames` requires each act directory to
+hold EXACTLY its expected count -- neither short nor padded with extras),
+and once on the assembled edit plan before any frame is written to ffmpeg.
+Act 4 previously died mid-render at 700/900 and had to be resumed; this
+check exists so a truncated act fails loudly here rather than shipping a
 silently-short video.
 
 CROSSFADE CONSTRUCTION: a transition between act A (length n_A) and act B
-consumes A's last 15 frames and B's first 15 frames and produces 15 blended
-output frames (not 30) via `draw.fade` -- so each of the 3 transitions nets
-the sequence -15 frames overall, which is where the "-3*15" in the total
-comes from. Concretely, for output position i in 0..14 of a transition:
-`draw.fade(A[n_A-15+i], B[i], i/14)`, so alpha ramps from an exact copy of
-A's tail (t=0) to an exact copy of B's head (t=1) with 13 genuine blends in
-between -- no plain cut, no black frame (fade() never multiplies to zero;
-it is a straight `cv2.addWeighted` cross-dissolve of two real frames).
+consumes A's last `N_CROSS` frames and B's first `N_CROSS` frames and
+produces `N_CROSS` blended output frames (not 2x) via `draw.fade` -- so each
+of the 3 transitions nets the sequence `-N_CROSS` frames overall, which is
+where the "-3*N_CROSS" in the total comes from. Concretely, for output
+position i in 0..N_CROSS-1 of a transition: `draw.fade(A[n_A-N_CROSS+i],
+B[i], i/(N_CROSS-1))`, so alpha ramps from an exact copy of A's tail (t=0)
+to an exact copy of B's head (t=1) with N_CROSS-2 genuine blends in between
+-- no plain cut, no black frame (fade() never multiplies to zero; it is a
+straight `cv2.addWeighted` cross-dissolve of two real frames).
 
 Everything this script writes lands under `<clip>/ik_explainer/`; the raw
 clip inputs (calibration/, Cam*.mp4, enhanced/, preview/, data3D_*.csv) are
@@ -56,10 +59,10 @@ ACT_SPECS = [
     ("act3_align", 600),
     ("act4_solve", 900),
 ]
-N_CROSS = 15
+N_CROSS = 30   # 1 s @ 30 fps; lengthened from 15 (task-14 round 4, "smoother transitions")
 FPS = 30
 CANVAS_W, CANVAS_H = 1920, 1080
-EXPECTED_TOTAL = sum(n for _, n in ACT_SPECS) - (len(ACT_SPECS) - 1) * N_CROSS  # 2025
+EXPECTED_TOTAL = sum(n for _, n in ACT_SPECS) - (len(ACT_SPECS) - 1) * N_CROSS  # 1980
 
 
 def _list_frames(act_dir: Path, act_name: str, expected: int) -> list:

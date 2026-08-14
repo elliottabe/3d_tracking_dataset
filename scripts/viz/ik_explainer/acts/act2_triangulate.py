@@ -63,20 +63,27 @@ the image plane's origin sits or (per the re-measurement above) on this
 narrow an FOV.
 
 Timeline (300 frames, 30 fps):
-  f   0-119  panels detach from the Act 1 grid (same row/col cell Act 1 used)
+  f   0- 89  panels detach from the Act 1 grid (same row/col cell Act 1 used)
              and fly out (ease-in-out position + orientation slerp) to their
-             true rig pose; video only, no keypoints yet.
-  f 120-199  video fades out to a dim translucent plate; keypoint constellation
-             fades in on each panel; parallel rays extend inward from the
-             panel toward the (not-yet-visible) cloud.
+             true rig pose; 2D keypoint constellations fade in EARLY here
+             (task-14 round 4: "keypoints projected on the frames from the
+             start of Act 2", not held back until the panels finish moving)
+             -- video is still fully opaque, so keypoints are drawn directly
+             on the real video texture, same as Act 1's own overlay.
+  f  90-119  keypoints fully visible (constellation fade-in complete);
+             panels still finishing their fly-out to the true rig pose.
+  f 120-199  video fades out to a dim translucent plate (keypoints, already
+             visible, persist through the crossfade); parallel rays extend
+             inward from the panel toward the (not-yet-visible) cloud.
   f 200-259  the 3D keypoint cloud materialises (alpha ramp) exactly where the
              ray bundles meet.
   f 260-299  panels + rays fade out; cloud remains.
 
-EXPECTATION: f=0 shows the Act 1 grid tiles with no rays/cloud; f=150 shows
-panels on the true 180 deg arc, translucent, with keypoint constellations and
-partially-extended PARALLEL rays; f=299 shows only the fly-shaped cloud, no
-panels.
+EXPECTATION: f=0 shows the Act 1 grid tiles, video only, no keypoints yet
+(alpha still ramping from 0); f=90 shows keypoint constellations fully
+visible directly on the video, mid-fly-out; f=150 shows panels on the true
+180 deg arc, translucent, with keypoint constellations and partially-extended
+PARALLEL rays; f=299 shows only the fly-shaped cloud, no panels.
 FALSIFICATION: rays fanning to a shared point (not staying parallel within a
 camera's own bundle) means a perspective model leaked into the rig geometry;
 a cloud not sitting where the rays end means a wrong transform.
@@ -105,6 +112,11 @@ from viz.core.colors import PALETTE  # noqa: E402
 CANVAS_W, CANVAS_H = 1920, 1080
 N_OUT = 300
 FLY_START, FLY_END = 0, 119          # 0-119 inclusive: detach + fly out
+KP_EARLY_END = 89                    # task-14 round 4: keypoints fade in EARLY
+                                      # (independent of the panel fly-out), so
+                                      # Act 2 shows "keypoints projected on the
+                                      # frames" from near the start, not only
+                                      # once panels reach their arc pose.
 RAY_START, RAY_END = 120, 199        # 120-199 inclusive: video->constellation, rays extend
 CLOUD_START, CLOUD_END = 200, 259    # 200-259 inclusive: cloud alpha ramp
 FADE_START, FADE_END = 260, 299      # 260-299 inclusive: panels+rays fade out
@@ -358,11 +370,14 @@ def _video_alpha(f):
 
 
 def _kp_alpha(f):
-    if f <= FLY_END:
-        return 0.0
-    if f >= RAY_END:
-        return 1.0
-    return (f - RAY_START) / float(RAY_END - RAY_START)
+    """Keypoint-constellation opacity on the video texture. Task-14 round 4:
+    fades in EARLY (0-KP_EARLY_END), independent of the panel fly-out/ray
+    timing below -- the user asked for keypoints visible on the frames from
+    the start of Act 2, not held back until panels reach their true arc
+    pose. Reaches 1.0 well before `RAY_START` and stays there (the video->
+    constellation crossfade and ray extension are separate visual layers,
+    unaffected by this)."""
+    return float(_smoothstep(f / float(KP_EARLY_END)))
 
 
 def _ray_progress(f):

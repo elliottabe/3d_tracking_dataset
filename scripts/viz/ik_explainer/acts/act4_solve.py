@@ -122,6 +122,14 @@ scheme, Change 2) for the mesh+cloud panels; `viz.core.colors.PALETTE`
 MARKER COLOURS" above). Wing visibility (Change 1): `set_mesh_rgba`/
 `capture_geom_alpha` (stage_ik.py) keep originally-invisible geoms (the
 wings' `*_inertial` boxes) at alpha=0 across every `geom_rgba` mutation.
+
+SKELETON (task-14 round 4): the cloud is now drawn as bones, not loose
+spheres, here too -- same `kp_colors.jarvis_skeleton_edges`/`stage_ik._add_bone`
+construction Act 3 uses (`data/fly50.json`'s 44 edges, mapped by NAME,
+coloured per JARVIS's own stop-node convention), in BOTH the Phase A/B full
+mesh+cloud panel and Phase C's narrower left panel. The closing 2-up's
+RIGHT panel (real video, `_chain`/`_dots`) is unaffected -- it already drew
+leg-chain lines and keeps the PALETTE fit/observed convention untouched.
 """
 import os
 
@@ -145,12 +153,14 @@ sys.path.insert(0, str(_REPO / "stac-mjx"))
 
 from scripts.viz.ik_explainer import clip_io, draw                    # noqa: E402
 from scripts.viz.ik_explainer.stage_ik import (                       # noqa: E402
-    _add_sphere, _tracking_site_map, marker_residual_mm,
+    _add_sphere, _add_bone, _tracking_site_map, marker_residual_mm,
     capture_geom_alpha, set_mesh_rgba,
 )
-from scripts.viz.ik_explainer.kp_colors import jarvis_kp_colors_rgb01  # noqa: E402
+from scripts.viz.ik_explainer.kp_colors import (                      # noqa: E402
+    jarvis_kp_colors_rgb01, jarvis_skeleton_edges,
+)
 from scripts.viz.ik_explainer.acts.act3_align import (                 # noqa: E402
-    _slerp_qpos, _wide_camera, _smoothstep, AZ_START, ELEV,
+    _slerp_qpos, _wide_camera, _smoothstep, AZ_START, ELEV, BONE_RADIUS_FRACTION,
 )
 from scripts.viz.ik_explainer.acts.act1_views import _smoothed_crop_x0  # noqa: E402
 from viz.core.colors import PALETTE, leg_chains                       # noqa: E402
@@ -345,6 +355,14 @@ def render_act4(clip: str = clip_io.CLIP_DEFAULT, start_frame: int = 0) -> Path:
     # of the previous 4-group (head/thorax/abdomen/legs) scheme.
     kp_rgb01 = jarvis_kp_colors_rgb01(kp_names)
     kp_rgb01_by_idx = [kp_rgb01[n] for n in kp_names]
+    # Skeleton bones (task-14 round 4, "skeleton on Act 4 too"): same
+    # construction as act3_align.py -- data/fly50.json's 44 edges mapped onto
+    # THIS array's own kp_names order by name, coloured per JARVIS's own
+    # `colors[line[1]]` (stop-node) convention.
+    skeleton_edges = [
+        (a, b, (bg[2] / 255.0, bg[1] / 255.0, bg[0] / 255.0))
+        for a, b, bg in jarvis_skeleton_edges(kp_names)
+    ]
 
     kp3d_scaled = kp3d * shared_scale                     # same target pose_optimization fit
 
@@ -420,9 +438,14 @@ def render_act4(clip: str = clip_io.CLIP_DEFAULT, start_frame: int = 0) -> Path:
                 cam, spread = _wide_camera_for_aspect(
                     mesh_ctr, cloud_pts, mj_model.stat.extent, AZ_START, aspect)
                 marker_r = max(spread * 0.03, mj_model.stat.extent * 0.006)
+                bone_r = marker_r * BONE_RADIUS_FRACTION
 
                 renderer_full.update_scene(d, camera=cam)
                 scn = renderer_full.scene
+                for a, b, rgb in skeleton_edges:
+                    pa, pb = cloud_pts[a], cloud_pts[b]
+                    if np.all(np.isfinite(pa)) and np.all(np.isfinite(pb)):
+                        _add_bone(scn, pa, pb, np.array((*rgb, 1.0), np.float32), bone_r)
                 for i, p3 in enumerate(cloud_pts):
                     if np.all(np.isfinite(p3)):
                         rgb = kp_rgb01_by_idx[i]
@@ -455,9 +478,14 @@ def render_act4(clip: str = clip_io.CLIP_DEFAULT, start_frame: int = 0) -> Path:
                 cam, spread = _wide_camera_for_aspect(
                     mesh_ctr, cloud_pts, mj_model.stat.extent, AZ_START, aspect)
                 marker_r = max(spread * 0.03, mj_model.stat.extent * 0.006)
+                bone_r = marker_r * BONE_RADIUS_FRACTION
 
                 renderer_left.update_scene(d, camera=cam)
                 scn = renderer_left.scene
+                for a, b, rgb in skeleton_edges:
+                    pa, pb = cloud_pts[a], cloud_pts[b]
+                    if np.all(np.isfinite(pa)) and np.all(np.isfinite(pb)):
+                        _add_bone(scn, pa, pb, np.array((*rgb, 1.0), np.float32), bone_r)
                 for i, p3 in enumerate(cloud_pts):
                     if np.all(np.isfinite(p3)):
                         rgb = kp_rgb01_by_idx[i]

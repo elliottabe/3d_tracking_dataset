@@ -103,12 +103,14 @@ def test_render_op_crossfade_matches_draw_fade(tmp_path):
     assert np.array_equal(out, expected)
 
 
-def test_real_act_specs_total_matches_expected_2025():
+def test_real_act_specs_total_matches_expected_1980():
     """Locks the exact arithmetic the brief specifies for the shipped acts
-    (task-14: Act 1 shortened 450 -> 270 frames, total 2205 -> 2025)."""
-    assert assemble.EXPECTED_TOTAL == 2025
+    (task-14: Act 1 shortened 450 -> 270 frames; a later round lengthened
+    crossfades 15 -> 30 frames for smoother transitions; total 2205 -> 2025
+    -> 1980)."""
+    assert assemble.EXPECTED_TOTAL == 1980
     assert sum(n for _, n in assemble.ACT_SPECS) == 2070
-    assert assemble.N_CROSS == 15
+    assert assemble.N_CROSS == 30
 
 
 def test_ffprobe_video_info_reports_exact_dims_not_macroblock_padded(tmp_path):
