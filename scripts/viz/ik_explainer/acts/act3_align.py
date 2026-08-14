@@ -805,7 +805,11 @@ def render_act3(clip: str = clip_io.CLIP_DEFAULT) -> Path:
                       f"centroid_dist_px={centroid_dist_px:.1f} (must decrease "
                       f"monotonically f=0->59, ~0 by f=59)")
 
-            cv2.imwrite(str(out_dir / f"f{f:05d}.png"), canvas)
+            # Task-32: PNG_COMPRESSION 1 (vs cv2's default 3) -- lossless,
+            # faster zlib pass; decoded pixels are bit-identical (verified in
+            # the task-32 report). This is a build-speed change only.
+            cv2.imwrite(str(out_dir / f"f{f:05d}.png"), canvas,
+                        [cv2.IMWRITE_PNG_COMPRESSION, 1])
 
     dt = time.time() - t0
     print(f"[act3] wrote {N_OUT} frames to {out_dir} in {dt:.1f} s "

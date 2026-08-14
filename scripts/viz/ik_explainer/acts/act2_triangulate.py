@@ -768,7 +768,11 @@ def render_act2(clip: str = clip_io.CLIP_DEFAULT) -> Path:
         canvas = draw.label(canvas, f"frame {f + 1}/{N_OUT}", (48, CANVAS_H - 24),
                              scale=draw.SMALL_SCALE, color=(150, 150, 150))
 
-        cv2.imwrite(str(out_dir / f"f{f:05d}.png"), canvas)
+        # Task-32: PNG_COMPRESSION 1 (vs cv2's default 3) -- lossless, faster
+        # zlib pass; decoded pixels are bit-identical (verified in the task-32
+        # report). This is a build-speed change only.
+        cv2.imwrite(str(out_dir / f"f{f:05d}.png"), canvas,
+                    [cv2.IMWRITE_PNG_COMPRESSION, 1])
 
     print(f"wrote {N_OUT} frames to {out_dir}")
     return out_dir
