@@ -111,6 +111,7 @@ import sys
 import time
 from pathlib import Path
 
+import h5py
 import hydra
 import imageio.v2 as imageio
 import mujoco
@@ -375,6 +376,140 @@ def run(clip: str = clip_io.CLIP_DEFAULT, frame_for_stills: int = 450) -> dict:
     }
 
 
+def run_root_f0(clip: str = clip_io.CLIP_DEFAULT, frame: int = 0) -> dict:
+    """TASK-25: recompute the root-aligned pose (``root_optimization`` ONLY --
+    the exact same call ``run()`` makes for its own ``qpos_root``) at an
+    arbitrary frame, default source frame 0 -- closes the Act3->Act4 cut
+    regression (see ``act3_align.py``/``act4_solve.py``'s own TASK-25
+    sections for the full story).
+
+    Why this exists: ``run()``'s ``qpos_root`` is a snapshot solved AT
+    ``frame_for_stills`` (450) -- ``root_optimization(..., frame=450)``. When
+    Act 4 moved its playback anchor to source frame 0 (TASK-24), Act 3's
+    static mesh (still ``qpos_root``, frame 450) stopped being co-located
+    with the keypoints both acts display at frame 0 -- translating the
+    frame-450 ``qpos_root`` by hand to "fix" this was considered and
+    rejected (that would not be a real solver output, just an invented
+    approximation). This function instead reruns the ACTUAL solver call, at
+    frame 0, against the frame both acts already show: the PRODUCTION
+    solve's own ``kp_data`` (``ik_production/stac_ik_full.h5``), per the
+    task-25 brief's explicit instruction to target "the production
+    keypoints ... since that is what both acts already display."
+
+    Reuses ``run()``'s exact ``Stac``/rest-snapshot construction and calls
+    the same ``compute_stac.root_optimization`` -- not a reimplementation,
+    just a different ``frame`` and a different (but numerically
+    near-identical to this repo's own ``04_kp3d_filt.npz * shared_scale` --
+    see ``act3_align.py``'s TASK-18 section, mean 0.0016 mm agreement)
+    keypoint source.
+
+    Persists ``predictions/06_stages_f0.npz``, a NEW file living BESIDE
+    ``predictions/06_stages.npz`` -- that file's own keys (including its
+    frame-450 ``qpos_root``/``frame_for_stills``) are left completely
+    untouched; other code and prior reports reference them.
+    """
+    dirs = clip_io.out_dirs(clip)
+
+    # Keypoint order for the Stac construction below comes from this repo's
+    # own filtered triangulation, exactly as run() does -- the ACTUAL
+    # keypoint VALUES optimized against come from the production h5 (below),
+    # but the NAME/ORDER contract (and the Stac object itself) is shared with
+    # run()'s own stage-450 solve, so it must be built identically.
+    npz_path = dirs["predictions"] / "04_kp3d_filt.npz"
+    with np.load(npz_path, allow_pickle=True) as z:
+        kp_names = [str(n) for n in z["kp_names"]]
+
+    expected_names = clip_io.model_kp_names()
+    if kp_names != expected_names:
+        raise ValueError(
+            "kp_names from 04_kp3d_filt.npz do not match configs/anatomy/"
+            "v1.yaml:KP_NAMES (MODEL order) -- refusing to run STAC on "
+            "possibly-mis-ordered keypoints."
+        )
+
+    h5_path = Path(clip) / "ik_production" / "stac_ik_full.h5"
+    with h5py.File(h5_path, "r") as hf:
+        kp_names_prod = [n.decode() if isinstance(n, bytes) else str(n)
+                          for n in hf["kp_names"][:]]
+        kp_data_prod = np.asarray(hf["kp_data"][:], np.float64).reshape(-1, 50, 3)
+    if kp_names_prod != expected_names:
+        raise ValueError(
+            f"{h5_path} kp_names != clip_io.model_kp_names() -- refusing to "
+            "mix keypoint orders (CLAUDE.md's keypoint-order bug class). "
+            f"First mismatch: {next((a, b) for a, b in zip(kp_names_prod, expected_names) if a != b)}")
+    if kp_names_prod != kp_names:
+        raise ValueError(
+            f"{h5_path} kp_names != 04_kp3d_filt.npz kp_names -- refusing to "
+            "mix keypoint orders (CLAUDE.md's keypoint-order bug class)."
+        )
+
+    T = kp_data_prod.shape[0]
+    if not (0 <= frame < T):
+        raise ValueError(f"frame={frame} out of range for production T={T}")
+
+    cfg = _build_cfg()
+    xml_path = str(cfg.model.MJCF_PATH)
+    assert list(cfg.model.KEYPOINT_MODEL_PAIRS.keys()) == kp_names, (
+        "cfg.model.KEYPOINT_MODEL_PAIRS key order != kp_names order -- "
+        "Stac's site index map would silently misalign to the wrong keypoint."
+    )
+
+    # ---------------- Single model: no mesh morphing, ever -----------------
+    stac = Stac(xml_path, cfg, kp_names)
+    mjx_model, mjx_data0 = _rest_snapshot(stac)
+
+    # kp_data_prod is ALREADY in the SCALED/model coordinate frame
+    # root_optimization/pose_optimization fit against (see act4_solve.py's
+    # own COORDINATE-FRAME CAVEAT) -- feed it directly, no shared_scale
+    # multiplication needed here (unlike run()'s own kp3d*shared_scale, which
+    # starts from raw mm).
+    kp_flat_prod_np = kp_data_prod.reshape(T, -1)
+    kp_flat_prod = jp.asarray(kp_flat_prod_np)
+
+    residual_scaled_f0 = marker_residual_mm(
+        mjx_model, mjx_data0, kp_flat_prod_np[frame], stac._body_site_idxs
+    )
+    print(f"[stage_ik] root_f0: frame={frame} pre-solve (rest pose) "
+          f"residual={residual_scaled_f0:.3f} mm")
+
+    mjx_data_root_f0 = compute_stac.root_optimization(
+        stac.stac_core_obj, mjx_model, mjx_data0, kp_flat_prod,
+        stac._root_kp_idx, stac._lb, stac._ub,
+        stac._body_site_idxs, stac._trunk_kps, frame=frame,
+    )
+    qpos_root_f0 = np.array(mjx_data_root_f0.qpos)
+    residual_root_f0 = marker_residual_mm(
+        mjx_model, mjx_data_root_f0, kp_flat_prod_np[frame], stac._body_site_idxs
+    )
+    print(f"[stage_ik] root_f0: frame={frame} post-root_optimization "
+          f"residual={residual_root_f0:.3f} mm")
+
+    if not (residual_root_f0 <= residual_scaled_f0 + 1e-9):
+        raise RuntimeError(
+            f"root_f0 residual ({residual_root_f0:.4f} mm) did not improve "
+            f"over the pre-solve residual ({residual_scaled_f0:.4f} mm) at "
+            f"frame={frame} -- refusing to persist a solve that did not "
+            "converge."
+        )
+
+    out_path = dirs["predictions"] / "06_stages_f0.npz"
+    np.savez(
+        out_path,
+        qpos_root_f0=qpos_root_f0, frame=np.array(frame),
+        residual_scaled_f0=np.array(residual_scaled_f0),
+        residual_root_f0=np.array(residual_root_f0),
+        kp_names=np.array(kp_names),
+        kp_source=np.array(str(h5_path)),
+    )
+    print(f"[stage_ik] saved {out_path}")
+    return {
+        "qpos_root_f0": qpos_root_f0, "frame": frame,
+        "residual_scaled_f0": residual_scaled_f0,
+        "residual_root_f0": residual_root_f0, "kp_names": kp_names,
+        "clip": clip,
+    }
+
+
 def _add_sphere(scene, pos, rgba, size):
     if scene.ngeom >= scene.maxgeom:
         return
@@ -565,8 +700,21 @@ def qc_stages(result: dict, out_png=None, size=(480, 480)) -> Path:
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--clip", default=clip_io.CLIP_DEFAULT)
-    ap.add_argument("--frame", type=int, default=450, help="frame index used for the stage stills/residuals")
+    ap.add_argument("--frame", type=int, default=450, help="frame index used for the stage stills/residuals (--mode full only)")
+    ap.add_argument("--mode", choices=["full", "root_f0"], default="full",
+                     help="'full' (default, unchanged): the original 4-stage "
+                          "run() + QC figure. 'root_f0' (task-25): ONLY "
+                          "recompute root_optimization at --root-frame "
+                          "against the production kp_data, saving "
+                          "predictions/06_stages_f0.npz -- never touches "
+                          "06_stages.npz.")
+    ap.add_argument("--root-frame", type=int, default=0,
+                     help="frame used by --mode root_f0 (default 0)")
     args = ap.parse_args()
+
+    if args.mode == "root_f0":
+        run_root_f0(args.clip, args.root_frame)
+        return
 
     result = run(args.clip, args.frame)
     qc_stages(result)

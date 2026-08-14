@@ -215,53 +215,69 @@ swap changes PROVENANCE (what array is read) without changing what is drawn
 in any visually meaningful way. It does guarantee exact equality with Act 4's
 own opening frame (both now read the identical `kp_data[frame_for_stills]`),
 which the previous `04_kp3d_filt.npz`-sourced cloud only matched to that same
-~0.002 mm noise floor. **STALE as of TASK-24**: Act 4's opening frame no
-longer reads `kp_data[frame_for_stills]` -- see the TASK-24 section
-immediately below for why this act does NOT follow it there.
+~0.002 mm noise floor. **STALE as of TASK-24, RESOLVED by TASK-25**: TASK-24
+moved Act 4's opening frame off `kp_data[frame_for_stills]` to
+`kp_data[0]`, and this act's own TASK-24 section (below) explains why it
+deliberately did NOT follow at the time; TASK-25 (further below) closes
+that gap by re-anchoring this act's own target to `kp_data[0]` too, once a
+mesh solved AT frame 0 (`qpos_root_f0`) existed to pair it with.
 
 TASK-24 (`act4_solve.py` fixed a wrap/replayed-tail bug the user reported in
 Act 4's playback -- read `act4_solve.py`'s own TASK-24 section first for the
-full bug report; this section covers ONLY its consequence for Act 3, which
-does NOT change as a result): the fix re-anchors Act 4's Phase A target and
-Phase B playback start from `frame_for_stills` (450) to source frame 0
-(`act4_solve.PLAYBACK_ANCHOR`). Act 4's own docstring argues this act's
-skeleton target should, in principle, move to the same anchor for a
-perfectly seamless keypoint-cloud handoff at the Act3->Act4 cut. **This act
-deliberately does NOT make that change**, for a measured, rendered reason:
+full bug report; this section covers ONLY its consequence for Act 3).
+**SUPERSEDED BY TASK-25 immediately below** -- kept as the historical record
+of why a naive re-anchor was rejected, NOT a description of current
+behaviour: the fix re-anchored Act 4's Phase A target and Phase B playback
+start from `frame_for_stills` (450) to source frame 0
+(`act4_solve.PLAYBACK_ANCHOR`). Re-pointing only this act's SKELETON target
+to `kp_data_prod[0]` while leaving the OLD `qpos_root` (`06_stages.npz`'s
+own snapshot, a fit SPECIFICALLY to frame 450's keypoints via
+`root_optimization(..., frame=frame_for_stills)`) as-is was tried and
+rendered before deciding against it, not assumed bad: `mesh_ctr_final` (FK
+of that old `qpos_root`) sat at `[1.634, 0.250, 0.198]`; `C_true` computed
+from `kp_data_prod[0]` instead of `kp_data_prod[450]` sat at
+`[0.598, 0.235, 0.146]` -- **1.038 model units** away (roughly 3.6x the
+model's own ~0.289-unit body length) -- rendered directly (`f=89`, the
+hold): the skeleton sat in the frame's far corner, clipped, never touching
+the mesh. TASK-24's decision was correct GIVEN its own stated constraint
+("out of scope for a playback bugfix" to re-run the actual STAC solve) --
+TASK-25 below lifts exactly that constraint instead of accepting the
+trade-off.
 
-This act's MESH (`qpos_root`, above) is a snapshot baked by
-`stage_ik.py`'s `root_optimization(..., frame=frame_for_stills)` call --
-i.e. `qpos_root` is itself a fit SPECIFICALLY to frame 450's keypoints, not
-a frame-independent "root only" pose. Re-pointing only the SKELETON target
-to `kp_data_prod[0]` while leaving `qpos_root` as-is (it cannot be
-re-solved at frame 0 without re-running the actual STAC optimization --
-out of scope for a playback bugfix, and would invalidate the many other
-measured numbers this module's docstring and `residual_root`/`residual_mm`
-depend on) was tried and rendered before deciding against it, not assumed
-bad: `mesh_ctr_final` (FK of `qpos_root`) sits at
-`[1.634, 0.250, 0.198]`; `C_true` computed from `kp_data_prod[0]` instead of
-`kp_data_prod[450]` sits at `[0.598, 0.235, 0.146]` -- **1.038 model units**
-away (roughly 3.6x the model's own ~0.289-unit body length), versus the
-~0.05-model-unit near-coincidence this act's whole staging premise depends
-on (see the WORLD-COORDINATE STORY section above). Rendered directly
-(`f=89`, the hold): the skeleton sits in the frame's far corner, clipped,
-never touching the mesh -- flatly contradicting this act's own EXPECTATION
-("by f=59 ... skeleton and mesh are co-located") and FALSIFICATION
-("skeleton growing/shrinking or not reaching the mesh means the blend does
-not reach p=1") criteria above. That is a WORSE, more visible failure than
-the keypoint-cloud jump at the Act3->Act4 cut it would have fixed.
+TASK-25 (closes the regression TASK-24 left open, by removing the blocker
+TASK-24 itself named): a hand-translated `qpos_root` was never on the
+table (that would not be a real solver output, just an invented
+approximation of one -- exactly what the task-25 brief forbids). Instead,
+`stage_ik.py` gained `run_root_f0()`, which calls the exact SAME
+`compute_stac.root_optimization` (same `Stac`/rest-snapshot construction)
+`run()` already calls for its own `qpos_root`, just at frame 0 of the
+PRODUCTION `kp_data` instead of frame `frame_for_stills` (450) of this
+repo's own rescaled keypoints. The result, `qpos_root_f0`, is persisted to
+a NEW file, `predictions/06_stages_f0.npz`, living BESIDE (never
+overwriting) `06_stages.npz` -- that file's own `qpos_root`/
+`frame_for_stills`/etc. are untouched, still the correct provenance for the
+frame-450 stage figure `stage_ik.qc_stages` produces.
 
-DECISION: this act keeps reading `kp_data_prod[frame_for_stills]` (450,
-matching `qpos_root`'s own solve frame) for its skeleton target --
-UNCHANGED by TASK-24. Consequence, measured and reported rather than hidden:
-the Act3(f=89)->Act4(f=0) MESH handoff remains exactly continuous (the mesh
-is `qpos_root` on both sides regardless of which frame either act's
-KEYPOINT target uses, so this is unaffected), but the keypoint
-cloud/skeleton overlay now shows a real, measured jump at that exact cut (the
-same 1.038-model-unit gap above, since Act 4's Phase A target moved to
-`kp_data_prod[0]` while this act's target stays at `kp_data_prod[450]`) --
-see `act4_solve.py`'s own TASK-24 section and the task-24 report for the
-measured on-screen numbers.
+This act now draws `qpos_root_f0` (not `06_stages.npz`'s `qpos_root`) as its
+static mesh and reads `kp_data_prod[0]` (not `kp_data_prod[frame_for_stills]`)
+as its skeleton target -- both consistently anchored at source frame 0, the
+SAME frame `act4_solve.PLAYBACK_ANCHOR` plays back from. Because
+`qpos_root_f0` was solved specifically against frame 0's own keypoints,
+`mesh_ctr_final` (now FK of `qpos_root_f0`) is once again near-coincident
+with `C_true` (now computed from `kp_data_prod[0]`) -- measured directly:
+residual_root_f0 = 0.099 mm (down from a pre-solve 0.695 mm), the same
+small-residual signature the WORLD-COORDINATE STORY section above describes
+for the frame-450 solve, just re-measured at a different frame -- so this
+act's own convergence premise (skeleton and mesh co-located by f=59/the
+hold) holds exactly as it always did; see the render-time acceptance print
+for the exact numbers. The measured-fact guard below (translation-only
+`root_optimization`) is checked against `qpos_root_f0`, not the old
+`qpos_root`. Consequence, and the whole point of this task: since both this
+act's mesh AND Act 4's Phase A opening pose (`act4_solve.py`'s own TASK-25
+section) are now the identical `qpos_root_f0`, and both acts' skeleton
+target is now the identical `kp_data_prod[0]`, the Act3(f=89)->Act4(f=0)
+handoff is a real, measured, near-zero jump on BOTH the mesh and the
+keypoint cloud -- not merely the mesh, as TASK-17/24 could only guarantee.
 
 Timeline (90 frames, 3 s @ 30 fps -- task-16: cut down from the 180-frame/
 6s task-15 v2 cut per the user's direct "just the second half... swings in
@@ -577,8 +593,6 @@ def render_act3(clip: str = clip_io.CLIP_DEFAULT) -> Path:
 
     with np.load(dirs["predictions"] / "06_stages.npz", allow_pickle=True) as z:
         qpos_default = np.asarray(z["qpos_default"], np.float64)
-        qpos_root = np.asarray(z["qpos_root"], np.float64)
-        residual_mm = np.asarray(z["residual_mm"], np.float64)
         stage_names = [str(s) for s in z["stage_names"]]
         kp_names = [str(n) for n in z["kp_names"]]
         frame_for_stills = int(z["frame_for_stills"])
@@ -586,17 +600,43 @@ def render_act3(clip: str = clip_io.CLIP_DEFAULT) -> Path:
 
     assert stage_names[:3] == ["default", "scaled", "root"], (
         f"unexpected 06_stages.npz stage_names order: {stage_names}")
-    residual_scaled, residual_root = float(residual_mm[1]), float(residual_mm[2])
+
+    # TASK-25: the mesh's static pose and the residual endpoints below now
+    # come from `06_stages_f0.npz` (`stage_ik.run_root_f0`), a root_optimization
+    # solved AT source frame 0 against the PRODUCTION kp_data -- NOT
+    # `06_stages.npz`'s own `qpos_root`/`residual_mm`, which are frame-450
+    # snapshots. See module docstring's TASK-25 section for why (closes the
+    # Act3->Act4 cut regression TASK-24 left open). `06_stages.npz` itself is
+    # untouched -- still loaded above only for `qpos_default`/`kp_names`/
+    # `frame_for_stills`/`shared_scale`, all of which are frame-independent.
+    with np.load(dirs["predictions"] / "06_stages_f0.npz", allow_pickle=True) as zf0:
+        qpos_root_f0 = np.asarray(zf0["qpos_root_f0"], np.float64)
+        f0_frame = int(zf0["frame"])
+        residual_scaled_f0 = float(zf0["residual_scaled_f0"])
+        residual_root_f0 = float(zf0["residual_root_f0"])
+        kp_names_f0 = [str(n) for n in zf0["kp_names"]]
+    if f0_frame != 0:
+        raise ValueError(
+            f"06_stages_f0.npz frame={f0_frame} -- expected 0 (this act's "
+            "skeleton target and Act 4's PLAYBACK_ANCHOR are both hardcoded "
+            "to source frame 0; a mismatched snapshot would reintroduce the "
+            "Act3->Act4 cut regression TASK-25 fixes).")
+    if kp_names_f0 != kp_names:
+        raise ValueError(
+            "06_stages_f0.npz kp_names != 06_stages.npz kp_names -- refusing "
+            "to mix keypoint orders (CLAUDE.md's keypoint-order bug class).")
 
     # Measured-fact guard: root_optimization must not have rotated or moved
-    # any joint DOF (module docstring point 2). If a future re-run of
-    # stage_ik.py ever produces a rotating root_optimization, this act's
-    # entire "translation only" premise would be wrong -- fail loudly rather
-    # than silently render the old (incorrect) story.
-    if not np.allclose(qpos_default[3:], qpos_root[3:], atol=1e-9):
+    # any joint DOF (module docstring point 2), now checked against
+    # `qpos_root_f0` (the pose this act actually draws) rather than the old
+    # frame-450 `qpos_root`. If a future re-run of stage_ik.py ever produces
+    # a rotating root_optimization, this act's entire "translation only"
+    # premise would be wrong -- fail loudly rather than silently render the
+    # old (incorrect) story.
+    if not np.allclose(qpos_default[3:], qpos_root_f0[3:], atol=1e-9):
         raise ValueError(
-            "qpos_default[3:] != qpos_root[3:] -- root_optimization rotated "
-            "and/or moved joint DOF in this solve. Act 3's premise "
+            "qpos_default[3:] != qpos_root_f0[3:] -- root_optimization "
+            "rotated and/or moved joint DOF in this solve. Act 3's premise "
             "(translation only, no rotation, no scale change) no longer "
             "matches the recorded snapshots; refusing to render a "
             "mesh-rotation animation that contradicts the measured facts.")
@@ -624,23 +664,26 @@ def render_act3(clip: str = clip_io.CLIP_DEFAULT) -> Path:
             f"{h5_path} kp_names != 06_stages.npz kp_names -- refusing to mix "
             "keypoint orders (CLAUDE.md's keypoint-order bug class).")
 
-    # TASK-24: deliberately still `frame_for_stills` (450), NOT
-    # `act4_solve.PLAYBACK_ANCHOR` (0) -- `qpos_root` below is itself a
-    # snapshot solved AT frame_for_stills, so this act's skeleton target must
-    # match IT, not Act 4's (separately anchored) playback. See this
-    # module's own TASK-24 docstring section for the measured, rendered
-    # reason (re-anchoring here to 0 leaves the skeleton ~1.04 model units
-    # from the static mesh, never converging) and the resulting Act3->Act4
-    # keypoint-cloud seam trade-off this choice accepts.
-    kp3d_raw_frame = kp_data_prod[frame_for_stills] / shared_scale  # (50,3) mm, MODEL order, RAW (unscaled)
-    print(f"[act3] frame_for_stills={frame_for_stills}, shared_scale={shared_scale:.4f} "
-          f"(FIXED for this act -- root_optimization only, task-15 v2/task-16)")
-    print(f"[act3] TASK-18: keypoint skeleton sourced from the PRODUCTION fit's "
-          f"kp_data ({h5_path}), not 04_kp3d_filt.npz -- mesh below is still "
-          f"the staged (no-offset) qpos_root from 06_stages.npz.")
-    print(f"[act3] residuals scaled/root = {residual_scaled:.3f}/{residual_root:.3f} mm")
-    print(f"[act3] qpos_root - qpos_default (translation only, mm, NOT depicted "
-          f"this act -- task-16): {(qpos_root[:3] - qpos_default[:3])}")
+    # TASK-25: this act's skeleton target is now source frame 0 (matching
+    # `act4_solve.PLAYBACK_ANCHOR` and `06_stages_f0.npz`'s own `frame`), NOT
+    # `frame_for_stills` (450) -- see module docstring's TASK-25 section.
+    # `frame_for_stills` is still loaded/printed above only as provenance for
+    # `06_stages.npz`'s OWN frame-450 solve (unrelated to what this act draws
+    # now).
+    SKELETON_TARGET_FRAME = 0  # must match act4_solve.PLAYBACK_ANCHOR
+    kp3d_raw_frame = kp_data_prod[SKELETON_TARGET_FRAME] / shared_scale  # (50,3) mm, MODEL order, RAW (unscaled)
+    print(f"[act3] TASK-25: skeleton target frame={SKELETON_TARGET_FRAME}, "
+          f"shared_scale={shared_scale:.4f} (06_stages.npz's own "
+          f"frame_for_stills={frame_for_stills} is UNRELATED to what this "
+          f"act draws, kept only as 06_stages.npz's own provenance)")
+    print(f"[act3] TASK-18/25: keypoint skeleton sourced from the PRODUCTION "
+          f"fit's kp_data ({h5_path}), not 04_kp3d_filt.npz -- mesh below is "
+          f"qpos_root_f0 (06_stages_f0.npz), a root_optimization solved AT "
+          f"frame 0 against this SAME kp_data, not 06_stages.npz's "
+          f"frame-450 qpos_root.")
+    print(f"[act3] residuals scaled_f0/root_f0 = {residual_scaled_f0:.3f}/{residual_root_f0:.3f} mm")
+    print(f"[act3] qpos_root_f0 - qpos_default (translation only, mm, NOT "
+          f"depicted this act -- task-16): {(qpos_root_f0[:3] - qpos_default[:3])}")
 
     mj_model = mujoco.MjModel.from_xml_path(str(XML_PATH))
     orig_alpha = capture_geom_alpha(mj_model)   # BEFORE any geom_rgba mutation
@@ -673,25 +716,26 @@ def render_act3(clip: str = clip_io.CLIP_DEFAULT) -> Path:
 
     # --- Mesh, static for the WHOLE act (task-16): forward-kinematics both
     # `qpos_default` (only used to derive the skeleton's fixed START_CENTROID
-    # reference) and `qpos_root` (the mesh's real, final position, drawn for
-    # every frame) ONCE, outside the render loop -- see module docstring's
-    # TASK-16 PIVOT section.
+    # reference) and `qpos_root_f0` (the mesh's real, final position -- TASK-25:
+    # a root_optimization solved AT frame 0, replacing 06_stages.npz's
+    # frame-450 `qpos_root` -- drawn for every frame) ONCE, outside the render
+    # loop -- see module docstring's TASK-16 PIVOT and TASK-25 sections.
     d_default = mujoco.MjData(mj_model)
     d_default.qpos[:] = qpos_default
     mujoco.mj_forward(mj_model, d_default)
     mesh_ctr_default = np.asarray(d_default.site_xpos[body_site_idxs]).mean(axis=0)
 
     d = mujoco.MjData(mj_model)
-    d.qpos[:] = qpos_root
+    d.qpos[:] = qpos_root_f0
     mujoco.mj_forward(mj_model, d)
     mesh_ctr_final = np.asarray(d.site_xpos[body_site_idxs]).mean(axis=0)
 
     start_centroid = (1.0 - P_REF) * mesh_ctr_default + P_REF * C_true
-    start_resid = residual_root + (1.0 - P_REF) * (residual_scaled - residual_root)
-    print(f"[act3] staging (task-16): P_REF={P_REF} start_centroid={start_centroid} "
+    start_resid = residual_root_f0 + (1.0 - P_REF) * (residual_scaled_f0 - residual_root_f0)
+    print(f"[act3] staging (task-16/25): P_REF={P_REF} start_centroid={start_centroid} "
           f"-> C_true={C_true} (mesh_ctr_final={mesh_ctr_final}); "
-          f"start_resid={start_resid:.3f} -> residual_root={residual_root:.3f} mm; "
-          f"mesh is STATIC at qpos_root for the whole act, camera lookat is "
+          f"start_resid={start_resid:.3f} -> residual_root_f0={residual_root_f0:.3f} mm; "
+          f"mesh is STATIC at qpos_root_f0 for the whole act, camera lookat is "
           f"the fixed mesh_ctr_final -- only the skeleton's centroid moves.")
 
     out_dir = dirs["frames"] / "act3_align"
@@ -711,7 +755,7 @@ def render_act3(clip: str = clip_io.CLIP_DEFAULT) -> Path:
         cam = act3_frozen_camera(mesh_ctr_final)
 
         for f in range(N_OUT):
-            stage_label, resid, p = _stage_at(f, start_resid, residual_root)
+            stage_label, resid, p = _stage_at(f, start_resid, residual_root_f0)
 
             # STAGING (task-16): the ALREADY fixed-size cloud's centroid
             # blends from the fixed `start_centroid` (p=0) to the cloud's

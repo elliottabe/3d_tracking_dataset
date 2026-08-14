@@ -14,12 +14,15 @@ used before task-18) reflects a fit with the model's stock, un-fitted marker
 placement, while the production `qpos` reflects a fit that also corrected
 those marker positions (`offsets`, mean |0.015| max |0.26| mm -- real and
 fitted, confirmed by reading them from the h5, not assumed). `06_stages.npz`
-is still read for `qpos_root` (Act 3's true final mesh position -- a genuine
-earlier stage of a real solve, still the right thing for Phase A to
-interpolate FROM) and `frame_for_stills`/`shared_scale` (both unchanged
-between the two solves, since they describe the SAME clip). See PLAYBACK
-START and the EXPECTATION/FALSIFICATION sections below for the specific
-numbers this swap changes (and the ones it, reassuringly, does not).
+is still read for `frame_for_stills`/`shared_scale` (both unchanged between
+the two solves, since they describe the SAME clip); Phase A's starting
+mesh pose is `qpos_root_f0` (TASK-25: `predictions/06_stages_f0.npz`, a
+root_optimization solved AT source frame 0 -- was `06_stages.npz`'s own
+frame-450 `qpos_root` pre-TASK-25; see the TASK-25 section below), still
+the right thing for Phase A to interpolate FROM: a genuine earlier stage of
+a real solve. See PLAYBACK START and the EXPECTATION/FALSIFICATION sections
+below for the specific numbers this swap changes (and the ones it,
+reassuringly, does not).
 
 TASK-19 (presentation changes -- read this before touching the render loop's
 drawing calls or the Phase B/C split below; none of these alter what is
@@ -168,16 +171,31 @@ different anchor.
 ALSO MEASURED, two further consequences of moving Phase A's target from
 frame 450 to frame 0 -- one required an actual fix (a), the other is
 reported as a known, out-of-scope side effect (b):
-  (a) Phase A is no longer close to a pure rotation. `qpos_root` is a
+  (a) Phase A is no longer close to a pure rotation. `qpos_root` (the OLD,
+      pre-TASK-25 snapshot this paragraph originally measured) is a
       translation snapshot solved AT frame 450 (see stage_ik.py's
       `root_optimization(..., frame=frame_for_stills)` call), so it sat
       near `qpos_prod[450]`'s position by construction; it does NOT sit
       near `qpos_prod[0]`'s position (a real ~1.03-model-unit gap -- the fly
-      walks during the clip). Phase A's live-recomputed residual now runs
+      walks during the clip). Phase A's live-recomputed residual ran
       1.041 -> 0.012 mm (was 0.118 -> 0.011 mm pre-TASK-24) -- a real,
       substantially bigger swing, because Phase A now closes a genuine
       translation gap in addition to the rotation it always closed.
-      TASK-24 CLIPPING FIX (found by rendering and looking, not assumed):
+      **UPDATED BY TASK-25** (see the TASK-25 section below, which replaces
+      this paragraph's `qpos_root` with `qpos_root_f0`, a root_optimization
+      solved AT frame 0 instead of 450): the ~1.03-model-unit translation
+      gap this paragraph measured shrinks to **0.061 model units**
+      (`qpos_root_f0[:3]` vs `qpos_anchor[:3]`) -- rotation (11.49 deg) and
+      joint-DOF delta (3.77) are UNCHANGED (both depend only on
+      `qpos_anchor` vs. the rest pose's own rotation/DOF, which no root
+      solve at any frame ever touches -- see the translation-only guard).
+      Phase A's live-recomputed residual now starts at `residual_root_f0`
+      (0.099 mm, `06_stages_f0.npz`) rather than 1.041 mm, since the mesh
+      once again starts near-coincident with its keypoint target instead of
+      ~1 model unit away.
+      TASK-24 CLIPPING FIX (found by rendering and looking, not assumed;
+      kept unmodified by TASK-25 -- see the TASK-25 section below for
+      whether it is still load-bearing):
       the FIRST version of this fix kept Phase A's camera lookat FROZEN at
       `mesh_ctr_final` (`qpos_root`'s own FK centroid) for the whole act,
       unchanged from pre-TASK-24 -- this was safe before because the OLD
@@ -220,20 +238,37 @@ reported as a known, out-of-scope side effect (b):
       pre-existing, explicitly out-of-scope category this task asked to be
       reported on, not fixed.
 
-KNOWN, DELIBERATE LIMITATION -- Act 3 does NOT make the matching anchor
-change: see `act3_align.py`'s own TASK-24 section for why (in short: Act 3's
-static mesh, `qpos_root`, is a snapshot baked by `root_optimization(frame=
-450)` in `06_stages.npz` and cannot be moved to frame 0 without re-running
-that solve, which is out of scope here; measured and rendered directly,
-re-anchoring Act 3's skeleton target alone to frame 0 leaves the skeleton
-~1.04 model units from the static mesh at the "converged" hold, visibly
-never touching it -- worse than the problem it would fix). Act 3 therefore
-keeps reading `kp_data_prod[frame_for_stills]` (450) for its own skeleton
-target. Consequence: the Act3(f89) -> Act4(f0) MESH handoff remains exactly
-continuous (mesh is `qpos_root` on both sides regardless of anchor, so this
-is unaffected by anything above), but the KEYPOINT CLOUD/skeleton overlay
-shows a real, measured jump at that exact cut (the same ~1.04-model-unit gap)
--- reported as a known trade-off, not silently patched over.
+TASK-25 (closes the regression the "KNOWN, DELIBERATE LIMITATION" this
+section used to describe -- read `act3_align.py`'s own TASK-25 section
+first for the full story; this section covers ONLY Act 4's side of it):
+previously (pre-TASK-25), Act 3 did NOT make the matching anchor change --
+its static mesh, `06_stages.npz`'s `qpos_root`, was a snapshot baked by
+`root_optimization(frame=450)` and could not be moved to frame 0 without
+re-running that solve, which TASK-24 (a playback bugfix) treated as out of
+scope; measured and rendered directly at the time, re-anchoring Act 3's
+skeleton target alone to frame 0 left the skeleton ~1.04 model units from
+the static mesh at the "converged" hold, visibly never touching it -- worse
+than the seam it would have fixed. Act 3 kept reading
+`kp_data_prod[frame_for_stills]` (450), and the Act3(f89)->Act4(f0)
+KEYPOINT CLOUD/skeleton overlay showed a real, measured ~1.04-model-unit
+jump at that exact cut (the mesh handoff was already exactly continuous,
+since both acts drew the same frame-450 `qpos_root` regardless of anchor).
+
+TASK-25 removes that limitation by re-running the actual solve instead of
+accepting the trade-off: `stage_ik.run_root_f0()` calls the SAME
+`compute_stac.root_optimization` `06_stages.npz`'s own `qpos_root` came
+from, at frame 0 of the PRODUCTION `kp_data` instead of frame
+`frame_for_stills` (450), producing `qpos_root_f0`
+(`predictions/06_stages_f0.npz`, a NEW file -- `06_stages.npz` and its own
+`qpos_root` are untouched). Act 4's Phase A now interpolates
+`qpos_root_f0 -> qpos_prod[anchor]` (this section's own preceding TASK-24
+paragraphs, and `_slerp_qpos`'s call site below, both now read
+`qpos_root_f0`); Act 3 now draws `qpos_root_f0` as its static mesh and reads
+`kp_data_prod[0]` (not `kp_data_prod[frame_for_stills]`) as its skeleton
+target -- see act3_align.py's own TASK-25 section. Both acts are once again
+anchored at the identical frame (0), so BOTH the mesh AND the keypoint
+cloud/skeleton are continuous across the Act3(f89)->Act4(f0) cut, not just
+the mesh as before.
 
 This act carries the ORIENTING beat of the whole explainer. Act 3 covered
 scale + translation only: `root_optimization` measured 0.0000 deg of
@@ -423,6 +458,13 @@ near `qpos_prod[0]`'s position the way it sat near `qpos_prod[450]`'s) --
 measured live-recomputed residual is now **1.041 -> 0.012 mm** over the same
 240 frames, a much bigger swing than the pre-TASK-24 number, because Phase A
 is no longer purely rotational: it now visibly repositions the mesh too.
+**TASK-25 UPDATE**: this ~1.03-model-unit gap (and the 1.041 mm residual
+start) is measured against the OLD, pre-TASK-25 `qpos_root` (frame 450);
+with `qpos_root_f0` (frame 0), the gap shrinks to 0.061 model units and the
+residual starts at 0.099 mm -- see the TASK-25 section above for the full
+number set. The clipping fix below is kept regardless (harmless when the
+gap it was sized for shrinks; see that section for whether it remains
+load-bearing at the new, smaller gap).
 Rendered and checked directly (not assumed from the residual alone): the
 FIRST version of this fix kept Phase A's camera `lookat` frozen at
 `mesh_ctr_final` for the whole act (unchanged from pre-TASK-24) and this
@@ -749,11 +791,31 @@ def render_act4(clip: str = clip_io.CLIP_DEFAULT, start_frame: int = 0) -> Path:
     dirs = clip_io.out_dirs(clip)
 
     with np.load(dirs["predictions"] / "06_stages.npz", allow_pickle=True) as z:
-        qpos_root = np.asarray(z["qpos_root"], np.float64)
         stage_names = [str(s) for s in z["stage_names"]]
         kp_names = [str(n) for n in z["kp_names"]]
         frame_for_stills = int(z["frame_for_stills"])
         shared_scale = float(z["shared_scale"])
+
+    # TASK-25: Phase A's starting pose now comes from `06_stages_f0.npz`
+    # (`stage_ik.run_root_f0`) -- a root_optimization solved AT source frame
+    # 0 against the PRODUCTION kp_data, NOT `06_stages.npz`'s own `qpos_root`
+    # (a frame-450 snapshot). See module docstring's TASK-25 section (and
+    # act3_align.py's own TASK-25 section) for why: this closes the Act3->
+    # Act4 keypoint-cloud jump TASK-24's "KNOWN, DELIBERATE LIMITATION"
+    # section reported but did not fix. `06_stages.npz` itself is untouched.
+    with np.load(dirs["predictions"] / "06_stages_f0.npz", allow_pickle=True) as zf0:
+        qpos_root_f0 = np.asarray(zf0["qpos_root_f0"], np.float64)
+        f0_frame = int(zf0["frame"])
+        kp_names_f0 = [str(n) for n in zf0["kp_names"]]
+    if f0_frame != 0:
+        raise ValueError(
+            f"06_stages_f0.npz frame={f0_frame} -- expected 0 (PLAYBACK_ANCHOR "
+            "and this snapshot must agree, or Phase A's starting pose no "
+            "longer matches what Act 3's own mesh is drawn at).")
+    if kp_names_f0 != kp_names:
+        raise ValueError(
+            "06_stages_f0.npz kp_names != 06_stages.npz kp_names -- refusing "
+            "to mix keypoint orders (CLAUDE.md's keypoint-order bug class).")
 
     assert stage_names == ["default", "scaled", "root", "pose"], (
         f"unexpected 06_stages.npz stage_names order: {stage_names}")
@@ -819,14 +881,14 @@ def render_act4(clip: str = clip_io.CLIP_DEFAULT, start_frame: int = 0) -> Path:
     # non-empty and root_optimization starts doing the orienting instead),
     # this act's "orienting beat lives here" story would be wrong -- fail
     # loudly rather than silently render a stale claim.
-    root_pose_angle_deg = _quat_angle_deg(qpos_root[3:7], qpos_anchor[3:7])
+    root_pose_angle_deg = _quat_angle_deg(qpos_root_f0[3:7], qpos_anchor[3:7])
     if root_pose_angle_deg < 1.0:
         raise ValueError(
             f"root->anchor rotation is only {root_pose_angle_deg:.3f} deg -- "
             "Act 4's premise (pose_optimization performs the real orienting) "
             "no longer matches the recorded snapshots; refusing to render."
         )
-    joint_dof_delta = float(np.linalg.norm(qpos_anchor[7:] - qpos_root[7:]))
+    joint_dof_delta = float(np.linalg.norm(qpos_anchor[7:] - qpos_root_f0[7:]))
     print(f"[act4] root->anchor rotation: {root_pose_angle_deg:.2f} deg, "
           f"joint-DOF L2 delta: {joint_dof_delta:.2f}")
 
@@ -896,12 +958,13 @@ def render_act4(clip: str = clip_io.CLIP_DEFAULT, start_frame: int = 0) -> Path:
 
     # Task-17 ("seamless Act3->Act4 cut"): the mesh's own final centroid,
     # computed EXACTLY the way act3_align.py computes `mesh_ctr_final` --
-    # FK against the SAME `qpos_root`, averaged over the SAME
-    # `body_site_idxs` -- so Phase A's camera lookat (below) is the
-    # IDENTICAL number Act 3's last frame used, not a re-derived
-    # approximation of it. See module docstring's CAMERA section.
+    # FK against the SAME `qpos_root_f0` (TASK-25: was the old `qpos_root`),
+    # averaged over the SAME `body_site_idxs` -- so Phase A's camera lookat
+    # (below) is the IDENTICAL number Act 3's last frame used, not a
+    # re-derived approximation of it. See module docstring's CAMERA and
+    # TASK-25 sections.
     d_root_ref = mujoco.MjData(mj_model)
-    d_root_ref.qpos[:] = qpos_root
+    d_root_ref.qpos[:] = qpos_root_f0
     mujoco.mj_forward(mj_model, d_root_ref)
     mesh_ctr_final = np.asarray(d_root_ref.site_xpos[body_site_idxs]).mean(axis=0)
     print(f"[act4] task-17: Phase A frozen camera distance={ACT3_CAM_DISTANCE} "
@@ -1031,7 +1094,7 @@ def render_act4(clip: str = clip_io.CLIP_DEFAULT, start_frame: int = 0) -> Path:
             if f <= PHASE_A_END:
                 phase = "A"
                 p = _smoothstep(f / float(PHASE_A_END))
-                qpos = _slerp_qpos(qpos_root, qpos_anchor, p)
+                qpos = _slerp_qpos(qpos_root_f0, qpos_anchor, p)
                 cloud_pts = target_a
                 t_src = anchor
             else:
