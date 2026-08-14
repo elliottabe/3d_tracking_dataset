@@ -111,7 +111,6 @@ import sys
 import time
 from pathlib import Path
 
-import cv2
 import hydra
 import imageio.v2 as imageio
 import mujoco
@@ -123,13 +122,13 @@ sys.path.insert(0, str(_REPO))
 sys.path.insert(0, str(_REPO / "third_party" / "jarvis_jax"))
 sys.path.insert(0, str(_REPO / "stac-mjx"))
 
-from scripts.viz.ik_explainer import clip_io  # noqa: E402
+from scripts.viz.ik_explainer import clip_io, draw  # noqa: E402
 from scripts.preprocess_keypoints_for_ik import compute_shared_scale  # noqa: E402
 from stac_mjx import compute_stac, io as stac_io  # noqa: E402
 from stac_mjx import utils as stac_utils  # noqa: E402
 from stac_mjx.stac import Stac  # noqa: E402
 from utils.path_utils import register_custom_resolvers  # noqa: E402
-from viz.core.colors import keypoint_groups  # noqa: E402
+from viz.core.colors import PALETTE, keypoint_groups  # noqa: E402
 
 register_custom_resolvers()
 
@@ -333,9 +332,14 @@ def run(clip: str = clip_io.CLIP_DEFAULT, frame_for_stills: int = 450) -> dict:
 
     residual_mm = np.array([residual_default, residual_scaled, residual_root, residual_pose])
     if not np.all(np.diff(residual_mm) <= 1e-9):
-        print(f"[stage_ik] WARNING: residuals not monotonically decreasing: {residual_mm}")
-    else:
-        print(f"[stage_ik] residuals monotonically decreasing: {residual_mm}")
+        raise RuntimeError(
+            "residuals did not decrease monotonically across "
+            f"default->scaled->root->pose: {residual_mm}. Monotonic decrease "
+            "is the explainer video's core claim (each stage is a real "
+            "improvement over the last) -- refusing to produce output that "
+            "contradicts it rather than scrolling past a warning."
+        )
+    print(f"[stage_ik] residuals monotonically decreasing: {residual_mm}")
 
     # ---------------- Save 06_stages.npz -----------------------------------
     stages_path = dirs["predictions"] / "06_stages.npz"
@@ -381,12 +385,21 @@ def _add_sphere(scene, pos, rgba, size):
     scene.ngeom += 1
 
 
-# RGB (not BGR -- these feed mjv_initGeom, not cv2) group colours, semantically
-# matched to viz/core/colors.py's PALETTE (head=red, thorax=yellow, tail/
-# abdomen=blue); "legs" has no PALETTE entry so it gets a 4th, unambiguous hue.
+def _bgr255_to_rgb01(bgr):
+    """viz/core/colors.py's PALETTE is BGR/0-255 (cv2 convention); mjv_initGeom
+    wants RGB/0-1. Derive rather than restate so the two cannot diverge."""
+    b, g, r = bgr
+    return (r / 255.0, g / 255.0, b / 255.0)
+
+
+# Group colours derived from PALETTE (not restated): head=red, thorax=yellow,
+# abdomen=PALETTE's "tail" entry=blue. "legs" has no PALETTE entry, so it gets
+# a 4th, unambiguous hue chosen locally.
 _GROUP_RGB = {
-    "head": (1.0, 0.15, 0.15), "thorax": (1.0, 1.0, 0.0),
-    "abdomen": (0.2, 0.4, 1.0), "legs": (1.0, 0.0, 1.0),
+    "head": _bgr255_to_rgb01(PALETTE["head"]),
+    "thorax": _bgr255_to_rgb01(PALETTE["thorax"]),
+    "abdomen": _bgr255_to_rgb01(PALETTE["tail"]),
+    "legs": (1.0, 0.0, 1.0),
 }
 
 
@@ -411,9 +424,18 @@ def qc_stages(result: dict, out_png=None, size=(480, 480)) -> Path:
     mj_model = result["mj_model"]
     mj_model.geom_rgba[:, :3] = 0.55  # grey mesh -- same model for every panel
     mj_model.geom_rgba[:, 3] = 1.0
-    body_site_idxs = np.asarray([
-        mujoco.mj_name2id(mj_model, mujoco.mjtObj.mjOBJ_SITE, n) for n in kp_names
-    ])
+    # `tracking[name]` sites, not bare `name` -- reuse the same helper `run()`
+    # uses for `compute_shared_scale` rather than re-deriving the lookup.
+    # `mj_name2id` returns -1 (not an error) on a miss, so this is guarded
+    # explicitly: a silent -1 would make every "missing" keypoint alias site
+    # index -1 (the model's LAST site), corrupting `mesh_ctr` without any
+    # visible error -- exactly the silent index-mismatch class CLAUDE.md warns
+    # about.
+    site_map = _tracking_site_map(mj_model, kp_names)
+    missing = [n for n in kp_names if n not in site_map]
+    if missing:
+        raise ValueError(f"tracking[...] site missing for keypoints: {missing}")
+    body_site_idxs = np.asarray([site_map[n] for n in kp_names])
 
     groups = keypoint_groups(kp_names)
     group_of = {i: g for g, idxs in groups.items() for i in idxs}
@@ -470,19 +492,18 @@ def qc_stages(result: dict, out_png=None, size=(480, 480)) -> Path:
             wide_img = np.ascontiguousarray(renderer.render())
 
         for img, row in ((hero_img, hero_row), (wide_img, wide_row)):
-            cv2.putText(img, stage, (16, 34), cv2.FONT_HERSHEY_SIMPLEX, 0.95, (255, 255, 255), 2, cv2.LINE_AA)
-            cv2.putText(img, f"residual {resid:.2f} mm", (16, 64), cv2.FONT_HERSHEY_SIMPLEX,
-                        0.62, (255, 255, 0), 1, cv2.LINE_AA)
-            cv2.putText(img, f"frame {frame}", (16, H - 16), cv2.FONT_HERSHEY_SIMPLEX,
-                        0.55, (200, 200, 200), 1, cv2.LINE_AA)
+            img = draw.stage_title(img, stage, f"residual {resid:.2f} mm")
+            img = draw.label(img, f"frame {frame}", (16, H - 16), scale=0.55, color=(200, 200, 200))
             row.append(img)
 
     hero_strip = np.concatenate(hero_row, axis=1)
     wide_strip = np.concatenate(wide_row, axis=1)
-    cv2.putText(hero_strip, "hero camera (video framing)", (16, hero_strip.shape[0] - 44),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.55, (150, 220, 150), 1, cv2.LINE_AA)
-    cv2.putText(wide_strip, "wide diagnostic camera -- red=head yellow=thorax blue=abdomen magenta=legs",
-                (16, wide_strip.shape[0] - 44), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (150, 220, 150), 1, cv2.LINE_AA)
+    hero_strip = draw.label(hero_strip, "hero camera (video framing)",
+                             (16, hero_strip.shape[0] - 44), scale=0.55, color=(150, 220, 150))
+    wide_strip = draw.label(
+        wide_strip, "wide diagnostic camera -- red=head yellow=thorax blue=abdomen magenta=legs",
+        (16, wide_strip.shape[0] - 44), scale=0.55, color=(150, 220, 150),
+    )
     grid = np.concatenate([hero_strip, wide_strip], axis=0)
     out_png.parent.mkdir(parents=True, exist_ok=True)
     imageio.imwrite(out_png, grid)
