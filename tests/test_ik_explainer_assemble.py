@@ -103,7 +103,7 @@ def test_render_op_crossfade_matches_draw_fade(tmp_path):
     assert np.array_equal(out, expected)
 
 
-def test_real_act_specs_total_matches_expected_840():
+def test_real_act_specs_total_matches_expected_975():
     """Locks the exact arithmetic the brief specifies for the shipped acts
     (task-14: Act 1 shortened 450 -> 270 frames; a later round lengthened
     crossfades 15 -> 30 frames for smoother transitions; total 2205 -> 2025
@@ -127,10 +127,16 @@ def test_real_act_specs_total_matches_expected_840():
     420); total 1410 -> 900. task-30: removed Act 1's reprojection reveal
     entirely (the user no longer wants it) -- the closing 60-frame crossfade
     (frames 150-209) and its caption are deleted, not shortened; Act 1
-    210 -> 150 frames; total 900 -> 840)."""
-    assert assemble.EXPECTED_TOTAL == 840
-    assert sum(n for _, n in assemble.ACT_SPECS) == 930
-    assert assemble.N_CROSS == 30
+    210 -> 150 frames; total 900 -> 840. task-31: direct user feedback ("the
+    rays combining are a slightly too fast... keep the points on the screen
+    a little longer" + quicker fade transitions) -- Act 2 grows 150 -> 240
+    frames (NOT uniform rescaling; extra time weighted toward the final
+    held-cloud phase, see act2_triangulate.py's TASK-31 section), Acts 1/3/4
+    unchanged, crossfades shorten 30 -> 15 frames at all 3 boundaries; total
+    840 -> 975)."""
+    assert assemble.EXPECTED_TOTAL == 975
+    assert sum(n for _, n in assemble.ACT_SPECS) == 1020
+    assert assemble.N_CROSS == 15
 
 
 def test_ffprobe_video_info_reports_exact_dims_not_macroblock_padded(tmp_path):

@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """Assemble the four acts into the deliverable: mp4, README, manifest.
 
-Concatenates `frames/act{1..4}_*/f%05d.png` in story order with 30-frame
-(1 s) crossfades at each of the 3 act boundaries, encodes 1920x1080 @ 30 fps
+Concatenates `frames/act{1..4}_*/f%05d.png` in story order with 15-frame
+(0.5 s) crossfades at each of the 3 act boundaries, encodes 1920x1080 @ 30 fps
 H.264 (silent) via `viz.core.io.write_video` (imageio + ffmpeg, the repo's
 shared encoder), then writes `README.md` and `manifest.json` beside it.
 
-EXPECTED TOTAL FRAMES: 150 + 150 + 90 + 540 - 3*30 = 840 (28.0 s @ 30 fps).
+EXPECTED TOTAL FRAMES: 150 + 240 + 90 + 540 - 3*15 = 975 (32.5 s @ 30 fps).
 (Task-14 shortened Act 1 from 450 to 270 frames -- 15s to 9s -- and
 re-sourced it from a contiguous ~40% sub-range of the clip rather than the
 whole 921 frames; see `act1_views.py`'s module docstring. A later task-14
@@ -40,7 +40,18 @@ Task-30 then removed Act 1's reprojection reveal entirely (the user no
 longer wants it): the closing 60-frame raw-2D -> reprojected-3D crossfade
 (frames 150-209) and its caption are deleted outright, not shortened --
 see `act1_views.py`'s TASK-30 section. Act 1 210 -> 150 frames; total
-900 -> 840.)
+900 -> 840.
+Task-31 then re-timed Act 2 and the crossfades per direct user feedback
+("the rays combining are a slightly too fast... keep the points on the
+screen a little longer" + "I would rather have the fade transitions
+themselves be quicker"): Act 2 grows 150 -> 240 frames, NOT by uniform
+rescaling -- the extra 90 frames are weighted toward the final held-cloud
+phase (see `act2_triangulate.py`'s TASK-31 section for the per-phase
+breakdown); Acts 1/3/4 are untouched. Crossfades shorten 30 -> 15 frames
+(1 s -> 0.5 s) at all 3 boundaries, per the user's explicit "quicker
+transitions" request. Total: 150 + 240 + 90 + 540 - 3*15 = 975 (32.5 s) --
+slightly over the earlier ~30 s target, an accepted trade for more cloud
+dwell time paid for partly by quicker transitions.)
 This is asserted TWICE: once per-act (`_list_frames` requires each act directory to
 hold EXACTLY its expected count -- neither short nor padded with extras),
 and once on the assembled edit plan before any frame is written to ffmpeg.
@@ -84,14 +95,16 @@ from viz.core.io import write_video                  # noqa: E402
 # (directory name under frames/, expected frame count) in story order.
 ACT_SPECS = [
     ("act1_views", 150),
-    ("act2_triangulate", 150),
+    ("act2_triangulate", 240),
     ("act3_align", 90),
     ("act4_solve", 540),
 ]
-N_CROSS = 30   # 1 s @ 30 fps; lengthened from 15 (task-14 round 4, "smoother transitions")
+N_CROSS = 15   # 0.5 s @ 30 fps; task-31: shortened from 30 per the user's
+               # explicit "quicker transitions" request (was lengthened
+               # 15 -> 30 back in task-14 round 4, "smoother transitions").
 FPS = 30
 CANVAS_W, CANVAS_H = 1920, 1080
-EXPECTED_TOTAL = sum(n for _, n in ACT_SPECS) - (len(ACT_SPECS) - 1) * N_CROSS  # 840
+EXPECTED_TOTAL = sum(n for _, n in ACT_SPECS) - (len(ACT_SPECS) - 1) * N_CROSS  # 975
 
 
 def _list_frames(act_dir: Path, act_name: str, expected: int) -> list:
