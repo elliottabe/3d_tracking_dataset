@@ -1810,7 +1810,13 @@ in anatomy/v1.yaml) -- but the SLERP path is still required for Act 4."
 
 - [ ] **Step 1: Write the act**
 
-Timeline: 0–239 interpolate `qpos_root → qpos_pose` (joints bend onto the keypoints), residual falling; 240–779 play `qpos_seq` with the keypoint cloud advancing in step; 780–899 the closing 2-up — MuJoCo fit on the left, one real camera view with the fit reprojected on the right.
+Timeline: 0–239 interpolate `qpos_root → qpos_pose`, residual falling 0.118 → 0.017 mm; 240–779 play `qpos_seq` with the keypoint cloud advancing in step; 780–899 the closing 2-up — MuJoCo fit on the left, one real camera view with the fit reprojected on the right.
+
+**MEASURED — this act carries the ORIENTING beat, not Act 3.** `pose_optimization` rotates the body AND bends the joints simultaneously: 34.73° of root rotation plus 2.74 of joint-DOF movement. `root_optimization` contributed 0.0000° (`TRUNK_OPTIMIZATION_KEYPOINTS` is empty in `configs/anatomy/v1.yaml`), so the first 240 frames of this act are where the fly visibly swings into its true heading. Label it accordingly.
+
+The rotation is genuinely solved per frame, not a static pose: root heading varies **0–33°** across the 921-frame sequence. Use the same wide framing as Act 3 (the model's `hero` camera frames the mesh only and drops the cloud out of view).
+
+**Interpolating qpos:** `qpos[:3]` linearly, `qpos[3:7]` by **SLERP**, `qpos[7:]` linearly. SLERP matters here specifically — this act interpolates across a real 34.73° rotation, and a lerped quaternion denormalises and tumbles visibly.
 
 For the 2-up, reproject the FK'd marker sites through that camera's DLT with `clip_io.project` and draw them in green (`PALETTE["fit"]`) over the video, with observed 2D in cyan for contrast.
 
