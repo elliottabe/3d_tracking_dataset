@@ -558,6 +558,11 @@ model:
     # T3R_TaT3: 0.5
     # T3R_TaTip: 0.5
 
+  # Post-solve refit of weakly-conditioned DOFs (see
+  # docs/superpowers/specs/2026-08-13-stac-weak-dof-convergence-design.md).
+  POLISH_WEAK_DOFS: true
+  POLISH_WEAK_DOF_THRESHOLD: 0.2
+
 # CSE visual mesh. NOT BUILT YET for this anatomy -- only the v1 mesh
 # exists under fruitfly_cse/. Left pointing at the correct-by-convention
 # path so a run fails loudly on the missing file rather than silently

@@ -603,5 +603,10 @@ model:
     # T3R_TaT3: 0.5
     # T3R_TaTip: 0.5
 
+  # Post-solve refit of weakly-conditioned DOFs (see
+  # docs/superpowers/specs/2026-08-13-stac-weak-dof-convergence-design.md).
+  POLISH_WEAK_DOFS: true
+  POLISH_WEAK_DOF_THRESHOLD: 0.2
+
 # CSE visual mesh used by the silhouette/FK path.
 cse_mesh_npz: "${paths.body_model_dir}/fruitfly_cse/fly_v1_visual_canonical_wings.npz"
