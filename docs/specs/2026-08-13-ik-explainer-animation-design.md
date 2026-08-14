@@ -347,3 +347,24 @@ Renders need `MUJOCO_GL=egl` and a GPU. Work runs directly on `glados`
 
 - The full clip (all `N` = 921 frames) rather than a sub-range.
 - No captions beyond stage labels.
+
+
+## Correction (measured 2026-08-13, after Task 7 ran)
+
+`root_optimization` does **translation only** on this anatomy.
+`configs/anatomy/v1.yaml` has `TRUNK_OPTIMIZATION_KEYPOINTS = {}`, so nothing
+constrains rotation there; it aligns `ROOT_OPTIMIZATION_KEYPOINT = Scutellum`
+and stops. Measured on the real solve: after `root_optimization` the root
+quaternion is unchanged from identity (**0.0000 deg**) and joint DOF are
+unchanged (**0.000000**); after `pose_optimization` the root has rotated
+**34.73 deg** and joint DOF have moved 2.74.
+
+Consequences for the acts:
+- Act 3 shows body **scale** (applied to the keypoints, not the mesh — the mesh
+  never changes size) and **translation**. It must NOT claim to show orienting.
+- Act 4 shows **rotation and articulation together**, since `pose_optimization`
+  solves the free-joint quaternion alongside every other joint.
+- The model is not relying on a lucky rest pose: root heading varies 0-33 deg
+  across the 921-frame sequence, so rotation is genuinely solved per frame.
+
+Measured per-stage residuals: 13.404 -> 1.710 -> 0.118 -> 0.017 mm.
