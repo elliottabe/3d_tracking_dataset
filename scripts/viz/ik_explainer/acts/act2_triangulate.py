@@ -180,6 +180,17 @@ green to per-keypoint JARVIS colours, looked up BY NAME
 construction) is untouched; only line colour changed. See `_draw_rays`'s own
 docstring for the colour-by-name rationale and `_RAY_ALPHA_SCALE` below for
 the legibility tuning this required.
+
+TASK-33 FOLLOW-UP (header/panel-label mismatch): the panel-label switch
+above left the fact-line header (TASK-19's "7 cameras, 180 deg arc, 30 deg
+spacing (elev ... deg)") un-updated, so it still advertised the OLD raw-
+elevation convention directly under panel labels now reading the NEW
+arc-position convention ("Camera 1  0 deg" ... "Camera 7  180 deg") --
+"0 to 180" on the panels contradicted "-89.6 to +0.6" in the header. Fixed
+by dropping the stale elevation parenthetical; the header is now just
+"7 cameras, 180 deg arc, 30 deg spacing", consistent with the panel labels.
+`elev_deg` (only ever computed to feed that parenthetical) is removed as
+dead code along with it.
 """
 import argparse
 import sys
@@ -684,7 +695,6 @@ def render_act2(clip: str = clip_io.CLIP_DEFAULT) -> Path:
     print(f"[act2] max deviation of any camera's right-axis from world +X: {max_right_dev:.2f} deg")
     assert max_right_dev < 5.0, "cameras are not all perpendicular to a shared long axis"
 
-    elev_deg = np.degrees(np.arcsin(np.clip(view_dirs[:, 2], -1.0, 1.0)))
     centroid = kp3d[T0].mean(axis=0)
     kp3d_local = kp3d[T0] - centroid
     kp2d_t0 = kp2d[T0]                                     # (C,K,2)
@@ -817,8 +827,7 @@ def render_act2(clip: str = clip_io.CLIP_DEFAULT) -> Path:
 
         canvas = draw.stage_title(canvas, "3D triangulation")
         canvas = draw.label(
-            canvas, f"7 cameras, 180 deg arc, 30 deg spacing "
-                    f"(elev {elev_deg.min():+.1f} to {elev_deg.max():+.1f} deg)",
+            canvas, "7 cameras, 180 deg arc, 30 deg spacing",
             (48, 150), scale=draw.CAPTION_SCALE, color=(190, 190, 190))
         canvas = draw.label(canvas, f"frame {f + 1}/{N_OUT}", (48, CANVAS_H - 24),
                              scale=draw.SMALL_SCALE, color=(150, 150, 150))

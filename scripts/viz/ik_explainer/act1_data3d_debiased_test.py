@@ -110,17 +110,6 @@ EXPECTED_MEDIAN_BEFORE_MM = 0.170
 EXPECTED_MEDIAN_AFTER_MM = 0.088
 
 
-def _elevations_deg(cam_names, clip):
-    cam_mats, dlt_names = clip_io.load_dlt(str(Path(clip) / "calibration"))
-    dirs = clip_io.camera_view_dirs(cam_mats)
-    elev = np.degrees(np.arcsin(np.clip(dirs[:, 2], -1.0, 1.0)))
-    by_name = dict(zip(dlt_names, elev))
-    missing = [c for c in cam_names if c not in by_name]
-    if missing:
-        raise ValueError(f"no DLT elevation for cameras {missing}")
-    return np.array([by_name[c] for c in cam_names], np.float64)
-
-
 def _smoothed_crop_x0(kp2d_cam: np.ndarray, frame_w: int) -> np.ndarray:
     cx = np.nanmean(kp2d_cam[..., 0], axis=1)
     if not np.all(np.isfinite(cx)):
@@ -281,7 +270,6 @@ def render(clip: str = clip_io.CLIP_DEFAULT) -> Path:
             f"WINDOW_START+WINDOW_LEN ({WINDOW_START + WINDOW_LEN}) exceeds "
             f"02_kp2d.npz's {N} frames (used for crop centring)")
 
-    elev_deg = _elevations_deg(cam_names, clip)
     kp_colors = jarvis_kp_colors(kp_names)
     # DISPLAY ONLY (task-28): "Camera N" panel labels; every lookup above/
     # below (cam_names, DLT order) keeps using the real Cam20128xx strings.
@@ -411,7 +399,7 @@ def render(clip: str = clip_io.CLIP_DEFAULT) -> Path:
 
             py, px = celly + MARGIN + LABEL_H, cellx + MARGIN
             canvas[py:py + PANEL_H, px:px + PANEL_W] = panel
-            label_text = f"{disp_name[cam]}  elev {elev_deg[ci]:+.1f} deg"
+            label_text = disp_name[cam]
             canvas = draw.label(canvas, label_text,
                                  (cellx + MARGIN, celly + MARGIN + 20),
                                  scale=draw.SMALL_SCALE)
