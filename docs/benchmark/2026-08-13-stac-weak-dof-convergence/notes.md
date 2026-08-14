@@ -2,7 +2,19 @@
 
 **Date:** 2026-08-13
 **Branch:** `elliottabe/stac-weak-dof-convergence` (parent + `stac-mjx` submodule)
-**Spec:** `docs/superpowers/specs/2026-08-13-stac-weak-dof-convergence-design.md`
+**Spec:** the design doc this investigation started from
+(`docs/superpowers/specs/2026-08-13-stac-weak-dof-convergence-design.md`) is **not
+committed** to either repo and lives under a gitignored `docs/superpowers/` path, so it
+is unresolvable post-merge. The specific claims from it that D1/D2 below critique,
+stated inline so this note stands on its own:
+  - it mapped stac-mjx's existing `FTOL` config key onto jaxls' `cost_tolerance`, while
+    separately listing `JAXLS_COST_TOLERANCE: 1.0e-5  # unchanged from jaxls default` —
+    a direct self-contradiction (`FTOL` is `5.0e-03`, not `1.0e-5`);
+  - it set a "polish" reselection threshold of `0.2` on normalized Jacobian column norm
+    with no empirical grounding, validated only on synthetic two-hinge geometry;
+  - it inferred from single-`pose_optimization` sweeps that production `fit_offsets`
+    "leaves weakly-conditioned DOFs far short of their optimum" — a claim that does not
+    hold once the full seven-call production path is measured (see Summary).
 **Status:** fix B kept (corrected); fix C removed; 13-bout benchmark gate NOT satisfied.
 
 ## Summary
@@ -101,8 +113,10 @@ The `0.2` threshold was invented in the design doc with no empirical grounding, 
 plan's tests validated it only on synthetic two-hinge geometry.
 
 **Resolution:** fix C removed entirely (Task 9). The conditioning-analysis tooling
-survives in git history at commits `e7aa9a9`, `136dfe8`, `f69b2f6` if it is ever wanted
-as a diagnostic.
+survives in git history as `stac-mjx` **submodule** commits `e7aa9a9`, `136dfe8`,
+`f69b2f6` (not parent-repo commits) if it is ever wanted as a diagnostic. These SHAs
+are only reachable through `stac-mjx`'s own history and vanish if that submodule's
+branch is ever squash-merged.
 
 ### D3 — derived arrays went stale after polish
 
@@ -131,6 +145,35 @@ Hyak before anyone claims a quality improvement.
 **Removed — fix C (polish).** See D2.
 
 **Not done — the 13-bout benchmark gate.** See below.
+
+## Known divergence: JaxlsBatchSolver vs. the jarvis_jax silhouette/bundle solvers
+
+This branch changed `JaxlsBatchSolver`'s constructor **defaults** (gradient
+1e-4→1e-8, parameter 1e-6→1e-10; cost stays at jaxls' own 1e-5). Two other jaxls call
+sites were knowingly **left on jaxls' un-overridden defaults** and were not touched:
+
+- `third_party/jarvis_jax/jarvis_jax/tracking/silhouette_joint_ik.py:347`
+  (`SilhouetteJaxlsBatchSolver`) builds a bare
+  `jaxls.TerminationConfig(max_iterations=self.n_iter)`.
+- `third_party/jarvis_jax/jarvis_jax/tracking/bundle_adjust.py:180` likewise builds a
+  bare `jaxls.TerminationConfig(max_iterations=n_iter)`.
+
+This was a deliberate scope decision, not an oversight: changing another subsystem's
+solver with no way to validate it from this workstation would be unvalidated scope
+creep. The consequence is that `JaxlsBatchSolver` and `SilhouetteJaxlsBatchSolver` now
+terminate on different criteria, and
+`third_party/jarvis_jax/tests/test_silhouette_joint_solve.py:48-53`
+(`test_no_silhouette_matches_jaxls_batch_solver`) asserts they stay `atol=1e-5`
+byte-close. That test is `skipif`-gated on an IK fixture under `/gscratch/...`
+(Hyak-only), so it cannot run on this workstation and stays silently green here
+regardless of whether the two solvers actually agree.
+
+**Required pre-merge check on Hyak:** run
+`third_party/jarvis_jax/tests/test_silhouette_joint_solve.py` where the `/gscratch`
+fixture is present. If it still skips there too, the divergence remains unvalidated and
+should block treating this as settled. If it fails, the fix is to give
+`SilhouetteJaxlsBatchSolver` matching (or at least equally-explicit) tolerances —
+**not** to loosen the test's `atol=1e-5` assertion to make it pass again.
 
 ## Coverage limitations — read before trusting anything above
 
@@ -162,16 +205,34 @@ python -m scripts.benchmark.run_variant collect  --variant weakdof \
 ```
 
 To run an explicit pre-change arm instead of relying on stored baselines, add
-`--override model.JAXLS_GRADIENT_TOLERANCE=1.0e-4 --override model.JAXLS_COST_TOLERANCE=1.0e-5`
-to the `commands` step. Verify the override key path resolves (`cfg.model.*`) with a
-single-bout dry run first — `--override` values are passed through verbatim as Hydra
-overrides to `scripts/run_bout.py`.
+`--override model.JAXLS_GRADIENT_TOLERANCE=1.0e-4 --override model.JAXLS_COST_TOLERANCE=1.0e-5 --override model.JAXLS_PARAMETER_TOLERANCE=1.0e-6`
+to the `commands` step. Omitting `JAXLS_PARAMETER_TOLERANCE` here would leave it at the
+new default `1.0e-10` instead of jaxls' pre-change `1.0e-6`, so the "baseline" arm would
+still be partially tightened rather than a true pre-change recipe. Verify the override
+key path resolves (`cfg.model.*`) with a single-bout dry run first — `--override`
+values are passed through verbatim as Hydra overrides to `scripts/run_bout.py`.
 
-**Acceptance:** all-keypoint residual improves or is flat; no bout regresses beyond the
-~1.2 deg / run-to-run noise band; the female cohort improves or is flat. If the fixed
-arm is indistinguishable from baseline, fix B is a pure correctness change with no
-quality effect — which is a perfectly good result, and should be recorded as such
-rather than dressed up.
+The `--out` paths above (`docs/benchmark/.../scorecard-*.json`) land under
+`docs/benchmark/`, which is gitignored; committing the scorecards as evidence for this
+decision needs `git add -f`.
+
+**Acceptance:**
+- All-keypoint residual improves or is flat; no bout regresses beyond the ~1.2 deg /
+  run-to-run noise band; the female cohort improves or is flat.
+- **Wall-clock per bout, both arms.** Tightening `gradient_tolerance` 1e-4→1e-8 and
+  `parameter_tolerance` 1e-6→1e-10 makes early termination far harder, so solves may
+  now run out toward `N_ITER_Q: 500` instead of exiting early, and `fit_offsets` calls
+  `pose_optimization` seven times per bout — this cost multiplies. Runtime impact was
+  never measured in this investigation (only residuals and angles were), and slower
+  wall-clock is the most likely production-visible effect of this branch. Record
+  seconds/bout for baseline vs. fixed and flag any large increase even if quality is
+  flat.
+- Run `third_party/jarvis_jax/tests/test_silhouette_joint_solve.py` (see "Known
+  divergence" above) as a **required** pre-merge check wherever the `/gscratch` IK
+  fixture is available.
+- If the fixed arm is indistinguishable from baseline on quality, fix B is a pure
+  correctness change with no quality effect — which is a perfectly good result, and
+  should be recorded as such rather than dressed up.
 
 ## Separate follow-up: the explainer
 

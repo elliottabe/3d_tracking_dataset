@@ -531,10 +531,14 @@ model:
   # instead of per-frame ProjectedGradient.
   USE_JAXLS: True
   JAXLS_LAMBDA_INITIAL: 1.0
-  # jaxls termination tolerances. The library defaults (gradient 1e-4,
-  # parameter 1e-6) exit the solve while weakly-conditioned DOFs are still far
-  # from their optimum -- loosening them improved the residual 23% across all
-  # keypoints on Session6/2025_10_12_15_06_46.
+  # jaxls termination tolerances, made explicit rather than left on jaxls'
+  # own defaults. Gradient and parameter are TIGHTENED relative to jaxls'
+  # defaults (gradient 1e-4, parameter 1e-6); cost is left AT jaxls' own
+  # default (1e-5). A 23% residual improvement was measured on the
+  # explainer's truncated single-`pose_optimization` path
+  # (Session6/2025_10_12_15_06_46, not the production `fit_offsets` path) and
+  # has NOT been reproduced there -- see
+  # docs/benchmark/2026-08-13-stac-weak-dof-convergence/notes.md.
   JAXLS_GRADIENT_TOLERANCE: 1.0e-8
   JAXLS_PARAMETER_TOLERANCE: 1.0e-10
   # jaxls cost tolerance. Left at jaxls' own default -- FTOL is NOT mapped here:
