@@ -177,12 +177,15 @@ def load_data3d_csv(csv_path):
 
     return kp3d, conf, names, frames
 
-def write_video(out_path, frames_iter, fps=30, fourcc="mp4v"):
+def write_video(out_path, frames_iter, fps=30, fourcc="mp4v", macro_block_size=16):
     """Write an iterable/generator of BGR uint8 frames to an H.264 mp4 that plays
     everywhere (browsers, VSCode's preview, Artifacts): libx264 + yuv420p +
     ``+faststart``. Encodes via imageio-ffmpeg's bundled ffmpeg; frames are BGR
     (cv2 convention) and converted to RGB for the encoder. Size is taken from the
-    first frame; odd dimensions are padded to a multiple of 16 by imageio.
+    first frame; dimensions not divisible by ``macro_block_size`` are padded up
+    to the nearest multiple by imageio (e.g. 1080 -> 1088 at the default 16) --
+    pass ``macro_block_size=1`` when the caller needs the output's exact
+    pixel dimensions preserved (verified e.g. by a downstream ffprobe check).
 
     ``fourcc`` is accepted for backward compatibility but ignored: the previous
     cv2 ``mp4v`` path produced MPEG-4 Part 2, which Chromium-based players (VSCode)
@@ -208,7 +211,7 @@ def write_video(out_path, frames_iter, fps=30, fourcc="mp4v"):
         import imageio.v2 as imageio
         writer = imageio.get_writer(
             out_path, format="FFMPEG", fps=float(fps), codec="libx264",
-            pixelformat="yuv420p", macro_block_size=16,
+            pixelformat="yuv420p", macro_block_size=macro_block_size,
             output_params=["-movflags", "+faststart"])
         try:
             writer.append_data(_to_rgb(first))
