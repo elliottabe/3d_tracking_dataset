@@ -6,7 +6,7 @@ Concatenates `frames/act{1..4}_*/f%05d.png` in story order with 30-frame
 H.264 (silent) via `viz.core.io.write_video` (imageio + ffmpeg, the repo's
 shared encoder), then writes `README.md` and `manifest.json` beside it.
 
-EXPECTED TOTAL FRAMES: 330 + 300 + 90 + 900 - 3*30 = 1530 (51.0 s @ 30 fps).
+EXPECTED TOTAL FRAMES: 330 + 300 + 90 + 780 - 3*30 = 1410 (47.0 s @ 30 fps).
 (Task-14 shortened Act 1 from 450 to 270 frames -- 15s to 9s -- and
 re-sourced it from a contiguous ~40% sub-range of the clip rather than the
 whole 921 frames; see `act1_views.py`'s module docstring. A later task-14
@@ -23,7 +23,11 @@ and aligns"); see `act3_align.py`'s module docstring's TASK-16 PIVOT
 section. Task-20 then EXTENDED Act 1 again, 270 -> 330 frames, adding a
 60-frame closing beat that crossfades the raw detector 2D into the
 reprojection of the triangulated 3D across all seven panels -- see
-`act1_views.py`'s module docstring's TASK-20 section; total 1470 -> 1530.)
+`act1_views.py`'s module docstring's TASK-20 section; total 1470 -> 1530.
+Task-27 then shortened Act 4's opening joint-solve phase (Phase A) from 240
+to 120 frames (8s -> 4s), Act 4 900 -> 780 frames -- the side-by-side
+playback (660 frames) is unchanged, only Phase A halved; see
+`act4_solve.py`'s module docstring's TASK-27 section; total 1530 -> 1410.)
 This is asserted TWICE: once per-act (`_list_frames` requires each act directory to
 hold EXACTLY its expected count -- neither short nor padded with extras),
 and once on the assembled edit plan before any frame is written to ffmpeg.
@@ -69,12 +73,12 @@ ACT_SPECS = [
     ("act1_views", 330),
     ("act2_triangulate", 300),
     ("act3_align", 90),
-    ("act4_solve", 900),
+    ("act4_solve", 780),
 ]
 N_CROSS = 30   # 1 s @ 30 fps; lengthened from 15 (task-14 round 4, "smoother transitions")
 FPS = 30
 CANVAS_W, CANVAS_H = 1920, 1080
-EXPECTED_TOTAL = sum(n for _, n in ACT_SPECS) - (len(ACT_SPECS) - 1) * N_CROSS  # 1530
+EXPECTED_TOTAL = sum(n for _, n in ACT_SPECS) - (len(ACT_SPECS) - 1) * N_CROSS  # 1410
 
 
 def _list_frames(act_dir: Path, act_name: str, expected: int) -> list:
@@ -356,9 +360,10 @@ ik_explainer/
                          settling at the solver's true fitted
                          root_optimization position
     act4_solve/          {n4} frames -- on-screen title "Solve joint angles":
-                         0-239 the joints solve (+ orientation), 3D only;
-                         240-899 side-by-side for the REST of the act (task-19:
-                         previously only the closing 120 frames) -- left is
+                         0-119 the joints solve (+ orientation), 3D only;
+                         120-779 side-by-side for the REST of the act (task-19:
+                         previously only the closing 120 frames; task-27
+                         shortened the opening solve 240->120 frames) -- left is
                          the MuJoCo IK render, right is the real camera frame
                          with the detector's own 2D keypoints, coloured to
                          match the left panel's per-limb-chain colours
@@ -403,7 +408,7 @@ re-deriving the story from the original plan wording alone would get it wrong:
   kp_colors.py` calls `third_party/JARVIS-HybridNet`'s own `get_skeleton`
   against `data/fly50.json`'s skeleton graph, so each leg (and the head/thorax
   loop, and each wing) gets its own colour instead of one flat per-group
-  colour. Task-19: Act 4's side-by-side (240-899, the whole rest of the act)
+  colour. Task-19: Act 4's side-by-side (120-779, task-27: was 240-899, the whole rest of the act)
   colour-matches its two panels -- the right panel draws the detector's own
   2D keypoints in this SAME per-limb-chain scheme, not the old FK-reprojected
   fit -- so `viz.core.colors.PALETTE`'s fit=green/observed=cyan convention no
