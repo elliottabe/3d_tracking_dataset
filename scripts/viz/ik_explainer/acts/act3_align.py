@@ -343,6 +343,24 @@ ACT3_CAM_DISTANCE = 0.93
 ACT3_CAM_AZIMUTH = AZ_START
 ACT3_CAM_ELEV = ELEV
 
+
+def act3_frozen_camera(lookat):
+    """The EXACT fixed camera Act 3 renders every frame with: constant
+    `ACT3_CAM_DISTANCE`/`ACT3_CAM_AZIMUTH`/`ACT3_CAM_ELEV`, orbiting the
+    caller-supplied `lookat`. Factored out here (task-17, "make the Act3/
+    Act4 cut seamless") so Act 4's Phase A can build the IDENTICAL camera
+    Act 3's own last frame renders with, by calling this with its own
+    `mesh_ctr_final` (computed the same way Act 3 does: FK against
+    `qpos_root`, averaged over the same `body_site_idxs`) -- a shared
+    function, not a re-derived approximation of the same numbers. `lookat`
+    is the only thing that varies between callers; the three camera
+    constants never do."""
+    cam = mujoco.MjvCamera()
+    cam.lookat[:] = lookat
+    cam.distance = ACT3_CAM_DISTANCE
+    cam.azimuth, cam.elevation = ACT3_CAM_AZIMUTH, ACT3_CAM_ELEV
+    return cam
+
 # Skeleton staging (task-16): fraction of the ORIGINAL (task-15 v2) rest ->
 # C_true convergence line used as the new, fixed START_CENTROID -- see
 # module docstring's TASK-16 PIVOT section for why 0.65 (checked directly: a
@@ -562,10 +580,7 @@ def render_act3(clip: str = clip_io.CLIP_DEFAULT) -> Path:
     # mujoco.Renderer(...)` construction is the prime suspect for Act 4's
     # mid-render EGL resource-leak crash at ~700/900 frames).
     with mujoco.Renderer(mj_model, height=CANVAS_H, width=CANVAS_W) as renderer:
-        cam = mujoco.MjvCamera()
-        cam.lookat[:] = mesh_ctr_final
-        cam.distance = ACT3_CAM_DISTANCE
-        cam.azimuth, cam.elevation = ACT3_CAM_AZIMUTH, ACT3_CAM_ELEV
+        cam = act3_frozen_camera(mesh_ctr_final)
 
         for f in range(N_OUT):
             stage_label, resid, p = _stage_at(f, start_resid, residual_root)

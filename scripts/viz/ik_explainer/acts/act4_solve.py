@@ -85,6 +85,67 @@ supplied value per the task-11 fix, not internally derived) twice per frame:
 once to read back the live spread, once more to build the camera from it --
 both calls are pure geometry, no rendering, so free.
 
+TASK-17 ("seamless Act3->Act4 cut"): measuring Act3's last frame
+(`act3_align/f00089.png`) against Act4's first (`act4_solve/f00000.png`)
+directly found a real, on-screen jump -- mesh centre shifted (-24,-44) px,
+mesh area 1.22x bigger, skeleton centre shifted (-11,-27) px. Root cause,
+verified before touching anything: Act 3's camera is fully FROZEN
+(`act3_align.ACT3_CAM_DISTANCE`/`_AZIMUTH`/`_ELEV`, `lookat=mesh_ctr_final`),
+while this act's Phase A camera (above) was ALREADY live (same
+`_wide_camera_for_aspect` call Phase B uses) -- so the two acts simply
+disagreed about camera distance/lookat at the exact frame they're supposed
+to hand off at.
+
+Fix: Phase A (0-239) now renders with `act3_align.act3_frozen_camera`, the
+SAME function Act 3 itself calls, given THIS act's own `mesh_ctr_final` --
+computed identically to Act 3's own (FK against `qpos_root`, same
+`body_site_idxs`), so the two acts share the identical camera number rather
+than each re-deriving an approximation of it. This is a legitimate staging
+choice, not just a patch: Phase A is a frozen-time interpolation (the same
+single `frame_for_stills` target the whole beat), so a fixed camera suits it
+exactly as it suits Act 3. `_wide_camera_for_aspect` is still called every
+Phase-A/B frame for its OTHER output, `spread` (marker/bone sizing only,
+left live and unchanged) -- only the `cam` it returns is overridden for
+Phase A.
+
+Phase B (>=240) resumes this SAME live/adaptive `_wide_camera_for_aspect`
+camera UNMODIFIED -- not eased in from the frozen value. An eased hand-off
+(smoothstep-blending `lookat`/`distance` from the frozen value back to live
+over the first ~30 frames of Phase B) was tried FIRST, per this task's own
+"hold through Phase A, ease over the first second of Phase B" suggestion,
+and rejected after measuring and LOOKING at the result, not on suspicion:
+`qpos_pose` (frame_for_stills=450, what f=239 renders) and `qpos_seq[0]`
+(playback's own first real frame, what f=240 renders) differ by a REAL 1.06
+model-unit root translation and ~25 deg of rotation -- Phase A solves toward
+one specific mid-clip frame while Phase B immediately starts playing back
+the trajectory from t=0, a genuine content discontinuity in the DATA, not an
+artifact of this fix. A camera that is still mostly at the FROZEN value
+(as any smooth ease necessarily is for its first several frames, by
+construction -- `e` starts at 0 at f=240 no matter how short the window) has
+to view that already-relocated content through the OLD, un-adapted
+lookat/distance -- measured directly: f=240 under the 30-frame ease had its
+mesh mask centred at px (119, 410), a 858 px / 154 px shift off Act 3's
+frozen framing and the mesh clipped hard against the canvas's LEFT edge
+(confirmed by opening the rendered PNG, not just the mask numbers) for a
+visible stretch of Phase B's opening second -- exactly the "fly walks out of
+a frozen frame" failure this task's own "When You're in Over Your Head"
+section named as the trigger to stop and report a trade-off instead of
+silently shipping either extreme.
+
+Resuming the live camera on Phase B's very first frame (no easing at all)
+is measurably the better of the two options: it matches the ORIGINAL,
+already-shown-to-work design (a live camera re-centres on WHATEVER content
+is on screen every frame, so it was already seamless at this exact seam
+before Phase A was ever frozen), and it keeps the mesh framed correctly for
+every one of Phase B's 660 frames. The cost is a bounded, small mismatch
+right at the f=239/f=240 cut itself (Phase A's frozen f=239 no longer
+perfectly tracks its own content the way a live f=239 would have, so it
+doesn't line up quite as tightly with Phase B's now-fully-adaptive f=240) --
+see the task-17 report for the exact measured numbers. This residual is far
+smaller than either the original Act3/Act4 jump this task fixes or the
+858 px/clipped-frame failure the slow-ease alternative produced, but it is
+not literally zero; reported as the deliberate trade-off it is, not hidden.
+
 Phase C's left panel is rendered at a narrower (960x1080, not 1920x1080)
 aspect than Acts 3/A/B; `_wide_camera_for_aspect` scales the distance by
 `1/aspect` for aspect < 1 so the same mesh+cloud content that fit the wide
@@ -161,6 +222,7 @@ from scripts.viz.ik_explainer.kp_colors import (                      # noqa: E4
 )
 from scripts.viz.ik_explainer.acts.act3_align import (                 # noqa: E402
     _slerp_qpos, _wide_camera, _smoothstep, AZ_START, ELEV, BONE_RADIUS_FRACTION,
+    act3_frozen_camera, ACT3_CAM_DISTANCE,
 )
 from scripts.viz.ik_explainer.acts.act1_views import _smoothed_crop_x0  # noqa: E402
 from viz.core.colors import PALETTE, leg_chains                       # noqa: E402
@@ -370,6 +432,23 @@ def render_act4(clip: str = clip_io.CLIP_DEFAULT, start_frame: int = 0) -> Path:
     # target `stage_ik.py` measured residual_root/residual_pose against).
     target_a = kp3d_scaled[frame_for_stills]
 
+    # Task-17 ("seamless Act3->Act4 cut"): the mesh's own final centroid,
+    # computed EXACTLY the way act3_align.py computes `mesh_ctr_final` --
+    # FK against the SAME `qpos_root`, averaged over the SAME
+    # `body_site_idxs` -- so Phase A's camera lookat (below) is the
+    # IDENTICAL number Act 3's last frame used, not a re-derived
+    # approximation of it. See module docstring's CAMERA section.
+    d_root_ref = mujoco.MjData(mj_model)
+    d_root_ref.qpos[:] = qpos_root
+    mujoco.mj_forward(mj_model, d_root_ref)
+    mesh_ctr_final = np.asarray(d_root_ref.site_xpos[body_site_idxs]).mean(axis=0)
+    print(f"[act4] task-17: Phase A frozen camera distance={ACT3_CAM_DISTANCE} "
+          f"azimuth/elevation={AZ_START}/{ELEV} lookat=mesh_ctr_final={mesh_ctr_final} "
+          f"(identical formula to act3_align.py's own mesh_ctr_final -- shared "
+          f"via act3_frozen_camera); Phase B resumes the live camera "
+          f"unmodified at f={PHASE_A_END + 1} (see module docstring's CAMERA "
+          f"section for why an eased hand-off was tried and reverted)")
+
     # --- Phase C prerequisites: smoothed crop centring + real video frames -
     x0_full = _smoothed_crop_x0(kp2d[:, cam2up_idx], SRC_FRAME_W)   # (T,)
 
@@ -437,6 +516,17 @@ def render_act4(clip: str = clip_io.CLIP_DEFAULT, start_frame: int = 0) -> Path:
                 aspect = CANVAS_W / CANVAS_H
                 cam, spread = _wide_camera_for_aspect(
                     mesh_ctr, cloud_pts, mj_model.stat.extent, AZ_START, aspect)
+                # Task-17: Phase A no longer uses the live camera computed
+                # above for FRAMING (only `spread`, still live, for marker/
+                # bone sizing) -- it renders with the EXACT frozen camera
+                # Act 3's last frame used, so the Act3->Act4 cut does not
+                # jump. Phase B resumes this SAME live `cam` unmodified --
+                # see module docstring's CAMERA section for why an eased
+                # (rather than immediate) hand-off was tried and reverted:
+                # measured directly, it left the mesh clipped against the
+                # frame's left edge for a visible stretch of Phase B.
+                if phase == "A":
+                    cam = act3_frozen_camera(mesh_ctr_final)
                 marker_r = max(spread * 0.03, mj_model.stat.extent * 0.006)
                 bone_r = marker_r * BONE_RADIUS_FRACTION
 
