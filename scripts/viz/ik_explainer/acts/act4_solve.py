@@ -75,6 +75,36 @@ side-by-side):
    (right panel) -- there is no second index variable that could drift from
    the first, through the wrap/hold included (the wrap only changes what
    `t_src` computes to, and both panels always read that same value).
+   **SUPERSEDED by TASK-20 immediately below** -- point 4's own
+   `02_kp2d.npz`/detector-2D design is what TASK-20 reverts, for the reason
+   given there; points 1-3 above are unaffected and still describe the
+   current behaviour.
+
+TASK-20 (fixes a regression TASK-19's point 4 introduced -- the user
+reported Act 4's right-panel keypoints had gone "jumpy" versus what the
+original production showed): raw detector 2D (`02_kp2d.npz`) is genuinely
+jittery frame-to-frame (measured 0.9-1.5 px depending on camera elevation,
+worse on the near-horizontal `Cam2012857`/`Cam2012861` where the six leg
+chains project nearly on top of each other) -- drawing it directly, as
+TASK-19 point 4 did, is what the user saw. Fix: the right panel now
+reprojects the PRODUCTION solve's own fit target (`kp_data_prod[t_src]`,
+already the exact `cloud_pts` the left panel is rendering that same frame)
+through `CAM_2UP`'s DLT, instead of drawing `02_kp2d.npz` directly --
+restoring what the panel showed before TASK-19's regression. `02_kp2d.npz`
+(`kp2d`) is still loaded and still used for `_smoothed_crop_x0`'s
+crop-centring smoothing; it is simply no longer what gets DRAWN. This
+reinstates the `cam_mats`/DLT loading TASK-19 point 4 removed (now indexed
+by camera NAME, `dlt_cam_idx`, not position, and asserted present rather
+than assumed) and the `site_xpos`-through-DLT reprojection idea from before
+TASK-18/19 -- but reprojects `kp_data_prod` (the recorded fit target)
+rather than a live FK `site_xpos`, since `kp_data_prod[t_src]` is already
+exactly what the left panel's `cloud_pts` is for the SAME `t_src`, so no
+extra FK evaluation is needed. Per the module's own COORDINATE-FRAME
+CAVEAT below, `kp_data_prod` is divided by `shared_scale` before
+projecting (verified empirically there: reproduces the observed 2D to a
+mean ~8.5 px / max ~24 px). Colours/helpers are UNCHANGED from TASK-19
+(`kp_colors.jarvis_kp_colors`, `draw.draw_keypoints`/`draw.draw_leg_chains`,
+no `conf` dimming) -- only the SOURCE of `obs_uv` changes.
 
 This act carries the ORIENTING beat of the whole explainer. Act 3 covered
 scale + translation only: `root_optimization` measured 0.0000 deg of
@@ -138,12 +168,14 @@ TASK-19 section above):
           full width, coloured per limb chain, JARVIS scheme --
           `kp_colors.jarvis_kp_colors_rgb01`, shared with Act 3); right is
           one real camera's video, cropped and centred the same way Act 1
-          crops (`act1_views._smoothed_crop_x0`, reused), now overlaid with
-          the DETECTOR's own 2D keypoints (`kp_colors.jarvis_kp_colors`,
-          colour-matched to the left panel) instead of the old
-          FK-reprojected fit -- see "COLOUR-MATCHED 2D KEYPOINTS" below. Both
+          crops (`act1_views._smoothed_crop_x0`, reused), overlaid with
+          `kp_data_prod[t_src]` (the SAME cloud the left panel just
+          rendered) reprojected through this camera's DLT
+          (`kp_colors.jarvis_kp_colors`, colour-matched to the left panel;
+          TASK-20 reverted TASK-19's brief detour through raw detector 2D,
+          which was jittery -- see "COLOUR-MATCHED 2D KEYPOINTS" below). Both
           panels are indexed by the identical `t_src`, never independently --
-          see TASK-19 note 4 above for how this is verified. Residual (not
+          see TASK-19 note 4/TASK-20 above for how this is verified. Residual (not
           shown on screen since task-19, still printed) is `resid_prod_mm[t]`
           -- the REAL, offset-adjusted production fit quality for that exact
           recorded frame (`|marker_sites - kp_data|` from the h5, mean over
@@ -320,19 +352,21 @@ horizontal once aspect < 1, requiring distance to grow by 1/aspect to keep
 the same real-world width in frame).
 
 COLOUR-MATCHED 2D KEYPOINTS (task-19, replaces the old "2-UP MARKER COLOURS"
-cyan-observed/green-fit design): the right panel no longer draws the FK'd
-fit at all (there is no `clip_io.project`-through-the-DLT reprojection left
-in this file), so there is no fit-vs-observed contrast left to draw with a
-flat two-colour scheme. Instead the right panel draws the DETECTOR's own 2D
-keypoints (`02_kp2d.npz`, already loaded above) with the SAME per-limb-chain
-JARVIS colours (`kp_colors.jarvis_kp_colors`, BGR-by-NAME) the left panel's
-mesh/cloud uses (`kp_colors.jarvis_kp_colors_rgb01`, RGB/0-1-by-NAME, same
-underlying colour table) -- both panels are keyed by keypoint NAME, so they
-agree regardless of which array order either side happens to be in
-(CLAUDE.md's keypoint-order bug class). Drawn with the shared
+cyan-observed/green-fit design; TASK-20 changes the SOURCE of the right
+panel's points back to a reprojection -- see below -- but keeps this
+colour-matching design): the right panel does not draw a flat
+fit-vs-observed two-colour contrast. It draws `kp_data_prod[t_src]`
+reprojected through `CAM_2UP`'s DLT (TASK-20; see the render loop's own
+comments) with the SAME per-limb-chain JARVIS colours
+(`kp_colors.jarvis_kp_colors`, BGR-by-NAME) the left panel's mesh/cloud uses
+(`kp_colors.jarvis_kp_colors_rgb01`, RGB/0-1-by-NAME, same underlying colour
+table) -- both panels are keyed by keypoint NAME, so they agree regardless
+of which array order either side happens to be in (CLAUDE.md's
+keypoint-order bug class). Drawn with the shared
 `draw.draw_keypoints`/`draw.draw_leg_chains` helpers every other act already
-uses -- the old `_dots`/`_chain` single-colour analogues (and the
-FK-reprojection code that was their only caller) are removed as dead code.
+uses -- the old `_dots`/`_chain` single-colour analogues from before
+task-19 are not reinstated (task-19's colour-matched design is kept;
+only the point SOURCE reverts).
 
 EXPECTATION: by f=239 the mesh's limbs lie along the keypoint chains and the
 body has visibly rotated from Act 3's ending heading; residual (live-
@@ -342,21 +376,28 @@ side-by-side since task-19), `resid_prod_mm` (the real, offset-adjusted
 production fit quality, still printed) stays in its measured ~0.014-0.041 mm
 range, tarsal tips TRACK the observed keypoints through leg swing -- the mesh
 foot stays ON the marker as the leg moves, not merely near it -- and the
-right panel's detector keypoints move through the SAME leg swing, in the SAME
-per-limb colours as the left panel's mesh/cloud, with one frame index
-(`t_src`) driving both panels.
+right panel's reprojected production keypoints (TASK-20) move through the
+SAME leg swing, in the SAME per-limb colours as the left panel's mesh/cloud,
+with one frame index (`t_src`) driving both panels and both drawing the
+SAME underlying `kp_data_prod[t_src]` (left in 3D, right reprojected to 2D)
+-- so the two panels cannot show genuinely different content, only a
+different projection of the identical fit.
 FALSIFICATION: tips detaching from markers during swing means `pose_
 optimization` did not converge, or the wrong qpos frame is being drawn; a
 tumbling/flipping body during 0-239 means the quaternion was lerped instead
 of SLERPed; the right panel showing the fly at a visibly DIFFERENT moment
 than the left panel (e.g. legs in a different swing phase) means `t_src`
 desynced between the two panels -- see TASK-19 note 4 above for the
-single-variable construction that rules this out.
+single-variable construction that rules this out; the reprojected points
+landing off the fly (rather than merely off the exact marker, which the
+~8.5 px mean/~24 px max reprojection error already explains) would mean the
+TASK-20 `/ shared_scale` coordinate-frame conversion is missing or wrong.
 
 Colours come from `kp_colors.jarvis_kp_colors_rgb01` (JARVIS per-limb-chain
 scheme, Change 2) for the mesh+cloud panels, and `kp_colors.jarvis_kp_colors`
-(the same underlying colour table, BGR/0-255) for the right panel's detector
-keypoints since task-19 -- see "COLOUR-MATCHED 2D KEYPOINTS" above.
+(the same underlying colour table, BGR/0-255) for the right panel's
+reprojected keypoints since task-19 (source changed by TASK-20, colours
+unchanged) -- see "COLOUR-MATCHED 2D KEYPOINTS" above.
 `viz.core.colors.PALETTE` is still used for the mesh's own grey
 (`PALETTE["mesh"]`); its fit=green/observed=cyan convention is RETIRED for
 this act's right panel (task-19). Wing visibility (Change 1):
@@ -582,11 +623,19 @@ def render_act4(clip: str = clip_io.CLIP_DEFAULT, start_frame: int = 0) -> Path:
     if CAM_2UP not in cam_names:
         raise ValueError(f"{CAM_2UP} not in 02_kp2d.npz cam_names {cam_names}")
     cam2up_idx = cam_names.index(CAM_2UP)
-    # TASK-19: the FK-reprojection this act used to draw on the right panel
-    # (`clip_io.project` of `site_xpos` through the DLT) is removed -- the
-    # right panel now draws the detector's OWN 2D keypoints directly (see
-    # module docstring's TASK-19 note 4) -- so the DLT (`cam_mats`) this
-    # reprojection needed is no longer loaded here.
+
+    # TASK-20 (fixes the task-19 regression, see module docstring's TASK-20
+    # section): the right panel no longer draws the detector's raw, jittery
+    # `02_kp2d.npz` points -- it reprojects the PRODUCTION solve's own fit
+    # target (`kp_data_prod`, already loaded above) through this camera's DLT
+    # instead, restoring what the panel showed before task-19. `kp2d` itself
+    # is still loaded and used above/below for the crop-centring smoothing
+    # only (`_smoothed_crop_x0`) -- it is no longer what gets DRAWN.
+    cam_mats, dlt_cam_names = clip_io.load_dlt(str(Path(clip) / "calibration"))
+    if CAM_2UP not in dlt_cam_names:
+        raise ValueError(f"{CAM_2UP} not in calibration cam_names {dlt_cam_names}")
+    dlt_cam_idx = dlt_cam_names.index(CAM_2UP)
+    cam_mat_2up = cam_mats[dlt_cam_idx:dlt_cam_idx + 1]   # (1,4,3), keep the leading cam axis
 
     mj_model = mujoco.MjModel.from_xml_path(str(XML_PATH))
     orig_alpha = capture_geom_alpha(mj_model)   # BEFORE any geom_rgba mutation
@@ -606,10 +655,11 @@ def render_act4(clip: str = clip_io.CLIP_DEFAULT, start_frame: int = 0) -> Path:
     # of the previous 4-group (head/thorax/abdomen/legs) scheme.
     kp_rgb01 = jarvis_kp_colors_rgb01(kp_names)
     kp_rgb01_by_idx = [kp_rgb01[n] for n in kp_names]
-    # TASK-19: the right panel's detector-2D overlay uses the SAME underlying
-    # colour table, in cv2's BGR/0-255 convention (`draw.draw_keypoints`/
-    # `draw.draw_leg_chains`'s `kp_colors` argument), keyed by NAME so it
-    # matches the left panel's per-limb colours regardless of array order.
+    # TASK-19 (colours unchanged by TASK-20's source swap): the right
+    # panel's 2D overlay uses the SAME underlying colour table, in cv2's
+    # BGR/0-255 convention (`draw.draw_keypoints`/`draw.draw_leg_chains`'s
+    # `kp_colors` argument), keyed by NAME so it matches the left panel's
+    # per-limb colours regardless of array order.
     kp_colors_bgr = jarvis_kp_colors(kp_names)
     # Skeleton bones (task-14 round 4, "skeleton on Act 4 too"): same
     # construction as act3_align.py -- data/fly50.json's 44 edges mapped onto
@@ -863,20 +913,29 @@ def render_act4(clip: str = clip_io.CLIP_DEFAULT, start_frame: int = 0) -> Path:
                 # TASK-19: title only, no other caption on the left panel.
                 left = draw.stage_title(left, "Solve joint angles")
 
-                # --- right panel (TASK-19): real video, overlaid with the
-                # DETECTOR's OWN 2D keypoints (not an FK reprojection),
-                # coloured per-limb-chain to match the left panel -- see
-                # module docstring's "COLOUR-MATCHED 2D KEYPOINTS" section.
-                # `row`/`native`/`obs_uv` are all indexed by the SAME t_src
-                # the left panel's qpos/cloud_pts just used above (see the
-                # phase=="BC" branch at the top of this loop) -- there is no
-                # second frame index here that could disagree with the left
-                # panel's.
+                # --- right panel (TASK-20, fixing the task-19 regression):
+                # real video, overlaid with the REPROJECTED PRODUCTION
+                # keypoints (`kp_data_prod`, the same fit target driving the
+                # left panel this very frame via `cloud_pts` above), not the
+                # detector's raw 2D -- coloured per-limb-chain to match the
+                # left panel -- see module docstring's "COLOUR-MATCHED 2D
+                # KEYPOINTS" / TASK-20 sections. `row`/`native`/`obs_uv` are
+                # all indexed by the SAME t_src the left panel's qpos/
+                # cloud_pts just used above (see the phase=="BC" branch at
+                # the top of this loop) -- there is no second frame index
+                # here that could disagree with the left panel's.
                 row = t_to_video_row[t_src]
                 native = video_frames[row].copy()               # (FRAME_H, SRC_FRAME_W, 3)
                 x0 = float(x0_full[t_src])
 
-                obs_uv = kp2d[t_src, cam2up_idx].copy()
+                # kp_data_prod is in the SCALED/model coordinate frame
+                # pose_optimization fit against (see module docstring's
+                # COORDINATE-FRAME CAVEAT) -- divide by shared_scale to get
+                # back to the raw arena-mm frame the DLTs were calibrated in
+                # before projecting (verified once, empirically: this
+                # reproduces the observed 2D to a mean ~8.5 px / max ~24 px,
+                # see the CAVEAT section).
+                obs_uv = clip_io.project(cam_mat_2up, cloud_pts / shared_scale)[0].copy()
                 obs_uv[:, 0] -= x0
 
                 panel_native = native[:FRAME_H, int(round(x0)):int(round(x0)) + CROP_W]
