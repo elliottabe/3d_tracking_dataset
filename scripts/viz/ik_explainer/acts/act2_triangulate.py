@@ -43,7 +43,7 @@ GEOMETRIC CONSTRUCTION (exact, not approximate):
   `CROP_W/PX_PER_MM x FRAME_H/PX_PER_MM`).
 
 PRESENTATION CAMERA (viewer's camera, not a rig camera): a weak-perspective
-pinhole (narrow FOV, ~6 deg half-angle) placed off to the side so the arc's
+pinhole (narrow FOV, ~2 deg half-angle) placed off to the side so the arc's
 Y-Z sweep (world X is the shared "perpendicular to the long axis" direction,
 confirmed above) reads as a wide fan on screen. Weak perspective is a
 deliberate choice, not an oversight: with scene depth variation small
@@ -52,7 +52,15 @@ parallel 2D lines regardless of viewing angle -- `_check_geometry` measures
 the worst-case pairwise angular spread within any one camera's ray bundle
 after this presentation projection and asserts it stays under 1 deg (measured
 ~0.1 deg), so the viewer's perspective cannot be mistaken for rig
-convergence.
+convergence. The camera's distance and image-plane centring are CALIBRATED
+(`_calibrate_scene_radius`, then a principal-point recentring offset -- see
+render_act2), not assumed: a task-10 composition review found the original
+fixed distance/FOV filled only ~40% of the canvas, off-centre. Both
+calibration steps are pure changes to the VIEWER's camera (distance and
+image-plane translation) -- neither can affect measured ray parallelism,
+which depends only on 3D ray directions and viewing distance, not on where
+the image plane's origin sits or (per the re-measurement above) on this
+narrow an FOV.
 
 Timeline (300 frames, 30 fps):
   f   0-119  panels detach from the Act 1 grid (same row/col cell Act 1 used)
@@ -121,11 +129,31 @@ _EYE_DIR = _EYE_DIR / np.linalg.norm(_EYE_DIR)
 # panel's own width down to a near-invisible sliver. This direction keeps the
 # worst-case panel width/height ratio at ~0.70 (vs ~0.40 for a more X-aligned
 # choice), so every panel stays legibly rectangular.
-_HALF_FOV_DEG = 6.0                  # narrow FOV -> weak perspective, parallel lines stay ~parallel
+_HALF_FOV_DEG = 2.0                  # narrow FOV -> weak perspective, parallel lines stay ~parallel.
+# Narrower than the original 6 deg: composition review (task-10 fix) needed the
+# presentation camera to sit noticeably closer to fill the frame (see
+# `_calibrate_scene_radius` below), and moving closer at a fixed FOV increases
+# scene-depth-variation/distance -- i.e. more perspective creep, the one thing
+# that must not happen here. Narrowing the FOV compensates: for the same
+# on-screen framing, `dist = f_px * r / target_px` grows with `f_px` (which
+# grows as FOV shrinks), keeping depth-variation/distance small again. Refit
+# and re-measured by `_check_geometry` below, not assumed.
 _WORLD_UP_REF = np.array([0.0, 0.0, 1.0])
-_SCENE_RADIUS_MM = R_STAGE + 4.0     # panels' extent beyond the staged radius
+_SCENE_RADIUS_MM = R_STAGE + 4.0     # nominal panel extent; the ACTUAL wide-shot
+# radius fed to the camera is `_calibrate_scene_radius`'s output (see
+# render_act2) -- this constant is only the search upper bound.
 _CLOUD_RADIUS_MM = 3.5               # fly-cloud half-diagonal (~2.3 mm) + margin
 _FILL_FRACTION = 0.85                # fraction of half-canvas-height the scene should span
+
+# --- composition target (task-10 fix): where the arc/rays/cloud should sit,
+# leaving the top-left caption block and the bottom-left frame counter clear.
+_CAPTION_CLEAR_Y = 280.0   # px; stay clear of the 3-line on-screen caveat + camera labels
+_BOTTOM_CLEAR_Y = 1010.0   # px; stay clear of the "frame N/300" label
+_SIDE_MARGIN_PX = 90.0
+_TARGET_CX = CANVAS_W / 2.0
+_TARGET_CY = (_CAPTION_CLEAR_Y + _BOTTOM_CLEAR_Y) / 2.0
+_TARGET_HALF_W = (CANVAS_W - 2 * _SIDE_MARGIN_PX) / 2.0
+_TARGET_HALF_H = (_BOTTOM_CLEAR_Y - _CAPTION_CLEAR_Y) / 2.0
 
 
 def _smoothstep(p):
@@ -152,6 +180,13 @@ class PresentationCamera:
         self.dist = self.f_px * scene_radius_mm / self.target_px
         self.eye = eye_dir * self.dist
         self.canvas_w, self.canvas_h = canvas_w, canvas_h
+        # Principal-point OFFSET from true canvas centre: a pure image-plane
+        # translation used only to recentre the arc's off-axis geometry (the
+        # fly centroid, X_local=(0,0,0), always projects to exactly
+        # (ppx, ppy) regardless of `dist` -- see `project`). This cannot
+        # change ray angles (it is added identically to every projected
+        # point), so it cannot affect the parallel-ray check.
+        self.ppx, self.ppy = self.canvas_w / 2.0, self.canvas_h / 2.0
 
     def set_scene_radius(self, scene_radius_mm):
         """Dolly the eye along its fixed viewing direction so `scene_radius_mm`
@@ -162,14 +197,22 @@ class PresentationCamera:
         self.dist = self.f_px * scene_radius_mm / self.target_px
         self.eye = self.eye_dir * self.dist
 
+    def set_principal_point_offset(self, delta_u, delta_v, t):
+        """Blend the principal-point offset in by fraction `t` in [0,1] (t=0:
+        untouched canvas-centre projection, matching the Act-1-style grid
+        pose; t=1: full recentring offset). A pure translation, independent
+        of `dist`/FOV, so it cannot introduce or hide ray convergence."""
+        self.ppx = self.canvas_w / 2.0 + t * delta_u
+        self.ppy = self.canvas_h / 2.0 + t * delta_v
+
     def project(self, X_local):
         """(...,3) scene-local points -> ((...,2) pixel coords, (...) depth)."""
         rel = np.asarray(X_local, np.float64) - self.eye
         xc = rel @ self.right
         yc = rel @ self.up
         zc = rel @ self.forward
-        u = self.canvas_w / 2.0 + self.f_px * xc / zc
-        v = self.canvas_h / 2.0 - self.f_px * yc / zc
+        u = self.ppx + self.f_px * xc / zc
+        v = self.ppy - self.f_px * yc / zc
         return np.stack([u, v], axis=-1), zc
 
 
@@ -343,16 +386,56 @@ def _panel_overall_alpha(f):
     return 1.0 - (f - FADE_START) / float(FADE_END - FADE_START)
 
 
-def _scene_radius(f):
-    """Wide arc framing through the panel/ray phases; dolly IN (not a focal
-    zoom -- see `PresentationCamera.set_scene_radius`) toward a tight
-    cloud-only framing only once panels/rays are already fading out (260-299),
-    so the fly-shaped cloud is actually legible in the final frames instead of
-    a several-px blob at the wide, whole-arc scale."""
+def _scene_radius(f, wide_radius):
+    """Wide arc framing (`wide_radius`, calibrated by `_calibrate_scene_radius`
+    to fill most of the canvas -- see render_act2) through the panel/ray
+    phases; dolly IN (not a focal zoom -- see
+    `PresentationCamera.set_scene_radius`) toward a tight cloud-only framing
+    only once panels/rays are already fading out (260-299), so the fly-shaped
+    cloud is actually legible in the final frames instead of a several-px blob
+    at the wide, whole-arc scale. `_CLOUD_RADIUS_MM` (the dolly's endpoint) is
+    untouched by the wide-shot recalibration: it only depends on `target_px`/
+    `f_px`, neither of which the calibration changes."""
     if f < FADE_START:
-        return _SCENE_RADIUS_MM
+        return wide_radius
     p = _smoothstep((f - FADE_START) / float(FADE_END - FADE_START))
-    return (1 - p) * _SCENE_RADIUS_MM + p * _CLOUD_RADIUS_MM
+    return (1 - p) * wide_radius + p * _CLOUD_RADIUS_MM
+
+
+def _arc_bbox(pres_cam, end_frames, names):
+    """Pixel-space bounding box of every panel-quad corner in its TRUE (arc)
+    pose, under `pres_cam`'s current dist/principal-point. This is the extent
+    that must fit inside the composition target during the panel/ray phases."""
+    us, vs = [], []
+    for cam in names:
+        for X in _quad_corners(end_frames[cam]).values():
+            uv, _ = pres_cam.project(X[None, :])
+            us.append(uv[0, 0])
+            vs.append(uv[0, 1])
+    us, vs = np.asarray(us), np.asarray(vs)
+    return float(us.min()), float(us.max()), float(vs.min()), float(vs.max())
+
+
+def _calibrate_scene_radius(pres_cam, end_frames, names, r_hi):
+    """Bisect the wide-shot `scene_radius_mm` so the arc's panel-quad bbox
+    exactly fills the composition target (`_TARGET_HALF_W/H`) on its binding
+    axis -- i.e. find the biggest on-screen arc that still fits inside the
+    margin, rather than assuming a fill fraction that (as shipped) undershot
+    by ~2x. `r_hi` (the un-recalibrated `_SCENE_RADIUS_MM`) is known to be
+    an UNDER-fill (bigger r => smaller image), so it's a safe search upper
+    bound; the search is monotonic (bigger r -> smaller on-screen extent)."""
+    lo, hi = 0.5, r_hi
+    for _ in range(40):
+        mid = 0.5 * (lo + hi)
+        pres_cam.set_scene_radius(mid)
+        u0, u1, v0, v1 = _arc_bbox(pres_cam, end_frames, names)
+        ratio = max((u1 - u0) / 2.0 / _TARGET_HALF_W, (v1 - v0) / 2.0 / _TARGET_HALF_H)
+        if ratio > 1.0:
+            lo = mid   # overflowed the target -> need a LARGER radius (further away, smaller image)
+        else:
+            hi = mid
+    pres_cam.set_scene_radius(hi)
+    return hi
 
 
 _DARK_PLATE = np.full((FRAME_H, CROP_W, 3), 22, np.uint8)
@@ -451,6 +534,24 @@ def render_act2(clip: str = clip_io.CLIP_DEFAULT) -> Path:
     pres_cam = PresentationCamera(_EYE_DIR, _HALF_FOV_DEG, _SCENE_RADIUS_MM,
                                    _FILL_FRACTION, CANVAS_W, CANVAS_H)
 
+    # --- task-10 composition fix: rescale + recentre the wide (arc) shot ---
+    # so panels+rays fill most of the canvas instead of ~40% of it, off
+    # centre. `_calibrate_scene_radius` finds the biggest wide-shot radius
+    # that keeps every panel-quad corner inside the composition target;
+    # `delta_u/delta_v` (a pure image-plane translation -- see
+    # `PresentationCamera.set_principal_point_offset`) then centres that
+    # bbox in the target region. Neither can affect ray parallelism: the
+    # radius change is exactly the pre-existing "dolly" mechanism (already
+    # verified below by `_check_geometry`), and a translation cancels out of
+    # any direction/angle computed from two projected points.
+    wide_radius = _calibrate_scene_radius(pres_cam, end_frames, names, _SCENE_RADIUS_MM)
+    u0, u1, v0, v1 = _arc_bbox(pres_cam, end_frames, names)
+    delta_u = _TARGET_CX - (u0 + u1) / 2.0
+    delta_v = _TARGET_CY - (v0 + v1) / 2.0
+    print(f"[act2] wide-shot calibration: radius {wide_radius:.2f} mm "
+          f"(was {_SCENE_RADIUS_MM:.2f} mm), bbox {u1 - u0:.0f}x{v1 - v0:.0f} px, "
+          f"recentring offset ({delta_u:+.0f}, {delta_v:+.0f}) px")
+
     _check_geometry(cam_mats, names, view_dirs, centroid, kp3d[T0], kp2d_t0,
                      end_frames, pres_cam)
 
@@ -485,13 +586,27 @@ def render_act2(clip: str = clip_io.CLIP_DEFAULT) -> Path:
 
     for f in range(N_OUT):
         canvas = np.zeros((CANVAS_H, CANVAS_W, 3), np.uint8)
-        pres_cam.set_scene_radius(_scene_radius(f))
+        pres_cam.set_scene_radius(_scene_radius(f, wide_radius))
 
         fly_p = (f - FLY_START) / float(FLY_END - FLY_START) if f <= FLY_END else 1.0
+        # Recentring offset ramps IN with the same progress used to fly the
+        # panels to their true pose (0 at the grid start, matching the
+        # already-correct Act-1-style grid framing; full by f=FLY_END, held
+        # through the ray-extend/cloud-materialise phases so the arc+rays
+        # never drift once settled), then ramps back OUT in lockstep with
+        # `_panel_overall_alpha`'s existing 260-299 fade/dolly: the arc's
+        # bbox centre is not where the cloud (= the fly centroid, which always
+        # projects to the principal point, at any dist) naturally sits, so
+        # holding the arc's offset through the pure-cloud ending would drag
+        # the already-correctly-centred cloud off centre for no reason. Both
+        # camera moves (recentre-out, dolly-in) share one 260-299 window and
+        # ease together as a single final camera move.
+        panel_a = _panel_overall_alpha(f)
+        t_center = _smoothstep(fly_p) * _smoothstep(panel_a)
+        pres_cam.set_principal_point_offset(delta_u, delta_v, t_center)
         v_a, k_a = _video_alpha(f), _kp_alpha(f)
         ray_p = _ray_progress(f)
         cloud_a = _cloud_alpha(f)
-        panel_a = _panel_overall_alpha(f)
 
         frames_now = {}
         for cam in names:
@@ -508,17 +623,25 @@ def render_act2(clip: str = clip_io.CLIP_DEFAULT) -> Path:
             for cam in order:
                 tex = _build_texture(video_crop[cam], tex_uv[cam], kp_names, v_a, k_a)
                 canvas = _warp_panel(canvas, tex, frames_now[cam], pres_cam, panel_a)
-                # camera name + elevation label just above the panel's
-                # projected TOP edge (not raw mm -- panel size in mm means
-                # nothing in screen pixels once perspective is applied).
+                # Camera name + elevation label just above the panel's
+                # SCREEN-SPACE topmost corner (not the world "+up" edge --
+                # once a panel is tilted well off the viewer's own up axis,
+                # the world-top edge can project to the middle of the quad's
+                # screen footprint, sitting the label over the panel instead
+                # of clear of it; task-10 fix). Horizontally centred on the
+                # quad's mean projected corner, not raw mm (panel size in mm
+                # means nothing in screen pixels once perspective is applied).
                 fr = frames_now[cam]
-                top_world = fr["center_local"] + (fr["height_mm"] / 2.0) * fr["up"]
-                tuv, _ = pres_cam.project(top_world[None, :])
-                tx, ty = tuv[0]
-                if np.all(np.isfinite([tx, ty])):
+                corners_uv = np.stack(
+                    [pres_cam.project(X[None, :])[0][0] for X in _quad_corners(fr).values()])
+                if np.all(np.isfinite(corners_uv)):
+                    cx_ = float(corners_uv[:, 0].mean())
+                    top_v = float(corners_uv[:, 1].min())
                     ci = names.index(cam)
-                    canvas = draw.label(canvas, f"{cam} {elev_deg[ci]:+.1f} deg",
-                                         (tx - 70, ty - 12),
+                    text = f"{cam} {elev_deg[ci]:+.1f} deg"
+                    (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)
+                    canvas = draw.label(canvas, text,
+                                         (cx_ - tw / 2.0, top_v - th - 8),
                                          scale=0.45, color=(200, 200, 200))
 
             if ray_p > 0.0:
