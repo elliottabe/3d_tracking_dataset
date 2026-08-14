@@ -285,7 +285,7 @@ def render(clip: str = clip_io.CLIP_DEFAULT) -> Path:
     kp_colors = jarvis_kp_colors(kp_names)
     # DISPLAY ONLY (task-28): "Camera N" panel labels; every lookup above/
     # below (cam_names, DLT order) keeps using the real Cam20128xx strings.
-    disp_name = clip_io.display_names(cam_names)
+    disp_name = clip_io.display_names(cam_names, clip)
 
     # --- load 04_kp3d_filt.npz (full sequence, MODEL order) -----------------
     kp3d_z = np.load(d["predictions"] / "04_kp3d_filt.npz", allow_pickle=True)

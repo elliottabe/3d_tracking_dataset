@@ -174,24 +174,102 @@ def video_path(clip: str, cam_name: str, *, enhanced: bool = True) -> str:
     return hits[0]
 
 
-def display_names(cam_names) -> dict:
-    """Real camera name -> presentation-only "Camera N" label.
+def arc_positions_deg(cam_mats: np.ndarray, names, tol: float = 1.5) -> dict:
+    """DLT optical axes -> {name: arc position in degrees}, clean multiples
+    of 180/(n-1) deg (30 deg for this rig's 7 cameras) -- DERIVED from the
+    measured geometry, never a hardcoded per-camera table (task-33).
+
+    The seven cameras sit on one geodesic arc (this clip's cameras share a
+    "right" axis of ~world +X to within a few degrees -- see
+    `act2_triangulate.py`'s `max_right_dev` check), so each camera's arc
+    position is exactly its great-circle (geodesic) angle from one arc
+    ENDPOINT. Elevation (`arcsin` of the view direction's z-component,
+    `_elevations_deg`-style) is NOT enough on its own: it is symmetric about
+    the arc's mid-point (90 deg), so it folds the two halves of the arc onto
+    the same value (elev -30 deg matches BOTH 30 deg and 150 deg of arc) --
+    exactly why plain elevation gives a non-monotonic camera ordering while
+    sweeping the arc.
+
+    Endpoints = the two cameras with the LARGEST pairwise geodesic
+    separation (should be ~180 deg apart for this rig). Direction (which
+    endpoint is 0 vs the far end) is fixed by the lab-frame Y axis: since the
+    arc's shared right axis is world +X, the arc itself necessarily sweeps
+    in the Y-Z plane, and by convention the endpoint whose view direction has
+    the more negative Y-component is arc position 0.
+
+    Every derived position must land within `tol` degrees of a clean
+    multiple of 180/(n-1) deg -- raises loudly otherwise (a rig that is not
+    really an evenly spaced arc must not be silently relabelled as one).
+    Prints the derived-vs-clean values so a render's stdout is itself the
+    evidence for this check, not just the pass/fail.
+    """
+    dirs = camera_view_dirs(cam_mats)
+    n = len(names)
+    if n < 3:
+        raise ValueError(f"need >=3 cameras to derive an arc, got {n}")
+    dots = np.clip(dirs @ dirs.T, -1.0, 1.0)
+    geo = np.degrees(np.arccos(dots))
+    i0, i1 = np.unravel_index(np.argmax(geo), geo.shape)
+    # orientation tie-break: more-negative-Y endpoint is arc position 0.
+    e0 = i0 if dirs[i0, 1] <= dirs[i1, 1] else i1
+    raw = geo[e0]                                   # (n,) geodesic deg from e0
+    order = np.argsort(raw)
+    spacing = 180.0 / (n - 1)
+    clean = spacing * np.arange(n)
+    dev = np.abs(raw[order] - clean)
+    print("[arc_positions_deg] derived (deg) -> clean assignment: " + ", ".join(
+        f"{names[order[i]]}={raw[order[i]]:.2f}->{clean[i]:.0f}" for i in range(n)))
+    print(f"[arc_positions_deg] max deviation from clean {spacing:.1f} deg "
+          f"spacing: {dev.max():.2f} deg (tol {tol} deg)")
+    if dev.max() > tol:
+        raise ValueError(
+            f"derived arc positions {raw[order].round(2).tolist()} deg do not "
+            f"land within {tol} deg of clean {spacing:.1f} deg-spaced multiples "
+            f"{clean.tolist()} (max deviation {dev.max():.2f} deg) -- rig "
+            "geometry does not match the assumed evenly spaced arc")
+    return {names[order[i]]: float(clean[i]) for i in range(n)}
+
+
+def _arc_by_name(clip: str) -> dict:
+    cam_mats, dlt_names = load_dlt(str(Path(clip) / "calibration"))
+    return arc_positions_deg(cam_mats, dlt_names)
+
+
+def arc_order(cam_names, clip: str) -> list:
+    """`cam_names` (any order) -> the SAME names sorted by arc position
+    ascending (0 -> 180 deg). DISPLAY ordering only -- e.g. panel grid
+    placement -- never for indexing (see `display_names`)."""
+    arc_by_name = _arc_by_name(clip)
+    missing = [c for c in cam_names if c not in arc_by_name]
+    if missing:
+        raise ValueError(f"no arc position for cameras {missing}")
+    return sorted((str(c) for c in cam_names), key=lambda n: arc_by_name[n])
+
+
+def display_names(cam_names, clip: str) -> dict:
+    """Real camera name -> presentation-only "Camera N  <arc> deg" label.
 
     DISPLAY ONLY -- never use the returned strings for indexing/lookup.
     `expected_cameras=`, DLT/`load_dlt` lookups, and every other data path
     must keep using the real `Cam20128xx` name; this dict exists purely so
-    on-screen labels can say "Camera 1" instead of a serial number (see
-    CLAUDE.md/task-28: name-based lookup is what keeps the mask camera axis
-    and the calibration axis from silently diverging).
+    on-screen labels can say "Camera 1  0 deg" instead of a serial number
+    (see CLAUDE.md/task-28: name-based lookup is what keeps the mask camera
+    axis and the calibration axis from silently diverging).
 
-    N is the 1-based position in `sorted(cam_names)` -- the SAME
-    sorted-by-serial order `load_dlt`'s `sorted(glob(...))` produces, so the
-    numbering matches what a viewer reads left-to-right, top-to-bottom in
-    Act 1's grid (panel order there is exactly `02_kp2d.npz`'s `cam_names`,
-    itself asserted equal to `load_dlt`'s order at render time).
+    N is the 1-based position along the rig's measured arc (`arc_order` /
+    `arc_positions_deg`), NOT sorted-by-serial order (task-33: renumbered so
+    panel placement and the on-screen label both read monotonically 0->180
+    along the arc, replacing the old "Camera N  elev <measured> deg" label,
+    which was non-monotonic across the arc's mid-point -- see
+    `arc_positions_deg`'s docstring for why).
     """
-    order = sorted(set(str(c) for c in cam_names))
-    return {name: f"Camera {i + 1}" for i, name in enumerate(order)}
+    arc_by_name = _arc_by_name(clip)
+    missing = [c for c in cam_names if c not in arc_by_name]
+    if missing:
+        raise ValueError(f"no arc position for cameras {missing}")
+    order = sorted((str(c) for c in cam_names), key=lambda n: arc_by_name[n])
+    return {name: f"Camera {i + 1}  {int(round(arc_by_name[name]))} deg"
+            for i, name in enumerate(order)}
 
 
 def n_video_frames(path: str) -> int:

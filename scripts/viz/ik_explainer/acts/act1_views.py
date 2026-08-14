@@ -28,8 +28,22 @@ last frame instead of handing off to the reveal. `WINDOW_START`/`WINDOW_LEN`
 just over fewer output frames (see the speed-label derivation below for the
 consequence of that).
 
+TASK-33 (user: clean 0-180 deg arc labels, renumber cameras along the arc):
+panel labels changed from "Camera N  elev <measured> deg" (numbered off
+sorted-by-serial order, so both the number and the elevation value swept
+non-monotonically as the arc passed its 90 deg mid-point -- e.g. Cam2012862 at
+arc 120 deg reads elev -59.5 deg, the SAME elevation as Cam2012853 at arc
+60 deg) to "Camera N  <arc> deg", where N and the arc angle both come from
+`clip_io.display_names`/`clip_io.arc_order` (`clip_io.arc_positions_deg`
+derives the arc position from the DLT optical axes -- never a hardcoded
+per-camera table -- and asserts it lands within tolerance of a clean 30 deg
+multiple). Panels are now placed in ARC order (0->180 deg, left-to-right,
+top-to-bottom) instead of `cam_names`' sorted-by-serial order, so the grid
+reads monotonically; every data lookup (kp2d/conf indexing, crop centring)
+still keys off the real Cam20128xx name, never the display order.
+
 Timeline:
-  f   0- 35  video only, panels labelled camera name + true elevation.
+  f   0- 35  video only, panels labelled by arc position ("Camera N  <arc> deg").
   f  36- 95  2D keypoints fade in, alpha = (f-36)/60; low-confidence markers
              are drawn dimmer (`draw.draw_keypoints(..., conf=...)` shrinks
              their radius itself).
@@ -59,11 +73,12 @@ card's text is stripped down to ONLY the title, the fps/speed line, and the
 colour-coded keypoint legend -- the camera-count/elevation summary line and
 the "dim marker = low detector confidence" note are removed from the FRAME
 per the user's explicit request. Both facts remain true and are still
-documented here and enforced in code (7 cameras with elev range asserted in
-`_elevations_deg`'s caller; `draw.draw_keypoints`'s `conf` argument still
-shrinks low-confidence markers, see `draw_keypoints`'s own docstring in
-`draw.py`) -- only their on-screen captions are gone. Per-panel camera name +
-elevation labels and the per-panel scale bar are UNCHANGED (they are
+documented here and enforced in code (7 cameras asserted via
+`assert C == len(cam_names) == 7` above; `draw.draw_keypoints`'s `conf`
+argument still shrinks low-confidence markers, see `draw_keypoints`'s own
+docstring in `draw.py`) -- only their on-screen captions are gone. Per-panel
+camera labels (task-33: now arc position, not elevation -- see the TASK-33
+section above) and the per-panel scale bar are UNCHANGED IN KIND (they are
 per-panel annotations, not part of the removed title-card text block).
 Typography now comes from `draw.py`'s shared `TITLE_SCALE`/`CAPTION_SCALE`/
 `SMALL_SCALE` (one size per role across all four acts) instead of this
@@ -146,22 +161,6 @@ def _draw_raw_overlay(panel_native, uv_raw, conf_raw, x0, kp_names, kp_colors,
     return out
 
 
-def _elevations_deg(cam_names, clip):
-    """Camera names -> elevation in degrees, computed from the DLTs.
-
-    `camera_view_dirs`'s third component is elevation directly: matches the
-    brief's Cam2012630 -89.6 deg (vertical) ... Cam2012861 +0.6 deg exactly.
-    """
-    cam_mats, dlt_names = clip_io.load_dlt(str(Path(clip) / "calibration"))
-    dirs = clip_io.camera_view_dirs(cam_mats)
-    elev = np.degrees(np.arcsin(np.clip(dirs[:, 2], -1.0, 1.0)))
-    by_name = dict(zip(dlt_names, elev))
-    missing = [c for c in cam_names if c not in by_name]
-    if missing:
-        raise ValueError(f"no DLT elevation for cameras {missing}")
-    return np.array([by_name[c] for c in cam_names], np.float64)
-
-
 def _smoothed_crop_x0(kp2d_cam: np.ndarray, frame_w: int) -> np.ndarray:
     """(N,K,2) for one camera -> (N,) smoothed left edge of the CROP_W window."""
     cx = np.nanmean(kp2d_cam[..., 0], axis=1)          # (N,)
@@ -225,16 +224,16 @@ def _speed_factor() -> float:
     return out_duration_s / real_duration_s
 
 
-def _build_title_panel(cam_names, elev_deg, kp_names) -> np.ndarray:
+def _build_title_panel(kp_names) -> np.ndarray:
     """Task-19 (Change 2): stripped down to ONLY the title, the fps/speed
     line, and the colour-coded keypoint legend -- the camera-count/elevation
     summary and the "dim marker = low confidence" note are removed from the
     frame (the FACTS themselves -- 7 cameras, elev range, low-confidence
     markers drawn dimmer -- are unchanged in the code and still documented in
     this module's docstring; only the on-screen text is cut, per the user's
-    explicit request). `cam_names`/`elev_deg` are kept as parameters (no
-    longer drawn) only because per-panel labels elsewhere in this module
-    still need `elev_deg`; nothing here computes them redundantly.
+    explicit request). Task-33: no longer takes `cam_names`/`elev_deg` --
+    per-panel labels now come from `clip_io.display_names`'s arc-derived
+    "Camera N  <arc> deg" string, so this panel never needed raw elevation.
     """
     img = np.zeros((CELL_H, CELL_W, 3), np.uint8)
     # This title card is only CELL_W=480 px wide (one grid cell), unlike
@@ -266,13 +265,17 @@ def render_act1(clip: str = clip_io.CLIP_DEFAULT) -> Path:
     N, C, K, _ = kp2d.shape
     assert C == len(cam_names) == 7
 
-    elev_deg = _elevations_deg(cam_names, clip)
     kp_colors = jarvis_kp_colors(kp_names)
-    # DISPLAY ONLY (task-28): "Camera N" panel labels, numbered off the same
-    # sorted-by-serial order as `cam_names` -- every lookup below (kp2d/kp3d
-    # indexing, DLT/camera matrices) keeps using the real Cam20128xx names in
-    # `cam_names`; `disp_name` is never used for indexing.
-    disp_name = clip_io.display_names(cam_names)
+    # DISPLAY ONLY (task-33): "Camera N  <arc> deg" panel labels, numbered and
+    # ORDERED along the rig's measured 180 deg arc (`clip_io.display_names` /
+    # `clip_io.arc_order`) rather than sorted-by-serial order -- every lookup
+    # below that indexes real data (kp2d/conf via `ci`, `x0_by_cam`/`crops`
+    # via the real camera name) keeps using `cam_names`; `disp_name` and
+    # `panel_order` are never used for indexing, only for what to draw where
+    # and what text to show.
+    disp_name = clip_io.display_names(cam_names, clip)
+    panel_order = clip_io.arc_order(cam_names, clip)
+    ci_by_name = {cam: ci for ci, cam in enumerate(cam_names)}
 
     if WINDOW_START + WINDOW_LEN > N:
         raise ValueError(
@@ -294,7 +297,7 @@ def render_act1(clip: str = clip_io.CLIP_DEFAULT) -> Path:
 
     out_dir = d["frames"] / "act1_views"
     out_dir.mkdir(parents=True, exist_ok=True)
-    title_panel = _build_title_panel(cam_names, elev_deg, kp_names)
+    title_panel = _build_title_panel(kp_names)
 
     for f in range(N_OUT):
         t = int(t_for_f[f])
@@ -307,8 +310,13 @@ def render_act1(clip: str = clip_io.CLIP_DEFAULT) -> Path:
         else:
             kp_alpha = 1.0
 
-        for ci, cam in enumerate(cam_names):
-            row, col = divmod(ci, GRID_COLS)
+        # Task-33: panels are placed in ARC order (0->180 deg left-to-right,
+        # top-to-bottom), not `cam_names`' sorted-by-serial order -- `ci`
+        # (the real index into kp2d/conf) is still looked up BY NAME so data
+        # indexing never changes, only where each camera's panel is drawn.
+        for panel_idx, cam in enumerate(panel_order):
+            ci = ci_by_name[cam]
+            row, col = divmod(panel_idx, GRID_COLS)
             cellx, celly = col * CELL_W, row * CELL_H
             x0 = x0_by_cam[cam][t]
 
@@ -325,8 +333,7 @@ def render_act1(clip: str = clip_io.CLIP_DEFAULT) -> Path:
 
             py, px = celly + MARGIN + LABEL_H, cellx + MARGIN
             canvas[py:py + PANEL_H, px:px + PANEL_W] = panel
-            label_text = f"{disp_name[cam]}  elev {elev_deg[ci]:+.1f} deg"
-            canvas = draw.label(canvas, label_text,
+            canvas = draw.label(canvas, disp_name[cam],
                                  (cellx + MARGIN, celly + MARGIN + 20),
                                  scale=draw.SMALL_SCALE)
 

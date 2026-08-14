@@ -87,6 +87,62 @@ def test_read_frames_returns_requested_frames():
     assert imgs.dtype == np.uint8
 
 
+def test_arc_positions_deg_matches_measured_table():
+    """Task-33: arc position must be DERIVED from the DLT optical axes, not a
+    hardcoded per-camera table -- this test locks in the expected OUTCOME
+    (the measured mapping) without hardcoding the derivation itself."""
+    cam_mats, names = clip_io.load_dlt(os.path.join(CLIP, "calibration"))
+    arc = clip_io.arc_positions_deg(cam_mats, names)
+    expected = {
+        "Cam2012857": 0.0, "Cam2012855": 30.0, "Cam2012853": 60.0,
+        "Cam2012630": 90.0, "Cam2012862": 120.0, "Cam2012631": 150.0,
+        "Cam2012861": 180.0,
+    }
+    assert arc == expected
+    # every value is an exact clean multiple of 30 (never a raw/measured one).
+    for v in arc.values():
+        assert v % 30.0 == 0.0
+
+
+def test_arc_positions_deg_rejects_a_non_arc_rig():
+    """Non-vacuousness: perturbing one camera off the arc must FAIL the
+    tolerance check, not silently relabel it as an arc position."""
+    from jarvis_jax.tracking.affine_camera import factor_affine, reconstruct_affine
+
+    cam_mats, names = clip_io.load_dlt(os.path.join(CLIP, "calibration"))
+    # sanity: the real rig passes at a tight tolerance.
+    clip_io.arc_positions_deg(cam_mats, names, tol=1.5)
+    # rotate camera 0's optical axis by ~20 deg (about world X) out of the
+    # arc's Y-Z plane.
+    bad_mats = cam_mats.copy()
+    K2, R, t = factor_affine(cam_mats[0].T)
+    perturb = np.array([[1, 0, 0],
+                         [0, np.cos(np.radians(20)), -np.sin(np.radians(20))],
+                         [0, np.sin(np.radians(20)), np.cos(np.radians(20))]])
+    R_bad = perturb @ R
+    bad_mats[0] = reconstruct_affine(K2, R_bad, t).T
+    with pytest.raises(ValueError):
+        clip_io.arc_positions_deg(bad_mats, names, tol=1.5)
+
+
+def test_arc_order_and_display_names_agree_and_are_name_keyed():
+    """arc_order/display_names must use the SAME derivation and agree with
+    each other regardless of the input cam_names order (name-keyed, never
+    positional -- task-28's lesson)."""
+    cam_mats, names = clip_io.load_dlt(os.path.join(CLIP, "calibration"))
+    shuffled = list(reversed(names))
+    order = clip_io.arc_order(shuffled, CLIP)
+    assert set(order) == set(names)
+    assert order[0] == "Cam2012857" and order[-1] == "Cam2012861"
+
+    disp = clip_io.display_names(shuffled, CLIP)
+    assert disp["Cam2012857"] == "Camera 1  0 deg"
+    assert disp["Cam2012861"] == "Camera 7  180 deg"
+    # display_names' own numbering order must match arc_order's.
+    numbered = sorted(names, key=lambda n: int(disp[n].split()[1]))
+    assert numbered == order
+
+
 def test_out_dirs_creates_the_layout_under_ik_explainer():
     d = clip_io.out_dirs(CLIP)
     assert set(d) == {"root", "predictions", "qc", "frames"}

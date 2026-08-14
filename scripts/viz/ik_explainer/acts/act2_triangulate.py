@@ -120,8 +120,9 @@ is still hard to read as a fly at f=235 means TASK-31's dwell-time request
 was not actually satisfied.
 
 Colours: per-keypoint, JARVIS per-limb-chain scheme (`kp_colors.jarvis_kp_colors`),
-same as Act 1; `PALETTE["fit"]` green is reserved for the ray-bundle lines
-(the reconstruction mechanism, not a keypoint).
+same as Act 1. Task-33: the ray-bundle lines are ALSO per-keypoint JARVIS
+colours now (previously a flat `PALETTE["fit"]` green) -- see the TASK-33
+section below.
 
 TASK-18 DECISION (kept on `03_kp3d.npz`, deliberately NOT switched to the
 user-supplied `data3D.csv` or the production solve's `kp_data`): this act's
@@ -158,10 +159,27 @@ only" caption lines are removed from the FRAME per the user's explicit
 request. Both facts they described remain true and are documented in this
 module's RIG GEOMETRY section above (nothing about the geometric
 construction changed) -- only their on-screen captions are gone. Per-panel
-camera name + elevation labels are UNCHANGED (per-panel annotations, not
-part of the removed caption block). Typography now comes from `draw.py`'s
-shared `TITLE_SCALE`/`CAPTION_SCALE`/`SMALL_SCALE` instead of this module's
-own ad hoc scale values.
+camera labels remain UNCHANGED IN KIND (per-panel annotations, not part of
+the removed caption block) -- task-33 changes their CONTENT from "Camera N
+elev <measured> deg" to "Camera N  <arc> deg" (see TASK-33 section below) and
+renumbers/reorders panels to follow the arc, matching Act 1. Typography now
+comes from `draw.py`'s shared `TITLE_SCALE`/`CAPTION_SCALE`/`SMALL_SCALE`
+instead of this module's own ad hoc scale values.
+
+TASK-33 (user: clean 0-180 deg arc labels + renumber cameras along the arc;
+colour rays by keypoint): panel labels/numbering now come from
+`clip_io.display_names`/`clip_io.arc_order` (same arc-derived numbering Act 1
+uses -- see `act1_views.py`'s TASK-33 section), so "Camera N" and its
+on-screen deg value both increase monotonically 0->180 across the arc
+instead of folding at the arc's 90 deg mid-point. `_grid_start_frame`'s
+per-camera Act-1-style "start" grid cell is keyed off this SAME arc order so
+the fly-out still detaches from the cell Act 1 actually drew each camera in.
+Ray-bundle lines (`_draw_rays`) are recoloured from a flat `PALETTE["fit"]`
+green to per-keypoint JARVIS colours, looked up BY NAME
+(`kp_colors[kp_names[k]]`) -- ray GEOMETRY (parallel-within-a-bundle
+construction) is untouched; only line colour changed. See `_draw_rays`'s own
+docstring for the colour-by-name rationale and `_RAY_ALPHA_SCALE` below for
+the legibility tuning this required.
 """
 import argparse
 import sys
@@ -177,7 +195,6 @@ sys.path.insert(0, str(_REPO / "third_party" / "jarvis_jax"))
 
 from scripts.viz.ik_explainer import clip_io, draw          # noqa: E402
 from scripts.viz.ik_explainer.kp_colors import jarvis_kp_colors  # noqa: E402
-from viz.core.colors import PALETTE  # noqa: E402
 
 # --- canvas / timeline ----------------------------------------------------
 CANVAS_W, CANVAS_H = 1920, 1080
@@ -539,6 +556,22 @@ def _calibrate_scene_radius(pres_cam, end_frames, names, r_hi):
 _DARK_PLATE = np.full((FRAME_H, CROP_W, 3), 22, np.uint8)
 _BACKDROP_OPACITY = 0.55   # translucent plate: dims but doesn't blank the video base
 
+# --- TASK-33 ray colouring: legibility tuning ------------------------------
+# Up to 7 cameras x 50 keypoints = 350 ray segments on screen at once. Thin
+# lines (thickness 1, the pre-existing value) keep each ray a hairline rather
+# than a wide coloured band; `_RAY_ALPHA_SCALE` additionally dims the ray
+# layer's own blend-in below the caller's `alpha` (`panel_a`) -- rendered and
+# read at 1.0 (full `panel_a`) first: with 50 distinct hues at full strength
+# the bundle read as a busy rainbow haze rather than "structure", especially
+# where many chains' rays cross near the panels. At 0.55 the per-chain HUE
+# (which is the entire point of Change 2 -- same-colour rays sharing a limb
+# chain, converging on that chain's keypoints) still reads clearly, while the
+# overall bundle recedes enough to look like translucent converging
+# structure instead of clutter. Thickness is left at 1 (already the minimum
+# useful value); alpha, not thickness, is what was tuned.
+_RAY_THICKNESS = 1
+_RAY_ALPHA_SCALE = 0.55
+
 
 def _build_texture(video_crop, kp_local_uv, kp_names, video_alpha, kp_alpha, kp_colors):
     # crossfade video -> a dark plate, then dim the whole thing further the
@@ -574,21 +607,33 @@ def _warp_panel(canvas, texture, frame, pres_cam, alpha):
     return (canvas.astype(np.float32) * (1 - mask_f) + warped.astype(np.float32) * mask_f).astype(np.uint8)
 
 
-def _draw_rays(canvas, panel_pts_local, kp3d_local, progress, pres_cam, alpha):
+def _draw_rays(canvas, panel_pts_local, kp3d_local, kp_names, progress, pres_cam,
+                alpha, kp_colors):
     """Parallel-by-construction ray segments, one per keypoint, sharing camera
-    c's exact `view_dir[c]`: see the module docstring's geometric construction."""
+    c's exact `view_dir[c]`: see the module docstring's geometric construction.
+
+    TASK-33 (user: colour each ray by the keypoint it belongs to, using the
+    same JARVIS per-limb-chain colours as the keypoints/skeleton elsewhere):
+    each of the K rays in this one camera's bundle is coloured by
+    `kp_colors[kp_names[k]]` -- looked up BY NAME (never by the row's plain
+    index into `panel_pts_local`/`kp3d_local`, which are in whatever order the
+    caller's `kp_names` says -- see kp_colors.py's own module docstring on why
+    this project keys colour lookups by name, not position). This recolours
+    the lines only: `panel_pts_local`/`kp3d_local`/`progress` (the ray
+    geometry) are untouched, so every ray in a camera's bundle still shares
+    that camera's exact `view_dir` and stays parallel -- colour is drawn last,
+    after the same endpoints already computed for the green version."""
     if progress <= 0.0 or alpha <= 0.0:
         return canvas
     out = canvas.copy()
     ends = panel_pts_local + progress * (kp3d_local - panel_pts_local)
     uv0, _ = pres_cam.project(panel_pts_local)
     uv1, _ = pres_cam.project(ends)
-    color = PALETTE["fit"]     # green: this is the reconstructed-geometry mechanism
-    for p0, p1 in zip(uv0, uv1):
+    for p0, p1, name in zip(uv0, uv1, kp_names):
         if np.all(np.isfinite(p0)) and np.all(np.isfinite(p1)):
             cv2.line(out, tuple(np.round(p0).astype(int)), tuple(np.round(p1).astype(int)),
-                      color, 1, cv2.LINE_AA)
-    return draw.fade(canvas, out, alpha)
+                      kp_colors[name], _RAY_THICKNESS, cv2.LINE_AA)
+    return draw.fade(canvas, out, alpha * _RAY_ALPHA_SCALE)
 
 
 def _draw_cloud(canvas, kp3d_local, kp_names, pres_cam, alpha, kp_colors):
@@ -619,10 +664,18 @@ def render_act2(clip: str = clip_io.CLIP_DEFAULT) -> Path:
     cam_mats, names, view_dirs = _load_rig(clip)
     assert list(names) == cam_names, (
         f"load_dlt order {names} != 02_kp2d.npz cam_names {cam_names}")
-    # DISPLAY ONLY (task-28): "Camera N" panel labels; `names`/`cam_names`
-    # (the real Cam20128xx strings) remain what every DLT/kp2d/kp3d lookup
-    # below uses -- `disp_name` is only read when drawing the on-screen text.
-    disp_name = clip_io.display_names(names)
+    # DISPLAY ONLY (task-33): "Camera N  <arc> deg" panel labels, numbered
+    # along the rig's measured arc (`clip_io.display_names`) -- same numbering
+    # Act 1 uses. `names`/`cam_names` (the real Cam20128xx strings) remain
+    # what every DLT/kp2d/kp3d lookup below uses -- `disp_name`/`panel_order`
+    # are only read when drawing/placing the on-screen panels.
+    disp_name = clip_io.display_names(names, clip)
+    # ARC order, same as Act 1's now-arc-ordered grid: each camera's Act-1-
+    # style "start" grid cell (`_grid_start_frame`) must match the cell Act 1
+    # actually drew it in, so the "detach from the Act 1 grid" fly-out reads
+    # as continuous rather than jump-cutting cameras between cells.
+    panel_order = clip_io.arc_order(names, clip)
+    panel_idx_by_name = {cam: i for i, cam in enumerate(panel_order)}
     # Confirms the brief's "perpendicular to the arena's long axis" claim in
     # THIS clip's own data, not assumed from the spec table.
     from jarvis_jax.tracking.affine_camera import factor_affine
@@ -686,7 +739,10 @@ def render_act2(clip: str = clip_io.CLIP_DEFAULT) -> Path:
         x0 = int(round(np.clip(end_frames[cam]["x0"], 0, fw - CROP_W)))
         video_crop[cam] = frame[:FRAME_H, x0:x0 + CROP_W].copy()
 
-    start_frames = {cam: _grid_start_frame(pres_cam, ci) for ci, cam in enumerate(names)}
+    # Task-33: grid start pose keyed off ARC order (matches Act 1's now-arc-
+    # ordered panel placement), not `names`' sorted-by-serial order.
+    start_frames = {cam: _grid_start_frame(pres_cam, panel_idx_by_name[cam])
+                     for cam in names}
 
     out_dir = d["frames"] / "act2_triangulate"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -731,8 +787,8 @@ def render_act2(clip: str = clip_io.CLIP_DEFAULT) -> Path:
             for cam in order:
                 tex = _build_texture(video_crop[cam], tex_uv[cam], kp_names, v_a, k_a, kp_colors)
                 canvas = _warp_panel(canvas, tex, frames_now[cam], pres_cam, panel_a)
-                # Camera name + elevation label just above the panel's
-                # SCREEN-SPACE topmost corner (not the world "+up" edge --
+                # Camera label ("Camera N  <arc> deg", task-33) just above the
+                # panel's SCREEN-SPACE topmost corner (not the world "+up" edge --
                 # once a panel is tilted well off the viewer's own up axis,
                 # the world-top edge can project to the middle of the quad's
                 # screen footprint, sitting the label over the panel instead
@@ -745,8 +801,7 @@ def render_act2(clip: str = clip_io.CLIP_DEFAULT) -> Path:
                 if np.all(np.isfinite(corners_uv)):
                     cx_ = float(corners_uv[:, 0].mean())
                     top_v = float(corners_uv[:, 1].min())
-                    ci = names.index(cam)
-                    text = f"{disp_name[cam]} {elev_deg[ci]:+.1f} deg"
+                    text = disp_name[cam]
                     (tw, th), _ = cv2.getTextSize(
                         text, cv2.FONT_HERSHEY_SIMPLEX, draw.SMALL_SCALE, 1)
                     canvas = draw.label(canvas, text,
@@ -755,8 +810,8 @@ def render_act2(clip: str = clip_io.CLIP_DEFAULT) -> Path:
 
             if ray_p > 0.0:
                 for cam in names:
-                    canvas = _draw_rays(canvas, panel_pts_local[cam], kp3d_local,
-                                         ray_p, pres_cam, panel_a)
+                    canvas = _draw_rays(canvas, panel_pts_local[cam], kp3d_local, kp_names,
+                                         ray_p, pres_cam, panel_a, kp_colors)
 
         canvas = _draw_cloud(canvas, kp3d_local, kp_names, pres_cam, cloud_a, kp_colors)
 
