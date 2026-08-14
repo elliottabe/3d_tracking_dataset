@@ -91,6 +91,33 @@ a cloud not sitting where the rays end means a wrong transform.
 Colours: per-keypoint, JARVIS per-limb-chain scheme (`kp_colors.jarvis_kp_colors`),
 same as Act 1; `PALETTE["fit"]` green is reserved for the ray-bundle lines
 (the reconstruction mechanism, not a keypoint).
+
+TASK-18 DECISION (kept on `03_kp3d.npz`, deliberately NOT switched to the
+user-supplied `data3D.csv` or the production solve's `kp_data`): this act's
+entire claim is that its cloud IS the triangulation of the 2D shown in Act 1
+-- enforced at runtime by the `kp2d/kp3d keypoint order mismatch` assert
+below and by `_check_geometry`'s reprojection sanity check, which reprojects
+this act's OWN panel-plane construction back through the real rig DLTs and
+compares it to `02_kp2d.npz`'s own `kp2d_t0` (the same array Act 1 draws).
+Measured before deciding (not assumed): reprojecting `data3D.csv` (converted
+to mm, MODEL order) through the same DLTs at T0=525 gives a mean 10.3 px /
+max 38.3 px error against `02_kp2d.npz`'s OWN observed 2D -- worse than this
+act's existing `03_kp3d.npz`-based construction (mean 3.1 px / max 28.5 px
+against the same 2D, i.e. what the module docstring above already reports),
+and closer to failing its own <40 px construction-reprojection assert.
+`data3D.csv` is a separate, independently-produced triangulation, not derived
+from this repo's own re-run 2D detector -- swapping the cloud to it while
+Act 1 still shows OUR OWN 2D keypoints would sever the "same points, by
+construction" claim this act exists to make. (The production solve's own
+`kp_data`, by contrast, reprojects to 3.1 px / 28.9 px -- essentially
+identical to `03_kp3d.npz` -- because it turns out to BE this repo's own
+filtered triangulation, `04_kp3d_filt.npz`, carried through the STAC solve;
+see act3_align.py's TASK-18 MIXTURE section for that comparison. Even so,
+Act 2 stays on `03_kp3d.npz` directly rather than `kp_data`/`shared_scale`,
+since `03_kp3d.npz` is this act's own pre-existing, already-verified,
+un-filtered source and introducing a second production-solve dependency here
+would not change what is shown.) Act 1 and Act 2 are therefore UNCHANGED by
+task-18.
 """
 import argparse
 import sys

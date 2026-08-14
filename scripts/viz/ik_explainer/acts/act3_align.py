@@ -192,6 +192,31 @@ Wing visibility (Change 1, task-14): `set_mesh_rgba`/`capture_geom_alpha`
 act performs -- see their docstrings for why a blanket alpha assignment used
 to turn them into opaque white rectangles.
 
+TASK-18 MIXTURE (deliberately disclosed on screen, not hidden): the user
+supplied a full production STAC solve (`ik_production/stac_ik_full.h5`) that,
+unlike this repo's own `06_stages.npz`, actually ran `offset_optimization`
+(fitted marker offsets, mean |0.015| max |0.26| mm -- our own staged run
+never fit these). Act 4 now plays that production fit back; this act's
+keypoint SKELETON is switched to match -- it now swings onto the production
+solve's own `kp_data` (converted back to raw mm by dividing out
+`shared_scale`, so the existing centroid-blend math below runs unchanged)
+instead of this repo's own re-triangulated `04_kp3d_filt.npz`. This act's
+MESH, however, still renders `qpos_root` from `06_stages.npz` -- the staged,
+no-offset root-alignment solve -- because that is a genuine intermediate
+stage of a real solve and this act's whole point (see the module's opening
+paragraph). The result is a deliberate, disclosed mixture of two solves
+(captioned on screen, not just here): staged mesh position, production
+keypoint target. Measured, not assumed: the production `kp_data` and this
+repo's own `04_kp3d_filt.npz * shared_scale` agree to a mean 0.0016 mm (max
+0.0026 mm) at this clip's keypoint scale -- i.e. the production run's target
+IS (to floating-point noise) this same repository's own filtered
+triangulation, just carried through a solve that also fit offsets -- so this
+swap changes PROVENANCE (what array is read) without changing what is drawn
+in any visually meaningful way. It does guarantee exact equality with Act 4's
+own opening frame (both now read the identical `kp_data[frame_for_stills]`),
+which the previous `04_kp3d_filt.npz`-sourced cloud only matched to that same
+~0.002 mm noise floor.
+
 Timeline (90 frames, 3 s @ 30 fps -- task-16: cut down from the 180-frame/
 6s task-15 v2 cut per the user's direct "just the second half... swings in
 and aligns" request; the mesh's own translation and the pre-task-15
@@ -242,6 +267,7 @@ import time
 from pathlib import Path
 
 import cv2
+import h5py
 import mujoco
 import numpy as np
 from scipy.spatial.transform import Rotation, Slerp
@@ -375,10 +401,15 @@ BASE_MARKER_R_AT_FINAL_SCALE = 0.012   # model units; ~ a leg-segment's width at
 BONE_RADIUS_FRACTION = 0.4             # bone capsule radius, as a fraction of marker radius
 
 # Real-pixel mesh-size acceptance test: near-white, low-saturation pixels,
-# excluding the top-270px caption band -- keypoints are drawn as SATURATED
-# colours so they never count as "mesh" here (and vice versa for the
-# skeleton-centroid probe below).
-_CAPTION_BAND_PX = 270
+# excluding the top caption band -- keypoints are drawn as SATURATED colours
+# so they never count as "mesh" here (and vice versa for the
+# skeleton-centroid probe below). TASK-18: raised from 270 to 300 -- the new
+# disclosure caption line this task adds (see "mixture disclosed" label
+# below) prints text down to about row 298, which the old 270px band did not
+# cover; measured directly on a rendered frame before picking 300 (not
+# guessed), so this near-white text can't get miscounted as "mesh" and
+# silently break the Act3->Act4 seam's mesh-pixel acceptance test.
+_CAPTION_BAND_PX = 300
 
 
 def _mesh_mask(canvas_bgr):
@@ -499,17 +530,35 @@ def render_act3(clip: str = clip_io.CLIP_DEFAULT) -> Path:
             "matches the recorded snapshots; refusing to render a "
             "mesh-rotation animation that contradicts the measured facts.")
 
-    with np.load(dirs["predictions"] / "04_kp3d_filt.npz", allow_pickle=True) as z:
-        kp3d = np.asarray(z["kp3d"], np.float64)
-        kp3d_names = [str(n) for n in z["kp_names"]]
-    if kp3d_names != kp_names:
+    # TASK-18: the keypoint skeleton this act swings in now comes from the
+    # PRODUCTION solve's own `kp_data` (`ik_production/stac_ik_full.h5`), not
+    # our own re-triangulated `04_kp3d_filt.npz` -- see module docstring's
+    # TASK-18 MIXTURE section. `kp_data` is stored in MODEL order, already
+    # multiplied by `shared_scale`; dividing back out here lets the rest of
+    # this function's existing raw-mm staging math (`raw_mean`/`scaled_centered`
+    # below) run completely unchanged.
+    h5_path = Path(clip) / "ik_production" / "stac_ik_full.h5"
+    with h5py.File(h5_path, "r") as hf:
+        kp_names_prod = [n.decode() if isinstance(n, bytes) else str(n)
+                          for n in hf["kp_names"][:]]
+        kp_data_prod = np.asarray(hf["kp_data"][:], np.float64).reshape(-1, 50, 3)
+    expected_model_names = clip_io.model_kp_names()
+    if kp_names_prod != expected_model_names:
         raise ValueError(
-            "04_kp3d_filt.npz kp_names != 06_stages.npz kp_names -- refusing "
-            "to mix keypoint orders (CLAUDE.md's keypoint-order bug class).")
+            f"{h5_path} kp_names != clip_io.model_kp_names() -- refusing to "
+            "mix keypoint orders (CLAUDE.md's keypoint-order bug class). "
+            f"First mismatch: {next((a, b) for a, b in zip(kp_names_prod, expected_model_names) if a != b)}")
+    if kp_names_prod != kp_names:
+        raise ValueError(
+            f"{h5_path} kp_names != 06_stages.npz kp_names -- refusing to mix "
+            "keypoint orders (CLAUDE.md's keypoint-order bug class).")
 
-    kp3d_raw_frame = kp3d[frame_for_stills]   # (50,3) mm, MODEL order, RAW (unscaled)
+    kp3d_raw_frame = kp_data_prod[frame_for_stills] / shared_scale  # (50,3) mm, MODEL order, RAW (unscaled)
     print(f"[act3] frame_for_stills={frame_for_stills}, shared_scale={shared_scale:.4f} "
           f"(FIXED for this act -- root_optimization only, task-15 v2/task-16)")
+    print(f"[act3] TASK-18: keypoint skeleton sourced from the PRODUCTION fit's "
+          f"kp_data ({h5_path}), not 04_kp3d_filt.npz -- mesh below is still "
+          f"the staged (no-offset) qpos_root from 06_stages.npz.")
     print(f"[act3] residuals scaled/root = {residual_scaled:.3f}/{residual_root:.3f} mm")
     print(f"[act3] qpos_root - qpos_default (translation only, mm, NOT depicted "
           f"this act -- task-16): {(qpos_root[:3] - qpos_default[:3])}")
@@ -633,6 +682,11 @@ def render_act3(clip: str = clip_io.CLIP_DEFAULT) -> Path:
                 canvas, "keypoints start modestly offset from the model and move "
                         "onto it monotonically; their final position is the solver's",
                 (48, 266), scale=0.45, color=(150, 150, 150))
+            canvas = draw.label(
+                canvas, "mixture disclosed: mesh is the earlier staged (no marker-"
+                        "offset) solve; keypoints are the full production fit's "
+                        "target, so this act's end state matches Act 4's start exactly",
+                (48, 294), scale=0.45, color=(150, 150, 150))
             canvas = draw.label(canvas, f"frame {f + 1}/{N_OUT}", (48, CANVAS_H - 24),
                                  scale=0.45, color=(150, 150, 150))
 
