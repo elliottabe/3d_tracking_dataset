@@ -499,6 +499,12 @@ model:
   # --- Jaxls batch Levenberg-Marquardt IK solver ---
   USE_JAXLS: True
   JAXLS_LAMBDA_INITIAL: 1.0
+  # jaxls termination tolerances. The library defaults (gradient 1e-4,
+  # parameter 1e-6) exit the solve while weakly-conditioned DOFs are still far
+  # from their optimum -- loosening them improved the residual 23% across all
+  # keypoints on Session6/2025_10_12_15_06_46.
+  JAXLS_GRADIENT_TOLERANCE: 1.0e-8
+  JAXLS_PARAMETER_TOLERANCE: 1.0e-10
   JAXLS_SMOOTH_WEIGHT: 0.01
   JAXLS_LINEAR_SOLVER: "auto"
   JAXLS_USE_SE3_ROOT: true
