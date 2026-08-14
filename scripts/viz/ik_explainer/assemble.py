@@ -6,7 +6,7 @@ Concatenates `frames/act{1..4}_*/f%05d.png` in story order with 30-frame
 H.264 (silent) via `viz.core.io.write_video` (imageio + ffmpeg, the repo's
 shared encoder), then writes `README.md` and `manifest.json` beside it.
 
-EXPECTED TOTAL FRAMES: 270 + 300 + 180 + 900 - 3*30 = 1560 (52.0 s @ 30 fps).
+EXPECTED TOTAL FRAMES: 270 + 300 + 90 + 900 - 3*30 = 1470 (49.0 s @ 30 fps).
 (Task-14 shortened Act 1 from 450 to 270 frames -- 15s to 9s -- and
 re-sourced it from a contiguous ~40% sub-range of the clip rather than the
 whole 921 frames; see `act1_views.py`'s module docstring. A later task-14
@@ -16,8 +16,11 @@ shortened Act 3 from 600 to 360 frames -- 20s to 12s -- and dropped its
 rest-pose fade-in phase; a direct mid-task user follow-up ("the scaling
 doesn't look good... just have it do the root alignment... and can we have
 it shorter") then retired the merged scale+align design and shortened Act 3
-again, 360 -> 180 frames (12s -> 6s); see `act3_align.py`'s module
-docstring's TASK-15 PIVOT section.) This is asserted TWICE: once per-act (`_list_frames` requires each act directory to
+again, 360 -> 180 frames (12s -> 6s). Task-16 then cut Act 3 a further time,
+180 -> 90 frames (6s -> 3s), keeping only the swing-in-and-align beat per a
+second direct user pivot ("just the second half... where it just swings in
+and aligns"); see `act3_align.py`'s module docstring's TASK-16 PIVOT
+section.) This is asserted TWICE: once per-act (`_list_frames` requires each act directory to
 hold EXACTLY its expected count -- neither short nor padded with extras),
 and once on the assembled edit plan before any frame is written to ffmpeg.
 Act 4 previously died mid-render at 700/900 and had to be resumed; this
@@ -61,13 +64,13 @@ from viz.core.io import write_video                  # noqa: E402
 ACT_SPECS = [
     ("act1_views", 270),
     ("act2_triangulate", 300),
-    ("act3_align", 180),
+    ("act3_align", 90),
     ("act4_solve", 900),
 ]
 N_CROSS = 30   # 1 s @ 30 fps; lengthened from 15 (task-14 round 4, "smoother transitions")
 FPS = 30
 CANVAS_W, CANVAS_H = 1920, 1080
-EXPECTED_TOTAL = sum(n for _, n in ACT_SPECS) - (len(ACT_SPECS) - 1) * N_CROSS  # 1980
+EXPECTED_TOTAL = sum(n for _, n in ACT_SPECS) - (len(ACT_SPECS) - 1) * N_CROSS  # 1470
 
 
 def _list_frames(act_dir: Path, act_name: str, expected: int) -> list:
@@ -337,10 +340,10 @@ ik_explainer/
                          independently re-renderable without repaying a GPU pass
     act1_views/          {n1} frames -- seven camera views, 2D keypoints fade in
     act2_triangulate/    {n2} frames -- views converge into the 3D keypoint cloud
-    act3_align/          {n3} frames -- already-scaled keypoint skeleton,
-                         staged centred on the model, translates in place
-                         (root_optimization) onto the solver's true fitted
-                         position
+    act3_align/          {n3} frames -- already-scaled keypoint skeleton
+                         starts modestly offset from the (static) model and
+                         swings onto it, settling at the solver's true
+                         fitted root_optimization position
     act4_solve/          {n4} frames -- joints solve (+ orientation), then playback
   ik_explainer.mp4       the deliverable: {total} frames, 1920x1080 @ 30 fps,
                          H.264, silent (assembled by scripts/viz/ik_explainer/assemble.py)

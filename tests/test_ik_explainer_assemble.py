@@ -103,7 +103,7 @@ def test_render_op_crossfade_matches_draw_fade(tmp_path):
     assert np.array_equal(out, expected)
 
 
-def test_real_act_specs_total_matches_expected_1560():
+def test_real_act_specs_total_matches_expected_1470():
     """Locks the exact arithmetic the brief specifies for the shipped acts
     (task-14: Act 1 shortened 450 -> 270 frames; a later round lengthened
     crossfades 15 -> 30 frames for smoother transitions; total 2205 -> 2025
@@ -111,9 +111,12 @@ def test_real_act_specs_total_matches_expected_1560():
     rest-pose fade-in phase); total 1980 -> 1740. A direct mid-task user
     follow-up then retired the merged scale+align design (see
     act3_align.py's TASK-15 PIVOT section) and shortened Act 3 again,
-    360 -> 180 frames; total 1740 -> 1560)."""
-    assert assemble.EXPECTED_TOTAL == 1560
-    assert sum(n for _, n in assemble.ACT_SPECS) == 1650
+    360 -> 180 frames; total 1740 -> 1560. task-16: a second direct user
+    pivot ("just the second half... where it just swings in and aligns")
+    cut Act 3 again, 180 -> 90 frames (see act3_align.py's TASK-16 PIVOT
+    section); total 1560 -> 1470)."""
+    assert assemble.EXPECTED_TOTAL == 1470
+    assert sum(n for _, n in assemble.ACT_SPECS) == 1560
     assert assemble.N_CROSS == 30
 
 

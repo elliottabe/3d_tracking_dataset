@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Act 3 -- root alignment ONLY, keypoints assumed already scaled (task-15 v2,
-a direct mid-task user pivot away from the earlier "merged scale+align" cut --
-see the TASK-15 PIVOT section below for why).
+a direct mid-task user pivot away from the earlier "merged scale+align" cut),
+now trimmed to JUST the swing-in-and-align beat (task-16, a second direct
+user pivot -- see the TASK-16 PIVOT section below for why the mesh itself no
+longer visibly translates in this cut).
 
 This act renders SNAPSHOTS `stage_ik.py` recorded from an actual STAC solve
 (`06_stages.npz`) -- it does not invent motion. Two measured facts underlie
@@ -12,10 +14,9 @@ the story (do not restate the pre-measurement storyboard):
    `preprocess_keypoints_for_ik.compute_shared_scale` (Umeyama trunk scale;
    `shared_scale = 0.1261` for this clip). The model geometry is never
    touched. This act draws the keypoint cloud ALREADY at `shared_scale` --
-   fixed-size for the whole act -- and animates only its POSITION (the
-   `root_optimization` translation). The rescale step itself (1.0 ->
-   `shared_scale`) is not depicted here; it is assumed done (see TASK-15
-   PIVOT below for why).
+   fixed-size for the whole act -- and animates only its POSITION. The
+   rescale step itself (1.0 -> `shared_scale`) is not depicted here; it is
+   assumed done (see the TASK-15 PIVOT section below for why).
 2. **`root_optimization` does NOT rotate.** `configs/anatomy/v1.yaml` sets
    `TRUNK_OPTIMIZATION_KEYPOINTS: {}`, so `root_optimization`'s keypoint-fit
    loss is uniformly zero and only the manual root-translation it also
@@ -23,131 +24,149 @@ the story (do not restate the pre-measurement storyboard):
    (the free-joint quaternion) is bit-identical to `qpos_default[3:7]`
    (`[1,0,0,0]` both), and `qpos_root[7:]` (all joint DOF) is bit-identical
    to `qpos_default[7:]` too. Only `qpos_root[:3]` (the free-joint
-   translation) differs. So this act is TRANSLATION ONLY -- no rotation, no
-   scale change. Orienting is Act 4's `pose_optimization` (34.73 deg
-   measured there), not this one.
+   translation) differs -- so root_optimization is TRANSLATION ONLY, no
+   rotation, no scale change. Orienting is Act 4's `pose_optimization`
+   (34.73 deg measured there), not this one. The runtime guard below still
+   fails loudly if a future re-run of `stage_ik.py` ever contradicts this.
 
-Because `root_optimization` is genuinely translation-only here, `_slerp_qpos`
-SLERPs a quaternion that never actually changes over this act. It is used
-anyway (rather than a plain lerp of `qpos[:3]`/`qpos[7:]` only) so the same
-helper is correct for Act 4, where `pose_optimization` produces a real
-34.73 deg rotation and a lerped quaternion would denormalise and visibly
-tumble.
+TASK-16 PIVOT (read this before touching the STAGING math below -- this is
+the CURRENT design; the TASK-15 PIVOT section further down is kept only as
+a record of the design this one replaces): after task-15 v2 shipped and was
+assembled into the full video, the user watched it and reported it still
+"looks off": *"can we have so it is just the second half of that were it
+just swings in and aligns? from around 18s to 20s in"* -- i.e. keep only the
+skeleton's swing-onto-the-model-and-settle beat, and drop the outward
+excursion entirely. Measuring the task-15 v2 cut directly (near-white
+mesh-mask pixel count is a bad probe for this -- it stayed steady; the
+SKELETON's own saturated-pixel bounding box is what shows it) confirmed a
+real, reproducible excursion:
 
-TASK-15 PIVOT (read this before touching the STAGING math below): task-15
-originally asked for the EXISTING merged "rescale + root_optimization"
-single-step design (scale 1.0 -> `shared_scale` WHILE qpos SLERPs
-`qpos_default` -> `qpos_root`) to additionally stay centred on the model
-throughout, rather than flying in from off-screen. That version was
-implemented, rendered, and read frame-by-frame -- and while f=0/f=299 looked
-right in isolation, reading the IN-BETWEEN frames (f=30/60/90/150/250)
-showed the oversized cloud visibly SHRINKING AWAY FROM the model, exiting
-the frame entirely by roughly f=90, staying off-screen through the middle,
-then flying BACK IN near the end to land correctly -- i.e. the "flies in
-from off-screen" problem the user asked to remove was still there, just
-moved to the back half of the act instead of the front. Root cause (kept
-here as a record, not a live design): with scale ALSO animating, the cloud's
-own true (measured, unstaged) centroid trajectory `factor(f)*raw_mean`
-travels along a completely different path than the mesh's own translation
-`mesh_ctr(f)` -- the two only coincide at the very end (by construction of
-`root_optimization`), so any staging pivot that blends toward that true
-trajectory necessarily drags the displayed cloud through its huge
-intermediate values (multiple model-units away from the camera's lookat)
-somewhere in the middle. The user, live, asked to sidestep this rather than
-patch it further: **"the scaling doesn't look good... just have it do the
-root alignment and assume it is already scaled... and can we have it
-shorter."** This is a direct user pivot, not a further tuning of the merged
-design -- so the merged "rescale + root_optimization" single step (task-14
-round 4 / task-15 v1) is RETIRED here, not layered under a bigger fix.
+    f000: skeleton_px=46860  span=536x433
+    f060: skeleton_px=93688  span=709x541   <- swings OUT and gets BIGGER
+    f119: skeleton_px=46517  span=533x460
+    f179: skeleton_px=46517  span=533x460   (held)
 
-With scale fixed at `shared_scale` for the WHOLE act, the problem above goes
-away almost entirely: the cloud's own true (fixed) position `C_true =
-shared_scale * raw_mean` is now a SINGLE POINT, not a moving trajectory, and
-(by construction of `root_optimization`) it sits close to `mesh_ctr_final`
--- the mesh's own real translation target already nearly arrives there
-without any staging help. So the ONLY staging needed is a plain, one-shot
-blend of the cloud's centroid from the mesh's own LIVE tracked centroid
-(`mesh_ctr(f)`, which the camera already follows) to that single fixed true
-point `C_true`, using the SAME progress `p` that drives `root_optimization`'s
-own qpos SLERP:
+Root cause (kept as a record, not a live design): task-15 v2's staged
+centroid blended the ALREADY fixed-size cloud from the mesh's own LIVE,
+MOVING centroid `mesh_ctr(f)` at `p=0` to the single fixed point `C_true` at
+`p=1`, i.e. `staged_centroid(f) = (1-p)*mesh_ctr(f) + p*C_true`. Camera
+`lookat` also tracked that same moving `mesh_ctr(f)` every frame (needed at
+the time because the mesh's own real translation was ~5.8x its body length
+across the WHOLE act). Substituting `mesh_ctr(f)` ~= `(1-p)*M0 + p*C_true`
+(M0 = the mesh's rest position, since `root_optimization`'s translation is
+itself linear in `p`) shows the camera-to-skeleton distance carries an
+added term proportional to `p*(1-p)*(M0 - C_true)` -- a hump that is exactly
+ZERO at `p=0` and `p=1` but PEAKS at `p=0.5` (old `f=60`, precisely the
+frame the measurement above flags). That hump moves the skeleton measurably
+CLOSER to the camera mid-act, which is what reads on screen as the skeleton
+swelling outward and back -- a real geometric consequence of chasing a
+MOVING mesh target with a camera that also chases it, not a bug in any
+single number.
 
-    C_true             = shared_scale * raw_mean            (fixed, measured)
-    scaled_centered     = shared_scale * (kp3d_raw_frame - raw_mean)  (fixed shape)
-    staged_centroid(f)  = (1 - p) * mesh_ctr(f)  +  p * C_true
-    cloud_pts(f)         = staged_centroid(f) + scaled_centered
+The fix (this cut): stop moving the things that create the hump.
+`root_optimization`'s own translation is no longer depicted at all -- the
+mesh is drawn STATIC at `qpos_root` (its final, true, measured position)
+for the ENTIRE act, and the camera's `lookat` is likewise a SINGLE fixed
+point (`mesh_ctr_final`, computed once). This is the same kind of staging
+choice task-15 already made for the rescale step ("assumed done"): the
+translation happened (it is real, measured, unretouched in `06_stages.npz`)
+but this act no longer re-enacts it, choosing instead to show only the
+skeleton's own approach onto an already-placed model -- which is exactly
+what the user asked for ("it just swings in and aligns"). With BOTH the
+mesh and the camera fixed, the ONLY moving thing left is the skeleton's own
+centroid, blended along a straight line between two FIXED points:
 
-At `p=0` (`f=0`): `staged_centroid = mesh_ctr(0)` exactly, i.e. the
-(already correctly-sized) skeleton is centred on the model's REST position.
-At `p=1` (`f=ALIGN_END`, and every hold frame): `staged_centroid = C_true`
-exactly, so `cloud_pts = shared_scale*raw_mean + shared_scale*(kp3d_raw_frame
-- raw_mean) = shared_scale * kp3d_raw_frame` -- the SOLVER's true scaled
-keypoint position, unmodified, bit-for-bit the same value every earlier cut
-used. Nothing about the measured endpoint changes; only the in-between
-staged position of the (now fixed-size) cloud's centroid does -- captioned
-on screen as a presentation choice, in the same spirit as Act 2's "panel
-DISTANCE... is staging only" caveat: the pivot used for the animation's
-IN-BETWEEN frames is a staging decision, the endpoints are measured.
+    mesh_ctr_default    = FK(qpos_default)                    (fixed, measured)
+    mesh_ctr_final       = FK(qpos_root)                       (fixed, measured)
+    C_true               = shared_scale * raw_mean             (fixed, measured)
+    START_CENTROID       = (1 - P_REF) * mesh_ctr_default + P_REF * C_true
+    staged_centroid(f)   = (1 - p) * START_CENTROID + p * C_true
+    cloud_pts(f)          = staged_centroid(f) + scaled_centered
+
+`P_REF` (`0.65`) picks a point along the ORIGINAL (task-15 v2) rest->C_true
+convergence line as the new, "modestly offset" starting position -- not the
+full rest-position gap (which measured ~1.71 model-units and clips off
+screen at this act's zoomed-in `ACT3_CAM_DISTANCE`; verified directly:
+`P_REF=0.5`'s start point clips the skeleton's own bounding box against the
+frame edge), and not a point so close that no "approach" is visible either.
+`P_REF=0.65` was checked by rendering a probe frame and confirming the
+skeleton's own saturated-pixel bounding box sits fully inside the canvas
+with margin (no edge touch) while still being clearly separated from the
+mesh. Because BOTH the mesh and the camera are now genuinely static, this
+is a straight-line blend between two fixed points under a fixed camera --
+there is no moving target left to create the old hump, so the skeleton's
+on-screen distance from the mesh shrinks monotonically with no mid-act
+excursion (verified numerically in `render_act3` below and reported by the
+`--clip` caller).
+
+Because the mesh is drawn at its OWN true final position for the whole act,
+the residual caption can no longer start at `residual_scaled` (which is the
+residual for the FAR REST position, `qpos_default`, against the scaled
+keypoints) without overstating how far apart things look on screen at
+`f=0` -- the skeleton is only `1 - P_REF` of the way out, not the whole
+distance. The caption instead interpolates from a `START_RESID` scaled by
+that same fraction: `START_RESID = residual_root + (1 - P_REF) *
+(residual_scaled - residual_root)`, ending exactly at `residual_root`
+(0.118 mm, unchanged, still the solver's real measured number) by `f =
+ALIGN_END` and through the hold -- nothing here is invented, only the
+SAME two measured residual numbers, blended along the SAME progress `p`
+this act already used for the residual caption in every prior cut.
+
+TASK-15 PIVOT (kept as a record of the design task-16 replaces; the
+staging math it describes -- centroid blending toward a LIVE `mesh_ctr(f)`
+-- is NOT what `render_act3` does any more): task-15 originally asked for
+the EXISTING merged "rescale + root_optimization" single-step design (scale
+1.0 -> `shared_scale` WHILE qpos SLERPs `qpos_default` -> `qpos_root`) to
+additionally stay centred on the model throughout, rather than flying in
+from off-screen. That version was implemented, rendered, and read
+frame-by-frame -- and while f=0/f=299 looked right in isolation, reading the
+IN-BETWEEN frames showed the oversized cloud visibly SHRINKING AWAY FROM
+the model, exiting the frame entirely, then flying BACK IN near the end.
+The user, live, asked to sidestep this rather than patch it further: "the
+scaling doesn't look good... just have it do the root alignment and assume
+it is already scaled... and can we have it shorter." That pivot fixed the
+SCALE-related excursion; task-16 (above) is a second, independent pivot
+that fixes a DIFFERENT, translation-related excursion that survived it.
 
 WORLD-COORDINATE STORY (measured, not staged): the raw triangulated keypoints
 (`04_kp3d_filt.npz`) sit in an arena-relative mm frame far from the model's
-own origin (frame 450 mean ~[13.15, 1.99, 1.19] model-units), while the
-model's rest qpos places its root at the world origin. `C_true` above
-(`shared_scale * raw_mean` ~= [1.66, 0.25, 0.15]) is close to where
-`root_optimization` independently translates the mesh (`qpos_root[:3]` =
-[1.65, 0.25, 0.26]) -- because `root_optimization` sets the root translation
-to the (already-scaled) root keypoint itself. That near-coincidence is why
-this act's staged blend converges cleanly: the mesh's OWN real translation
-target and the cloud's OWN true fixed position are, by the solver's
-construction, already close together.
+own origin, while the model's rest qpos places its root at the world
+origin. `C_true` (`shared_scale * raw_mean` ~= [1.66, 0.25, 0.15]) is close
+to where `root_optimization` independently translates the mesh
+(`qpos_root[:3]` = [1.65, 0.25, 0.26]) -- because `root_optimization` sets
+the root translation to the (already-scaled) root keypoint itself. That
+near-coincidence (not exact -- the two points differ by ~0.05 model-units,
+which is why even the fully-converged hold frames show a small, real,
+residual on-screen gap between the skeleton's centroid and the mesh's own
+centroid, matching `residual_root` = 0.118 mm) is why this act's staged
+blend converges cleanly onto the model.
 
-CAMERA (task-14 round 3 -- ACT 3'S CAMERA IS COMPLETELY FIXED, no zoom, no
-dolly, no orbit): two earlier cuts of this act both routed the story
-through a MOVING camera -- first a fully live-distance camera that
-CANCELLED the cloud's own shrink (task-11), then a frozen-distance camera
-with an added animated dolly-in (task-14 round 2) that fixed the framing but
-cropped keypoints and read as distracting camera motion. Both attempts hit
-the same lesson twice: a moving camera in this act keeps fighting the thing
-the act is supposed to show. This cut retires camera motion entirely.
-
-`ACT3_CAM_DISTANCE`/`ACT3_CAM_AZIMUTH`/`ACT3_CAM_ELEV` are TRUE CONSTANTS,
-set once and never touched inside the render loop -- no per-frame
-`cam.distance` or `cam.azimuth` derivation of any kind. `ACT3_CAM_AZIMUTH`/
-`ACT3_CAM_ELEV` are the SAME values as the shared `AZ_START`/`ELEV` Act 4
-uses (task-14 round 4 fix: an earlier cut of this redesign used a DIFFERENT
-azimuth here, 40 deg, chosen only so the raw incoming skeleton faced the
-camera at f=0 -- that broke the camera-angle continuity Act 3 and Act 4 are
-supposed to share across their cut, and the mesh visibly "snapped" to face a
-different way at the Act3->Act4 transition. Continuity across the cut
-matters more than the incoming skeleton's own entry angle, so this now
-matches Act 4 exactly; `ACT3_CAM_DISTANCE` stays Act-3-local since a cut is
-allowed to change shot DISTANCE, just not shot ANGLE.) `cam.lookat` is the
-one quantity that still updates every frame, set to the mesh's own REAL
-`mesh_ctr` (forward-kinematics, cheap) -- this is NOT zoom/dolly/orbit (none
-of `distance`/`azimuth`/`elevation` change), it is the minimum "frame it on
-the body model" requires given a real, measured fact: `root_optimization`
-translates the mesh by ~1.69 model-units (`qpos_root[:3] - qpos_default[:3]`)
--- about 5.8x the model's own body length -- so ANY single fixed lookat
-point would either clip the mesh out of frame for most of the act, or force
-the camera wide enough that the mesh reads far too small. Tracking
-`mesh_ctr` keeps the mesh centred and the SAME apparent size at every frame
-(size depends only on `cam.distance`, which never changes) while still
-showing the real translation as the mesh visibly slides during the ALIGN
-phase. `ACT3_CAM_DISTANCE` was tuned against a REAL rendered-pixel
-measurement: near-white/low-saturation pixel count (`mx>60 & (mx-mn)<40`,
-excluding the top-270px caption band). At `distance=1.0` (an earlier cut's
-value), `f=0` measured 47,648 px -- just under the requested 50,000-75,000
-px band -- because task-15 v2's skeleton sits DIRECTLY ON the mesh at f=0
-(it no longer arrives from off-scale), so the saturated keypoint markers
-occlude slightly more of the mesh's own near-white silhouette than they used
-to. Retuned to `ACT3_CAM_DISTANCE=0.93` (closer -> larger apparent mesh),
-which measures 55,312 / 70,625 / 63,323 / 63,338 px at f=0/60/119/179 --
-comfortably inside the band at every checked frame and matching Act 4's own
-~54,000-73,000 px framing. The 55k-71k spread (vs the ~4% spread task-14
-measured on the old design) is largely f=60's skeleton sitting BESIDE the
-mesh rather than overlapping it, so less of the mesh silhouette is occluded
-there -- i.e. it is an OCCLUSION artefact of the pixel-counting proxy, not
-the mesh itself changing size (the mesh geometry and camera distance are
-identical at every frame; see the `qpos_default[3:]==qpos_root[3:]` guard).
+CAMERA (task-14 round 3, tightened further by task-16 -- ACT 3'S CAMERA IS
+COMPLETELY FIXED, no zoom, no dolly, no orbit, and -- as of task-16 -- no
+lookat tracking either): earlier cuts of this act routed the story through
+a MOVING camera in one form or another (task-11's fully live-distance
+camera; task-14 round 2's frozen-distance-but-dollying-in camera; every cut
+through task-15 v2's live `mesh_ctr(f)`-tracking `lookat`). Each attempt hit
+some version of the same lesson: a moving camera in this act keeps fighting
+the thing the act is supposed to show, whether by directly cancelling the
+cloud's shrink (task-11) or by creating the p*(1-p) hump described in the
+TASK-16 PIVOT section above. This cut retires camera motion entirely,
+INCLUDING `lookat`: `ACT3_CAM_DISTANCE`/`ACT3_CAM_AZIMUTH`/`ACT3_CAM_ELEV`
+remain TRUE CONSTANTS (unchanged from task-14 round 3, and still equal to
+Act 4's own `AZ_START`/`ELEV` so the camera ANGLE matches exactly across the
+Act3->Act4 cut -- continuity across the cut matters more than any single
+act's own framing preference), and `cam.lookat` is now ALSO a constant,
+`mesh_ctr_final` (the mesh's own real, final centroid, computed ONCE via
+forward kinematics against the static `qpos_root` this act now renders
+throughout) -- not zoom/dolly/orbit (none of `distance`/`azimuth`/
+`elevation` change, and neither does `lookat` any more), just a frame that
+does not move at all, because the mesh it is framing does not move at all
+either. `ACT3_CAM_DISTANCE=0.93` (unchanged from task-14 round 3) still
+lands the near-white/low-saturation mesh-pixel count (`mx>60 & (mx-mn)<40`,
+excluding the top-270px caption band) inside the requested 50,000-75,000 px
+band -- re-measured directly for this cut at f=0/59/89 by `render_act3`
+below (values reported by the CLI at render time, not restated here as a
+number that would go stale the next time `P_REF` or the clip changes).
 
 Keypoint SKELETON, not a loose cloud (task-14 round 3): keypoints are
 connected by thin capsule "bones" (`stage_ik._add_bone`, MuJoCo's
@@ -156,11 +175,11 @@ onto THIS array's own keypoint order by NAME --
 `kp_colors.jarvis_skeleton_edges`), coloured per JARVIS's own bone-colour
 convention (`colors[line[1]]`, the STOP node's colour -- verified against
 all six of JARVIS's own skeleton-drawing call sites). Marker/bone radius are
-now FIXED (`BASE_MARKER_R_AT_FINAL_SCALE`, `BONE_RADIUS_FRACTION`) -- task-15
-v1's factor-linked sizing (oversized while raw, shrinking with the cloud) no
-longer applies now that the cloud is drawn at `shared_scale` for the whole
-act, never resized. The same skeleton (bones + colours) is also drawn in
-Act 4 (task-14 round 4) -- see `act4_solve.py`'s module docstring.
+FIXED (`BASE_MARKER_R_AT_FINAL_SCALE`, `BONE_RADIUS_FRACTION`) -- the cloud
+is drawn at `shared_scale` for the whole act, never resized, so there is no
+"factor" left to scale these with. The same skeleton (bones + colours) is
+also drawn in Act 4 (task-14 round 4) -- see `act4_solve.py`'s module
+docstring.
 
 Keypoint colours (Change 2, task-14): each limb chain gets its own colour
 from the JARVIS scheme (`kp_colors.jarvis_kp_colors_rgb01`, ported by calling
@@ -173,43 +192,41 @@ Wing visibility (Change 1, task-14): `set_mesh_rgba`/`capture_geom_alpha`
 act performs -- see their docstrings for why a blanket alpha assignment used
 to turn them into opaque white rectangles.
 
-Timeline (180 frames, 6 s @ 30 fps -- task-15 v2: shortened again from the
-360-frame/12s cut per the same live user request, "and can we have it
-shorter" -- root alignment alone is a simpler story than the retired
-merged scale+align one and reads fine in less time; the rest-pose fade-in
-phase from before task-15 stays REMOVED, the act opens already inside the
-translation):
-  f   0-119  root_optimization: qpos SLERPs `qpos_default` -> `qpos_root`
-             (translation only, no rotation, via `_slerp_qpos`); the
-             ALREADY fixed-size (`shared_scale`) keypoint skeleton's
-             STAGED centroid blends `mesh_ctr(f)` -> `C_true` (see the
-             TASK-15 PIVOT section) with the SAME progress `p`. Residual
-             ticks down `residual_scaled` (1.710 mm) -> `residual_root`
-             (0.118 mm) over the same window. Mesh never changes size; the
-             camera never moves. At `f=0` the skeleton is drawn CENTRED ON
-             the model's rest position rather than off in a corner.
-  f 120-179  hold: mesh and skeleton co-located at the solver's true final
-             position, residual 0.118 mm.
+Timeline (90 frames, 3 s @ 30 fps -- task-16: cut down from the 180-frame/
+6s task-15 v2 cut per the user's direct "just the second half... swings in
+and aligns" request; the mesh's own translation and the pre-task-15
+rest-pose fade-in phase both stay REMOVED, not merely shortened -- the mesh
+is drawn at its final `qpos_root` position for the WHOLE act, never at
+`qpos_default`):
+  f   0-59  the ALREADY fixed-size (`shared_scale`) keypoint skeleton's
+            STAGED centroid blends `START_CENTROID` (a fixed, modestly-
+            offset point -- see TASK-16 PIVOT) -> `C_true` (the solver's
+            true scaled keypoint centroid), smoothstep-eased. Residual
+            ticks down `START_RESID` -> `residual_root` (0.118 mm) over the
+            same window. Mesh and camera are both static throughout; only
+            the skeleton moves.
+  f  60-89  hold: skeleton and mesh co-located at the solver's true final
+            position, residual 0.118 mm, exactly as `render_act3` renders
+            through the hold in every earlier cut.
 
-EXPECTATION: at f=0 the (fixed-size, already-scaled) skeleton is centred on
-/ surrounding the mesh, not off-screen or entering from a corner; it stays
-near the mesh and visibly TRANSLATES with it (not through a huge detour)
-over the align window; by f=119 (and through the hold) skeleton and mesh
-are co-located at the solver's true position, residual has fallen 1.710 ->
-0.118 mm, mesh reads at the same on-screen size it always has, and the
-camera's ANGLE matches Act 4's exactly (no visible reorientation at the
-cut). The mesh does NOT change size and does NOT rotate at any point; the
-camera does NOT zoom, dolly, or orbit at any point.
-FALSIFICATION: a skeleton that is NOT roughly centred on the mesh at f=0, or
-that visibly leaves the frame and re-enters (see the TASK-15 PIVOT section's
-account of why the earlier merged-scale cut did exactly that), means the
-staging blend above is not being applied correctly; a skeleton that has not
-reached the mesh's exact position by f=119/the hold means the staged-to-true
-blend does not reach `p=1`, i.e. the "END state unchanged" guarantee is
-broken. A visibly rotating OR resizing mesh means the act is animating
-something the solver did not do; a visible "snap" in the fly's apparent
-facing direction across the Act3->Act4 cut means the camera angles have
-drifted apart again.
+EXPECTATION: at f=0 the (fixed-size, already-scaled) skeleton sits fully
+on screen, modestly offset from the static mesh -- clearly two separate
+things, not yet aligned, but with the approach clearly readable; it moves
+monotonically toward the mesh with NO backward/outward step and NO
+mid-act growth in its own on-screen size (contrast the task-15 v2 measured
+excursion in the TASK-16 PIVOT section above); by f=59 (and through the
+hold) skeleton and mesh are co-located at the solver's true position,
+residual has fallen to 0.118 mm, mesh reads at the same on-screen size it
+always has (it does not move OR resize OR rotate at any point), and the
+camera does not move at all (matching Act 4's angle exactly, no visible
+snap at the cut).
+FALSIFICATION: a skeleton that grows then shrinks in on-screen size or
+distance between f=0 and f=59 means the old hump is back (check that BOTH
+the mesh qpos and `cam.lookat` are genuinely constant this frame, not
+re-introducing a moving target); a skeleton that has not reached the mesh's
+exact position by f=59/the hold means the blend does not reach `p=1`; a
+visibly moving OR resizing OR rotating mesh means the act is animating
+something task-16 deliberately stopped depicting.
 
 Colours come from `kp_colors.jarvis_kp_colors_rgb01` (JARVIS per-limb-chain
 scheme) -- never invented here.
@@ -245,11 +262,13 @@ from viz.core.colors import PALETTE                                # noqa: E402
 
 # --- canvas / timeline ------------------------------------------------------
 CANVAS_W, CANVAS_H = 1920, 1080
-N_OUT = 180
-# root_optimization (translation only) covers the WHOLE act (task-15 v2: no
-# rescale step is depicted -- see module docstring's TASK-15 PIVOT section).
-ALIGN_START, ALIGN_END = 0, 119
-HOLD_START = 120
+N_OUT = 90
+# Skeleton align-onto-model window (task-16: cut to the swing-in-and-align
+# beat only). The mesh itself is static at qpos_root for the WHOLE act (see
+# module docstring's TASK-16 PIVOT section) -- only the skeleton's staged
+# centroid animates over this window.
+ALIGN_START, ALIGN_END = 0, 59
+HOLD_START = 60
 
 XML_PATH = _REPO / "models" / "fruitfly_v1" / "fruitfly_v1_free.xml"
 
@@ -257,90 +276,22 @@ XML_PATH = _REPO / "models" / "fruitfly_v1" / "fruitfly_v1_free.xml"
 # `AZ_START`/`ELEV`, `_cloud_mesh_spread`, and `_wide_camera` below are kept
 # for ACT 4 ONLY (imported from there: `_wide_camera_for_aspect` builds on
 # `_wide_camera` with a LIVE per-frame distance, appropriate for Act 4's real
-# 921-frame playback). As of task-14 round 3, Act 3 no longer uses ANY of
-# these -- its own camera is the fully independent, fully fixed
-# `ACT3_CAM_DISTANCE`/`ACT3_CAM_AZIMUTH`/`ACT3_CAM_ELEV` below. Do not repoint
-# Act 3 back at `AZ_START`/`ELEV`/`_wide_camera`: changing THIS block changes
-# Act 4's camera too (see the CAMERA section of the module docstring).
+# 921-frame playback). Act 3 no longer uses ANY of these -- its own camera is
+# the fully independent, fully fixed `ACT3_CAM_DISTANCE`/`ACT3_CAM_AZIMUTH`/
+# `ACT3_CAM_ELEV` below. Do not repoint Act 3 back at
+# `AZ_START`/`ELEV`/`_wide_camera`: changing THIS block changes Act 4's
+# camera too (see the CAMERA section of the module docstring).
 AZ_START = 120.0
 ELEV = -20.0
-
-# --- Act 3's OWN fixed camera (task-14 round 3) -----------------------------
-# TRUE CONSTANTS -- never read into a per-frame formula, unlike `AZ_START`/
-# `ELEV` above (which Act 4 imports for its own, deliberately LIVE camera).
-# `ACT3_CAM_DISTANCE` was solved (in an earlier cut) against a REAL
-# rendered-pixel measurement (see `_mesh_px` below and the module docstring).
-# `ACT3_CAM_AZIMUTH`/`ACT3_CAM_ELEV` are set EQUAL to the shared
-# `AZ_START`/`ELEV` (both 120/-20) so Act 3's camera ANGLE matches Act 4's
-# exactly -- a previous cut used a different azimuth (40 deg), which broke
-# continuity and made the fly visibly "snap" to a different apparent facing
-# direction at the Act3->Act4 cut. Distance stays Act-3-local (a cut is
-# allowed to change shot distance, just not shot angle).
-ACT3_CAM_DISTANCE = 0.93
-ACT3_CAM_AZIMUTH = AZ_START
-ACT3_CAM_ELEV = ELEV
-
-# Marker/bone radius: FIXED for the whole act (task-15 v2) -- the keypoint
-# cloud is drawn at `shared_scale` throughout, never resized, so there is no
-# "factor" left to scale these with (contrast task-15 v1 / task-14 round 3,
-# where markers scaled with the cloud's own shrink).
-BASE_MARKER_R_AT_FINAL_SCALE = 0.012   # model units; ~ a leg-segment's width at Act 4's framing
-BONE_RADIUS_FRACTION = 0.4             # bone capsule radius, as a fraction of marker radius
-
-# Real-pixel mesh-size acceptance test (Change-3 round 2/3): near-white,
-# low-saturation pixels, excluding the top-270px caption band -- keypoints
-# are drawn as SATURATED colours so they never count as "mesh" here.
-_CAPTION_BAND_PX = 270
-
-
-def _mesh_px(canvas_bgr) -> int:
-    b = canvas_bgr[..., 0].astype(np.int32)
-    g = canvas_bgr[..., 1].astype(np.int32)
-    r = canvas_bgr[..., 2].astype(np.int32)
-    mx = np.maximum(np.maximum(b, g), r)
-    mn = np.minimum(np.minimum(b, g), r)
-    mesh = (mx > 60) & ((mx - mn) < 40)
-    mesh[:_CAPTION_BAND_PX, :] = False
-    return int(mesh.sum())
-
-
-def _smoothstep(p):
-    p = np.clip(p, 0.0, 1.0)
-    return 3 * p ** 2 - 2 * p ** 3
-
-
-def _slerp_qpos(qa, qb, t):
-    """Interpolate a MuJoCo free-joint qpos: `qpos[:3]` (translation) lerp,
-    `qpos[3:7]` (w,x,y,z quaternion) SLERP, `qpos[7:]` (hinge/joint DOF) lerp.
-
-    A plain lerp of the quaternion denormalises and visibly tumbles; SLERP
-    keeps it a unit quaternion throughout. In THIS act the quaternion never
-    actually changes (qa[3:7] == qb[3:7] == identity, per the module
-    docstring's measured fact), so SLERP is a no-op here -- it is used anyway
-    so this helper is directly reusable for Act 4's real 34.73 deg rotation.
-    """
-    qa, qb = np.asarray(qa, np.float64), np.asarray(qb, np.float64)
-    pos = (1 - t) * qa[:3] + t * qb[:3]
-    quat_a_xyzw = np.roll(qa[3:7], -1)     # (w,x,y,z) -> (x,y,z,w) for scipy
-    quat_b_xyzw = np.roll(qb[3:7], -1)
-    rots = Rotation.from_quat(np.stack([quat_a_xyzw, quat_b_xyzw]))
-    slerp = Slerp([0.0, 1.0], rots)
-    quat_t_xyzw = slerp(t).as_quat()
-    quat_t_wxyz = np.roll(quat_t_xyzw, 1)  # back to (w,x,y,z)
-    joints = (1 - t) * qa[7:] + t * qb[7:]
-    return np.concatenate([pos, quat_t_wxyz, joints])
 
 
 def _cloud_mesh_spread(mesh_ctr, cloud_pts, lookat, model_extent):
     """Radius (world units) that a camera centred at `lookat` must span to
     keep both `mesh_ctr` and every finite point of `cloud_pts` in frame --
     the same formula stage_ik.py's qc_stages() uses for its wide-camera row.
-    Pure geometry, no camera object built here (used both for the one-time
-    FIXED `cam_spread` in `render_act3` and, live, for marker sizing only --
-    see task-11 review "Important 1": these two uses must NOT share a value
-    that also drives `cam.distance` every frame, or the camera zooms in step
-    with the shrinking cloud).
-    """
+    Pure geometry, no camera object built here. Kept for Act 4's import only
+    (see the block comment above); Act 3's own camera stopped using this at
+    task-14 round 3."""
     finite = cloud_pts[np.all(np.isfinite(cloud_pts), axis=-1)]
     return max(
         float(np.max(np.linalg.norm(finite - lookat, axis=-1))),
@@ -352,20 +303,18 @@ def _cloud_mesh_spread(mesh_ctr, cloud_pts, lookat, model_extent):
 def _wide_camera(mesh_ctr, cloud_pts, model_extent, azimuth, cam_spread, zoom=1.0):
     """The wide diagnostic camera: same lookat construction stage_ik.py's
     qc_stages() uses for its wide-camera row (never the model's `hero`
-    camera, which frames the mesh only). `lookat` is recomputed every frame
-    (mesh_ctr and the cloud both move over the act) so both stay centred.
+    camera, which frames the mesh only). Kept for Act 4's import only (see
+    the block comment above); Act 3's own camera stopped using this at
+    task-14 round 3.
 
     `cam_spread` -- hence the BASE `cam.distance` -- is NOT derived from the
     live cloud here. It is a FIXED value the caller computes ONCE for the
-    whole act (see `render_act3`'s dry pass), so the camera cannot zoom in
-    lock-step with the shrinking cloud (task-11 review, "Important 1": the
-    previous per-frame version did exactly that, cancelling the cloud's
-    on-screen shrink).
+    whole act, so the camera cannot zoom in lock-step with the shrinking
+    cloud (task-11 review, "Important 1").
 
     `zoom` (default 1.0, i.e. no change) is a SEPARATE, optional dolly-in
     multiplier -- `cam.distance = cam_spread * 2.6 / zoom` -- kept for Act 4
-    (`_wide_camera_for_aspect`), which never passes it either, so it is
-    unaffected here.
+    (`_wide_camera_for_aspect`).
 
     Returns `(cam, live_cloud_spread)` where `live_cloud_spread` is the
     cloud's OWN current extent from this frame's lookat -- used only to size
@@ -382,36 +331,125 @@ def _wide_camera(mesh_ctr, cloud_pts, model_extent, azimuth, cam_spread, zoom=1.
     return cam, live_cloud_spread
 
 
-def _progress(f):
-    """Progress `p` in [0, 1] for `root_optimization`'s translation,
-    smoothstep-eased over `ALIGN_START`-`ALIGN_END`, clamped at 1.0 for the
-    hold (`f >= ALIGN_END`). The SAME `p` drives the qpos SLERP, the
-    residual interpolation, AND (task-15) the keypoint-cloud STAGING
-    centroid blend in `render_act3` -- one schedule, not several
-    independently-timed ones.
+# --- Act 3's OWN fixed camera (task-14 round 3; lookat also frozen task-16) -
+# TRUE CONSTANTS -- never read into a per-frame formula, unlike `AZ_START`/
+# `ELEV` above (which Act 4 imports for its own, deliberately LIVE camera).
+# `ACT3_CAM_DISTANCE` was solved (in an earlier cut) against a REAL
+# rendered-pixel measurement (see `_mesh_mask`/`_mesh_px` below and the module
+# docstring). `ACT3_CAM_AZIMUTH`/`ACT3_CAM_ELEV` are set EQUAL to the shared
+# `AZ_START`/`ELEV` (both 120/-20) so Act 3's camera ANGLE matches Act 4's
+# exactly.
+ACT3_CAM_DISTANCE = 0.93
+ACT3_CAM_AZIMUTH = AZ_START
+ACT3_CAM_ELEV = ELEV
+
+# Skeleton staging (task-16): fraction of the ORIGINAL (task-15 v2) rest ->
+# C_true convergence line used as the new, fixed START_CENTROID -- see
+# module docstring's TASK-16 PIVOT section for why 0.65 (checked directly: a
+# smaller fraction, e.g. 0.5, clips the skeleton's own bounding box against
+# the frame edge at this act's zoomed-in ACT3_CAM_DISTANCE).
+P_REF = 0.65
+
+# Marker/bone radius: FIXED for the whole act -- the keypoint cloud is drawn
+# at `shared_scale` throughout, never resized, so there is no "factor" left
+# to scale these with.
+BASE_MARKER_R_AT_FINAL_SCALE = 0.012   # model units; ~ a leg-segment's width at Act 4's framing
+BONE_RADIUS_FRACTION = 0.4             # bone capsule radius, as a fraction of marker radius
+
+# Real-pixel mesh-size acceptance test: near-white, low-saturation pixels,
+# excluding the top-270px caption band -- keypoints are drawn as SATURATED
+# colours so they never count as "mesh" here (and vice versa for the
+# skeleton-centroid probe below).
+_CAPTION_BAND_PX = 270
+
+
+def _mesh_mask(canvas_bgr):
+    b = canvas_bgr[..., 0].astype(np.int32)
+    g = canvas_bgr[..., 1].astype(np.int32)
+    r = canvas_bgr[..., 2].astype(np.int32)
+    mx = np.maximum(np.maximum(b, g), r)
+    mn = np.minimum(np.minimum(b, g), r)
+    mesh = (mx > 60) & ((mx - mn) < 40)
+    mesh[:_CAPTION_BAND_PX, :] = False
+    return mesh
+
+
+def _mesh_px(canvas_bgr) -> int:
+    return int(_mesh_mask(canvas_bgr).sum())
+
+
+def _smoothstep(p):
+    p = np.clip(p, 0.0, 1.0)
+    return 3 * p ** 2 - 2 * p ** 3
+
+
+def _slerp_qpos(qa, qb, t):
+    """Interpolate a MuJoCo free-joint qpos: `qpos[:3]` (translation) lerp,
+    `qpos[3:7]` (w,x,y,z quaternion) SLERP, `qpos[7:]` (hinge/joint DOF) lerp.
+
+    Not called by `render_act3` any more (task-16: the mesh is drawn static
+    at `qpos_root` for the whole act, so there is no qpos to interpolate) --
+    kept here because `act4_solve.py` imports this exact helper for its own,
+    real 34.73 deg rotation, and a plain lerp of the quaternion there would
+    denormalise and visibly tumble.
     """
+    qa, qb = np.asarray(qa, np.float64), np.asarray(qb, np.float64)
+    pos = (1 - t) * qa[:3] + t * qb[:3]
+    quat_a_xyzw = np.roll(qa[3:7], -1)     # (w,x,y,z) -> (x,y,z,w) for scipy
+    quat_b_xyzw = np.roll(qb[3:7], -1)
+    rots = Rotation.from_quat(np.stack([quat_a_xyzw, quat_b_xyzw]))
+    slerp = Slerp([0.0, 1.0], rots)
+    quat_t_xyzw = slerp(t).as_quat()
+    quat_t_wxyz = np.roll(quat_t_xyzw, 1)  # back to (w,x,y,z)
+    joints = (1 - t) * qa[7:] + t * qb[7:]
+    return np.concatenate([pos, quat_t_wxyz, joints])
+
+
+def _progress(f):
+    """Progress `p` in [0, 1] for the skeleton's staged-centroid blend,
+    smoothstep-eased over `ALIGN_START`-`ALIGN_END`, clamped at 1.0 for the
+    hold (`f >= ALIGN_END`). The SAME `p` drives the residual interpolation
+    in `_stage_at` -- one schedule, not several independently-timed ones."""
     if f >= ALIGN_END:
         return 1.0
     return _smoothstep((f - ALIGN_START) / float(ALIGN_END - ALIGN_START))
 
 
-def _stage_at(f, residual_scaled, residual_root, qpos_default, qpos_root):
-    """Return (stage_label, residual_mm, qpos, progress) for output frame
-    `f`. Pure function of the recorded stage snapshots and `f` -- no numbers
-    invented here, only interpolated between measured stage values. Scale is
-    NOT part of this act any more (task-15 v2: keypoints are assumed already
-    at `shared_scale` throughout -- see module docstring's TASK-15 PIVOT
-    section), so the residual interpolated here starts from
-    `residual_scaled` (the measured residual for `qpos_default` fit against
-    the ALREADY-scaled keypoints), not `residual_default` (which was
-    measured against the unscaled, raw keypoints and no longer applies to
-    anything this act draws).
-    """
+def _stage_at(f, start_resid, residual_root):
+    """Return (stage_label, residual_mm, progress) for output frame `f`.
+    Pure function of `f` and the two measured residual endpoints -- no
+    numbers invented here, only interpolated between them (task-16:
+    `start_resid` replaces the old `residual_scaled` as the f=0 endpoint,
+    scaled by how much of the original gap `START_CENTROID` actually spans --
+    see module docstring's TASK-16 PIVOT section)."""
     p = _progress(f)
-    stage_label = "root_optimization" if f <= ALIGN_END else "root_optimization (held)"
-    resid = (1 - p) * residual_scaled + p * residual_root
-    qpos = _slerp_qpos(qpos_default, qpos_root, p)
-    return stage_label, resid, qpos, p
+    stage_label = "root_optimization" if f < HOLD_START else "root_optimization (held)"
+    resid = (1 - p) * start_resid + p * residual_root
+    return stage_label, resid, p
+
+
+def _camera_project(scn, fovy_deg, width, height, pt):
+    """Project a world-space point `pt` into this frame's pixel coordinates,
+    using the EXACT camera pose `renderer.update_scene` just resolved
+    (`scn.camera[0]`'s `pos`/`forward`/`up`) rather than re-deriving a camera
+    matrix from `azimuth`/`elevation`/`distance` by hand -- this guarantees
+    the projection matches what was actually rendered. Used only for the
+    acceptance-test centroid-distance probe below; never drives anything
+    drawn on screen."""
+    pos = np.asarray(scn.camera[0].pos, np.float64)
+    forward = np.asarray(scn.camera[0].forward, np.float64)
+    forward = forward / np.linalg.norm(forward)
+    up = np.asarray(scn.camera[0].up, np.float64)
+    up = up / np.linalg.norm(up)
+    right = np.cross(forward, up)
+    right = right / np.linalg.norm(right)
+    rel = np.asarray(pt, np.float64) - pos
+    depth = rel @ forward
+    tan_half = np.tan(np.radians(fovy_deg / 2.0))
+    x_ndc = (rel @ right) / (depth * tan_half * (width / height))
+    y_ndc = (rel @ up) / (depth * tan_half)
+    return np.array([(x_ndc * 0.5 + 0.5) * width,
+                      (1.0 - (y_ndc * 0.5 + 0.5)) * height])
 
 
 def render_act3(clip: str = clip_io.CLIP_DEFAULT) -> Path:
@@ -453,16 +491,14 @@ def render_act3(clip: str = clip_io.CLIP_DEFAULT) -> Path:
 
     kp3d_raw_frame = kp3d[frame_for_stills]   # (50,3) mm, MODEL order, RAW (unscaled)
     print(f"[act3] frame_for_stills={frame_for_stills}, shared_scale={shared_scale:.4f} "
-          f"(FIXED for this act -- root_optimization only, task-15 v2)")
+          f"(FIXED for this act -- root_optimization only, task-15 v2/task-16)")
     print(f"[act3] residuals scaled/root = {residual_scaled:.3f}/{residual_root:.3f} mm")
-    print(f"[act3] qpos_root - qpos_default (translation only, mm): "
-          f"{(qpos_root[:3] - qpos_default[:3])}")
+    print(f"[act3] qpos_root - qpos_default (translation only, mm, NOT depicted "
+          f"this act -- task-16): {(qpos_root[:3] - qpos_default[:3])}")
 
     mj_model = mujoco.MjModel.from_xml_path(str(XML_PATH))
     orig_alpha = capture_geom_alpha(mj_model)   # BEFORE any geom_rgba mutation
     grey = PALETTE["mesh"][0] / 255.0   # PALETTE["mesh"] is (200,200,200): BGR==RGB here
-    # alpha=1.0 fixed for the whole act (task-15 dropped the rest-pose fade,
-    # so there is no longer any alpha ramp to animate per frame).
     set_mesh_rgba(mj_model, orig_alpha, rgb=grey, alpha=1.0)
 
     site_map = _tracking_site_map(mj_model, kp_names)
@@ -480,70 +516,73 @@ def render_act3(clip: str = clip_io.CLIP_DEFAULT) -> Path:
         for a, b, bg in jarvis_skeleton_edges(kp_names)
     ]
 
-    # --- Cloud, ALREADY scaled to shared_scale (task-15 v2) -- fixed shape
-    # for the whole act, no scale animation. `raw_mean`/`scaled_centered`
-    # decompose it into a rigid centroid + a zero-mean shape (already scaled);
-    # `C_true` is the SINGLE fixed point the staged centroid converges to --
-    # see module docstring's TASK-15 PIVOT section for the algebra.
+    # --- Cloud, ALREADY scaled to shared_scale -- fixed shape for the whole
+    # act, no scale animation. `raw_mean`/`scaled_centered` decompose it into
+    # a rigid centroid + a zero-mean shape (already scaled); `C_true` is the
+    # SINGLE fixed point the staged centroid converges to.
     finite_raw = np.all(np.isfinite(kp3d_raw_frame), axis=-1)
     raw_mean = kp3d_raw_frame[finite_raw].mean(axis=0)
     scaled_centered = shared_scale * (kp3d_raw_frame - raw_mean)
     C_true = shared_scale * raw_mean
-    print(f"[act3] staging: C_true (fixed, already-scaled cloud centroid) = "
-          f"{C_true} -- staged centroid blends mesh_ctr(f) -> C_true across "
-          f"the align window, landing exactly on C_true (the solver's real "
-          f"scaled keypoint position) by f=ALIGN_END/through the hold.")
+
+    # --- Mesh, static for the WHOLE act (task-16): forward-kinematics both
+    # `qpos_default` (only used to derive the skeleton's fixed START_CENTROID
+    # reference) and `qpos_root` (the mesh's real, final position, drawn for
+    # every frame) ONCE, outside the render loop -- see module docstring's
+    # TASK-16 PIVOT section.
+    d_default = mujoco.MjData(mj_model)
+    d_default.qpos[:] = qpos_default
+    mujoco.mj_forward(mj_model, d_default)
+    mesh_ctr_default = np.asarray(d_default.site_xpos[body_site_idxs]).mean(axis=0)
+
+    d = mujoco.MjData(mj_model)
+    d.qpos[:] = qpos_root
+    mujoco.mj_forward(mj_model, d)
+    mesh_ctr_final = np.asarray(d.site_xpos[body_site_idxs]).mean(axis=0)
+
+    start_centroid = (1.0 - P_REF) * mesh_ctr_default + P_REF * C_true
+    start_resid = residual_root + (1.0 - P_REF) * (residual_scaled - residual_root)
+    print(f"[act3] staging (task-16): P_REF={P_REF} start_centroid={start_centroid} "
+          f"-> C_true={C_true} (mesh_ctr_final={mesh_ctr_final}); "
+          f"start_resid={start_resid:.3f} -> residual_root={residual_root:.3f} mm; "
+          f"mesh is STATIC at qpos_root for the whole act, camera lookat is "
+          f"the fixed mesh_ctr_final -- only the skeleton's centroid moves.")
 
     out_dir = dirs["frames"] / "act3_align"
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # --- Act 3's fixed camera, resolved ONCE against the real (start, end)
-    # mesh positions (task-14 round 3; see module docstring's CAMERA section).
-    # No cam_spread dry pass any more -- the camera no longer needs to
-    # discover a worst-case distance across the act, since it never zooms.
     print(f"[act3] fixed camera: distance={ACT3_CAM_DISTANCE} azimuth="
-          f"{ACT3_CAM_AZIMUTH} elevation={ACT3_CAM_ELEV} (never animated); "
-          f"lookat tracks mesh_ctr each frame (translation magnitude "
-          f"{np.linalg.norm(qpos_root[:3] - qpos_default[:3]):.3f} model-units "
-          f"over the ROOT phase)")
+          f"{ACT3_CAM_AZIMUTH} elevation={ACT3_CAM_ELEV} lookat={mesh_ctr_final} "
+          f"(all constants, never animated -- task-16)")
 
     t0 = time.time()
+    fovy_deg = float(mj_model.vis.global_.fovy)
     # Persistent renderer, created ONCE and reused for every frame (matches
     # Act 4's fix; see CLAUDE.md/module constraints -- per-frame `with
     # mujoco.Renderer(...)` construction is the prime suspect for Act 4's
-    # mid-render EGL resource-leak crash at ~700/900 frames). Act 3's frame
-    # count never hit that failure, but this loop is touched here anyway, so
-    # it is fixed too rather than left on the known-bad pattern.
+    # mid-render EGL resource-leak crash at ~700/900 frames).
     with mujoco.Renderer(mj_model, height=CANVAS_H, width=CANVAS_W) as renderer:
+        cam = mujoco.MjvCamera()
+        cam.lookat[:] = mesh_ctr_final
+        cam.distance = ACT3_CAM_DISTANCE
+        cam.azimuth, cam.elevation = ACT3_CAM_AZIMUTH, ACT3_CAM_ELEV
+
         for f in range(N_OUT):
-            stage_label, resid, qpos, p = _stage_at(
-                f, residual_scaled, residual_root, qpos_default, qpos_root)
+            stage_label, resid, p = _stage_at(f, start_resid, residual_root)
 
-            d = mujoco.MjData(mj_model)
-            d.qpos[:] = qpos
-            mujoco.mj_forward(mj_model, d)
-
-            # `mesh_ctr` is the ONLY per-frame camera quantity, and it is not
-            # zoom/dolly/orbit -- see the module docstring's CAMERA section.
-            # This is the mesh's REAL centroid; the camera tracks the true,
-            # measured translation, and the staged cloud centroid (below)
-            # starts glued to this same point.
-            mesh_ctr = np.asarray(d.site_xpos[body_site_idxs]).mean(axis=0)
-
-            # STAGING (task-15 v2): the ALREADY fixed-size cloud's centroid
-            # blends from the mesh's own LIVE centroid (`mesh_ctr`, p=0) to
-            # the cloud's single true fixed position (`C_true`, p=1) -- see
-            # module docstring's TASK-15 PIVOT section for why this is now a
-            # well-behaved one-shot blend rather than chasing a moving
-            # target.
-            staged_centroid = (1.0 - p) * mesh_ctr + p * C_true
+            # STAGING (task-16): the ALREADY fixed-size cloud's centroid
+            # blends from the fixed `start_centroid` (p=0) to the cloud's
+            # single true fixed position (`C_true`, p=1) -- a straight line
+            # between two points that never move, under a camera that never
+            # moves either. See module docstring's TASK-16 PIVOT section for
+            # why this has no mid-act excursion, unlike the design it
+            # replaces.
+            staged_centroid = (1.0 - p) * start_centroid + p * C_true
             cloud_pts = staged_centroid + scaled_centered
 
-            cam = mujoco.MjvCamera()
-            cam.lookat[:] = mesh_ctr
-            cam.distance = ACT3_CAM_DISTANCE
-            cam.azimuth, cam.elevation = ACT3_CAM_AZIMUTH, ACT3_CAM_ELEV
-
+            # `d`/`cam` are UNCHANGED every frame (mesh and camera are both
+            # static this act); update_scene is still called per frame
+            # because the skeleton geoms below are added fresh each time.
             renderer.update_scene(d, camera=cam)
             scn = renderer.scene
             for a, b, rgb in skeleton_edges:
@@ -572,20 +611,24 @@ def render_act3(clip: str = clip_io.CLIP_DEFAULT) -> Path:
                         f"(Umeyama trunk fit) -- fixed size; only position animates",
                 (48, 210), scale=0.5, color=(190, 190, 190))
             canvas = draw.label(
-                canvas, "mesh size is fixed and never rotates; "
-                        "root_optimization translates the mesh only",
+                canvas, "mesh is static at its solved position and never rotates; "
+                        "only the keypoint skeleton swings in and settles",
                 (48, 238), scale=0.45, color=(150, 150, 150))
             canvas = draw.label(
-                canvas, "keypoints are drawn centred on the model so the alignment "
-                        "reads; their final position is the solver's",
+                canvas, "keypoints start modestly offset from the model and move "
+                        "onto it monotonically; their final position is the solver's",
                 (48, 266), scale=0.45, color=(150, 150, 150))
             canvas = draw.label(canvas, f"frame {f + 1}/{N_OUT}", (48, CANVAS_H - 24),
                                  scale=0.45, color=(150, 150, 150))
 
-            if f in (0, 60, 119, 179):
+            if f in (0, 20, 40, 59, 89):
                 mpx = _mesh_px(canvas)
-                print(f"[act3] fixed-camera acceptance: f={f} mesh_px={mpx} "
-                      f"(target ~50,000-75,000, near-constant across the act)")
+                sk_px2d = _camera_project(scn, fovy_deg, CANVAS_W, CANVAS_H, staged_centroid)
+                mesh_px2d = _camera_project(scn, fovy_deg, CANVAS_W, CANVAS_H, mesh_ctr_final)
+                centroid_dist_px = float(np.linalg.norm(sk_px2d - mesh_px2d))
+                print(f"[act3] acceptance: f={f} mesh_px={mpx} (target ~50,000-75,000) "
+                      f"centroid_dist_px={centroid_dist_px:.1f} (must decrease "
+                      f"monotonically f=0->59, ~0 by f=59)")
 
             cv2.imwrite(str(out_dir / f"f{f:05d}.png"), canvas)
 
