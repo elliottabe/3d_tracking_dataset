@@ -1753,9 +1753,17 @@ direction is real."
 
 - [ ] **Step 1: Write the act**
 
-Render with MuJoCo (`models/fruitfly_v1/fruitfly_v1_free.xml`, camera `hero`), time frozen on one keypoint frame, viewer camera slowly orbiting (azimuth sweep ~40° across the act).
+Render with MuJoCo (`models/fruitfly_v1/fruitfly_v1_free.xml`), time frozen on one keypoint frame, viewer camera slowly orbiting (azimuth sweep ~40° across the act).
 
-Timeline: 0–119 mesh fades in at `qpos_default` beside the cloud (visibly wrong size and place); 120–299 interpolate `qpos_default → qpos_scaled` with the scale factor on screen in mm; 300–539 interpolate `qpos_scaled → qpos_root`; 540–599 hold.
+**Camera: do NOT use the model's `hero` camera.** It frames the MESH only, so at the `default` stage the keypoint cloud falls entirely outside the view (verified in Task 7's QC figure). Use the wide-diagnostic framing Task 7 added for this exact reason — a camera that holds both the mesh and the cloud at every stage.
+
+Timeline: 0–119 mesh fades in at `qpos_default` beside the cloud (mesh in the wrong PLACE; the cloud is the wrong SIZE for it); 120–299 the KEYPOINT CLOUD scales to the model, with the scale factor on screen; 300–539 interpolate `qpos_scaled → qpos_root`; 540–599 hold.
+
+**MEASURED — two corrections to the original storyboard, do not restate the old version:**
+1. **Body scale is applied to the KEYPOINTS, not the mesh** (Umeyama trunk scale via `preprocess_keypoints_for_ik.compute_shared_scale`; measured `shared_scale = 0.1261`). The mesh never changes size, so do not animate it doing so — animate the cloud resizing onto the model.
+2. **`root_optimization` does NOT rotate.** `configs/anatomy/v1.yaml` has `TRUNK_OPTIMIZATION_KEYPOINTS = {}`, so nothing constrains rotation there. Measured: after `root_optimization` the root quaternion is still identity (0.0000° change) and joint DOF are untouched (0.000000). This act shows scale + TRANSLATION only. Orienting belongs to Act 4.
+
+Measured residuals for this act: 13.404 → 1.710 → 0.118 mm.
 
 Burn in the running residual in mm, interpolated between the recorded stage values, plus the stage name (`rescale`, `root_optimization`).
 
@@ -1764,13 +1772,15 @@ Burn in the running residual in mm, interpolated between the recorded stage valu
 - [ ] **Step 2: Render and READ**
 
 ```
-EXPECTATION: at f=0 mesh is clearly the wrong size and offset from the cloud.
-By f=299 it is the right size but still misplaced. By f=539 it sits on the
-cloud, ANATOMICALLY ORIENTED -- head end at the head keypoints. Residual
-decreases monotonically across the act.
-FALSIFICATION: mesh settles 180 deg flipped (head on the abdomen keypoints)
-while the residual still falls -- a flipped fit can score similarly on a
-roughly symmetric marker set, which is exactly why this is checked by eye.
+EXPECTATION: at f=0 the mesh and the cloud are both visible, the mesh offset
+from the cloud and the cloud the wrong SIZE for it. By f=299 the cloud matches
+the model's scale but is still displaced. By f=539 the cloud and mesh are
+co-located. Residual decreases monotonically 13.404 -> 1.710 -> 0.118 mm.
+The mesh does NOT change size at any point, and does NOT rotate at any point --
+both are correct; see the measured note above.
+FALSIFICATION: the mesh visibly rotating during this act would mean the act is
+animating something the solver did not do; the cloud leaving frame would mean
+the hero camera was used instead of the wide framing.
 ```
 Open frames 0, 299, 539 and report.
 
@@ -1782,7 +1792,9 @@ git commit -m "feat(ik-explainer): Act 3, body scale then root alignment
 
 Shows the solver's real rescale and root_optimization stages with the residual
 in mm on screen. Root quaternion is SLERPed rather than lerped, since a lerped
-quaternion denormalises and tumbles visibly."
+quaternion denormalises and tumbles visibly. The mesh does not rotate in this
+act -- root_optimization only translates (TRUNK_OPTIMIZATION_KEYPOINTS is empty
+in anatomy/v1.yaml) -- but the SLERP path is still required for Act 4."
 ```
 
 ---
