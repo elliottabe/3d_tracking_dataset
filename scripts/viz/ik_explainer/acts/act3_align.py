@@ -43,20 +43,34 @@ below follows this real geometry: cloud shrinks toward the mesh first
 (rescale), then the mesh translates the rest of the way to meet it
 (root_optimization).
 
-CAMERA: reuses the exact lookat/spread/distance construction
-`stage_ik.py:qc_stages`'s wide diagnostic camera uses (never the model's
-`hero` camera, which frames the mesh only and loses the far-away raw cloud
-entirely), generalised to recompute every frame (mesh_ctr and the cloud both
-move over the act). Azimuth/elevation are FIXED (not orbiting) -- a moving
-viewer azimuth would risk being misread, frame-to-frame, as the mesh itself
-rotating, which is exactly what this act must not depict. Only lookat and
-distance adapt, so both the mesh and the cloud stay in frame as they move;
-the mesh's own qpos quaternion is bit-identical at every frame in this act
-(asserted at runtime, see `render_act3`). Keypoint sphere radius is scaled
-with the camera's current `spread` (not a fixed absolute size) purely so the
-cloud stays legible whether the shot is wide (f=0, raw cloud ~13 mm from the
-mesh) or tight (f=599, cloud+mesh co-located) -- this changes how big we DRAW
-markers, never the mesh geometry.
+CAMERA: reuses the lookat/spread/distance construction from
+`stage_ik.py:qc_stages`'s wide diagnostic camera (never the model's `hero`
+camera, which frames the mesh only and loses the far-away raw cloud
+entirely), with one deliberate change from a first cut of this act (task-11
+review, "Important 1"): `cam.distance` is now FIXED for the whole act rather
+than re-derived from the live cloud every frame. The live-spread version
+zoomed the camera in exactly as fast as the (correctly, per point 1 above)
+shrinking cloud, so the cloud's on-screen footprint never visibly changed
+(measured ~26% of frame at f=120, f=210, AND f=299) while the never-resized
+mesh appeared to grow ~8x on screen -- i.e. the rendered act read as "the
+mesh grows to meet the cloud", exactly backwards, and contradicting this
+act's own on-screen caption. `cam_spread` is now computed ONCE, before the
+render loop, as the worst case over a dry pass through every output frame's
+true geometry (`render_act3`'s `cam_spread` pass) -- so the camera still
+keeps both the mesh and the (still 8x-oversized at f=0) cloud comfortably in
+frame at every stage (the wide camera's original purpose), but the mesh's
+on-screen size now stays genuinely constant and the cloud's real shrink is
+what becomes visible. `lookat` is still recomputed every frame (mesh_ctr and
+the cloud both move over the act) so both stay centred; azimuth/elevation
+are FIXED (not orbiting) -- a moving viewer azimuth would risk being
+misread, frame-to-frame, as the mesh itself rotating, which is exactly what
+this act must not depict. The mesh's own qpos quaternion is bit-identical
+at every frame in this act (asserted at runtime, see `render_act3`).
+Keypoint sphere radius is scaled with the cloud's own LIVE extent (not the
+fixed camera distance, and not a fixed absolute size) purely so markers stay
+legible whether the cloud is wide (f=0/120, raw, ~13 mm from the mesh) or
+tight (f=599, cloud+mesh co-located) -- this changes how big we DRAW
+markers, never the mesh geometry nor the camera zoom.
 
 Timeline (600 frames, 30 fps):
   f   0-119  mesh fades in at qpos_default (alpha ramp), cloud already fully
@@ -119,15 +133,17 @@ HOLD_START = 540
 XML_PATH = _REPO / "models" / "fruitfly_v1" / "fruitfly_v1_free.xml"
 
 # --- viewer (presentation) camera -------------------------------------------
-# Same lookat/spread/distance construction as stage_ik.py:qc_stages's wide
-# diagnostic camera (azimuth/elevation base values match it, 120/-20), with
-# azimuth animated for a ~40 deg sweep across the act -- see module docstring.
+# Same lookat/distance construction as stage_ik.py:qc_stages's wide
+# diagnostic camera (azimuth/elevation base values match it, 120/-20).
 # Fixed (not orbiting): a moving VIEWER azimuth risks being misread, in a
 # frame-by-frame diff, as the MESH rotating -- exactly the thing this act
 # must not depict (root_optimization does not rotate; see module docstring).
-# lookat/distance still adapt every frame (mesh_ctr and the cloud genuinely
-# move), which is not an orbit, just keeping both in frame.
-AZ_START, AZ_SWEEP = 120.0, 0.0
+# lookat still adapts every frame (mesh_ctr and the cloud genuinely move),
+# which is not an orbit, just keeping both centred. `cam.distance` does NOT
+# adapt every frame -- see `cam_spread` in `render_act3` (task-11 review,
+# "Important 1"): it is fixed once for the whole act so the camera cannot
+# zoom in step with the shrinking cloud.
+AZ_START = 120.0
 ELEV = -20.0
 
 # Mesh fade-in floor: f=0 must already show a (translucent) mesh, per the
@@ -163,25 +179,50 @@ def _slerp_qpos(qa, qb, t):
     return np.concatenate([pos, quat_t_wxyz, joints])
 
 
-def _wide_camera(mesh_ctr, cloud_pts, model_extent, azimuth):
-    """The wide diagnostic camera: same lookat/spread/distance formula
-    stage_ik.py's qc_stages() uses for its wide-camera row (never the
-    model's `hero` camera, which frames the mesh only), generalised to be
-    recomputed every frame since both mesh_ctr and the cloud move here.
+def _cloud_mesh_spread(mesh_ctr, cloud_pts, lookat, model_extent):
+    """Radius (world units) that a camera centred at `lookat` must span to
+    keep both `mesh_ctr` and every finite point of `cloud_pts` in frame --
+    the same formula stage_ik.py's qc_stages() uses for its wide-camera row.
+    Pure geometry, no camera object built here (used both for the one-time
+    FIXED `cam_spread` in `render_act3` and, live, for marker sizing only --
+    see task-11 review "Important 1": these two uses must NOT share a value
+    that also drives `cam.distance` every frame, or the camera zooms in step
+    with the shrinking cloud).
     """
     finite = cloud_pts[np.all(np.isfinite(cloud_pts), axis=-1)]
-    cloud_ctr = finite.mean(axis=0)
-    lookat = (mesh_ctr + cloud_ctr) / 2.0
-    spread = max(
+    return max(
         float(np.max(np.linalg.norm(finite - lookat, axis=-1))),
         float(np.linalg.norm(mesh_ctr - lookat)),
         model_extent * 0.5,
     )
+
+
+def _wide_camera(mesh_ctr, cloud_pts, model_extent, azimuth, cam_spread):
+    """The wide diagnostic camera: same lookat construction stage_ik.py's
+    qc_stages() uses for its wide-camera row (never the model's `hero`
+    camera, which frames the mesh only). `lookat` is recomputed every frame
+    (mesh_ctr and the cloud both move over the act) so both stay centred.
+
+    `cam_spread` -- hence `cam.distance` -- is NOT derived from the live
+    cloud here. It is a FIXED value the caller computes ONCE for the whole
+    act (see `render_act3`'s dry pass), so the camera cannot zoom in as the
+    cloud shrinks (task-11 review, "Important 1": the previous per-frame
+    version did exactly that, cancelling the cloud's on-screen shrink).
+
+    Returns `(cam, live_cloud_spread)` where `live_cloud_spread` is the
+    cloud's OWN current extent from this frame's lookat -- used only to size
+    the drawn keypoint markers (see `marker_r` in `render_act3`), never the
+    camera.
+    """
+    finite = cloud_pts[np.all(np.isfinite(cloud_pts), axis=-1)]
+    cloud_ctr = finite.mean(axis=0)
+    lookat = (mesh_ctr + cloud_ctr) / 2.0
+    live_cloud_spread = _cloud_mesh_spread(mesh_ctr, cloud_pts, lookat, model_extent)
     cam = mujoco.MjvCamera()
     cam.lookat[:] = lookat
-    cam.distance = spread * 2.6
+    cam.distance = cam_spread * 2.6
     cam.azimuth, cam.elevation = azimuth, ELEV
-    return cam, spread
+    return cam, live_cloud_spread
 
 
 def _stage_at(f, residual_default, residual_scaled, residual_root,
@@ -271,6 +312,33 @@ def render_act3(clip: str = clip_io.CLIP_DEFAULT) -> Path:
     out_dir = dirs["frames"] / "act3_align"
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    # --- Fixed camera spread (task-11 review, "Important 1") ----------------
+    # A dry pass -- forward-kinematics only, no rendering -- over every
+    # output frame's true (mesh_ctr, cloud) geometry, so `cam_spread` is the
+    # worst case across the ENTIRE act. This guarantees the frozen camera
+    # keeps both the mesh and the still-8x-oversized f=0 cloud comfortably in
+    # frame (the wide camera's original purpose) while giving the
+    # never-resized mesh a genuinely constant on-screen size for the whole
+    # act, instead of re-deriving distance from the live (shrinking) cloud
+    # every frame the way the previous version did.
+    cam_spread = 0.0
+    for f_dry in range(N_OUT):
+        _, _, factor_dry, qpos_dry, _ = _stage_at(
+            f_dry, residual_default, residual_scaled, residual_root,
+            qpos_default, qpos_root, shared_scale,
+        )
+        d_dry = mujoco.MjData(mj_model)
+        d_dry.qpos[:] = qpos_dry
+        mujoco.mj_forward(mj_model, d_dry)
+        mesh_ctr_dry = np.asarray(d_dry.site_xpos[body_site_idxs]).mean(axis=0)
+        cloud_dry = kp3d_raw_frame * factor_dry
+        cloud_ctr_dry = cloud_dry[np.all(np.isfinite(cloud_dry), axis=-1)].mean(axis=0)
+        lookat_dry = (mesh_ctr_dry + cloud_ctr_dry) / 2.0
+        cam_spread = max(cam_spread, _cloud_mesh_spread(
+            mesh_ctr_dry, cloud_dry, lookat_dry, mj_model.stat.extent))
+    print(f"[act3] fixed camera spread (worst case over all {N_OUT} frames) = "
+          f"{cam_spread:.4f} mm -> cam.distance = {cam_spread * 2.6:.4f} mm")
+
     t0 = time.time()
     for f in range(N_OUT):
         stage_label, resid, factor, qpos, mesh_alpha = _stage_at(
@@ -286,9 +354,9 @@ def render_act3(clip: str = clip_io.CLIP_DEFAULT) -> Path:
         mesh_ctr = np.asarray(d.site_xpos[body_site_idxs]).mean(axis=0)
         cloud_pts = kp3d_raw_frame * factor   # linear scale about world origin
 
-        azimuth = AZ_START + AZ_SWEEP * (f / float(N_OUT - 1))
-        cam, spread = _wide_camera(mesh_ctr, cloud_pts, mj_model.stat.extent, azimuth)
-        marker_r = max(spread * 0.03, mj_model.stat.extent * 0.006)
+        cam, live_cloud_spread = _wide_camera(
+            mesh_ctr, cloud_pts, mj_model.stat.extent, AZ_START, cam_spread)
+        marker_r = max(live_cloud_spread * 0.03, mj_model.stat.extent * 0.006)
 
         with mujoco.Renderer(mj_model, height=CANVAS_H, width=CANVAS_W) as renderer:
             renderer.update_scene(d, camera=cam)
@@ -304,8 +372,10 @@ def render_act3(clip: str = clip_io.CLIP_DEFAULT) -> Path:
         canvas = draw.stage_title(canvas, "ACT 3", "Body scale, then root alignment")
         canvas = draw.label(canvas, f"stage: {stage_label}", (48, 150),
                              scale=0.6, color=(255, 255, 255))
-        canvas = draw.label(canvas, f"residual: {resid:.3f} mm", (48, 182),
-                             scale=0.6, color=(190, 255, 190))
+        canvas = draw.label(
+            canvas, f"residual: {resid:.3f} mm (mean over 50 sites; "
+                    f"legs/wings lag until Act 4 solves the joints)",
+            (48, 182), scale=0.55, color=(190, 255, 190))
         shown_factor = shared_scale if f > SCALE_END else factor
         canvas = draw.label(
             canvas, f"keypoint scale factor: {shown_factor:.4f} "
