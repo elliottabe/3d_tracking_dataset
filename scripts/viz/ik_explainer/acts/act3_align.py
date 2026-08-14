@@ -255,6 +255,29 @@ something task-16 deliberately stopped depicting.
 
 Colours come from `kp_colors.jarvis_kp_colors_rgb01` (JARVIS per-limb-chain
 scheme) -- never invented here.
+
+TASK-19 (presentation-only; read before touching the render loop's drawing
+calls below): on-screen title changes "ACT 3" / "Root alignment" (the old
+title/subtitle pair) -> a single title, "Root alignment". ALL other caption
+text is removed from the frame: the "stage: root_optimization (held)" label,
+the residual-mm line, the "keypoints pre-scaled to shared_scale=..." line,
+the "mesh is static..." line, the "keypoints start modestly offset..." line,
+and the TASK-18 "mixture disclosed" line are all gone from the rendered PNG
+per the user's explicit request. NONE of the facts they described changed --
+every number and claim above (translation-only root_optimization, residual
+ticking start_resid -> 0.118 mm, shared_scale=0.1261, the mesh never
+resizing/rotating, the task-18 mesh/keypoint provenance mixture) is still
+computed exactly as before and printed to the console (`_stage_at`'s
+`resid`/`stage_label` are computed and logged, just not drawn) -- only the
+on-screen captions are gone. The small bottom-left frame counter is the only
+other on-screen text kept. Typography (the title) now comes from `draw.py`'s
+shared `TITLE_SCALE`/`CAPTION_SCALE`/`SMALL_SCALE`.
+
+Because the on-screen text block shrank to just one title line, `_mesh_mask`'s
+`_CAPTION_BAND_PX` (the near-white-text exclusion band the mesh-pixel
+acceptance test uses) was re-measured directly on a rendered frame and
+lowered accordingly -- see `_CAPTION_BAND_PX`'s own comment below for the
+current value and how it was checked.
 """
 import os
 
@@ -403,13 +426,15 @@ BONE_RADIUS_FRACTION = 0.4             # bone capsule radius, as a fraction of m
 # Real-pixel mesh-size acceptance test: near-white, low-saturation pixels,
 # excluding the top caption band -- keypoints are drawn as SATURATED colours
 # so they never count as "mesh" here (and vice versa for the
-# skeleton-centroid probe below). TASK-18: raised from 270 to 300 -- the new
-# disclosure caption line this task adds (see "mixture disclosed" label
-# below) prints text down to about row 298, which the old 270px band did not
-# cover; measured directly on a rendered frame before picking 300 (not
-# guessed), so this near-white text can't get miscounted as "mesh" and
-# silently break the Act3->Act4 seam's mesh-pixel acceptance test.
-_CAPTION_BAND_PX = 300
+# skeleton-centroid probe below). TASK-19: lowered from 300 to 130 -- the
+# on-screen text block shrank to a single title line ("Root alignment", no
+# subtitle, no stage/residual/staging captions -- see module docstring's
+# TASK-19 section), so the near-white title text no longer reaches anywhere
+# near row 300. Measured directly on a re-rendered frame before picking 130
+# (not guessed): with `TITLE_SCALE`/`TITLE_THICKNESS`, the title's tallest
+# ascender/descender pixels stay within row ~110, so 130 leaves a safety
+# margin without re-admitting title text into the mesh mask.
+_CAPTION_BAND_PX = 130
 
 
 def _mesh_mask(canvas_bgr):
@@ -663,34 +688,17 @@ def render_act3(clip: str = clip_io.CLIP_DEFAULT) -> Path:
 
             canvas = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
 
-            canvas = draw.stage_title(canvas, "ACT 3", "Root alignment")
-            canvas = draw.label(canvas, f"stage: {stage_label}", (48, 150),
-                                 scale=0.6, color=(255, 255, 255))
-            canvas = draw.label(
-                canvas, f"residual: {resid:.3f} mm (mean over 50 sites; "
-                        f"legs/wings lag until Act 4 solves the joints)",
-                (48, 182), scale=0.55, color=(190, 255, 190))
-            canvas = draw.label(
-                canvas, f"keypoints pre-scaled to shared_scale={shared_scale:.4f} "
-                        f"(Umeyama trunk fit) -- fixed size; only position animates",
-                (48, 210), scale=0.5, color=(190, 190, 190))
-            canvas = draw.label(
-                canvas, "mesh is static at its solved position and never rotates; "
-                        "only the keypoint skeleton swings in and settles",
-                (48, 238), scale=0.45, color=(150, 150, 150))
-            canvas = draw.label(
-                canvas, "keypoints start modestly offset from the model and move "
-                        "onto it monotonically; their final position is the solver's",
-                (48, 266), scale=0.45, color=(150, 150, 150))
-            canvas = draw.label(
-                canvas, "mixture disclosed: mesh is the earlier staged (no marker-"
-                        "offset) solve; keypoints are the full production fit's "
-                        "target, so this act's end state matches Act 4's start exactly",
-                (48, 294), scale=0.45, color=(150, 150, 150))
+            # TASK-19: every caption below the title is removed from the
+            # frame per the user's explicit request -- stage_label/resid are
+            # still computed above (and logged to the console just below)
+            # so the facts they represent are not lost, only their on-screen
+            # display. See module docstring's TASK-19 section.
+            canvas = draw.stage_title(canvas, "Root alignment")
             canvas = draw.label(canvas, f"frame {f + 1}/{N_OUT}", (48, CANVAS_H - 24),
-                                 scale=0.45, color=(150, 150, 150))
-
+                                 scale=draw.SMALL_SCALE, color=(150, 150, 150))
             if f in (0, 20, 40, 59, 89):
+                print(f"[act3] f={f} stage={stage_label} residual={resid:.3f} mm "
+                      f"(not shown on screen since task-19; see module docstring)")
                 mpx = _mesh_px(canvas)
                 sk_px2d = _camera_project(scn, fovy_deg, CANVAS_W, CANVAS_H, staged_centroid)
                 mesh_px2d = _camera_project(scn, fovy_deg, CANVAS_W, CANVAS_H, mesh_ctr_final)

@@ -21,6 +21,61 @@ between the two solves, since they describe the SAME clip). See PLAYBACK
 START and the EXPECTATION/FALSIFICATION sections below for the specific
 numbers this swap changes (and the ones it, reassuringly, does not).
 
+TASK-19 (presentation changes -- read this before touching the render loop's
+drawing calls or the Phase B/C split below; none of these alter what is
+SOLVED or measured above, only what is DRAWN and how much of the playback is
+side-by-side):
+1. **On-screen title renamed** "ACT 4" -> "Solve joint angles" (matches the
+   other three acts' renaming: "2D Keypoint tracking" / "3D triangulation" /
+   "Root alignment"). Applied via `draw.stage_title`, using the ONE shared
+   type scale all four acts now import from `draw.py`
+   (`TITLE_SCALE`/`CAPTION_SCALE`/`SMALL_SCALE`) instead of this module's own
+   ad hoc scale values.
+2. **Every caption line except the title is removed from the frame**: the
+   stage label, the residual-mm line, the rotated-so-far/joint-DOF-moved
+   numbers, the root-vs-pose explanatory line, and (in the old closing 2-up)
+   the per-camera label and the "cyan: observed / green: FK fit" legend are
+   all gone from the rendered PNG. This is presentation-only: every number
+   this act's docstring measures above (34.79 deg rotation, 3.95 DOF L2,
+   `resid_prod_mm`'s 0.014-0.041 mm range, etc.) is UNCHANGED, still computed
+   every frame, and still printed to the console (every 25 frames) -- only
+   removed from what is drawn. The small bottom-left frame counter is the
+   only other on-screen text kept.
+3. **The side-by-side now spans the WHOLE rest of the act (240-899), not
+   just the old closing 120-frame "Phase C"**: the old three-way split
+   (0-239 solve-only; 240-779 full-width playback; 780-899 side-by-side)
+   becomes TWO phases -- Phase A (0-239, unchanged: 3D-only, the
+   `qpos_root -> qpos_prod[anchor]` solve) and a merged Phase B/C
+   (240-899: side-by-side for all 660 remaining frames, left = the MuJoCo IK
+   render, right = the real camera frame). UNCHANGED by this merge: the
+   frame count (900 total, 660 in the merged phase), the playback wrap/hold
+   at the `frame_for_stills -> T-1 -> 0` seam (see PLAYBACK START below), and
+   the seam at f=240 -- only the panel LAYOUT during 240-899 changes (every
+   frame is now side-by-side, not just the last 120), never the frame's own
+   source-index mapping.
+4. **The right panel no longer reprojects the FK'd marker sites** (the old
+   green dots, `clip_io.project` through the DLT). It now draws the
+   DETECTOR's own 2D keypoints (`02_kp2d.npz`, already loaded as `kp2d`
+   below for the crop-centring smoothing -- MODEL order, matching `kp_names`,
+   verified by the existing `kp2d_names != kp_names` guard) directly,
+   coloured with the SAME per-limb-chain JARVIS scheme
+   (`kp_colors.jarvis_kp_colors`, keyed by keypoint NAME) the left panel's
+   mesh/cloud already uses (`kp_colors.jarvis_kp_colors_rgb01`, same
+   underlying colour table) -- the two panels are colour-MATCHED rather than
+   contrasted (see "COLOUR-MATCHED 2D KEYPOINTS" below; the old cyan-
+   observed/green-fit `PALETTE` convention is retired for this panel). Drawn
+   with `draw.draw_keypoints`/`draw.draw_leg_chains` (the shared helpers
+   every other act already uses), not hand-rolled: `_dots`/`_chain` (the old
+   single-colour analogues, and the FK-reprojection/`cam_mats`/DLT-loading
+   code that was their only caller) are removed as dead code.
+   Frame-index agreement between the two panels is enforced by
+   CONSTRUCTION, not by a separate check: a single `t_src` value per output
+   frame drives BOTH `qpos_prod[t_src]`/`kp_data_prod[t_src]` (left panel)
+   AND `video_frames[t_to_video_row[t_src]]`/`kp2d[t_src, cam2up_idx]`
+   (right panel) -- there is no second index variable that could drift from
+   the first, through the wrap/hold included (the wrap only changes what
+   `t_src` computes to, and both panels always read that same value).
+
 This act carries the ORIENTING beat of the whole explainer. Act 3 covered
 scale + translation only: `root_optimization` measured 0.0000 deg of
 rotation (`TRUNK_OPTIMIZATION_KEYPOINTS` is empty in `configs/anatomy/v1.yaml`,
@@ -42,7 +97,9 @@ The rotation is a real, per-frame solve, not a staged pose: root heading
 varies over the 921-frame production sequence (`qpos_prod`), so Phase B's
 playback shows genuinely solved per-frame rotation.
 
-THREE PHASES (900 frames, 30 fps -> 30 s):
+TWO PHASES (900 frames, 30 fps -> 30 s; TASK-19 merges the old Phase B/Phase
+C split into one side-by-side phase spanning the entire playback -- see the
+TASK-19 section above):
   0-239   (Phase A) qpos interpolates qpos_root -> qpos_prod[anchor] (the
           production fit at the single `frame_for_stills`/anchor frame, 450),
           quaternion SLERPed (`_slerp_qpos`, reused unmodified from
@@ -59,32 +116,39 @@ THREE PHASES (900 frames, 30 fps -> 30 s):
           INTERPOLATED pose, this is the best-available real, per-frame
           number, but it is NOT offset-adjusted (this act never applies the
           production `offsets` to the rendered model's site positions), so it
-          is a different quantity from Phase B/C's precomputed
+          is a different quantity from the merged phase's precomputed
           `resid_prod_mm` below -- see TASK-18 note above and the render
-          loop's own comments.
-  240-779 (Phase B) `qpos_prod` (921 frames, the production solve) plays
-          back, continuously mapped onto 540 output frames (same
-          `t = round(rel * (T-1) / REL_MAX)` style Act 1 uses to span a
-          longer source clip onto fewer output frames), but starting at
-          `frame_for_stills` (the anchor) and WRAPPING back around through
+          loop's own comments. Rendered full-width (1920x1080), 3D only, no
+          real-camera panel -- unchanged by task-19.
+  240-899 (Phase B/C, merged by TASK-19) side-by-side for the ENTIRE rest of
+          the act, 660 frames: `qpos_prod` (921 frames, the production
+          solve) plays back, continuously mapped onto these 660 output
+          frames (same `t = round(rel * (T-1) / REL_MAX)` style Act 1 uses
+          to span a longer source clip onto fewer output frames), starting
+          at `frame_for_stills` (the anchor) and WRAPPING back around through
           the end of the clip -- `frame_for_stills -> T-1 -> 0 ->
-          frame_for_stills-1` -- instead of starting at source frame 0. See
-          PLAYBACK START below for why. The keypoint cloud (`kp_data_prod[t]`,
-          coloured per limb chain, JARVIS scheme --
-          `kp_colors.jarvis_kp_colors_rgb01`, shared with Act 3) advances in
-          lock-step with the mesh (indexed by the SAME wrapped `t`, never
-          independently). Residual here is `resid_prod_mm[t]` -- the REAL,
-          offset-adjusted production fit quality for that exact recorded
-          frame (`|marker_sites - kp_data|` from the h5, mean over 50 sites,
-          converted to mm via `/ shared_scale`), not a live recompute -- see
-          TASK-18 note above.
-  780-899 (Phase C) the closing 2-up, continuing the SAME t-mapping from
-          Phase B (no jump): left is the mesh+cloud render (narrower, 960 px
-          wide); right is one real camera's video, cropped and centred the
-          same way Act 1 crops (`act1_views._smoothed_crop_x0`, reused), with
-          the FK'd tracking sites reprojected through that camera's DLT
-          (green, `PALETTE["fit"]`) over the observed 2D keypoints (cyan,
-          `PALETTE["fly0"]`).
+          frame_for_stills-1` -- instead of starting at source frame 0 (see
+          PLAYBACK START below for why), with `WRAP_HOLD_FRAMES` held on the
+          last source frame at the wrap. UNCHANGED by task-19: the frame
+          count (660), the source-frame mapping/wrap/hold, and the seam at
+          f=240. CHANGED by task-19 (presentation only): every one of these
+          660 frames, not just the closing 120, is now drawn side-by-side --
+          left is the mesh+cloud render (narrower, 960 px wide, the SAME
+          `_wide_camera_for_aspect` live camera the old Phase B rendered at
+          full width, coloured per limb chain, JARVIS scheme --
+          `kp_colors.jarvis_kp_colors_rgb01`, shared with Act 3); right is
+          one real camera's video, cropped and centred the same way Act 1
+          crops (`act1_views._smoothed_crop_x0`, reused), now overlaid with
+          the DETECTOR's own 2D keypoints (`kp_colors.jarvis_kp_colors`,
+          colour-matched to the left panel) instead of the old
+          FK-reprojected fit -- see "COLOUR-MATCHED 2D KEYPOINTS" below. Both
+          panels are indexed by the identical `t_src`, never independently --
+          see TASK-19 note 4 above for how this is verified. Residual (not
+          shown on screen since task-19, still printed) is `resid_prod_mm[t]`
+          -- the REAL, offset-adjusted production fit quality for that exact
+          recorded frame (`|marker_sites - kp_data|` from the h5, mean over
+          50 sites, converted to mm via `/ shared_scale`), not a live
+          recompute -- see TASK-18 note above.
 
 COORDINATE-FRAME CAVEAT that made the 2-up correctness non-obvious (measured,
 not assumed): `pose_optimization` fits the model against scaled keypoints
@@ -244,46 +308,61 @@ smaller than either the original Act3/Act4 jump this task fixes or the
 858 px/clipped-frame failure the slow-ease alternative produced, but it is
 not literally zero; reported as the deliberate trade-off it is, not hidden.
 
-Phase C's left panel is rendered at a narrower (960x1080, not 1920x1080)
-aspect than Acts 3/A/B; `_wide_camera_for_aspect` scales the distance by
-`1/aspect` for aspect < 1 so the same mesh+cloud content that fit the wide
-16:9 frame doesn't get clipped left/right in the narrower panel (derived once
-from the pinhole geometry, not tuned by eye: at the base 2.6x-spread
-distance, the binding constraint is vertical for aspect >= 1 -- horizontal
-FOV is always the wider of the two there -- but flips to horizontal once
-aspect < 1, requiring distance to grow by 1/aspect to keep the same
-real-world width in frame).
+The side-by-side's left panel (240-899, task-19 -- previously only the
+closing 120-frame Phase C) is rendered at a narrower (960x1080, not
+1920x1080) aspect than Acts 3/A; `_wide_camera_for_aspect` scales the
+distance by `1/aspect` for aspect < 1 so the same mesh+cloud content that fit
+the wide 16:9 frame doesn't get clipped left/right in the narrower panel
+(derived once from the pinhole geometry, not tuned by eye: at the base
+2.6x-spread distance, the binding constraint is vertical for aspect >= 1 --
+horizontal FOV is always the wider of the two there -- but flips to
+horizontal once aspect < 1, requiring distance to grow by 1/aspect to keep
+the same real-world width in frame).
 
-2-UP MARKER COLOURS: `draw.draw_keypoints`/`draw.draw_leg_chains` hard-code
-PER-GROUP anatomical colours (Acts 1-2's convention). The 2-up wants a
-different, two-colour contrast instead -- ALL observed points cyan, ALL fit
-points green, so the fit-vs-observed comparison reads at a glance rather than
-needing per-keypoint anatomy recall. `_dots` and `_chain` below are small
-single-colour analogues of those helpers (same primitives, same
-`leg_chains`/iteration pattern, imported not reimplemented), parameterised by
-colour instead of group, only used in this one panel.
+COLOUR-MATCHED 2D KEYPOINTS (task-19, replaces the old "2-UP MARKER COLOURS"
+cyan-observed/green-fit design): the right panel no longer draws the FK'd
+fit at all (there is no `clip_io.project`-through-the-DLT reprojection left
+in this file), so there is no fit-vs-observed contrast left to draw with a
+flat two-colour scheme. Instead the right panel draws the DETECTOR's own 2D
+keypoints (`02_kp2d.npz`, already loaded above) with the SAME per-limb-chain
+JARVIS colours (`kp_colors.jarvis_kp_colors`, BGR-by-NAME) the left panel's
+mesh/cloud uses (`kp_colors.jarvis_kp_colors_rgb01`, RGB/0-1-by-NAME, same
+underlying colour table) -- both panels are keyed by keypoint NAME, so they
+agree regardless of which array order either side happens to be in
+(CLAUDE.md's keypoint-order bug class). Drawn with the shared
+`draw.draw_keypoints`/`draw.draw_leg_chains` helpers every other act already
+uses -- the old `_dots`/`_chain` single-colour analogues (and the
+FK-reprojection code that was their only caller) are removed as dead code.
 
 EXPECTATION: by f=239 the mesh's limbs lie along the keypoint chains and the
 body has visibly rotated from Act 3's ending heading; residual (live-
-recomputed, no offset applied to the rendered sites) reads ~0.011 mm.
-Through 240-779, `resid_prod_mm` (the real, offset-adjusted production fit
-quality) stays in its measured ~0.014-0.041 mm range, and tarsal tips TRACK
-the observed keypoints through leg swing -- the mesh foot stays ON the
-marker as the leg moves, not merely near it. In the closing 2-up, the green
-reprojected fit overlies the fly in the real video, cyan observed keypoints
-alongside.
+recomputed, no offset applied to the rendered sites, printed to the console
+-- not shown on screen since task-19) reads ~0.011 mm. Through 240-899 (all
+side-by-side since task-19), `resid_prod_mm` (the real, offset-adjusted
+production fit quality, still printed) stays in its measured ~0.014-0.041 mm
+range, tarsal tips TRACK the observed keypoints through leg swing -- the mesh
+foot stays ON the marker as the leg moves, not merely near it -- and the
+right panel's detector keypoints move through the SAME leg swing, in the SAME
+per-limb colours as the left panel's mesh/cloud, with one frame index
+(`t_src`) driving both panels.
 FALSIFICATION: tips detaching from markers during swing means `pose_
 optimization` did not converge, or the wrong qpos frame is being drawn; a
 tumbling/flipping body during 0-239 means the quaternion was lerped instead
-of SLERPed; the 2-up markers sitting off the fly means the shared_scale
-coordinate-frame division above is missing or inverted.
+of SLERPed; the right panel showing the fly at a visibly DIFFERENT moment
+than the left panel (e.g. legs in a different swing phase) means `t_src`
+desynced between the two panels -- see TASK-19 note 4 above for the
+single-variable construction that rules this out.
 
 Colours come from `kp_colors.jarvis_kp_colors_rgb01` (JARVIS per-limb-chain
-scheme, Change 2) for the mesh+cloud panels; `viz.core.colors.PALETTE`
-(fit=green, observed=cyan) is UNCHANGED for the closing 2-up (see "2-UP
-MARKER COLOURS" above). Wing visibility (Change 1): `set_mesh_rgba`/
-`capture_geom_alpha` (stage_ik.py) keep originally-invisible geoms (the
-wings' `*_inertial` boxes) at alpha=0 across every `geom_rgba` mutation.
+scheme, Change 2) for the mesh+cloud panels, and `kp_colors.jarvis_kp_colors`
+(the same underlying colour table, BGR/0-255) for the right panel's detector
+keypoints since task-19 -- see "COLOUR-MATCHED 2D KEYPOINTS" above.
+`viz.core.colors.PALETTE` is still used for the mesh's own grey
+(`PALETTE["mesh"]`); its fit=green/observed=cyan convention is RETIRED for
+this act's right panel (task-19). Wing visibility (Change 1):
+`set_mesh_rgba`/`capture_geom_alpha` (stage_ik.py) keep originally-invisible
+geoms (the wings' `*_inertial` boxes) at alpha=0 across every `geom_rgba`
+mutation.
 
 SKELETON (task-14 round 4): the cloud is now drawn as bones, not loose
 spheres, here too -- same `kp_colors.jarvis_skeleton_edges`/`stage_ik._add_bone`
@@ -320,28 +399,30 @@ from scripts.viz.ik_explainer.stage_ik import (                       # noqa: E4
     capture_geom_alpha, set_mesh_rgba,
 )
 from scripts.viz.ik_explainer.kp_colors import (                      # noqa: E402
-    jarvis_kp_colors_rgb01, jarvis_skeleton_edges,
+    jarvis_kp_colors, jarvis_kp_colors_rgb01, jarvis_skeleton_edges,
 )
 from scripts.viz.ik_explainer.acts.act3_align import (                 # noqa: E402
     _slerp_qpos, _wide_camera, _smoothstep, AZ_START, ELEV, BONE_RADIUS_FRACTION,
     act3_frozen_camera, ACT3_CAM_DISTANCE,
 )
 from scripts.viz.ik_explainer.acts.act1_views import _smoothed_crop_x0  # noqa: E402
-from viz.core.colors import PALETTE, leg_chains                       # noqa: E402
+from viz.core.colors import PALETTE                                    # noqa: E402
 
 # --- canvas / timeline ------------------------------------------------------
 CANVAS_W, CANVAS_H = 1920, 1080
 N_OUT = 900
 PHASE_A_END = 239                 # inclusive: qpos_root -> qpos_prod[anchor], one frame
-PHASE_B_END = 779                 # inclusive: qpos_prod playback, full width
-# Phase C: 780..899 inclusive -- closing 2-up
+# TASK-19: the old PHASE_B_END=779 split (full-width playback 240-779, then a
+# closing 780-899 2-up) is retired -- 240..899 inclusive is now ONE merged,
+# side-by-side phase (see module docstring's TASK-19 section); there is no
+# longer an internal boundary within it to name.
 
 XML_PATH = _REPO / "models" / "fruitfly_v1" / "fruitfly_v1_free.xml"
 
-# Continuous t-mapping shared by Phase B and Phase C so the cut into the 2-up
-# does not skip or repeat time: rel=0 at f=240 (start of Phase B) maps to
-# source frame 0, rel=REL_MAX at f=899 (end of Phase C) maps to the clip's
-# last frame.
+# Continuous t-mapping for the whole merged 240-899 side-by-side phase, so it
+# never skips or repeats time: rel=0 at f=240 maps to source frame 0 (before
+# the frame_for_stills offset/wrap below is applied), rel=REL_MAX at f=899
+# maps to the clip's last frame.
 REL_MAX = (N_OUT - 1) - (PHASE_A_END + 1)   # 899 - 240 = 659
 
 # Chosen for the closing 2-up: brief names Cam2012862/Cam2012630 as reading
@@ -396,42 +477,18 @@ def _wide_camera_for_aspect(mesh_ctr, cloud_pts, model_extent, azimuth, aspect):
 
     Aspect correction (unchanged from the first cut): at the base `distance =
     spread * 2.6`, vertical FOV is the binding constraint for aspect >= 1
-    (Acts 3/4's 1920x1080 panels, unaffected). Once aspect < 1 (Phase C's
-    960-wide left panel), horizontal binds instead and distance must grow by
-    1/aspect to keep the same real-world width in frame (pinhole relation
-    tan(horiz_half) = aspect * tan(vert_half), not tuned by eye).
+    (Acts 3/4's 1920x1080 panels, unaffected). Once aspect < 1 (the
+    side-by-side's 960-wide left panel, task-19: now used for the WHOLE
+    240-899 range, not just the old closing Phase C), horizontal binds
+    instead and distance must grow by 1/aspect to keep the same real-world
+    width in frame (pinhole relation tan(horiz_half) = aspect * tan(vert_half),
+    not tuned by eye).
     """
     _, live_spread = _wide_camera(mesh_ctr, cloud_pts, model_extent, azimuth, cam_spread=1.0)
     cam, live_spread = _wide_camera(mesh_ctr, cloud_pts, model_extent, azimuth, cam_spread=live_spread)
     if aspect < 1.0:
         cam.distance = cam.distance / aspect
     return cam, live_spread
-
-
-def _dots(img, uv, color, radius=3):
-    """Single-colour analogue of `draw.draw_keypoints` (no per-group colour).
-
-    Same primitive (`cv2.circle`, NaN-skipped) as draw.py; only the colour
-    argument differs, so the 2-up's cyan-observed/green-fit contrast doesn't
-    have to fight `draw.draw_keypoints`'s baked-in anatomical palette.
-    """
-    out = np.asarray(img).copy()
-    for p in np.asarray(uv):
-        if np.all(np.isfinite(p)):
-            cv2.circle(out, tuple(np.round(p).astype(int)), radius, color, -1, cv2.LINE_AA)
-    return out
-
-
-def _chain(img, uv, kp_names, color, thickness=1):
-    """Single-colour analogue of `draw.draw_leg_chains`; reuses `leg_chains`."""
-    out = np.asarray(img).copy()
-    for _leg, chain in leg_chains(list(kp_names)).items():
-        pts = np.asarray(uv)[chain]
-        for a, b in zip(pts[:-1], pts[1:]):
-            if np.all(np.isfinite([a, b])):
-                cv2.line(out, tuple(np.round(a).astype(int)),
-                          tuple(np.round(b).astype(int)), color, thickness, cv2.LINE_AA)
-    return out
 
 
 def render_act4(clip: str = clip_io.CLIP_DEFAULT, start_frame: int = 0) -> Path:
@@ -525,12 +582,11 @@ def render_act4(clip: str = clip_io.CLIP_DEFAULT, start_frame: int = 0) -> Path:
     if CAM_2UP not in cam_names:
         raise ValueError(f"{CAM_2UP} not in 02_kp2d.npz cam_names {cam_names}")
     cam2up_idx = cam_names.index(CAM_2UP)
-
-    cam_mats, dlt_names = clip_io.load_dlt(str(Path(clip) / "calibration"))
-    if dlt_names != cam_names:
-        raise ValueError(
-            f"DLT camera order {dlt_names} != 02_kp2d.npz cam_names {cam_names} "
-            "-- refusing to project with a mismatched camera/matrix pairing.")
+    # TASK-19: the FK-reprojection this act used to draw on the right panel
+    # (`clip_io.project` of `site_xpos` through the DLT) is removed -- the
+    # right panel now draws the detector's OWN 2D keypoints directly (see
+    # module docstring's TASK-19 note 4) -- so the DLT (`cam_mats`) this
+    # reprojection needed is no longer loaded here.
 
     mj_model = mujoco.MjModel.from_xml_path(str(XML_PATH))
     orig_alpha = capture_geom_alpha(mj_model)   # BEFORE any geom_rgba mutation
@@ -550,6 +606,11 @@ def render_act4(clip: str = clip_io.CLIP_DEFAULT, start_frame: int = 0) -> Path:
     # of the previous 4-group (head/thorax/abdomen/legs) scheme.
     kp_rgb01 = jarvis_kp_colors_rgb01(kp_names)
     kp_rgb01_by_idx = [kp_rgb01[n] for n in kp_names]
+    # TASK-19: the right panel's detector-2D overlay uses the SAME underlying
+    # colour table, in cv2's BGR/0-255 convention (`draw.draw_keypoints`/
+    # `draw.draw_leg_chains`'s `kp_colors` argument), keyed by NAME so it
+    # matches the left panel's per-limb colours regardless of array order.
+    kp_colors_bgr = jarvis_kp_colors(kp_names)
     # Skeleton bones (task-14 round 4, "skeleton on Act 4 too"): same
     # construction as act3_align.py -- data/fly50.json's 44 edges mapped onto
     # THIS array's own kp_names order by name, coloured per JARVIS's own
@@ -582,7 +643,9 @@ def render_act4(clip: str = clip_io.CLIP_DEFAULT, start_frame: int = 0) -> Path:
           f"unmodified at f={PHASE_A_END + 1} (see module docstring's CAMERA "
           f"section for why an eased hand-off was tried and reverted)")
 
-    # --- Phase C prerequisites: smoothed crop centring + real video frames -
+    # --- side-by-side prerequisites: smoothed crop centring + real video ---
+    # frames (task-19: needed for the WHOLE 240-899 merged phase now, not
+    # just the old closing Phase C).
     x0_full = _smoothed_crop_x0(kp2d[:, cam2up_idx], SRC_FRAME_W)   # (T,)
 
     # Task-17 follow-up: playback starts at `frame_for_stills` (the anchor),
@@ -656,10 +719,14 @@ def render_act4(clip: str = clip_io.CLIP_DEFAULT, start_frame: int = 0) -> Path:
           f"at output frame {_wrap_out_frame}/{_wrap_out_frame + 1} "
           f"(source {t_playback[_wrap_idx[0]]}->{t_playback[_wrap_idx[0] + 1]})")
 
-    phase_c_t = t_playback[(PHASE_B_END + 1) - (PHASE_A_END + 1):]
-    video_frames = clip_io.read_frames(clip_io.video_path(clip, CAM_2UP), phase_c_t)
+    # TASK-19: video is now preloaded for the ENTIRE merged side-by-side phase
+    # (all 660 frames of `t_playback`, f=240..899) rather than just the old
+    # closing 120-frame Phase C -- the side-by-side spans the whole rest of
+    # the act now, so its right panel needs a real frame for every one of
+    # those output frames.
+    video_frames = clip_io.read_frames(clip_io.video_path(clip, CAM_2UP), t_playback)
     t_to_video_row = {}
-    for row, t in enumerate(phase_c_t):
+    for row, t in enumerate(t_playback):
         t_to_video_row.setdefault(int(t), row)
 
     out_dir = dirs["frames"] / "act4_solve"
@@ -695,7 +762,12 @@ def render_act4(clip: str = clip_io.CLIP_DEFAULT, start_frame: int = 0) -> Path:
                 cloud_pts = target_a
                 t_src = anchor
             else:
-                phase = "B" if f <= PHASE_B_END else "C"
+                # TASK-19: 240-899 is now ONE merged, side-by-side phase
+                # ("BC") -- see module docstring's TASK-19 section. `t_src`
+                # is the SAME single value that drives both panels below
+                # (left: qpos/cloud_pts; right: video row/observed 2D), so
+                # the two panels cannot desynchronise.
+                phase = "BC"
                 t_src = int(t_for_output_frame(f))
                 qpos = qpos_prod[t_src]
                 cloud_pts = kp_data_prod[t_src]
@@ -713,15 +785,25 @@ def render_act4(clip: str = clip_io.CLIP_DEFAULT, start_frame: int = 0) -> Path:
                 # offset-adjusted (this act never applies `offsets_prod` to
                 # the rendered model's site positions -- see module
                 # docstring's TASK-18 section), so it is not directly
-                # comparable to Phase B/C's precomputed `resid_prod_mm` below.
+                # comparable to the merged phase's precomputed
+                # `resid_prod_mm` below.
                 resid = marker_residual_mm(mj_model, d, cloud_pts, body_site_idxs)
             else:
                 # TASK-18: the REAL, offset-adjusted production residual for
                 # this exact recorded frame, not a live recompute -- see
                 # module docstring's TASK-18 section.
                 resid = float(resid_prod_mm[t_src])
+            # TASK-19: `resid` (and, for phase A, the rotation/joint-DOF
+            # progress) is no longer drawn on screen -- printed to the
+            # console instead so the numbers this act measures are not lost,
+            # only their on-screen caption. See module docstring's TASK-19
+            # section.
+            if (f + 1) % 25 == 0 or f == start_frame:
+                print(f"[act4] wrote frame {f} ({phase}) t_src={t_src} "
+                      f"residual={resid:.4f} mm ({time.time() - t0:.1f}s elapsed)",
+                      flush=True)
 
-            if phase in ("A", "B"):
+            if phase == "A":
                 aspect = CANVAS_W / CANVAS_H
                 cam, spread = _wide_camera_for_aspect(
                     mesh_ctr, cloud_pts, mj_model.stat.extent, AZ_START, aspect)
@@ -729,13 +811,13 @@ def render_act4(clip: str = clip_io.CLIP_DEFAULT, start_frame: int = 0) -> Path:
                 # above for FRAMING (only `spread`, still live, for marker/
                 # bone sizing) -- it renders with the EXACT frozen camera
                 # Act 3's last frame used, so the Act3->Act4 cut does not
-                # jump. Phase B resumes this SAME live `cam` unmodified --
-                # see module docstring's CAMERA section for why an eased
-                # (rather than immediate) hand-off was tried and reverted:
-                # measured directly, it left the mesh clipped against the
-                # frame's left edge for a visible stretch of Phase B.
-                if phase == "A":
-                    cam = act3_frozen_camera(mesh_ctr_final)
+                # jump. The merged BC phase resumes this SAME live `cam`
+                # unmodified -- see module docstring's CAMERA section for why
+                # an eased (rather than immediate) hand-off was tried and
+                # reverted: measured directly, it left the mesh clipped
+                # against the frame's left edge for a visible stretch of
+                # playback.
+                cam = act3_frozen_camera(mesh_ctr_final)
                 marker_r = max(spread * 0.03, mj_model.stat.extent * 0.006)
                 bone_r = marker_r * BONE_RADIUS_FRACTION
 
@@ -751,28 +833,15 @@ def render_act4(clip: str = clip_io.CLIP_DEFAULT, start_frame: int = 0) -> Path:
                         _add_sphere(scn, p3, np.array((*rgb, 1.0), np.float32), marker_r)
                 canvas = cv2.cvtColor(np.ascontiguousarray(renderer_full.render()), cv2.COLOR_RGB2BGR)
 
-                canvas = draw.stage_title(canvas, "ACT 4", "Joint solve, then motion")
-                if phase == "A":
-                    stage_label = "pose_optimization -- orientation + joints, together"
-                    extra = (f"rotated so far: {root_pose_angle_deg * p:.1f} / "
-                              f"{root_pose_angle_deg:.2f} deg    "
-                              f"joint-DOF moved: {joint_dof_delta * p:.2f} / {joint_dof_delta:.2f}")
-                else:
-                    stage_label = "pose_optimization (playback)"
-                    extra = f"source frame {t_src}/{T - 1}"
-                canvas = draw.label(canvas, f"stage: {stage_label}", (48, 150),
-                                     scale=0.6, color=(255, 255, 255))
-                canvas = draw.label(canvas, f"residual: {resid:.3f} mm", (48, 182),
-                                     scale=0.6, color=(190, 255, 190))
-                canvas = draw.label(canvas, extra, (48, 210), scale=0.5, color=(190, 190, 190))
-                canvas = draw.label(
-                    canvas, "root_optimization did not rotate the body (Act 3); "
-                            "pose_optimization does, and bends every joint at once",
-                    (48, 238), scale=0.45, color=(150, 150, 150))
+                # TASK-19: every caption below the title is removed from the
+                # frame -- stage_label/resid/rotation-progress are still
+                # computed and printed above, just not drawn. Only the title
+                # and the frame counter remain on screen.
+                canvas = draw.stage_title(canvas, "Solve joint angles")
                 canvas = draw.label(canvas, f"frame {f + 1}/{N_OUT}", (48, CANVAS_H - 24),
-                                     scale=0.45, color=(150, 150, 150))
+                                     scale=draw.SMALL_SCALE, color=(150, 150, 150))
 
-            else:  # Phase C: closing 2-up
+            else:  # phase == "BC": side-by-side for the whole rest of the act
                 aspect = left_w / CANVAS_H
                 cam, spread = _wide_camera_for_aspect(
                     mesh_ctr, cloud_pts, mj_model.stat.extent, AZ_START, aspect)
@@ -791,45 +860,40 @@ def render_act4(clip: str = clip_io.CLIP_DEFAULT, start_frame: int = 0) -> Path:
                         _add_sphere(scn, p3, np.array((*rgb, 1.0), np.float32), marker_r)
                 left = cv2.cvtColor(np.ascontiguousarray(renderer_left.render()), cv2.COLOR_RGB2BGR)
 
-                left = draw.stage_title(left, "ACT 4", "MuJoCo fit")
-                left = draw.label(left, f"residual: {resid:.3f} mm", (48, 150),
-                                   scale=0.55, color=(190, 255, 190))
-                left = draw.label(left, f"source frame {t_src}/{T - 1}", (48, 178),
-                                   scale=0.5, color=(190, 190, 190))
+                # TASK-19: title only, no other caption on the left panel.
+                left = draw.stage_title(left, "Solve joint angles")
 
-                # --- right panel: real video, FK fit reprojected in green,
-                # observed 2D in cyan ---
+                # --- right panel (TASK-19): real video, overlaid with the
+                # DETECTOR's OWN 2D keypoints (not an FK reprojection),
+                # coloured per-limb-chain to match the left panel -- see
+                # module docstring's "COLOUR-MATCHED 2D KEYPOINTS" section.
+                # `row`/`native`/`obs_uv` are all indexed by the SAME t_src
+                # the left panel's qpos/cloud_pts just used above (see the
+                # phase=="BC" branch at the top of this loop) -- there is no
+                # second frame index here that could disagree with the left
+                # panel's.
                 row = t_to_video_row[t_src]
                 native = video_frames[row].copy()               # (FRAME_H, SRC_FRAME_W, 3)
                 x0 = float(x0_full[t_src])
 
-                sites_raw = sites / shared_scale                 # back to raw arena-mm frame
-                proj_all = clip_io.project(cam_mats[cam2up_idx:cam2up_idx + 1], sites_raw)
-                fit_uv = proj_all[0].copy()
-                fit_uv[:, 0] -= x0
                 obs_uv = kp2d[t_src, cam2up_idx].copy()
                 obs_uv[:, 0] -= x0
 
                 panel_native = native[:FRAME_H, int(round(x0)):int(round(x0)) + CROP_W]
-                panel_native = _chain(panel_native, obs_uv, kp_names, PALETTE["fly0"], thickness=1)
-                panel_native = _dots(panel_native, obs_uv, PALETTE["fly0"], radius=3)
-                panel_native = _chain(panel_native, fit_uv, kp_names, PALETTE["fit"], thickness=1)
-                panel_native = _dots(panel_native, fit_uv, PALETTE["fit"], radius=3)
+                panel_native = draw.draw_leg_chains(panel_native, obs_uv, kp_names,
+                                                     alpha=1.0, thickness=1,
+                                                     kp_colors=kp_colors_bgr)
+                panel_native = draw.draw_keypoints(panel_native, obs_uv, kp_names,
+                                                    alpha=1.0, radius=4,
+                                                    kp_colors=kp_colors_bgr)
                 right = cv2.resize(panel_native, (CANVAS_W - left_w, CANVAS_H),
                                     interpolation=cv2.INTER_LINEAR)
-                right = draw.label(right, f"{CAM_2UP} -- real video", (24, 40),
-                                    scale=0.6, color=(255, 255, 255))
-                right = draw.label(right, "cyan: observed 2D   green: FK fit reprojected",
-                                    (24, 68), scale=0.5, color=(200, 200, 200))
 
                 canvas = np.concatenate([left, right], axis=1)
                 canvas = draw.label(canvas, f"frame {f + 1}/{N_OUT}", (48, CANVAS_H - 24),
-                                     scale=0.45, color=(150, 150, 150))
+                                     scale=draw.SMALL_SCALE, color=(150, 150, 150))
 
             cv2.imwrite(str(out_dir / f"f{f:05d}.png"), canvas)
-            if (f + 1) % 25 == 0 or f == start_frame:
-                print(f"[act4] wrote frame {f} ({phase}) t_src={t_src} "
-                      f"({time.time() - t0:.1f}s elapsed)", flush=True)
 
     dt = time.time() - t0
     n_written = N_OUT - start_frame

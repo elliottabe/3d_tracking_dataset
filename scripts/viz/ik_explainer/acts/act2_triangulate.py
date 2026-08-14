@@ -118,6 +118,19 @@ since `03_kp3d.npz` is this act's own pre-existing, already-verified,
 un-filtered source and introducing a second production-solve dependency here
 would not change what is shown.) Act 1 and Act 2 are therefore UNCHANGED by
 task-18.
+
+TASK-19 (presentation-only): on-screen title changes "ACT 2" -> "3D
+triangulation", and the title card's text is stripped to ONLY the title and
+the "7 cameras, 180 deg arc, 30 deg spacing (elev ... deg)" fact line -- the
+two "panel DIRECTION = measured optical axis" / "panel DISTANCE ... staging
+only" caption lines are removed from the FRAME per the user's explicit
+request. Both facts they described remain true and are documented in this
+module's RIG GEOMETRY section above (nothing about the geometric
+construction changed) -- only their on-screen captions are gone. Per-panel
+camera name + elevation labels are UNCHANGED (per-panel annotations, not
+part of the removed caption block). Typography now comes from `draw.py`'s
+shared `TITLE_SCALE`/`CAPTION_SCALE`/`SMALL_SCALE` instead of this module's
+own ad hoc scale values.
 """
 import argparse
 import sys
@@ -689,10 +702,11 @@ def render_act2(clip: str = clip_io.CLIP_DEFAULT) -> Path:
                     top_v = float(corners_uv[:, 1].min())
                     ci = names.index(cam)
                     text = f"{cam} {elev_deg[ci]:+.1f} deg"
-                    (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)
+                    (tw, th), _ = cv2.getTextSize(
+                        text, cv2.FONT_HERSHEY_SIMPLEX, draw.SMALL_SCALE, 1)
                     canvas = draw.label(canvas, text,
                                          (cx_ - tw / 2.0, top_v - th - 8),
-                                         scale=0.45, color=(200, 200, 200))
+                                         scale=draw.SMALL_SCALE, color=(200, 200, 200))
 
             if ray_p > 0.0:
                 for cam in names:
@@ -701,20 +715,13 @@ def render_act2(clip: str = clip_io.CLIP_DEFAULT) -> Path:
 
         canvas = _draw_cloud(canvas, kp3d_local, kp_names, pres_cam, cloud_a, kp_colors)
 
-        canvas = draw.stage_title(canvas, "ACT 2", "Seven views become one")
-        canvas = draw.label(
-            canvas, "panel DIRECTION = measured optical axis (DLT factorisation)",
-            (48, 150), scale=0.5, color=(190, 190, 190))
-        canvas = draw.label(
-            canvas, "panel DISTANCE from the cloud is staging only -- telecentric"
-                    " rig cameras have no finite centre of projection",
-            (48, 178), scale=0.5, color=(190, 190, 190))
+        canvas = draw.stage_title(canvas, "3D triangulation")
         canvas = draw.label(
             canvas, f"7 cameras, 180 deg arc, 30 deg spacing "
                     f"(elev {elev_deg.min():+.1f} to {elev_deg.max():+.1f} deg)",
-            (48, 206), scale=0.45, color=(150, 150, 150))
+            (48, 150), scale=draw.CAPTION_SCALE, color=(190, 190, 190))
         canvas = draw.label(canvas, f"frame {f + 1}/{N_OUT}", (48, CANVAS_H - 24),
-                             scale=0.45, color=(150, 150, 150))
+                             scale=draw.SMALL_SCALE, color=(150, 150, 150))
 
         cv2.imwrite(str(out_dir / f"f{f:05d}.png"), canvas)
 

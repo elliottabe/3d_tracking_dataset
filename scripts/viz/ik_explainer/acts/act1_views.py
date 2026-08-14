@@ -28,6 +28,22 @@ lost track of the centroid).
 
 Colours: per-keypoint, JARVIS per-limb-chain scheme
 (`kp_colors.jarvis_kp_colors`) -- never invented here.
+
+TASK-19 (presentation-only; read before touching `_build_title_panel`): the
+on-screen title changes "ACT 1" -> "2D Keypoint tracking", and the title
+card's text is stripped down to ONLY the title, the fps/speed line, and the
+colour-coded keypoint legend -- the camera-count/elevation summary line and
+the "dim marker = low detector confidence" note are removed from the FRAME
+per the user's explicit request. Both facts remain true and are still
+documented here and enforced in code (7 cameras with elev range asserted in
+`_elevations_deg`'s caller; `draw.draw_keypoints`'s `conf` argument still
+shrinks low-confidence markers, see `draw_keypoints`'s own docstring in
+`draw.py`) -- only their on-screen captions are gone. Per-panel camera name +
+elevation labels and the per-panel scale bar are UNCHANGED (they are
+per-panel annotations, not part of the removed title-card text block).
+Typography now comes from `draw.py`'s shared `TITLE_SCALE`/`CAPTION_SCALE`/
+`SMALL_SCALE` (one size per role across all four acts) instead of this
+module's own ad hoc scale values.
 """
 import argparse
 import sys
@@ -165,22 +181,34 @@ def _speed_factor() -> float:
 
 
 def _build_title_panel(cam_names, elev_deg, kp_names) -> np.ndarray:
+    """Task-19 (Change 2): stripped down to ONLY the title, the fps/speed
+    line, and the colour-coded keypoint legend -- the camera-count/elevation
+    summary and the "dim marker = low confidence" note are removed from the
+    frame (the FACTS themselves -- 7 cameras, elev range, low-confidence
+    markers drawn dimmer -- are unchanged in the code and still documented in
+    this module's docstring; only the on-screen text is cut, per the user's
+    explicit request). `cam_names`/`elev_deg` are kept as parameters (no
+    longer drawn) only because per-panel labels elsewhere in this module
+    still need `elev_deg`; nothing here computes them redundantly.
+    """
     img = np.zeros((CELL_H, CELL_W, 3), np.uint8)
-    img = draw.stage_title(img, "ACT 1", "Seven views, one fly")
+    # This title card is only CELL_W=480 px wide (one grid cell), unlike
+    # Acts 2-4's full 1920-px-wide canvas -- at the shared `TITLE_SCALE`,
+    # "2D Keypoint tracking" measures ~530 px on one line (checked with
+    # cv2.getTextSize before picking this, not guessed) and would clip
+    # against the cell edge. Wrapped across two lines, SAME `TITLE_SCALE`/
+    # `TITLE_THICKNESS` as every other act's title (no size reduction), each
+    # line comfortably under 480 px.
+    img = draw.stage_title(img, "2D Keypoint")
+    img = draw.label(img, "tracking", (48, 128), scale=draw.TITLE_SCALE,
+                      color=(255, 255, 255), thickness=draw.TITLE_THICKNESS)
     speed = _speed_factor()
-    img = draw.label(img, f"800 fps -> 1/{speed:.1f} speed", (48, 160), scale=0.6)
-    img = draw.label(img, "keypoints (JARVIS per-limb-chain colours):",
-                      (48, 196), scale=0.5)
-    y = 196
+    img = draw.label(img, f"800 fps -> 1/{speed:.1f} speed",
+                      (48, 200), scale=draw.CAPTION_SCALE)
+    y = 200
     for name, color in legend_entries(kp_names):
-        y += 22
-        img = draw.label(img, name, (64, y), scale=0.45, color=color)
-    img = draw.label(img, "dim marker = low detector confidence",
-                      (48, y + 34), scale=0.42, color=(160, 160, 160))
-    lo, hi = float(np.min(elev_deg)), float(np.max(elev_deg))
-    img = draw.label(
-        img, f"{len(cam_names)} cameras, elev {lo:+.1f} to {hi:+.1f} deg",
-        (48, y + 58), scale=0.42, color=(160, 160, 160))
+        y += 24
+        img = draw.label(img, name, (64, y), scale=draw.SMALL_SCALE, color=color)
     return img
 
 
@@ -256,13 +284,13 @@ def render_act1(clip: str = clip_io.CLIP_DEFAULT) -> Path:
             label_text = f"{cam}  elev {elev_deg[ci]:+.1f} deg"
             canvas = draw.label(canvas, label_text,
                                  (cellx + MARGIN, celly + MARGIN + 20),
-                                 scale=0.55)
+                                 scale=draw.SMALL_SCALE)
 
         trow, tcol = divmod(TITLE_CELL, GRID_COLS)
         tx, ty = tcol * CELL_W, trow * CELL_H
         canvas[ty:ty + CELL_H, tx:tx + CELL_W] = title_panel
         canvas = draw.label(canvas, f"frame {f + 1}/{N_OUT}  (src {t}/{N})",
-                             (tx + 48, ty + CELL_H - 24), scale=0.45,
+                             (tx + 48, ty + CELL_H - 24), scale=draw.SMALL_SCALE,
                              color=(150, 150, 150))
 
         cv2.imwrite(str(out_dir / f"f{f:05d}.png"), canvas)

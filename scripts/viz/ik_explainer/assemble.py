@@ -338,13 +338,22 @@ ik_explainer/
     04_filter_effect.png  05_ik_stages.png  qc.json
   frames/                per-act PNG sequences (f%05d.png, 1920x1080),
                          independently re-renderable without repaying a GPU pass
-    act1_views/          {n1} frames -- seven camera views, 2D keypoints fade in
-    act2_triangulate/    {n2} frames -- views converge into the 3D keypoint cloud
-    act3_align/          {n3} frames -- already-scaled keypoint skeleton
-                         starts modestly offset from the (static) model and
-                         swings onto it, settling at the solver's true
-                         fitted root_optimization position
-    act4_solve/          {n4} frames -- joints solve (+ orientation), then playback
+    act1_views/          {n1} frames -- on-screen title "2D Keypoint tracking":
+                         seven camera views, 2D keypoints fade in
+    act2_triangulate/    {n2} frames -- on-screen title "3D triangulation":
+                         views converge into the 3D keypoint cloud
+    act3_align/          {n3} frames -- on-screen title "Root alignment":
+                         already-scaled keypoint skeleton starts modestly
+                         offset from the (static) model and swings onto it,
+                         settling at the solver's true fitted
+                         root_optimization position
+    act4_solve/          {n4} frames -- on-screen title "Solve joint angles":
+                         0-239 the joints solve (+ orientation), 3D only;
+                         240-899 side-by-side for the REST of the act (task-19:
+                         previously only the closing 120 frames) -- left is
+                         the MuJoCo IK render, right is the real camera frame
+                         with the detector's own 2D keypoints, coloured to
+                         match the left panel's per-limb-chain colours
   ik_explainer.mp4       the deliverable: {total} frames, 1920x1080 @ 30 fps,
                          H.264, silent (assembled by scripts/viz/ik_explainer/assemble.py)
 ```
@@ -386,8 +395,11 @@ re-deriving the story from the original plan wording alone would get it wrong:
   kp_colors.py` calls `third_party/JARVIS-HybridNet`'s own `get_skeleton`
   against `data/fly50.json`'s skeleton graph, so each leg (and the head/thorax
   loop, and each wing) gets its own colour instead of one flat per-group
-  colour. `viz.core.colors.PALETTE`'s fit=green/observed=cyan convention is
-  unchanged for Act 4's closing 2-up (fit-vs-observed, not per-keypoint).
+  colour. Task-19: Act 4's side-by-side (240-899, the whole rest of the act)
+  colour-matches its two panels -- the right panel draws the detector's own
+  2D keypoints in this SAME per-limb-chain scheme, not the old FK-reprojected
+  fit -- so `viz.core.colors.PALETTE`'s fit=green/observed=cyan convention no
+  longer applies there.
 - This is the EASY case (one fly, open arena). CLAUDE.md is explicit that the
   female fly on walls / in occlusion is where this pipeline actually fails;
   do not cite this video as general QC evidence.
