@@ -6,7 +6,7 @@ Concatenates `frames/act{1..4}_*/f%05d.png` in story order with 30-frame
 H.264 (silent) via `viz.core.io.write_video` (imageio + ffmpeg, the repo's
 shared encoder), then writes `README.md` and `manifest.json` beside it.
 
-EXPECTED TOTAL FRAMES: 210 + 150 + 90 + 540 - 3*30 = 900 (30.0 s @ 30 fps).
+EXPECTED TOTAL FRAMES: 150 + 150 + 90 + 540 - 3*30 = 840 (28.0 s @ 30 fps).
 (Task-14 shortened Act 1 from 450 to 270 frames -- 15s to 9s -- and
 re-sourced it from a contiguous ~40% sub-range of the clip rather than the
 whole 921 frames; see `act1_views.py`'s module docstring. A later task-14
@@ -35,7 +35,12 @@ section), Act 2 300 -> 150 frames (all four phases scaled proportionally --
 see `act2_triangulate.py`'s TASK-29 section), Act 3 unchanged at 90 frames,
 Act 4 780 -> 540 frames (the 120-frame solve phase from task-27 is
 unchanged; only the 660-frame playback shrinks to 420 -- see
-`act4_solve.py`'s TASK-29 section); total 1410 -> 900.)
+`act4_solve.py`'s TASK-29 section); total 1410 -> 900.
+Task-30 then removed Act 1's reprojection reveal entirely (the user no
+longer wants it): the closing 60-frame raw-2D -> reprojected-3D crossfade
+(frames 150-209) and its caption are deleted outright, not shortened --
+see `act1_views.py`'s TASK-30 section. Act 1 210 -> 150 frames; total
+900 -> 840.)
 This is asserted TWICE: once per-act (`_list_frames` requires each act directory to
 hold EXACTLY its expected count -- neither short nor padded with extras),
 and once on the assembled edit plan before any frame is written to ffmpeg.
@@ -78,7 +83,7 @@ from viz.core.io import write_video                  # noqa: E402
 # --- edit plan ---------------------------------------------------------
 # (directory name under frames/, expected frame count) in story order.
 ACT_SPECS = [
-    ("act1_views", 210),
+    ("act1_views", 150),
     ("act2_triangulate", 150),
     ("act3_align", 90),
     ("act4_solve", 540),
@@ -86,7 +91,7 @@ ACT_SPECS = [
 N_CROSS = 30   # 1 s @ 30 fps; lengthened from 15 (task-14 round 4, "smoother transitions")
 FPS = 30
 CANVAS_W, CANVAS_H = 1920, 1080
-EXPECTED_TOTAL = sum(n for _, n in ACT_SPECS) - (len(ACT_SPECS) - 1) * N_CROSS  # 900
+EXPECTED_TOTAL = sum(n for _, n in ACT_SPECS) - (len(ACT_SPECS) - 1) * N_CROSS  # 840
 
 
 def _list_frames(act_dir: Path, act_name: str, expected: int) -> list:
@@ -355,11 +360,8 @@ ik_explainer/
   frames/                per-act PNG sequences (f%05d.png, 1920x1080),
                          independently re-renderable without repaying a GPU pass
     act1_views/          {n1} frames -- on-screen title "2D Keypoint tracking":
-                         seven camera views, 2D keypoints fade in; closing
-                         60-frame beat crossfades the raw detector 2D into
-                         the reprojection of the triangulated 3D across all
-                         seven panels (resolves the near-edge-on cameras'
-                         leg-assignment jitter)
+                         seven camera views, 2D keypoints fade in and hold
+                         as the full raw-detector overlay to the end
     act2_triangulate/    {n2} frames -- on-screen title "3D triangulation":
                          views converge into the 3D keypoint cloud
     act3_align/          {n3} frames -- on-screen title "Root alignment":

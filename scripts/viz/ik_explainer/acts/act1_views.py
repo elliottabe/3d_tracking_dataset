@@ -1,77 +1,54 @@
 #!/usr/bin/env python3
-"""Act 1 -- seven camera views, 2D keypoints fading in, closing on a
-raw-vs-reprojected crossfade.
+"""Act 1 -- seven camera views, 2D keypoints fading in, held on the full
+raw-detector overlay to the end.
 
 4x2 grid (7 fly-centred camera panels + 1 title/legend cell) at 1920x1080,
-210 output frames (7 s @ 30 fps). Source video frame for output frame `f` is
+150 output frames (5 s @ 30 fps). Source video frame for output frame `f` is
 `WINDOW_START + int(f * WINDOW_LEN / N_OUT)`, i.e. a CONTIGUOUS sub-range of
 the clip's 921 frames (`WINDOW_START..WINDOW_START+WINDOW_LEN-1`), not the
 whole clip -- see `WINDOW_START`/`WINDOW_LEN` below for why this window and
 not another, and the speed-label derivation.
 
-TASK-29 (user: shorten the whole explainer to ~30 s total; Act 1's budget
-drops 330 -> 210 frames): the user asked to "cut some of the end of act 1"
-while explicitly keeping the reprojection reveal (the raw-2D ->
-reprojected-3D crossfade, TASK-20). The 120 cut frames come entirely out of
-the long static raw-overlay hold (was 144 frames, 126-269; now 54 frames,
-96-149) -- the closing reveal (below) is UNCHANGED IN LENGTH, still 60
-frames. `WINDOW_START`/`WINDOW_LEN` (the source-frame span) are untouched,
-so the same real footage is shown, just compressed into fewer output frames
-(see the speed-label derivation below for the consequence of that).
+TASK-30 (user: remove Act 1's reprojection reveal): the user no longer wants
+the closing raw-2D -> reprojected-3D crossfade added in TASK-20 (and kept,
+unchanged in length, through TASK-29's shortening pass). It is deleted
+outright -- the beat itself (frames 150-209), its caption
+("reprojected 3D: one estimate, 7 views"), and the `04_kp3d_filt.npz` ->
+`clip_io.project` reprojection code path that fed it (the `04_kp3d_filt.npz`
+LOAD used by the reveal is gone; the file is unrelated to anything else in
+this module -- the crop-centring window scan mentioned in `WINDOW_START`'s
+comment below was a one-off, uncommitted script, not code that lives here).
+`N_OUT` drops 210 -> 150: since the pre-reveal content already ran exactly
+0-149 (unchanged by TASK-29), removing the reveal beat and truncating to
+150 frames requires no rescaling of `FADE_START`/`FADE_END` -- the three
+remaining phases (video-only / fade-in / raw-overlay hold) keep their
+existing frame numbers, and the raw-overlay hold now runs to the act's new
+last frame instead of handing off to the reveal. `WINDOW_START`/`WINDOW_LEN`
+(the source-frame span) are untouched, so the same real footage is shown,
+just over fewer output frames (see the speed-label derivation below for the
+consequence of that).
 
-Timeline (rescaled from the 330-frame version by cutting the raw-overlay
-hold only):
+Timeline:
   f   0- 35  video only, panels labelled camera name + true elevation.
   f  36- 95  2D keypoints fade in, alpha = (f-36)/60; low-confidence markers
              are drawn dimmer (`draw.draw_keypoints(..., conf=...)` shrinks
              their radius itself).
-  f  96-149  full raw-detector overlay, video advancing -- this is the
-             stretch TASK-29 shrank (was 126-269/144 frames; now 96-149/54
-             frames).
-  f 150-209  TASK-20 closing beat, length UNCHANGED by TASK-29 (still 60
-             frames): raw detector 2D crossfades into the reprojection of the
-             ALREADY-TRIANGULATED 3D (`04_kp3d_filt.npz`, projected back
-             through each camera's own DLT -- no re-triangulation here),
-             across all seven panels at once. Hold on raw 150-159,
-             `_smoothstep`-eased crossfade 160-199 (40 frames), hold on
-             reprojected 200-209. `Cam2012857`/`Cam2012861` (elev -0.6/+0.6
-             deg) are viewed edge-on, where the six leg chains project nearly
-             on top of each other and the raw detector visibly flips
-             assignments frame to frame; triangulation shares information
-             across all 7 views so the SAME 3D point reprojects consistently
-             even into the bad view. A one-line caption appears only for
-             f 150-209 explaining the switch (the on-screen text is otherwise
-             stripped to title/legend/fps per task-19 -- see
-             `_build_title_panel`).
+  f  96-149  full raw-detector overlay, video advancing, held to the act's
+             last frame (no reveal, no crossfade, no caption).
 
 EXPECTATION if this is right: f=0 shows raw video with no markers anywhere;
 f=66 (fade midpoint) shows markers at ~50% opacity on all 7 panels; f=120
 shows markers ON the fly (not off to one side) in every panel, including the
 wall-adjacent Cam2012857 where the leg keypoints are genuinely the messiest --
 that messiness is real per-view failure, not a bug, and is the setup for why
-Act 2 needs seven cameras.
-FALSIFICATION: markers visible at f=0 (fade math inverted), or markers
-sitting off the fly in some panel (crop centre wrong for that camera / smoothing
-lost track of the centroid).
-
-EXPECTATION for the closing beat: f=160 (crossfade not yet started) looks
-identical to f=149 -- same jittery raw markers, same tangle on `Cam2012861`.
-By f=209 (fully reprojected, the act's last frame) every panel's markers sit
-at the SAME rough location as the raw ones (this act's TASK-20 measurement --
-raw<->reprojected offset is a few px, denoising rather than overriding) but
-are visibly steadier; `Cam2012861`'s edge-on leg tangle should visibly
-resolve into separated leg chains, while the well-conditioned cameras (e.g.
-the near-vertical `Cam2012630`) barely move, because they were already
-tracking well. (TASK-29 note: the crossfade region now samples a wider
-source-frame span than before -- same 60 output frames, but a coarser
-output/source ratio -- so exact per-camera jitter numbers from the original
-330-frame cadence are not assumed to carry over unchanged; the qualitative
-behaviour above is what TASK-29's own render was checked against.)
-FALSIFICATION: markers snapping instantly at f=160 (crossfade not eased), or
-the reprojected markers landing far from the raw ones in any panel (would
-mean a keypoint-order or camera-order mismatch between `02_kp2d.npz` and
-`04_kp3d_filt.npz`/the DLTs -- exactly the class of bug CLAUDE.md warns is
-invisible to numeric QC alone).
+Act 2 needs seven cameras. The act's LAST frame (f=149) should look like any
+other frame in the 96-149 hold -- raw jittery overlay, no crossfade, no
+on-screen caption -- since the reveal that used to occupy 150-209 no longer
+exists.
+FALSIFICATION: markers visible at f=0 (fade math inverted), markers sitting
+off the fly in some panel (crop centre wrong for that camera / smoothing
+lost track of the centroid), or any crossfade/caption/reprojected overlay
+visible anywhere in the act (the reveal must be gone, not merely hidden).
 
 Colours: per-keypoint, JARVIS per-limb-chain scheme
 (`kp_colors.jarvis_kp_colors`) -- never invented here.
@@ -110,8 +87,9 @@ from scripts.viz.ik_explainer.kp_colors import (     # noqa: E402
 )
 
 # --- layout ------------------------------------------------------------
-N_OUT = 210   # TASK-29: was 330 -- cut from the raw-overlay hold only, see
-              # module docstring's TASK-29 section.
+N_OUT = 150   # TASK-30: was 210 -- the 60-frame reprojection reveal
+              # (150-209) is deleted outright, not shortened; see module
+              # docstring's TASK-30 section.
 
 # --- Change 4 (task-14): a contiguous sub-range of the clip, not the whole
 # 921 frames -- keeps the slow-motion factor (real-world seconds per output
@@ -148,71 +126,22 @@ SMOOTH_SIGMA = 12.0                  # frames (~15 ms @ 800 fps): removes
                                       # without lagging real fly motion
 
 # --- timeline ------------------------------------------------------------
-# TASK-29 (was FADE_START, FADE_END = 54, 126 @ 330 frames): rescaled to
-# the suggested new (0-35 video only / 36-95 keypoints fade in / 96-149 raw
-# overlay) timeline -- the fade-in itself shortens slightly (72 -> 60
-# frames) as part of the overall 330 -> 210 compression, per the module
-# docstring's TASK-29 section; the raw-overlay hold that follows absorbs
-# the rest of the cut.
+# Unchanged by TASK-30 (the reveal it fed into is deleted, not this split):
+# 0-35 video only / 36-95 keypoints fade in / 96-149 raw overlay, held to
+# the act's new last frame.
 FADE_START, FADE_END = 36, 96        # alpha ramps over frames [36, 96)
 PX_PER_MM = 80.7
-
-# --- TASK-20 closing beat: raw 2D -> reprojected-3D crossfade -----------
-# f 150-159 hold raw, 160-199 crossfade (smoothstep-eased), 200-209 hold
-# reprojected. 60 frames total (210-150), UNCHANGED by TASK-29 (the user
-# explicitly asked to keep this reveal roughly this long while cutting time
-# from the raw-overlay hold instead) -- same internal 10/40/10 split as the
-# pre-TASK-29 330-frame version, just renumbered onto the new, shorter act.
-REPRO_BEAT_START = 150
-REPRO_FADE_START = 160
-REPRO_FADE_END = 200
-assert N_OUT - REPRO_BEAT_START == 60
-assert REPRO_BEAT_START <= REPRO_FADE_START < REPRO_FADE_END <= N_OUT
-
-CAPTION_BEAT_TEXT = "reprojected 3D: one estimate, 7 views"
-CAPTION_BEAT_XY = (48, 480)          # clear of the legend (ends ~y=440) and
-                                      # the frame counter (drawn at y=516)
-
-
-def _smoothstep(p):
-    p = np.clip(p, 0.0, 1.0)
-    return 3 * p ** 2 - 2 * p ** 3
-
-
-def _repro_alpha(f: int) -> float:
-    """Crossfade weight for the reprojected-3D overlay: 0 (raw only) before
-    `REPRO_FADE_START`, smoothstep-eased through `REPRO_FADE_END`, 1
-    (reprojected only) after."""
-    if f < REPRO_FADE_START:
-        return 0.0
-    if f >= REPRO_FADE_END:
-        return 1.0
-    return float(_smoothstep((f - REPRO_FADE_START)
-                              / float(REPRO_FADE_END - REPRO_FADE_START)))
 
 
 def _draw_raw_overlay(panel_native, uv_raw, conf_raw, x0, kp_names, kp_colors,
                        alpha):
     """Draw the raw detector 2D (leg chains + points, `conf`-shrunk) on a
-    COPY of `panel_native` -- same call shape as the pre-task-20 overlay."""
+    COPY of `panel_native`."""
     uv = np.asarray(uv_raw).copy()
     uv[:, 0] -= x0
     out = draw.draw_leg_chains(panel_native, uv, kp_names, alpha=alpha,
                                 thickness=1, kp_colors=kp_colors)
     out = draw.draw_keypoints(out, uv, kp_names, conf=conf_raw, alpha=alpha,
-                               radius=4, kp_colors=kp_colors)
-    return out
-
-
-def _draw_repro_overlay(panel_native, uv_repro_cam, x0, kp_names, kp_colors):
-    """Draw the reprojected-3D 2D (SAME draw calls/colours/style as raw) on a
-    COPY of `panel_native`. No `conf` -- a reprojection has no per-view
-    detector confidence, so every marker draws at full strength."""
-    uv = np.asarray(uv_repro_cam).copy()
-    uv[:, 0] -= x0
-    out = draw.draw_leg_chains(panel_native, uv, kp_names, alpha=1.0,
-                                thickness=1, kp_colors=kp_colors)
-    out = draw.draw_keypoints(out, uv, kp_names, conf=None, alpha=1.0,
                                radius=4, kp_colors=kp_colors)
     return out
 
@@ -350,30 +279,6 @@ def render_act1(clip: str = clip_io.CLIP_DEFAULT) -> Path:
             f"WINDOW_START+WINDOW_LEN ({WINDOW_START + WINDOW_LEN}) exceeds "
             f"the clip's {N} frames")
 
-    # TASK-20: the already-triangulated 3D, reprojected back through each
-    # camera's own DLT -- NOT re-derived/re-triangulated here. Both
-    # `02_kp2d.npz` and `04_kp3d_filt.npz` are MODEL order (clip_io.py's
-    # module docstring); asserted equal below rather than assumed, since
-    # mixing DETECTOR/MODEL order is exactly the class of bug CLAUDE.md
-    # records as invisible to numeric QC alone.
-    kp3d_z = np.load(d["predictions"] / "04_kp3d_filt.npz", allow_pickle=True)
-    k3 = kp3d_z["kp3d"]                                # (N,K,3) mm, MODEL order
-    kp3d_names = [str(n) for n in kp3d_z["kp_names"]]
-    if kp3d_names != kp_names:
-        raise ValueError(
-            "04_kp3d_filt.npz kp_names != 02_kp2d.npz kp_names -- keypoint "
-            "order mismatch between the raw-2D and reprojected-3D sources")
-    cam_mats, dlt_names = clip_io.load_dlt(str(Path(clip) / "calibration"))
-    if list(dlt_names) != cam_names:
-        raise ValueError(
-            f"DLT camera order {list(dlt_names)} != 02_kp2d.npz cam_names "
-            f"{cam_names} -- camera axes would disagree between the raw-2D "
-            "and reprojected-3D overlays")
-    if k3.shape[0] < WINDOW_START + WINDOW_LEN:
-        raise ValueError(
-            f"04_kp3d_filt.npz has only {k3.shape[0]} frames, need at least "
-            f"{WINDOW_START + WINDOW_LEN} for this window")
-
     src_frame_w = 1936
     # Change 4 (task-14): a CONTIGUOUS sub-range of the clip
     # (WINDOW_START..WINDOW_START+WINDOW_LEN-1), not the whole 921 frames --
@@ -382,11 +287,6 @@ def render_act1(clip: str = clip_io.CLIP_DEFAULT) -> Path:
         [WINDOW_START + int(f * WINDOW_LEN / N_OUT) for f in range(N_OUT)],
         np.int64)
     assert np.all(np.diff(t_for_f) > 0), "expected a strictly increasing map"
-
-    # Reprojections are only ever drawn for the closing beat (f >=
-    # REPRO_BEAT_START); precompute just that range, keyed by output frame.
-    uv_repro = {int(f): clip_io.project(cam_mats, k3[int(t_for_f[f])])
-                for f in range(REPRO_BEAT_START, N_OUT)}
 
     x0_by_cam = {cam: _smoothed_crop_x0(kp2d[:, ci], src_frame_w)
                  for ci, cam in enumerate(cam_names)}
@@ -413,23 +313,10 @@ def render_act1(clip: str = clip_io.CLIP_DEFAULT) -> Path:
             x0 = x0_by_cam[cam][t]
 
             panel_native = crops[cam][f]                # (FRAME_H, CROP_W, 3)
-            if f < REPRO_BEAT_START:
-                if kp_alpha > 0.0:
-                    panel_native = _draw_raw_overlay(
-                        panel_native, kp2d[t, ci], conf[t, ci], x0, kp_names,
-                        kp_colors, kp_alpha)
-            else:
-                # TASK-20 closing beat: crossfade raw 2D -> reprojected 3D
-                # (kp_alpha is already 1.0 here -- FADE_END=126 << 270 -- but
-                # keep the same guard for consistency with the pre-270 path).
-                panel_raw = panel_native
-                if kp_alpha > 0.0:
-                    panel_raw = _draw_raw_overlay(
-                        panel_native, kp2d[t, ci], conf[t, ci], x0, kp_names,
-                        kp_colors, kp_alpha)
-                panel_repro = _draw_repro_overlay(
-                    panel_native, uv_repro[f][ci], x0, kp_names, kp_colors)
-                panel_native = draw.fade(panel_raw, panel_repro, _repro_alpha(f))
+            if kp_alpha > 0.0:
+                panel_native = _draw_raw_overlay(
+                    panel_native, kp2d[t, ci], conf[t, ci], x0, kp_names,
+                    kp_colors, kp_alpha)
             panel_native = draw.scale_bar_mm(
                 panel_native, px_per_mm=PX_PER_MM, mm=1.0,
                 origin=(10, panel_native.shape[0] - 14))
@@ -445,15 +332,7 @@ def render_act1(clip: str = clip_io.CLIP_DEFAULT) -> Path:
 
         trow, tcol = divmod(TITLE_CELL, GRID_COLS)
         tx, ty = tcol * CELL_W, trow * CELL_H
-        frame_title_panel = title_panel
-        if f >= REPRO_BEAT_START:
-            # One caption line, ONLY for the closing beat (task-20; flagged
-            # to the user as an exception to task-19's strip-down of Act 1's
-            # on-screen text to title/legend/fps).
-            frame_title_panel = draw.label(
-                title_panel, CAPTION_BEAT_TEXT, CAPTION_BEAT_XY,
-                scale=draw.CAPTION_SCALE)
-        canvas[ty:ty + CELL_H, tx:tx + CELL_W] = frame_title_panel
+        canvas[ty:ty + CELL_H, tx:tx + CELL_W] = title_panel
         canvas = draw.label(canvas, f"frame {f + 1}/{N_OUT}  (src {t}/{N})",
                              (tx + 48, ty + CELL_H - 24), scale=draw.SMALL_SCALE,
                              color=(150, 150, 150))

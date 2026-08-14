@@ -103,7 +103,7 @@ def test_render_op_crossfade_matches_draw_fade(tmp_path):
     assert np.array_equal(out, expected)
 
 
-def test_real_act_specs_total_matches_expected_900():
+def test_real_act_specs_total_matches_expected_840():
     """Locks the exact arithmetic the brief specifies for the shipped acts
     (task-14: Act 1 shortened 450 -> 270 frames; a later round lengthened
     crossfades 15 -> 30 frames for smoother transitions; total 2205 -> 2025
@@ -124,9 +124,12 @@ def test_real_act_specs_total_matches_expected_900():
     the same length), Act 2 300 -> 150 (all four phases scaled
     proportionally), Act 3 unchanged at 90, Act 4 780 -> 540 (task-27's
     120-frame solve phase unchanged; only the 660-frame playback shrinks to
-    420); total 1410 -> 900)."""
-    assert assemble.EXPECTED_TOTAL == 900
-    assert sum(n for _, n in assemble.ACT_SPECS) == 990
+    420); total 1410 -> 900. task-30: removed Act 1's reprojection reveal
+    entirely (the user no longer wants it) -- the closing 60-frame crossfade
+    (frames 150-209) and its caption are deleted, not shortened; Act 1
+    210 -> 150 frames; total 900 -> 840)."""
+    assert assemble.EXPECTED_TOTAL == 840
+    assert sum(n for _, n in assemble.ACT_SPECS) == 930
     assert assemble.N_CROSS == 30
 
 
