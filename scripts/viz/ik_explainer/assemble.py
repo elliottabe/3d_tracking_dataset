@@ -6,13 +6,18 @@ Concatenates `frames/act{1..4}_*/f%05d.png` in story order with 30-frame
 H.264 (silent) via `viz.core.io.write_video` (imageio + ffmpeg, the repo's
 shared encoder), then writes `README.md` and `manifest.json` beside it.
 
-EXPECTED TOTAL FRAMES: 270 + 300 + 600 + 900 - 3*30 = 1980 (66.0 s @ 30 fps).
+EXPECTED TOTAL FRAMES: 270 + 300 + 180 + 900 - 3*30 = 1560 (52.0 s @ 30 fps).
 (Task-14 shortened Act 1 from 450 to 270 frames -- 15s to 9s -- and
 re-sourced it from a contiguous ~40% sub-range of the clip rather than the
 whole 921 frames; see `act1_views.py`'s module docstring. A later task-14
 round lengthened the crossfades themselves from 15 to 30 frames per the
-user's "smoother transitions" request -- see `N_CROSS` below.) This is
-asserted TWICE: once per-act (`_list_frames` requires each act directory to
+user's "smoother transitions" request -- see `N_CROSS` below. Task-15
+shortened Act 3 from 600 to 360 frames -- 20s to 12s -- and dropped its
+rest-pose fade-in phase; a direct mid-task user follow-up ("the scaling
+doesn't look good... just have it do the root alignment... and can we have
+it shorter") then retired the merged scale+align design and shortened Act 3
+again, 360 -> 180 frames (12s -> 6s); see `act3_align.py`'s module
+docstring's TASK-15 PIVOT section.) This is asserted TWICE: once per-act (`_list_frames` requires each act directory to
 hold EXACTLY its expected count -- neither short nor padded with extras),
 and once on the assembled edit plan before any frame is written to ffmpeg.
 Act 4 previously died mid-render at 700/900 and had to be resumed; this
@@ -56,7 +61,7 @@ from viz.core.io import write_video                  # noqa: E402
 ACT_SPECS = [
     ("act1_views", 270),
     ("act2_triangulate", 300),
-    ("act3_align", 600),
+    ("act3_align", 180),
     ("act4_solve", 900),
 ]
 N_CROSS = 30   # 1 s @ 30 fps; lengthened from 15 (task-14 round 4, "smoother transitions")
@@ -332,7 +337,10 @@ ik_explainer/
                          independently re-renderable without repaying a GPU pass
     act1_views/          {n1} frames -- seven camera views, 2D keypoints fade in
     act2_triangulate/    {n2} frames -- views converge into the 3D keypoint cloud
-    act3_align/          {n3} frames -- mesh appears, scales, translates onto the cloud
+    act3_align/          {n3} frames -- already-scaled keypoint skeleton,
+                         staged centred on the model, translates in place
+                         (root_optimization) onto the solver's true fitted
+                         position
     act4_solve/          {n4} frames -- joints solve (+ orientation), then playback
   ik_explainer.mp4       the deliverable: {total} frames, 1920x1080 @ 30 fps,
                          H.264, silent (assembled by scripts/viz/ik_explainer/assemble.py)
