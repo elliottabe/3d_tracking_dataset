@@ -318,6 +318,11 @@ def render_act1(clip: str = clip_io.CLIP_DEFAULT) -> Path:
 
     elev_deg = _elevations_deg(cam_names, clip)
     kp_colors = jarvis_kp_colors(kp_names)
+    # DISPLAY ONLY (task-28): "Camera N" panel labels, numbered off the same
+    # sorted-by-serial order as `cam_names` -- every lookup below (kp2d/kp3d
+    # indexing, DLT/camera matrices) keeps using the real Cam20128xx names in
+    # `cam_names`; `disp_name` is never used for indexing.
+    disp_name = clip_io.display_names(cam_names)
 
     if WINDOW_START + WINDOW_LEN > N:
         raise ValueError(
@@ -412,7 +417,7 @@ def render_act1(clip: str = clip_io.CLIP_DEFAULT) -> Path:
 
             py, px = celly + MARGIN + LABEL_H, cellx + MARGIN
             canvas[py:py + PANEL_H, px:px + PANEL_W] = panel
-            label_text = f"{cam}  elev {elev_deg[ci]:+.1f} deg"
+            label_text = f"{disp_name[cam]}  elev {elev_deg[ci]:+.1f} deg"
             canvas = draw.label(canvas, label_text,
                                  (cellx + MARGIN, celly + MARGIN + 20),
                                  scale=draw.SMALL_SCALE)

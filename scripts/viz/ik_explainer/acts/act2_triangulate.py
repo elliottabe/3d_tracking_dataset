@@ -579,6 +579,10 @@ def render_act2(clip: str = clip_io.CLIP_DEFAULT) -> Path:
     cam_mats, names, view_dirs = _load_rig(clip)
     assert list(names) == cam_names, (
         f"load_dlt order {names} != 02_kp2d.npz cam_names {cam_names}")
+    # DISPLAY ONLY (task-28): "Camera N" panel labels; `names`/`cam_names`
+    # (the real Cam20128xx strings) remain what every DLT/kp2d/kp3d lookup
+    # below uses -- `disp_name` is only read when drawing the on-screen text.
+    disp_name = clip_io.display_names(names)
     # Confirms the brief's "perpendicular to the arena's long axis" claim in
     # THIS clip's own data, not assumed from the spec table.
     from jarvis_jax.tracking.affine_camera import factor_affine
@@ -701,7 +705,7 @@ def render_act2(clip: str = clip_io.CLIP_DEFAULT) -> Path:
                     cx_ = float(corners_uv[:, 0].mean())
                     top_v = float(corners_uv[:, 1].min())
                     ci = names.index(cam)
-                    text = f"{cam} {elev_deg[ci]:+.1f} deg"
+                    text = f"{disp_name[cam]} {elev_deg[ci]:+.1f} deg"
                     (tw, th), _ = cv2.getTextSize(
                         text, cv2.FONT_HERSHEY_SIMPLEX, draw.SMALL_SCALE, 1)
                     canvas = draw.label(canvas, text,

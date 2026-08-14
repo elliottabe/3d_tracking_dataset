@@ -174,6 +174,26 @@ def video_path(clip: str, cam_name: str, *, enhanced: bool = True) -> str:
     return hits[0]
 
 
+def display_names(cam_names) -> dict:
+    """Real camera name -> presentation-only "Camera N" label.
+
+    DISPLAY ONLY -- never use the returned strings for indexing/lookup.
+    `expected_cameras=`, DLT/`load_dlt` lookups, and every other data path
+    must keep using the real `Cam20128xx` name; this dict exists purely so
+    on-screen labels can say "Camera 1" instead of a serial number (see
+    CLAUDE.md/task-28: name-based lookup is what keeps the mask camera axis
+    and the calibration axis from silently diverging).
+
+    N is the 1-based position in `sorted(cam_names)` -- the SAME
+    sorted-by-serial order `load_dlt`'s `sorted(glob(...))` produces, so the
+    numbering matches what a viewer reads left-to-right, top-to-bottom in
+    Act 1's grid (panel order there is exactly `02_kp2d.npz`'s `cam_names`,
+    itself asserted equal to `load_dlt`'s order at render time).
+    """
+    order = sorted(set(str(c) for c in cam_names))
+    return {name: f"Camera {i + 1}" for i, name in enumerate(order)}
+
+
 def n_video_frames(path: str) -> int:
     cap = cv2.VideoCapture(path)
     n = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
