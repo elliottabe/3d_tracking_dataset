@@ -386,6 +386,26 @@ def _add_sphere(scene, pos, rgba, size):
     scene.ngeom += 1
 
 
+def _add_bone(scene, p_from, p_to, rgba, radius):
+    """Thin capsule connector between two 3D points -- a skeleton "bone" --
+    via `mjv_connector` (task-14 round 3, Act 3's skeleton redesign).
+    `mjv_initGeom` must run first to set colour/other geom properties;
+    `mjv_connector` then overwrites (type, size, pos, mat) to place a
+    CAPSULE-type connector spanning `p_from`->`p_to` with the given radius."""
+    if scene.ngeom >= scene.maxgeom:
+        return
+    g = scene.geoms[scene.ngeom]
+    mujoco.mjv_initGeom(
+        g, mujoco.mjtGeom.mjGEOM_CAPSULE, np.zeros(3), np.zeros(3),
+        np.eye(3).flatten(), np.asarray(rgba, dtype=np.float32),
+    )
+    mujoco.mjv_connector(
+        g, mujoco.mjtGeom.mjGEOM_CAPSULE, float(radius),
+        np.asarray(p_from, dtype=np.float64), np.asarray(p_to, dtype=np.float64),
+    )
+    scene.ngeom += 1
+
+
 def _bgr255_to_rgb01(bgr):
     """viz/core/colors.py's PALETTE is BGR/0-255 (cv2 convention); mjv_initGeom
     wants RGB/0-1. Derive rather than restate so the two cannot diverge."""

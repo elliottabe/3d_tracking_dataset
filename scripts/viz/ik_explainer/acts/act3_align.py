@@ -43,45 +43,62 @@ below follows this real geometry: cloud shrinks toward the mesh first
 (rescale), then the mesh translates the rest of the way to meet it
 (root_optimization).
 
-CAMERA: reuses the lookat/spread/distance construction from
-`stage_ik.py:qc_stages`'s wide diagnostic camera (never the model's `hero`
-camera, which frames the mesh only and loses the far-away raw cloud
-entirely), with one deliberate change from a first cut of this act (task-11
-review, "Important 1"): `cam.distance` is now FIXED for the whole act rather
-than re-derived from the live cloud every frame. The live-spread version
-zoomed the camera in exactly as fast as the (correctly, per point 1 above)
-shrinking cloud, so the cloud's on-screen footprint never visibly changed
-(measured ~26% of frame at f=120, f=210, AND f=299) while the never-resized
-mesh appeared to grow ~8x on screen -- i.e. the rendered act read as "the
-mesh grows to meet the cloud", exactly backwards, and contradicting this
-act's own on-screen caption. `cam_spread` is now computed ONCE, before the
-render loop, as the worst case over a dry pass through every output frame's
-true geometry (`render_act3`'s `cam_spread` pass) -- so the camera still
-keeps both the mesh and the (still 8x-oversized at f=0) cloud comfortably in
-frame at every stage (the wide camera's original purpose), but the mesh's
-on-screen size now stays genuinely constant and the cloud's real shrink is
-what becomes visible. `lookat` is still recomputed every frame (mesh_ctr and
-the cloud both move over the act) so both stay centred; azimuth/elevation
-are FIXED (not orbiting) -- a moving viewer azimuth would risk being
-misread, frame-to-frame, as the mesh itself rotating, which is exactly what
-this act must not depict. The mesh's own qpos quaternion is bit-identical
-at every frame in this act (asserted at runtime, see `render_act3`).
-Keypoint sphere radius is scaled with the cloud's own LIVE extent (not the
-fixed camera distance, and not a fixed absolute size) purely so markers stay
-legible whether the cloud is wide (f=0/120, raw, ~13 mm from the mesh) or
-tight (f=599, cloud+mesh co-located) -- this changes how big we DRAW
-markers, never the mesh geometry.
+CAMERA (task-14 round 3 -- ACT 3'S CAMERA IS NOW COMPLETELY FIXED, no zoom,
+no dolly, no orbit): two earlier cuts of this act both routed the story
+through a MOVING camera -- first a fully live-distance camera that
+CANCELLED the cloud's own shrink (task-11), then a frozen-distance camera
+with an added animated dolly-in (task-14 round 2) that fixed the framing but
+cropped keypoints and read as distracting camera motion. Both attempts hit
+the same lesson twice: a moving camera in this act keeps fighting the thing
+the act is supposed to show. This cut retires camera motion entirely.
 
-CHANGE 3 (task-14): the task-11 fix above froze `cam.distance` entirely,
-which left the act's final mesh+cloud pair filling only a small part of the
-frame. `_wide_camera` gained a separate `zoom` multiplier
-(`cam.distance = cam_spread * 2.6 / zoom(f)`, see `_zoom_factor`) that
-dollies the camera IN over the whole act, deliberately SLOWER than the
-cloud's own 120-299 world shrink so the shrink stays visible -- see
-`ZOOM_Z_END`'s docstring comment for the numeric derivation and the acceptance
-prints (`f=120/210/299/539`) this loop emits. This is layered UNDER the task-11
-fix, not a reversion of it: `cam_spread` (the worst-case, f=0-safe distance)
-is untouched; `zoom` is a new, separate per-frame multiplier on top of it.
+`ACT3_CAM_DISTANCE`/`ACT3_CAM_AZIMUTH`/`ACT3_CAM_ELEV` are TRUE CONSTANTS,
+set once and never touched inside the render loop -- no per-frame
+`cam.distance` or `cam.azimuth` derivation of any kind. (These are Act
+3-LOCAL constants, distinct from the module's `AZ_START`/`ELEV`, which Act 4
+imports for ITS OWN, unrelated live-distance camera -- changing Act 3's
+fixed framing must not perturb Act 4's already-correct one.) `cam.lookat` is
+the one quantity that still updates every frame, set to the mesh's own
+`mesh_ctr` (forward-kinematics, cheap) -- this is NOT zoom/dolly/orbit (none
+of `distance`/`azimuth`/`elevation` change), it is the minimum "frame it on
+the body model" requires given a real, measured fact: `root_optimization`
+translates the mesh by ~1.69 model-units (`qpos_root[:3] - qpos_default[:3]`)
+-- about 5.8x the model's own body length -- so ANY single fixed lookat
+point would either clip the mesh out of frame for most of the act, or force
+the camera wide enough that the mesh reads far too small. Tracking
+`mesh_ctr` keeps the mesh centred and the SAME apparent size at every frame
+(size depends only on `cam.distance`, which never changes) while still
+showing the real translation as the mesh visibly slides across the ROOT
+phase. `ACT3_CAM_DISTANCE=1.0` was tuned against a REAL rendered-pixel
+measurement (not an analytic FOV estimate -- see Change 3's history above):
+near-white/low-saturation pixel count (`mx>60 & (mx-mn)<40`, excluding the
+top-270px caption band) measures ~64,000 px at this distance, matching Act
+4's own ~54,000-73,000 px framing.
+
+Keypoint SKELETON, not a loose cloud (task-14 round 3): keypoints are now
+connected by thin capsule "bones" (`stage_ik._add_bone`, MuJoCo's
+`mjv_connector`) using `data/fly50.json`'s `edges` (44 index pairs, mapped
+onto THIS array's own keypoint order by NAME --
+`kp_colors.jarvis_skeleton_edges`), coloured per JARVIS's own bone-colour
+convention (`colors[line[1]]`, the STOP node's colour -- verified against
+all six of JARVIS's own skeleton-drawing call sites). Both marker and bone
+radius scale with the cloud's own current linear scale factor (`factor`,
+1.0 raw -> `shared_scale` 0.1261), so the incoming skeleton is drawn
+genuinely OVERSIZED while raw and shrinks to its final, proportionate size
+together with the cloud's own real shrink -- not a separately-invented
+animation.
+
+The oversized, raw-scale skeleton at f=0 sits ~13 model-units from the
+fixed camera's lookat (the real triangulated position -- see the
+WORLD-COORDINATE STORY below) -- mostly off-canvas, by design (the user
+confirmed this is fine), but verified to sit IN FRONT of the camera, not
+behind it: `ACT3_CAM_AZIMUTH=40`/`ACT3_CAM_ELEV=-20` were chosen (over the
+shared module's `AZ_START=120`) specifically so the real raw-cloud direction
+has a strongly positive dot product with the camera's forward vector
+(~0.77, checked by hand against this clip's real numbers before picking this
+angle) -- so the incoming skeleton visibly ENTERS from a screen corner as it
+shrinks into place over the SCALE phase, rather than materialising from
+directly behind the viewer.
 
 Keypoint colours (Change 2, task-14): each limb chain gets its own colour
 from the JARVIS scheme (`kp_colors.jarvis_kp_colors_rgb01`, ported by calling
@@ -94,26 +111,31 @@ Wing visibility (Change 1, task-14): `set_mesh_rgba`/`capture_geom_alpha`
 act performs -- see their docstrings for why a blanket alpha assignment used
 to turn them into opaque white rectangles.
 
-Timeline (600 frames, 30 fps):
-  f   0-119  mesh fades in at qpos_default (alpha ramp), cloud already fully
-             visible at its RAW (unscaled) position/size -- both in frame,
-             mesh visibly offset from the cloud, cloud the wrong SIZE for it.
-  f 120-299  cloud shrinks from raw scale (factor 1.0) to `shared_scale`
+Timeline (600 frames, 30 fps) -- UNCHANGED from the original design (only
+the camera and keypoint DRAWING changed, never the stage boundaries):
+  f   0-119  mesh fades in at qpos_default (alpha ramp), skeleton already
+             fully visible at its RAW (unscaled) position/size -- mostly
+             off-canvas (see CAMERA above), entering from a corner.
+  f 120-299  skeleton shrinks from raw scale (factor 1.0) to `shared_scale`
              (0.1261) about the world origin -- an exact `kp3d * factor`
              lerp of the interpolation factor, since scaling is linear; the
-             scale factor is burned in on screen. Mesh does not move.
+             scale factor is burned in on screen. Mesh does not move. With a
+             FIXED camera, the skeleton's on-screen size now tracks its
+             world-space shrink directly -- no compensating zoom to fight.
   f 300-539  qpos interpolates qpos_default -> qpos_root (`_slerp_qpos`):
-             translation only. Cloud stays at shared_scale (fixed). Residual
-             ticks down 1.710 -> 0.118 mm.
-  f 540-599  hold: mesh and cloud co-located, residual 0.118 mm.
+             translation only. Skeleton stays at shared_scale (fixed).
+             Residual ticks down 1.710 -> 0.118 mm.
+  f 540-599  hold: mesh and skeleton co-located, residual 0.118 mm.
 
-EXPECTATION: f=0 mesh+cloud both visible, mesh offset from cloud, cloud
-wrong SIZE; f=299 cloud matches model scale, still displaced; f=539 cloud
-and mesh co-located, residual has fallen 13.404 -> 0.118 mm. The mesh does
-NOT change size and does NOT rotate at any point.
-FALSIFICATION: a visibly rotating mesh means the act is animating something
-the solver did not do; a cloud leaving frame means the wrong (hero) camera
-was used.
+EXPECTATION: f=0 skeleton oversized and mostly off-canvas, entering from a
+corner; f=150 skeleton visibly shrinking and moving into frame; f=299
+skeleton matches model scale, still displaced; f=539 skeleton and mesh
+co-located, residual has fallen 13.404 -> 0.118 mm, mesh reads at the same
+on-screen size it always has. The mesh does NOT change size and does NOT
+rotate at any point; the camera does NOT zoom, dolly, or orbit at any point.
+FALSIFICATION: a visibly rotating OR resizing mesh means the act is
+animating something the solver did not do; the skeleton popping into
+existence with no visible approach means the entry direction was wrong.
 
 Colours come from `kp_colors.jarvis_kp_colors_rgb01` (JARVIS per-limb-chain
 scheme) -- never invented here.
@@ -140,9 +162,11 @@ sys.path.insert(0, str(_REPO / "stac-mjx"))
 
 from scripts.viz.ik_explainer import clip_io, draw               # noqa: E402
 from scripts.viz.ik_explainer.stage_ik import (                  # noqa: E402
-    _add_sphere, _tracking_site_map, capture_geom_alpha, set_mesh_rgba,
+    _add_sphere, _add_bone, _tracking_site_map, capture_geom_alpha, set_mesh_rgba,
 )
-from scripts.viz.ik_explainer.kp_colors import jarvis_kp_colors_rgb01  # noqa: E402
+from scripts.viz.ik_explainer.kp_colors import (                 # noqa: E402
+    jarvis_kp_colors_rgb01, jarvis_skeleton_edges,
+)
 from viz.core.colors import PALETTE                                # noqa: E402
 
 # --- canvas / timeline ------------------------------------------------------
@@ -155,17 +179,15 @@ HOLD_START = 540
 
 XML_PATH = _REPO / "models" / "fruitfly_v1" / "fruitfly_v1_free.xml"
 
-# --- viewer (presentation) camera -------------------------------------------
-# Same lookat/distance construction as stage_ik.py:qc_stages's wide
-# diagnostic camera (azimuth/elevation base values match it, 120/-20).
-# Fixed (not orbiting): a moving VIEWER azimuth risks being misread, in a
-# frame-by-frame diff, as the MESH rotating -- exactly the thing this act
-# must not depict (root_optimization does not rotate; see module docstring).
-# lookat still adapts every frame (mesh_ctr and the cloud genuinely move),
-# which is not an orbit, just keeping both centred. `cam.distance` does NOT
-# adapt every frame -- see `cam_spread` in `render_act3` (task-11 review,
-# "Important 1"): it is fixed once for the whole act so the camera cannot
-# zoom in step with the shrinking cloud.
+# --- shared "wide diagnostic camera" building blocks -------------------------
+# `AZ_START`/`ELEV`, `_cloud_mesh_spread`, and `_wide_camera` below are kept
+# for ACT 4 ONLY (imported from there: `_wide_camera_for_aspect` builds on
+# `_wide_camera` with a LIVE per-frame distance, appropriate for Act 4's real
+# 921-frame playback). As of task-14 round 3, Act 3 no longer uses ANY of
+# these -- its own camera is the fully independent, fully fixed
+# `ACT3_CAM_DISTANCE`/`ACT3_CAM_AZIMUTH`/`ACT3_CAM_ELEV` below. Do not repoint
+# Act 3 back at `AZ_START`/`ELEV`/`_wide_camera`: changing THIS block changes
+# Act 4's camera too (see the CAMERA section of the module docstring).
 AZ_START = 120.0
 ELEV = -20.0
 
@@ -174,77 +196,50 @@ ELEV = -20.0
 # fade that starts at literal alpha=0 would make f=0 mesh-invisible.
 MESH_ALPHA_MIN = 0.45
 
-# --- Change 3 (task-14): zoom in over the act, SLOWER than the cloud shrinks -
-# The frozen-distance camera above (task-11 fix) leaves the final mesh+cloud
-# pair occupying only a small part of the frame. `ZOOM_Z_END` is the final
-# distance DIVISOR (`cam.distance = cam_spread*2.6 / zoom(f)`, see
-# `_wide_camera`'s `zoom` arg): the camera dollies in by this factor over the
-# whole act. Tuned (by the analytic screen-fraction formula
-# `frac = radius / (distance * tan(fovy/2))`, `fovy=45` deg for this model)
-# against THIS clip's real numbers -- `cam_spread=8.065 mm` (dry pass, so
-# `cam.distance(f=0) = 20.968 mm`), `shared_scale=0.1261`, `model_extent=
-# 0.647 mm` -- so that:
-#   (a) mesh_screen_frac (mesh radius is CONSTANT -- the mesh never scales --
-#       so this is monotonic in 1/distance by construction) grows across the
-#       whole act, reaching ~0.27 (of canvas height) by f=539, comfortably in
-#       the requested ~0.25-0.40 target band;
-#   (b) cloud_screen_frac still FALLS by >=3x from f=120->299 despite the
-#       zoom fighting it: the cloud's own world shrink there is shared_scale
-#       (~7.93x), and the zoom factor only grows ~1.94x over that same
-#       window (299 zoom / 120 zoom), so shrink beats zoom by a comfortable
-#       margin (measured ~3.1x net fall, not just the bare minimum 3x).
-# A bigger ZOOM_Z_END pushes mesh_screen_frac(539) higher but ALSO grows the
-# 120->299 zoom ratio (the two requirements trade off against each other for
-# ANY single easing curve/endpoint), which is why this value is a solved
-# trade-off, not tuned by eye -- see task-14's report for the full derivation
-# and the two competing constraints it satisfies simultaneously.
-ZOOM_Z_END = 7.5
+# --- Act 3's OWN fixed camera (task-14 round 3) -----------------------------
+# TRUE CONSTANTS -- never read into a per-frame formula, unlike `AZ_START`/
+# `ELEV` above (which Act 4 imports for its own, deliberately LIVE camera).
+# `ACT3_CAM_DISTANCE` was solved against a REAL rendered-pixel measurement
+# (see `_mesh_px` below and the module docstring): at distance=1.0, the
+# mesh's own near-white/low-saturation pixel count is ~64,000 px, inside the
+# requested ~50,000-75,000 px band (matching Act 4's own ~54,000-73,000 px
+# framing). `ACT3_CAM_AZIMUTH`/`ACT3_CAM_ELEV` were chosen (over the shared
+# `AZ_START`/`ELEV`) so the real raw (f=0) keypoint cloud's direction from
+# the lookat has a strongly POSITIVE dot product with the camera's forward
+# vector (~0.77, checked numerically before picking this angle) -- i.e. the
+# oversized incoming skeleton is genuinely IN FRONT of the fixed camera
+# (just mostly outside the frame), not behind it.
+ACT3_CAM_DISTANCE = 1.0
+ACT3_CAM_AZIMUTH = 40.0
+ACT3_CAM_ELEV = -20.0
+
+# Marker/bone radius at the FINAL (shared_scale) size; scaled by (factor /
+# shared_scale) in the render loop so the incoming, raw-scale skeleton is
+# drawn genuinely bigger while it is genuinely bigger, not resized to a
+# constant on-screen marker size independent of the real geometry.
+BASE_MARKER_R_AT_FINAL_SCALE = 0.012   # model units; ~ a leg-segment's width at Act 4's framing
+BONE_RADIUS_FRACTION = 0.4             # bone capsule radius, as a fraction of marker radius
+
+# Real-pixel mesh-size acceptance test (Change-3 round 2/3): near-white,
+# low-saturation pixels, excluding the top-270px caption band -- keypoints
+# are drawn as SATURATED colours so they never count as "mesh" here.
+_CAPTION_BAND_PX = 270
+
+
+def _mesh_px(canvas_bgr) -> int:
+    b = canvas_bgr[..., 0].astype(np.int32)
+    g = canvas_bgr[..., 1].astype(np.int32)
+    r = canvas_bgr[..., 2].astype(np.int32)
+    mx = np.maximum(np.maximum(b, g), r)
+    mn = np.minimum(np.minimum(b, g), r)
+    mesh = (mx > 60) & ((mx - mn) < 40)
+    mesh[:_CAPTION_BAND_PX, :] = False
+    return int(mesh.sum())
 
 
 def _smoothstep(p):
     p = np.clip(p, 0.0, 1.0)
     return 3 * p ** 2 - 2 * p ** 3
-
-
-FOVY_DEG = 45.0   # this model's default vertical FOV (mj_model.vis.global_.fovy);
-                  # a fixed constant here rather than read per-call since it never
-                  # changes and `_screen_fracs` is only used for the Change-3
-                  # acceptance-test print below, not for anything rendered.
-
-
-def _screen_fracs(cloud_pts, model_extent, distance, fovy_deg):
-    """Analytic (pinhole, small-angle) screen-fraction estimate for the
-    Change-3 acceptance test: fraction of the canvas HEIGHT an object of
-    world radius `r` spans at distance `distance` under vertical FOV
-    `fovy_deg` is `r / (distance * tan(fovy_deg/2))` -- same relation
-    `_cloud_mesh_spread`'s `cam.distance = spread * 2.6` construction already
-    relies on, just solved for the fraction instead of the distance.
-
-    `mesh_radius` is `model_extent * 0.5` (the mesh's own CONSTANT visual
-    radius -- it never scales in this act, so mesh_screen_frac is monotonic
-    in 1/distance by construction). `cloud_radius` is the LIVE cloud's own
-    bounding radius about its OWN centroid (not `lookat`-relative, so this
-    number reflects the cloud's real physical size, independent of where the
-    mesh currently sits).
-    """
-    tan_half = float(np.tan(np.radians(fovy_deg) / 2.0))
-    mesh_radius = model_extent * 0.5
-    finite = cloud_pts[np.all(np.isfinite(cloud_pts), axis=-1)]
-    cloud_ctr = finite.mean(axis=0)
-    cloud_radius = float(np.max(np.linalg.norm(finite - cloud_ctr, axis=-1)))
-    mesh_frac = mesh_radius / (distance * tan_half)
-    cloud_frac = cloud_radius / (distance * tan_half)
-    return mesh_frac, cloud_frac
-
-
-def _zoom_factor(f):
-    """>=1.0, monotonically non-decreasing 1.0 (f=0) -> `ZOOM_Z_END` (f=
-    N_OUT-1), eased with `_smoothstep` over the WHOLE act. Feeds `_wide_
-    camera`'s `zoom` arg (`cam.distance = cam_spread*2.6 / zoom`), so
-    `cam.distance` shrinks monotonically over the act -- see `ZOOM_Z_END`'s
-    docstring comment for the numeric derivation."""
-    p = _smoothstep(f / float(N_OUT - 1))
-    return 1.0 + (ZOOM_Z_END - 1.0) * p
 
 
 def _slerp_qpos(qa, qb, t):
@@ -409,45 +404,34 @@ def render_act3(clip: str = clip_io.CLIP_DEFAULT) -> Path:
     body_site_idxs = np.asarray([site_map[n] for n in kp_names])
     kp_rgb01 = jarvis_kp_colors_rgb01(kp_names)
     kp_rgb01_by_idx = [kp_rgb01[n] for n in kp_names]
+    # Skeleton bones (task-14 round 3): (idx_a, idx_b, BGR) mapped onto THIS
+    # array's own kp_names order by name; converted to RGB/0-1 once, here,
+    # not per frame.
+    skeleton_edges = [
+        (a, b, (bg[2] / 255.0, bg[1] / 255.0, bg[0] / 255.0))
+        for a, b, bg in jarvis_skeleton_edges(kp_names)
+    ]
 
     out_dir = dirs["frames"] / "act3_align"
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # --- Fixed camera spread (task-11 review, "Important 1") ----------------
-    # A dry pass -- forward-kinematics only, no rendering -- over every
-    # output frame's true (mesh_ctr, cloud) geometry, so `cam_spread` is the
-    # worst case across the ENTIRE act. This guarantees the frozen camera
-    # keeps both the mesh and the still-8x-oversized f=0 cloud comfortably in
-    # frame (the wide camera's original purpose) while giving the
-    # never-resized mesh a genuinely constant on-screen size for the whole
-    # act, instead of re-deriving distance from the live (shrinking) cloud
-    # every frame the way the previous version did.
-    cam_spread = 0.0
-    for f_dry in range(N_OUT):
-        _, _, factor_dry, qpos_dry, _ = _stage_at(
-            f_dry, residual_default, residual_scaled, residual_root,
-            qpos_default, qpos_root, shared_scale,
-        )
-        d_dry = mujoco.MjData(mj_model)
-        d_dry.qpos[:] = qpos_dry
-        mujoco.mj_forward(mj_model, d_dry)
-        mesh_ctr_dry = np.asarray(d_dry.site_xpos[body_site_idxs]).mean(axis=0)
-        cloud_dry = kp3d_raw_frame * factor_dry
-        cloud_ctr_dry = cloud_dry[np.all(np.isfinite(cloud_dry), axis=-1)].mean(axis=0)
-        lookat_dry = (mesh_ctr_dry + cloud_ctr_dry) / 2.0
-        cam_spread = max(cam_spread, _cloud_mesh_spread(
-            mesh_ctr_dry, cloud_dry, lookat_dry, mj_model.stat.extent))
-    print(f"[act3] fixed camera spread (worst case over all {N_OUT} frames) = "
-          f"{cam_spread:.4f} mm -> cam.distance = {cam_spread * 2.6:.4f} mm")
+    # --- Act 3's fixed camera, resolved ONCE against the real (start, end)
+    # mesh positions (task-14 round 3; see module docstring's CAMERA section).
+    # No cam_spread dry pass any more -- the camera no longer needs to
+    # discover a worst-case distance across the act, since it never zooms.
+    print(f"[act3] fixed camera: distance={ACT3_CAM_DISTANCE} azimuth="
+          f"{ACT3_CAM_AZIMUTH} elevation={ACT3_CAM_ELEV} (never animated); "
+          f"lookat tracks mesh_ctr each frame (translation magnitude "
+          f"{np.linalg.norm(qpos_root[:3] - qpos_default[:3]):.3f} model-units "
+          f"over the ROOT phase)")
 
     t0 = time.time()
     # Persistent renderer, created ONCE and reused for every frame (matches
     # Act 4's fix; see CLAUDE.md/module constraints -- per-frame `with
     # mujoco.Renderer(...)` construction is the prime suspect for Act 4's
     # mid-render EGL resource-leak crash at ~700/900 frames. Act 3's 600
-    # frames never hit that failure, but this loop is touched here anyway
-    # (Change 1's wing-alpha guard, Change 3's zoom), so it is fixed too
-    # rather than left on the known-bad pattern.
+    # frames never hit that failure, but this loop is touched here anyway,
+    # so it is fixed too rather than left on the known-bad pattern.
     with mujoco.Renderer(mj_model, height=CANVAS_H, width=CANVAS_W) as renderer:
         for f in range(N_OUT):
             stage_label, resid, factor, qpos, mesh_alpha = _stage_at(
@@ -460,25 +444,31 @@ def render_act3(clip: str = clip_io.CLIP_DEFAULT) -> Path:
             d.qpos[:] = qpos
             mujoco.mj_forward(mj_model, d)
 
+            # `mesh_ctr` is the ONLY per-frame camera quantity, and it is not
+            # zoom/dolly/orbit -- see the module docstring's CAMERA section.
+            # Identical to `mesh_ctr_default` for f <= SCALE_END (qpos is
+            # qpos_default there); only changes during the ROOT phase, when
+            # the mesh genuinely translates.
             mesh_ctr = np.asarray(d.site_xpos[body_site_idxs]).mean(axis=0)
             cloud_pts = kp3d_raw_frame * factor   # linear scale about world origin
 
-            zoom = _zoom_factor(f)
-            cam, live_cloud_spread = _wide_camera(
-                mesh_ctr, cloud_pts, mj_model.stat.extent, AZ_START, cam_spread,
-                zoom=zoom)
-            marker_r = max(live_cloud_spread * 0.03, mj_model.stat.extent * 0.006)
+            cam = mujoco.MjvCamera()
+            cam.lookat[:] = mesh_ctr
+            cam.distance = ACT3_CAM_DISTANCE
+            cam.azimuth, cam.elevation = ACT3_CAM_AZIMUTH, ACT3_CAM_ELEV
 
-            if f in (120, 210, 299, 539):
-                mesh_frac, cloud_frac = _screen_fracs(
-                    cloud_pts, mj_model.stat.extent, cam.distance, FOVY_DEG)
-                print(f"[act3] Change-3 acceptance: f={f} zoom={zoom:.3f} "
-                      f"cam.distance={cam.distance:.3f} mm "
-                      f"mesh_screen_frac={mesh_frac:.4f} "
-                      f"cloud_screen_frac={cloud_frac:.4f}")
+            # Marker/bone radius scales with the cloud's OWN current linear
+            # scale factor (raw 1.0 -> shared_scale), so the incoming
+            # skeleton is drawn genuinely oversized while it genuinely is.
+            marker_r = BASE_MARKER_R_AT_FINAL_SCALE * (factor / shared_scale)
+            bone_r = marker_r * BONE_RADIUS_FRACTION
 
             renderer.update_scene(d, camera=cam)
             scn = renderer.scene
+            for a, b, rgb in skeleton_edges:
+                pa, pb = cloud_pts[a], cloud_pts[b]
+                if np.all(np.isfinite(pa)) and np.all(np.isfinite(pb)):
+                    _add_bone(scn, pa, pb, np.array((*rgb, 1.0), np.float32), bone_r)
             for i, p3 in enumerate(cloud_pts):
                 if np.all(np.isfinite(p3)):
                     rgb = kp_rgb01_by_idx[i]
@@ -505,6 +495,11 @@ def render_act3(clip: str = clip_io.CLIP_DEFAULT) -> Path:
                 (48, 238), scale=0.45, color=(150, 150, 150))
             canvas = draw.label(canvas, f"frame {f + 1}/{N_OUT}", (48, CANVAS_H - 24),
                                  scale=0.45, color=(150, 150, 150))
+
+            if f in (0, 150, 299, 450, 539):
+                mpx = _mesh_px(canvas)
+                print(f"[act3] fixed-camera acceptance: f={f} mesh_px={mpx} "
+                      f"(target ~50,000-75,000, near-constant across the act)")
 
             cv2.imwrite(str(out_dir / f"f{f:05d}.png"), canvas)
 

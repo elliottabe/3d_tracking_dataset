@@ -108,6 +108,35 @@ def jarvis_kp_colors_rgb01(kp_names=None) -> dict:
     return {n: (r / 255.0, g / 255.0, b / 255.0) for n, (b, g, r) in bgr.items()}
 
 
+def jarvis_skeleton_edges(kp_names) -> list:
+    """[(idx_a, idx_b, BGR tuple), ...] -- skeleton BONES, indices into
+    `kp_names`'s OWN order (any order -- looked up by name), for drawing a
+    skeleton (not a loose cloud) in 3D. Source: `data/fly50.json`'s `edges`
+    (44 index pairs over `node_names`, DETECTOR order), converted to name
+    pairs then re-indexed onto `kp_names`.
+
+    Colour convention verified against ALL SIX of JARVIS's own bone-drawing
+    call sites (`create_videos2D.py`, `create_videos3D.py`,
+    `visualize_dataset.py` x2, `time_slices.py` x2, `tools/visualize_phase4.py`,
+    `tools/visualize_identity.py`): every one colours a bone
+    `colors[line[1]]` -- the STOP/second node's colour, never the start's.
+    Reproduced exactly here (`bgr[nb]`, not `bgr[na]`).
+    """
+    d = _load_fly50()
+    names = list(d["node_names"])
+    bgr = jarvis_kp_colors()
+    idx_by_name = {n: i for i, n in enumerate(kp_names)}
+    out = []
+    for a, b in d["edges"]:
+        na, nb = names[a], names[b]
+        if na not in idx_by_name or nb not in idx_by_name:
+            raise ValueError(
+                f"skeleton edge ({na!r}, {nb!r}) not found in kp_names -- "
+                "cannot map fly50.json's edges onto this keypoint order")
+        out.append((idx_by_name[na], idx_by_name[nb], bgr[nb]))
+    return out
+
+
 def legend_entries(kp_names) -> list:
     """[(label, BGR tuple), ...] for an on-screen legend: one entry per leg
     chain (each gets its OWN colour under the JARVIS scheme, the whole point
