@@ -103,10 +103,11 @@ def test_render_op_crossfade_matches_draw_fade(tmp_path):
     assert np.array_equal(out, expected)
 
 
-def test_real_act_specs_total_matches_expected_2205():
-    """Locks the exact arithmetic the brief specifies for the shipped acts."""
-    assert assemble.EXPECTED_TOTAL == 2205
-    assert sum(n for _, n in assemble.ACT_SPECS) == 2250
+def test_real_act_specs_total_matches_expected_2025():
+    """Locks the exact arithmetic the brief specifies for the shipped acts
+    (task-14: Act 1 shortened 450 -> 270 frames, total 2205 -> 2025)."""
+    assert assemble.EXPECTED_TOTAL == 2025
+    assert sum(n for _, n in assemble.ACT_SPECS) == 2070
     assert assemble.N_CROSS == 15
 
 

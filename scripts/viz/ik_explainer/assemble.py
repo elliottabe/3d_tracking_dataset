@@ -6,7 +6,10 @@ crossfades at each of the 3 act boundaries, encodes 1920x1080 @ 30 fps H.264
 (silent) via `viz.core.io.write_video` (imageio + ffmpeg, the repo's shared
 encoder), then writes `README.md` and `manifest.json` beside it.
 
-EXPECTED TOTAL FRAMES: 450 + 300 + 600 + 900 - 3*15 = 2205 (~73.5 s @ 30 fps).
+EXPECTED TOTAL FRAMES: 270 + 300 + 600 + 900 - 3*15 = 2025 (67.5 s @ 30 fps).
+(Task-14 shortened Act 1 from 450 to 270 frames -- 15s to 9s -- and re-sourced
+it from a contiguous ~40% sub-range of the clip rather than the whole 921
+frames; see `act1_views.py`'s module docstring. Every other act is unchanged.)
 This is asserted TWICE: once per-act (`_list_frames` requires each act
 directory to hold EXACTLY its expected count -- neither short nor padded with
 extras), and once on the assembled edit plan before any frame is written to
@@ -48,7 +51,7 @@ from viz.core.io import write_video                  # noqa: E402
 # --- edit plan ---------------------------------------------------------
 # (directory name under frames/, expected frame count) in story order.
 ACT_SPECS = [
-    ("act1_views", 450),
+    ("act1_views", 270),
     ("act2_triangulate", 300),
     ("act3_align", 600),
     ("act4_solve", 900),
@@ -56,7 +59,7 @@ ACT_SPECS = [
 N_CROSS = 15
 FPS = 30
 CANVAS_W, CANVAS_H = 1920, 1080
-EXPECTED_TOTAL = sum(n for _, n in ACT_SPECS) - (len(ACT_SPECS) - 1) * N_CROSS  # 2205
+EXPECTED_TOTAL = sum(n for _, n in ACT_SPECS) - (len(ACT_SPECS) - 1) * N_CROSS  # 2025
 
 
 def _list_frames(act_dir: Path, act_name: str, expected: int) -> list:
@@ -365,6 +368,12 @@ re-deriving the story from the original plan wording alone would get it wrong:
 - Detector checkpoint: `{ckpt}`
 - Anatomy: `configs/anatomy/v1.yaml` -> `models/fruitfly_v1/fruitfly_v1_free.xml`
 - SAM3: `{hf_repo}`, text prompt `"{text_prompt}"`, run under `{sam3_env}`
+- Keypoint colours: JARVIS per-limb-chain scheme -- `scripts/viz/ik_explainer/
+  kp_colors.py` calls `third_party/JARVIS-HybridNet`'s own `get_skeleton`
+  against `data/fly50.json`'s skeleton graph, so each leg (and the head/thorax
+  loop, and each wing) gets its own colour instead of one flat per-group
+  colour. `viz.core.colors.PALETTE`'s fit=green/observed=cyan convention is
+  unchanged for Act 4's closing 2-up (fit-vs-observed, not per-keypoint).
 - This is the EASY case (one fly, open arena). CLAUDE.md is explicit that the
   female fly on walls / in occlusion is where this pipeline actually fails;
   do not cite this video as general QC evidence.

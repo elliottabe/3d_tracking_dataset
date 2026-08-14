@@ -123,12 +123,13 @@ sys.path.insert(0, str(_REPO / "third_party" / "jarvis_jax"))
 sys.path.insert(0, str(_REPO / "stac-mjx"))
 
 from scripts.viz.ik_explainer import clip_io, draw  # noqa: E402
+from scripts.viz.ik_explainer.kp_colors import jarvis_kp_colors_rgb01  # noqa: E402
 from scripts.preprocess_keypoints_for_ik import compute_shared_scale  # noqa: E402
 from stac_mjx import compute_stac, io as stac_io  # noqa: E402
 from stac_mjx import utils as stac_utils  # noqa: E402
 from stac_mjx.stac import Stac  # noqa: E402
 from utils.path_utils import register_custom_resolvers  # noqa: E402
-from viz.core.colors import PALETTE, keypoint_groups  # noqa: E402
+from viz.core.colors import PALETTE  # noqa: E402
 
 register_custom_resolvers()
 
@@ -392,15 +393,37 @@ def _bgr255_to_rgb01(bgr):
     return (r / 255.0, g / 255.0, b / 255.0)
 
 
-# Group colours derived from PALETTE (not restated): head=red, thorax=yellow,
-# abdomen=PALETTE's "tail" entry=blue. "legs" has no PALETTE entry, so it gets
-# a 4th, unambiguous hue chosen locally.
-_GROUP_RGB = {
-    "head": _bgr255_to_rgb01(PALETTE["head"]),
-    "thorax": _bgr255_to_rgb01(PALETTE["thorax"]),
-    "abdomen": _bgr255_to_rgb01(PALETTE["tail"]),
-    "legs": (1.0, 0.0, 1.0),
-}
+# --- Wing-visibility guard (Change 1, task-14) ------------------------------
+# fruitfly_v1_free.xml's `wing_left_inertial`/`wing_right_inertial` geoms are
+# BOX (type 6), group 1, with `rgba="0 0 0 0"` baked in via the `wing-inertial`
+# default class -- deliberately invisible placeholders for the wing's inertia,
+# sitting on top of the real wing meshes (`wing_left_brown`/`_membrane` etc,
+# type 7 MESH). Every render below tints `geom_rgba` across ALL geoms
+# (`geom_rgba[:, :3] = grey`, `geom_rgba[:, 3] = alpha`) to colour/fade the
+# mesh uniformly; a blanket alpha assignment overwrites that alpha=0 and turns
+# the invisible inertial boxes into opaque white rectangles over/behind the
+# wings -- exactly the bug this guard exists to prevent. Capture each geom's
+# ORIGINAL alpha once, at load, then re-zero alpha on originally-invisible
+# geoms after every `geom_rgba` mutation; also skip recolouring them (the
+# rgb channels of an alpha=0 geom are never visible, but "only recolour geoms
+# whose original alpha > 0" is the safest general form and costs nothing).
+def capture_geom_alpha(mj_model) -> np.ndarray:
+    """Call ONCE, right after `MjModel.from_xml_path`, before any geom_rgba
+    mutation. Returns the model's as-shipped per-geom alpha (nan-safe copy)."""
+    return np.array(mj_model.geom_rgba[:, 3], copy=True)
+
+
+def set_mesh_rgba(mj_model, orig_alpha: np.ndarray, rgb=None, alpha=None) -> None:
+    """Recolour/re-alpha only geoms that were ORIGINALLY visible
+    (`orig_alpha > 0`); force every originally-invisible geom's alpha back to
+    0 regardless (a no-op if nothing ever touched it, a fix if something did).
+    `rgb`/`alpha` are each optional so callers can set just one channel."""
+    visible = orig_alpha > 0.0
+    if rgb is not None:
+        mj_model.geom_rgba[visible, :3] = rgb
+    if alpha is not None:
+        mj_model.geom_rgba[visible, 3] = alpha
+    mj_model.geom_rgba[~visible, 3] = 0.0
 
 
 def qc_stages(result: dict, out_png=None, size=(480, 480)) -> Path:
@@ -410,10 +433,10 @@ def qc_stages(result: dict, out_png=None, size=(480, 480)) -> Path:
     framing). Row 2 is a wide diagnostic camera that always keeps the WHOLE
     keypoint cloud in frame (hero's fixed relative offset can crop most of
     the cloud when the model sits far from it, e.g. `default`/`scaled`) and
-    colours keypoints by anatomical group (viz/core/colors.py convention) so
-    a 180-degree flip -- head keypoints landing on the abdomen -- is
-    directly visible rather than inferred from an undifferentiated cyan
-    cloud.
+    colours keypoints per the JARVIS per-limb-chain scheme (`kp_colors.py`,
+    each leg its own colour) so a 180-degree flip -- head keypoints landing
+    on the abdomen -- is directly visible rather than inferred from an
+    undifferentiated cyan cloud.
     """
     clip = result["clip"]
     dirs = clip_io.out_dirs(clip)
@@ -422,8 +445,9 @@ def qc_stages(result: dict, out_png=None, size=(480, 480)) -> Path:
     frame = result["frame_for_stills"]
     kp_names = result["kp_names"]
     mj_model = result["mj_model"]
-    mj_model.geom_rgba[:, :3] = 0.55  # grey mesh -- same model for every panel
-    mj_model.geom_rgba[:, 3] = 1.0
+    orig_alpha = capture_geom_alpha(mj_model)   # BEFORE any geom_rgba mutation
+    set_mesh_rgba(mj_model, orig_alpha, rgb=0.55, alpha=1.0)  # grey mesh,
+    # every panel -- wings' originally-invisible inertial boxes stay alpha=0.
     # `tracking[name]` sites, not bare `name` -- reuse the same helper `run()`
     # uses for `compute_shared_scale` rather than re-deriving the lookup.
     # `mj_name2id` returns -1 (not an error) on a miss, so this is guarded
@@ -437,8 +461,8 @@ def qc_stages(result: dict, out_png=None, size=(480, 480)) -> Path:
         raise ValueError(f"tracking[...] site missing for keypoints: {missing}")
     body_site_idxs = np.asarray([site_map[n] for n in kp_names])
 
-    groups = keypoint_groups(kp_names)
-    group_of = {i: g for g, idxs in groups.items() for i in idxs}
+    kp_rgb01 = jarvis_kp_colors_rgb01(kp_names)
+    kp_rgb01_by_idx = [kp_rgb01[n] for n in kp_names]
 
     stage_qpos = {
         "default": result["qpos_default"], "scaled": result["qpos_scaled"],
@@ -452,15 +476,22 @@ def qc_stages(result: dict, out_png=None, size=(480, 480)) -> Path:
     W, H = size
     marker_r = mj_model.stat.extent * 0.018
     hero_row, wide_row = [], []
-    for stage in STAGE_NAMES:
-        d = mujoco.MjData(mj_model)
-        d.qpos[:] = stage_qpos[stage]
-        mujoco.mj_forward(mj_model, d)
-        kp_frame = stage_kp[stage]
-        idx = STAGE_NAMES.index(stage)
-        resid = result["residual_mm"][idx]
+    # Persistent renderer, created ONCE and reused for every stage (matches
+    # Act 4's fix -- repeated per-frame `with mujoco.Renderer(...)`
+    # construction is the prime suspect for Act 4's mid-render EGL
+    # resource-leak crash; only 4 stages here so this loop never hit that
+    # failure, but it is touched by Change 1's wing-alpha guard and Change 2's
+    # per-keypoint colours, so it is fixed too rather than left on the
+    # known-bad pattern).
+    with mujoco.Renderer(mj_model, height=H, width=W) as renderer:
+        for stage in STAGE_NAMES:
+            d = mujoco.MjData(mj_model)
+            d.qpos[:] = stage_qpos[stage]
+            mujoco.mj_forward(mj_model, d)
+            kp_frame = stage_kp[stage]
+            idx = STAGE_NAMES.index(stage)
+            resid = result["residual_mm"][idx]
 
-        with mujoco.Renderer(mj_model, height=H, width=W) as renderer:
             # --- hero camera (video framing) ---
             renderer.update_scene(d, camera=CAMERA)
             scn = renderer.scene
@@ -487,21 +518,21 @@ def qc_stages(result: dict, out_png=None, size=(480, 480)) -> Path:
             scn = renderer.scene
             for i, p in enumerate(kp_frame):
                 if np.all(np.isfinite(p)):
-                    rgba = (*_GROUP_RGB.get(group_of.get(i), (1.0, 1.0, 1.0)), 1.0)
+                    rgba = (*kp_rgb01_by_idx[i], 1.0)
                     _add_sphere(scn, p, np.array(rgba, dtype=np.float32), marker_r * 1.3)
             wide_img = np.ascontiguousarray(renderer.render())
 
-        for img, row in ((hero_img, hero_row), (wide_img, wide_row)):
-            img = draw.stage_title(img, stage, f"residual {resid:.2f} mm")
-            img = draw.label(img, f"frame {frame}", (16, H - 16), scale=0.55, color=(200, 200, 200))
-            row.append(img)
+            for img, row in ((hero_img, hero_row), (wide_img, wide_row)):
+                img = draw.stage_title(img, stage, f"residual {resid:.2f} mm")
+                img = draw.label(img, f"frame {frame}", (16, H - 16), scale=0.55, color=(200, 200, 200))
+                row.append(img)
 
     hero_strip = np.concatenate(hero_row, axis=1)
     wide_strip = np.concatenate(wide_row, axis=1)
     hero_strip = draw.label(hero_strip, "hero camera (video framing)",
                              (16, hero_strip.shape[0] - 44), scale=0.55, color=(150, 220, 150))
     wide_strip = draw.label(
-        wide_strip, "wide diagnostic camera -- red=head yellow=thorax blue=abdomen magenta=legs",
+        wide_strip, "wide diagnostic camera -- JARVIS per-limb-chain colours (kp_colors.py)",
         (16, wide_strip.shape[0] - 44), scale=0.55, color=(150, 220, 150),
     )
     grid = np.concatenate([hero_strip, wide_strip], axis=0)

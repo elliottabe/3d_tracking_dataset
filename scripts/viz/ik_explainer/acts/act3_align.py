@@ -70,7 +70,29 @@ Keypoint sphere radius is scaled with the cloud's own LIVE extent (not the
 fixed camera distance, and not a fixed absolute size) purely so markers stay
 legible whether the cloud is wide (f=0/120, raw, ~13 mm from the mesh) or
 tight (f=599, cloud+mesh co-located) -- this changes how big we DRAW
-markers, never the mesh geometry nor the camera zoom.
+markers, never the mesh geometry.
+
+CHANGE 3 (task-14): the task-11 fix above froze `cam.distance` entirely,
+which left the act's final mesh+cloud pair filling only a small part of the
+frame. `_wide_camera` gained a separate `zoom` multiplier
+(`cam.distance = cam_spread * 2.6 / zoom(f)`, see `_zoom_factor`) that
+dollies the camera IN over the whole act, deliberately SLOWER than the
+cloud's own 120-299 world shrink so the shrink stays visible -- see
+`ZOOM_Z_END`'s docstring comment for the numeric derivation and the acceptance
+prints (`f=120/210/299/539`) this loop emits. This is layered UNDER the task-11
+fix, not a reversion of it: `cam_spread` (the worst-case, f=0-safe distance)
+is untouched; `zoom` is a new, separate per-frame multiplier on top of it.
+
+Keypoint colours (Change 2, task-14): each limb chain gets its own colour
+from the JARVIS scheme (`kp_colors.jarvis_kp_colors_rgb01`, ported by calling
+`third_party/JARVIS-HybridNet`'s own `get_skeleton`), replacing the previous
+4-group (head/thorax/abdomen/legs) scheme.
+
+Wing visibility (Change 1, task-14): `set_mesh_rgba`/`capture_geom_alpha`
+(stage_ik.py) preserve the model's originally-invisible geoms (the wings'
+`*_inertial` boxes, alpha=0 by design) across every `geom_rgba` mutation this
+act performs -- see their docstrings for why a blanket alpha assignment used
+to turn them into opaque white rectangles.
 
 Timeline (600 frames, 30 fps):
   f   0-119  mesh fades in at qpos_default (alpha ramp), cloud already fully
@@ -93,8 +115,8 @@ FALSIFICATION: a visibly rotating mesh means the act is animating something
 the solver did not do; a cloud leaving frame means the wrong (hero) camera
 was used.
 
-Colours come from viz/core/colors.py via draw.py / stage_ik.py's `_GROUP_RGB`
--- never invented here.
+Colours come from `kp_colors.jarvis_kp_colors_rgb01` (JARVIS per-limb-chain
+scheme) -- never invented here.
 """
 import os
 
@@ -118,9 +140,10 @@ sys.path.insert(0, str(_REPO / "stac-mjx"))
 
 from scripts.viz.ik_explainer import clip_io, draw               # noqa: E402
 from scripts.viz.ik_explainer.stage_ik import (                  # noqa: E402
-    _add_sphere, _tracking_site_map, _GROUP_RGB,
+    _add_sphere, _tracking_site_map, capture_geom_alpha, set_mesh_rgba,
 )
-from viz.core.colors import PALETTE, keypoint_groups              # noqa: E402
+from scripts.viz.ik_explainer.kp_colors import jarvis_kp_colors_rgb01  # noqa: E402
+from viz.core.colors import PALETTE                                # noqa: E402
 
 # --- canvas / timeline ------------------------------------------------------
 CANVAS_W, CANVAS_H = 1920, 1080
@@ -151,10 +174,77 @@ ELEV = -20.0
 # fade that starts at literal alpha=0 would make f=0 mesh-invisible.
 MESH_ALPHA_MIN = 0.45
 
+# --- Change 3 (task-14): zoom in over the act, SLOWER than the cloud shrinks -
+# The frozen-distance camera above (task-11 fix) leaves the final mesh+cloud
+# pair occupying only a small part of the frame. `ZOOM_Z_END` is the final
+# distance DIVISOR (`cam.distance = cam_spread*2.6 / zoom(f)`, see
+# `_wide_camera`'s `zoom` arg): the camera dollies in by this factor over the
+# whole act. Tuned (by the analytic screen-fraction formula
+# `frac = radius / (distance * tan(fovy/2))`, `fovy=45` deg for this model)
+# against THIS clip's real numbers -- `cam_spread=8.065 mm` (dry pass, so
+# `cam.distance(f=0) = 20.968 mm`), `shared_scale=0.1261`, `model_extent=
+# 0.647 mm` -- so that:
+#   (a) mesh_screen_frac (mesh radius is CONSTANT -- the mesh never scales --
+#       so this is monotonic in 1/distance by construction) grows across the
+#       whole act, reaching ~0.27 (of canvas height) by f=539, comfortably in
+#       the requested ~0.25-0.40 target band;
+#   (b) cloud_screen_frac still FALLS by >=3x from f=120->299 despite the
+#       zoom fighting it: the cloud's own world shrink there is shared_scale
+#       (~7.93x), and the zoom factor only grows ~1.94x over that same
+#       window (299 zoom / 120 zoom), so shrink beats zoom by a comfortable
+#       margin (measured ~3.1x net fall, not just the bare minimum 3x).
+# A bigger ZOOM_Z_END pushes mesh_screen_frac(539) higher but ALSO grows the
+# 120->299 zoom ratio (the two requirements trade off against each other for
+# ANY single easing curve/endpoint), which is why this value is a solved
+# trade-off, not tuned by eye -- see task-14's report for the full derivation
+# and the two competing constraints it satisfies simultaneously.
+ZOOM_Z_END = 7.5
+
 
 def _smoothstep(p):
     p = np.clip(p, 0.0, 1.0)
     return 3 * p ** 2 - 2 * p ** 3
+
+
+FOVY_DEG = 45.0   # this model's default vertical FOV (mj_model.vis.global_.fovy);
+                  # a fixed constant here rather than read per-call since it never
+                  # changes and `_screen_fracs` is only used for the Change-3
+                  # acceptance-test print below, not for anything rendered.
+
+
+def _screen_fracs(cloud_pts, model_extent, distance, fovy_deg):
+    """Analytic (pinhole, small-angle) screen-fraction estimate for the
+    Change-3 acceptance test: fraction of the canvas HEIGHT an object of
+    world radius `r` spans at distance `distance` under vertical FOV
+    `fovy_deg` is `r / (distance * tan(fovy_deg/2))` -- same relation
+    `_cloud_mesh_spread`'s `cam.distance = spread * 2.6` construction already
+    relies on, just solved for the fraction instead of the distance.
+
+    `mesh_radius` is `model_extent * 0.5` (the mesh's own CONSTANT visual
+    radius -- it never scales in this act, so mesh_screen_frac is monotonic
+    in 1/distance by construction). `cloud_radius` is the LIVE cloud's own
+    bounding radius about its OWN centroid (not `lookat`-relative, so this
+    number reflects the cloud's real physical size, independent of where the
+    mesh currently sits).
+    """
+    tan_half = float(np.tan(np.radians(fovy_deg) / 2.0))
+    mesh_radius = model_extent * 0.5
+    finite = cloud_pts[np.all(np.isfinite(cloud_pts), axis=-1)]
+    cloud_ctr = finite.mean(axis=0)
+    cloud_radius = float(np.max(np.linalg.norm(finite - cloud_ctr, axis=-1)))
+    mesh_frac = mesh_radius / (distance * tan_half)
+    cloud_frac = cloud_radius / (distance * tan_half)
+    return mesh_frac, cloud_frac
+
+
+def _zoom_factor(f):
+    """>=1.0, monotonically non-decreasing 1.0 (f=0) -> `ZOOM_Z_END` (f=
+    N_OUT-1), eased with `_smoothstep` over the WHOLE act. Feeds `_wide_
+    camera`'s `zoom` arg (`cam.distance = cam_spread*2.6 / zoom`), so
+    `cam.distance` shrinks monotonically over the act -- see `ZOOM_Z_END`'s
+    docstring comment for the numeric derivation."""
+    p = _smoothstep(f / float(N_OUT - 1))
+    return 1.0 + (ZOOM_Z_END - 1.0) * p
 
 
 def _slerp_qpos(qa, qb, t):
@@ -197,17 +287,27 @@ def _cloud_mesh_spread(mesh_ctr, cloud_pts, lookat, model_extent):
     )
 
 
-def _wide_camera(mesh_ctr, cloud_pts, model_extent, azimuth, cam_spread):
+def _wide_camera(mesh_ctr, cloud_pts, model_extent, azimuth, cam_spread, zoom=1.0):
     """The wide diagnostic camera: same lookat construction stage_ik.py's
     qc_stages() uses for its wide-camera row (never the model's `hero`
     camera, which frames the mesh only). `lookat` is recomputed every frame
     (mesh_ctr and the cloud both move over the act) so both stay centred.
 
-    `cam_spread` -- hence `cam.distance` -- is NOT derived from the live
-    cloud here. It is a FIXED value the caller computes ONCE for the whole
-    act (see `render_act3`'s dry pass), so the camera cannot zoom in as the
-    cloud shrinks (task-11 review, "Important 1": the previous per-frame
-    version did exactly that, cancelling the cloud's on-screen shrink).
+    `cam_spread` -- hence the BASE `cam.distance` -- is NOT derived from the
+    live cloud here. It is a FIXED value the caller computes ONCE for the
+    whole act (see `render_act3`'s dry pass), so the camera cannot zoom in
+    lock-step with the shrinking cloud (task-11 review, "Important 1": the
+    previous per-frame version did exactly that, cancelling the cloud's
+    on-screen shrink).
+
+    `zoom` (default 1.0, i.e. no change) is a SEPARATE, optional dolly-in
+    multiplier -- `cam.distance = cam_spread * 2.6 / zoom` -- added for
+    Change 3 (task-14): an animated zoom-in over the act so the final
+    mesh+cloud pair fills more of the frame, deliberately layered UNDER the
+    task-11 fix rather than replacing it (`zoom` is caller-controlled per
+    frame; `cam_spread` stays the one-time worst-case value, so f=0 still
+    frames the full, still-8x-oversized raw cloud). Act 4's calls
+    (`_wide_camera_for_aspect`) never pass `zoom`, so they are unaffected.
 
     Returns `(cam, live_cloud_spread)` where `live_cloud_spread` is the
     cloud's OWN current extent from this frame's lookat -- used only to size
@@ -220,7 +320,7 @@ def _wide_camera(mesh_ctr, cloud_pts, model_extent, azimuth, cam_spread):
     live_cloud_spread = _cloud_mesh_spread(mesh_ctr, cloud_pts, lookat, model_extent)
     cam = mujoco.MjvCamera()
     cam.lookat[:] = lookat
-    cam.distance = cam_spread * 2.6
+    cam.distance = cam_spread * 2.6 / zoom
     cam.azimuth, cam.elevation = azimuth, ELEV
     return cam, live_cloud_spread
 
@@ -298,16 +398,17 @@ def render_act3(clip: str = clip_io.CLIP_DEFAULT) -> Path:
           f"{(qpos_root[:3] - qpos_default[:3])}")
 
     mj_model = mujoco.MjModel.from_xml_path(str(XML_PATH))
+    orig_alpha = capture_geom_alpha(mj_model)   # BEFORE any geom_rgba mutation
     grey = PALETTE["mesh"][0] / 255.0   # PALETTE["mesh"] is (200,200,200): BGR==RGB here
-    mj_model.geom_rgba[:, :3] = grey
+    set_mesh_rgba(mj_model, orig_alpha, rgb=grey)   # alpha animated per-frame below
 
     site_map = _tracking_site_map(mj_model, kp_names)
     missing = [n for n in kp_names if n not in site_map]
     if missing:
         raise ValueError(f"tracking[...] site missing for keypoints: {missing}")
     body_site_idxs = np.asarray([site_map[n] for n in kp_names])
-    groups = keypoint_groups(kp_names)
-    group_of = {i: g for g, idxs in groups.items() for i in idxs}
+    kp_rgb01 = jarvis_kp_colors_rgb01(kp_names)
+    kp_rgb01_by_idx = [kp_rgb01[n] for n in kp_names]
 
     out_dir = dirs["frames"] / "act3_align"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -340,55 +441,72 @@ def render_act3(clip: str = clip_io.CLIP_DEFAULT) -> Path:
           f"{cam_spread:.4f} mm -> cam.distance = {cam_spread * 2.6:.4f} mm")
 
     t0 = time.time()
-    for f in range(N_OUT):
-        stage_label, resid, factor, qpos, mesh_alpha = _stage_at(
-            f, residual_default, residual_scaled, residual_root,
-            qpos_default, qpos_root, shared_scale,
-        )
-        mj_model.geom_rgba[:, 3] = mesh_alpha
+    # Persistent renderer, created ONCE and reused for every frame (matches
+    # Act 4's fix; see CLAUDE.md/module constraints -- per-frame `with
+    # mujoco.Renderer(...)` construction is the prime suspect for Act 4's
+    # mid-render EGL resource-leak crash at ~700/900 frames. Act 3's 600
+    # frames never hit that failure, but this loop is touched here anyway
+    # (Change 1's wing-alpha guard, Change 3's zoom), so it is fixed too
+    # rather than left on the known-bad pattern.
+    with mujoco.Renderer(mj_model, height=CANVAS_H, width=CANVAS_W) as renderer:
+        for f in range(N_OUT):
+            stage_label, resid, factor, qpos, mesh_alpha = _stage_at(
+                f, residual_default, residual_scaled, residual_root,
+                qpos_default, qpos_root, shared_scale,
+            )
+            set_mesh_rgba(mj_model, orig_alpha, alpha=mesh_alpha)
 
-        d = mujoco.MjData(mj_model)
-        d.qpos[:] = qpos
-        mujoco.mj_forward(mj_model, d)
+            d = mujoco.MjData(mj_model)
+            d.qpos[:] = qpos
+            mujoco.mj_forward(mj_model, d)
 
-        mesh_ctr = np.asarray(d.site_xpos[body_site_idxs]).mean(axis=0)
-        cloud_pts = kp3d_raw_frame * factor   # linear scale about world origin
+            mesh_ctr = np.asarray(d.site_xpos[body_site_idxs]).mean(axis=0)
+            cloud_pts = kp3d_raw_frame * factor   # linear scale about world origin
 
-        cam, live_cloud_spread = _wide_camera(
-            mesh_ctr, cloud_pts, mj_model.stat.extent, AZ_START, cam_spread)
-        marker_r = max(live_cloud_spread * 0.03, mj_model.stat.extent * 0.006)
+            zoom = _zoom_factor(f)
+            cam, live_cloud_spread = _wide_camera(
+                mesh_ctr, cloud_pts, mj_model.stat.extent, AZ_START, cam_spread,
+                zoom=zoom)
+            marker_r = max(live_cloud_spread * 0.03, mj_model.stat.extent * 0.006)
 
-        with mujoco.Renderer(mj_model, height=CANVAS_H, width=CANVAS_W) as renderer:
+            if f in (120, 210, 299, 539):
+                mesh_frac, cloud_frac = _screen_fracs(
+                    cloud_pts, mj_model.stat.extent, cam.distance, FOVY_DEG)
+                print(f"[act3] Change-3 acceptance: f={f} zoom={zoom:.3f} "
+                      f"cam.distance={cam.distance:.3f} mm "
+                      f"mesh_screen_frac={mesh_frac:.4f} "
+                      f"cloud_screen_frac={cloud_frac:.4f}")
+
             renderer.update_scene(d, camera=cam)
             scn = renderer.scene
             for i, p3 in enumerate(cloud_pts):
                 if np.all(np.isfinite(p3)):
-                    rgb = _GROUP_RGB.get(group_of.get(i), (1.0, 1.0, 1.0))
+                    rgb = kp_rgb01_by_idx[i]
                     _add_sphere(scn, p3, np.array((*rgb, 1.0), np.float32), marker_r)
             img_rgb = np.ascontiguousarray(renderer.render())
 
-        canvas = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
+            canvas = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
 
-        canvas = draw.stage_title(canvas, "ACT 3", "Body scale, then root alignment")
-        canvas = draw.label(canvas, f"stage: {stage_label}", (48, 150),
-                             scale=0.6, color=(255, 255, 255))
-        canvas = draw.label(
-            canvas, f"residual: {resid:.3f} mm (mean over 50 sites; "
-                    f"legs/wings lag until Act 4 solves the joints)",
-            (48, 182), scale=0.55, color=(190, 255, 190))
-        shown_factor = shared_scale if f > SCALE_END else factor
-        canvas = draw.label(
-            canvas, f"keypoint scale factor: {shown_factor:.4f} "
-                    f"(Umeyama trunk fit, target shared_scale={shared_scale:.4f})",
-            (48, 210), scale=0.5, color=(190, 190, 190))
-        canvas = draw.label(
-            canvas, "mesh size is fixed -- only the keypoint cloud is rescaled; "
-                    "root_optimization translates the mesh, it does not rotate it",
-            (48, 238), scale=0.45, color=(150, 150, 150))
-        canvas = draw.label(canvas, f"frame {f + 1}/{N_OUT}", (48, CANVAS_H - 24),
-                             scale=0.45, color=(150, 150, 150))
+            canvas = draw.stage_title(canvas, "ACT 3", "Body scale, then root alignment")
+            canvas = draw.label(canvas, f"stage: {stage_label}", (48, 150),
+                                 scale=0.6, color=(255, 255, 255))
+            canvas = draw.label(
+                canvas, f"residual: {resid:.3f} mm (mean over 50 sites; "
+                        f"legs/wings lag until Act 4 solves the joints)",
+                (48, 182), scale=0.55, color=(190, 255, 190))
+            shown_factor = shared_scale if f > SCALE_END else factor
+            canvas = draw.label(
+                canvas, f"keypoint scale factor: {shown_factor:.4f} "
+                        f"(Umeyama trunk fit, target shared_scale={shared_scale:.4f})",
+                (48, 210), scale=0.5, color=(190, 190, 190))
+            canvas = draw.label(
+                canvas, "mesh size is fixed -- only the keypoint cloud is rescaled; "
+                        "root_optimization translates the mesh, it does not rotate it",
+                (48, 238), scale=0.45, color=(150, 150, 150))
+            canvas = draw.label(canvas, f"frame {f + 1}/{N_OUT}", (48, CANVAS_H - 24),
+                                 scale=0.45, color=(150, 150, 150))
 
-        cv2.imwrite(str(out_dir / f"f{f:05d}.png"), canvas)
+            cv2.imwrite(str(out_dir / f"f{f:05d}.png"), canvas)
 
     dt = time.time() - t0
     print(f"[act3] wrote {N_OUT} frames to {out_dir} in {dt:.1f} s "

@@ -81,7 +81,9 @@ FALSIFICATION: rays fanning to a shared point (not staying parallel within a
 camera's own bundle) means a perspective model leaked into the rig geometry;
 a cloud not sitting where the rays end means a wrong transform.
 
-Colours come from viz/core/colors.py via draw.py -- never invented here.
+Colours: per-keypoint, JARVIS per-limb-chain scheme (`kp_colors.jarvis_kp_colors`),
+same as Act 1; `PALETTE["fit"]` green is reserved for the ray-bundle lines
+(the reconstruction mechanism, not a keypoint).
 """
 import argparse
 import sys
@@ -96,6 +98,7 @@ sys.path.insert(0, str(_REPO))
 sys.path.insert(0, str(_REPO / "third_party" / "jarvis_jax"))
 
 from scripts.viz.ik_explainer import clip_io, draw          # noqa: E402
+from scripts.viz.ik_explainer.kp_colors import jarvis_kp_colors  # noqa: E402
 from viz.core.colors import PALETTE  # noqa: E402
 
 # --- canvas / timeline ----------------------------------------------------
@@ -442,7 +445,7 @@ _DARK_PLATE = np.full((FRAME_H, CROP_W, 3), 22, np.uint8)
 _BACKDROP_OPACITY = 0.55   # translucent plate: dims but doesn't blank the video base
 
 
-def _build_texture(video_crop, kp_local_uv, kp_names, video_alpha, kp_alpha):
+def _build_texture(video_crop, kp_local_uv, kp_names, video_alpha, kp_alpha, kp_colors):
     # crossfade video -> a dark plate, then dim the whole thing further the
     # deeper into "constellation mode" we are, so the panel genuinely reads
     # as translucent rather than just a slightly-faded photo.
@@ -450,8 +453,10 @@ def _build_texture(video_crop, kp_local_uv, kp_names, video_alpha, kp_alpha):
     dim_factor = 1.0 - (1 - video_alpha) * (1 - _BACKDROP_OPACITY)
     tex = (base.astype(np.float32) * dim_factor).astype(np.uint8)
     if kp_alpha > 0.0:
-        tex = draw.draw_leg_chains(tex, kp_local_uv, kp_names, alpha=kp_alpha, thickness=1)
-        tex = draw.draw_keypoints(tex, kp_local_uv, kp_names, alpha=kp_alpha, radius=4)
+        tex = draw.draw_leg_chains(tex, kp_local_uv, kp_names, alpha=kp_alpha,
+                                    thickness=1, kp_colors=kp_colors)
+        tex = draw.draw_keypoints(tex, kp_local_uv, kp_names, alpha=kp_alpha,
+                                   radius=4, kp_colors=kp_colors)
     return tex
 
 
@@ -491,16 +496,18 @@ def _draw_rays(canvas, panel_pts_local, kp3d_local, progress, pres_cam, alpha):
     return draw.fade(canvas, out, alpha)
 
 
-def _draw_cloud(canvas, kp3d_local, kp_names, pres_cam, alpha):
-    """The triangulated 3D cloud, in the SAME anatomical group colours Act 1
-    uses for observed keypoints (head/thorax/abdomen/legs) -- this is the
-    triangulation result, not the STAC/IK fit, so it is not PALETTE["fit"]
-    green (that convention starts at Act 3)."""
+def _draw_cloud(canvas, kp3d_local, kp_names, pres_cam, alpha, kp_colors):
+    """The triangulated 3D cloud, in the SAME per-limb-chain JARVIS colours
+    Act 1 uses for observed keypoints (`kp_colors.jarvis_kp_colors`) -- this
+    is the triangulation result, not the STAC/IK fit, so it is not
+    PALETTE["fit"] green (that convention starts at Act 3)."""
     if alpha <= 0.0:
         return canvas
     uv, _ = pres_cam.project(kp3d_local)
-    out = draw.draw_leg_chains(canvas, uv, kp_names, alpha=1.0, thickness=2)
-    out = draw.draw_keypoints(out, uv, kp_names, alpha=1.0, radius=4)
+    out = draw.draw_leg_chains(canvas, uv, kp_names, alpha=1.0, thickness=2,
+                                kp_colors=kp_colors)
+    out = draw.draw_keypoints(out, uv, kp_names, alpha=1.0, radius=4,
+                               kp_colors=kp_colors)
     return draw.fade(canvas, out, alpha)
 
 
@@ -512,6 +519,7 @@ def render_act2(clip: str = clip_io.CLIP_DEFAULT) -> Path:
     z3d = np.load(d["predictions"] / "03_kp3d.npz", allow_pickle=True)
     kp3d = z3d["kp3d"]
     assert [str(n) for n in z3d["kp_names"]] == kp_names, "kp2d/kp3d keypoint order mismatch"
+    kp_colors = jarvis_kp_colors(kp_names)
 
     cam_mats, names, view_dirs = _load_rig(clip)
     assert list(names) == cam_names, (
@@ -621,7 +629,7 @@ def render_act2(clip: str = clip_io.CLIP_DEFAULT) -> Path:
 
         if panel_a > 0.0:
             for cam in order:
-                tex = _build_texture(video_crop[cam], tex_uv[cam], kp_names, v_a, k_a)
+                tex = _build_texture(video_crop[cam], tex_uv[cam], kp_names, v_a, k_a, kp_colors)
                 canvas = _warp_panel(canvas, tex, frames_now[cam], pres_cam, panel_a)
                 # Camera name + elevation label just above the panel's
                 # SCREEN-SPACE topmost corner (not the world "+up" edge --
@@ -649,7 +657,7 @@ def render_act2(clip: str = clip_io.CLIP_DEFAULT) -> Path:
                     canvas = _draw_rays(canvas, panel_pts_local[cam], kp3d_local,
                                          ray_p, pres_cam, panel_a)
 
-        canvas = _draw_cloud(canvas, kp3d_local, kp_names, pres_cam, cloud_a)
+        canvas = _draw_cloud(canvas, kp3d_local, kp_names, pres_cam, cloud_a, kp_colors)
 
         canvas = draw.stage_title(canvas, "ACT 2", "Seven views become one")
         canvas = draw.label(

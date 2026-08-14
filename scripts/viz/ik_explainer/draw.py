@@ -28,34 +28,53 @@ def fade(img_a, img_b, t: float):
     return cv2.addWeighted(np.asarray(img_a), 1.0 - t, np.asarray(img_b), t, 0.0)
 
 
-def draw_keypoints(img, uv, kp_names, conf=None, alpha=1.0, radius=3):
+def draw_keypoints(img, uv, kp_names, conf=None, alpha=1.0, radius=3, kp_colors=None):
+    """`kp_colors`: optional {name: BGR tuple} (e.g.
+    `kp_colors.jarvis_kp_colors`) for a per-keypoint colour scheme. When
+    omitted, falls back to the legacy 4-group anatomical colouring
+    (head/thorax/abdomen/legs) for backward compatibility."""
     out = np.asarray(img).copy()
     if alpha <= 0.0:
         return out
     layer = out.copy()
-    groups = keypoint_groups(list(kp_names))
-    for g, idxs in groups.items():
-        for i in idxs:
+    names = list(kp_names)
+    if kp_colors is not None:
+        for i, name in enumerate(names):
             p = np.asarray(uv)[i]
             if not np.all(np.isfinite(p)):
                 continue
             r = radius if (conf is None or conf[i] >= 0.3) else max(1, radius - 2)
             cv2.circle(layer, tuple(np.round(p).astype(int)), r,
-                       _GROUP_COLOR[g], -1, cv2.LINE_AA)
+                       kp_colors[name], -1, cv2.LINE_AA)
+    else:
+        groups = keypoint_groups(names)
+        for g, idxs in groups.items():
+            for i in idxs:
+                p = np.asarray(uv)[i]
+                if not np.all(np.isfinite(p)):
+                    continue
+                r = radius if (conf is None or conf[i] >= 0.3) else max(1, radius - 2)
+                cv2.circle(layer, tuple(np.round(p).astype(int)), r,
+                           _GROUP_COLOR[g], -1, cv2.LINE_AA)
     return cv2.addWeighted(out, 1.0 - alpha, layer, alpha, 0.0)
 
 
-def draw_leg_chains(img, uv, kp_names, alpha=1.0, thickness=1):
+def draw_leg_chains(img, uv, kp_names, alpha=1.0, thickness=1, kp_colors=None):
+    """`kp_colors`: optional {name: BGR tuple}; each leg chain is drawn in its
+    own colour (its first joint's colour -- under the JARVIS scheme a whole
+    chain shares one colour) instead of the legacy flat `PALETTE["fly0"]`."""
     out = np.asarray(img).copy()
     if alpha <= 0.0:
         return out
     layer = out.copy()
-    for _leg, chain in leg_chains(list(kp_names)).items():
+    names = list(kp_names)
+    for _leg, chain in leg_chains(names).items():
         pts = np.asarray(uv)[chain]
+        color = kp_colors[names[chain[0]]] if kp_colors is not None else PALETTE["fly0"]
         for a, b in zip(pts[:-1], pts[1:]):
             if np.all(np.isfinite([a, b])):
                 cv2.line(layer, tuple(np.round(a).astype(int)),
-                         tuple(np.round(b).astype(int)), PALETTE["fly0"],
+                         tuple(np.round(b).astype(int)), color,
                          thickness, cv2.LINE_AA)
     return cv2.addWeighted(out, 1.0 - alpha, layer, alpha, 0.0)
 

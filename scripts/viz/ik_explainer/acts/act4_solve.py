@@ -36,10 +36,10 @@ THREE PHASES (900 frames, 30 fps -> 30 s):
   240-779 (Phase B) `qpos_seq` (921 frames) plays back, continuously mapped
           onto 540 output frames (same `t = round(rel * (T-1) / REL_MAX)`
           style Act 1 uses to span a longer source clip onto fewer output
-          frames). The keypoint cloud (`kp3d[t] * shared_scale`, coloured by
-          anatomical group, same `_GROUP_RGB` Acts 3/4 share via
-          `stage_ik.py`) advances in lock-step with the mesh, and residual is
-          recomputed every frame the same way as Phase A.
+          frames). The keypoint cloud (`kp3d[t] * shared_scale`, coloured per
+          limb chain, JARVIS scheme -- `kp_colors.jarvis_kp_colors_rgb01`,
+          shared with Act 3) advances in lock-step with the mesh, and
+          residual is recomputed every frame the same way as Phase A.
   780-899 (Phase C) the closing 2-up, continuing the SAME t-mapping from
           Phase B (no jump): left is the mesh+cloud render (narrower, 960 px
           wide); right is one real camera's video, cropped and centred the
@@ -116,8 +116,12 @@ tumbling/flipping body during 0-239 means the quaternion was lerped instead
 of SLERPed; the 2-up markers sitting off the fly means the shared_scale
 coordinate-frame division above is missing or inverted.
 
-Colours come from viz/core/colors.py via draw.py / stage_ik.py's `_GROUP_RGB`
--- never invented here.
+Colours come from `kp_colors.jarvis_kp_colors_rgb01` (JARVIS per-limb-chain
+scheme, Change 2) for the mesh+cloud panels; `viz.core.colors.PALETTE`
+(fit=green, observed=cyan) is UNCHANGED for the closing 2-up (see "2-UP
+MARKER COLOURS" above). Wing visibility (Change 1): `set_mesh_rgba`/
+`capture_geom_alpha` (stage_ik.py) keep originally-invisible geoms (the
+wings' `*_inertial` boxes) at alpha=0 across every `geom_rgba` mutation.
 """
 import os
 
@@ -141,13 +145,15 @@ sys.path.insert(0, str(_REPO / "stac-mjx"))
 
 from scripts.viz.ik_explainer import clip_io, draw                    # noqa: E402
 from scripts.viz.ik_explainer.stage_ik import (                       # noqa: E402
-    _add_sphere, _tracking_site_map, _GROUP_RGB, marker_residual_mm,
+    _add_sphere, _tracking_site_map, marker_residual_mm,
+    capture_geom_alpha, set_mesh_rgba,
 )
+from scripts.viz.ik_explainer.kp_colors import jarvis_kp_colors_rgb01  # noqa: E402
 from scripts.viz.ik_explainer.acts.act3_align import (                 # noqa: E402
     _slerp_qpos, _wide_camera, _smoothstep, AZ_START, ELEV,
 )
 from scripts.viz.ik_explainer.acts.act1_views import _smoothed_crop_x0  # noqa: E402
-from viz.core.colors import PALETTE, keypoint_groups, leg_chains       # noqa: E402
+from viz.core.colors import PALETTE, leg_chains                       # noqa: E402
 
 # --- canvas / timeline ------------------------------------------------------
 CANVAS_W, CANVAS_H = 1920, 1080
@@ -322,17 +328,23 @@ def render_act4(clip: str = clip_io.CLIP_DEFAULT, start_frame: int = 0) -> Path:
             "-- refusing to project with a mismatched camera/matrix pairing.")
 
     mj_model = mujoco.MjModel.from_xml_path(str(XML_PATH))
+    orig_alpha = capture_geom_alpha(mj_model)   # BEFORE any geom_rgba mutation
     grey = PALETTE["mesh"][0] / 255.0
-    mj_model.geom_rgba[:, :3] = grey
-    mj_model.geom_rgba[:, 3] = 1.0
+    # Change 1 (task-14): set_mesh_rgba keeps originally-invisible geoms
+    # (the wings' *_inertial boxes, alpha=0 by design) at alpha=0 -- a blanket
+    # `geom_rgba[:, 3] = 1.0` assignment used to turn them into opaque white
+    # rectangles. See stage_ik.py's `set_mesh_rgba` docstring.
+    set_mesh_rgba(mj_model, orig_alpha, rgb=grey, alpha=1.0)
 
     site_map = _tracking_site_map(mj_model, kp_names)
     missing = [n for n in kp_names if n not in site_map]
     if missing:
         raise ValueError(f"tracking[...] site missing for keypoints: {missing}")
     body_site_idxs = np.asarray([site_map[n] for n in kp_names])
-    groups = keypoint_groups(kp_names)
-    group_of = {i: g for g, idxs in groups.items() for i in idxs}
+    # Change 2 (task-14): each limb chain gets its own JARVIS colour instead
+    # of the previous 4-group (head/thorax/abdomen/legs) scheme.
+    kp_rgb01 = jarvis_kp_colors_rgb01(kp_names)
+    kp_rgb01_by_idx = [kp_rgb01[n] for n in kp_names]
 
     kp3d_scaled = kp3d * shared_scale                     # same target pose_optimization fit
 
@@ -413,7 +425,7 @@ def render_act4(clip: str = clip_io.CLIP_DEFAULT, start_frame: int = 0) -> Path:
                 scn = renderer_full.scene
                 for i, p3 in enumerate(cloud_pts):
                     if np.all(np.isfinite(p3)):
-                        rgb = _GROUP_RGB.get(group_of.get(i), (1.0, 1.0, 1.0))
+                        rgb = kp_rgb01_by_idx[i]
                         _add_sphere(scn, p3, np.array((*rgb, 1.0), np.float32), marker_r)
                 canvas = cv2.cvtColor(np.ascontiguousarray(renderer_full.render()), cv2.COLOR_RGB2BGR)
 
@@ -448,7 +460,7 @@ def render_act4(clip: str = clip_io.CLIP_DEFAULT, start_frame: int = 0) -> Path:
                 scn = renderer_left.scene
                 for i, p3 in enumerate(cloud_pts):
                     if np.all(np.isfinite(p3)):
-                        rgb = _GROUP_RGB.get(group_of.get(i), (1.0, 1.0, 1.0))
+                        rgb = kp_rgb01_by_idx[i]
                         _add_sphere(scn, p3, np.array((*rgb, 1.0), np.float32), marker_r)
                 left = cv2.cvtColor(np.ascontiguousarray(renderer_left.render()), cv2.COLOR_RGB2BGR)
 

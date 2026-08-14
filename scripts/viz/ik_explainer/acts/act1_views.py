@@ -2,19 +2,22 @@
 """Act 1 -- seven camera views, 2D keypoints fading in.
 
 4x2 grid (7 fly-centred camera panels + 1 title/legend cell) at 1920x1080,
-450 output frames (15 s @ 30 fps). Source video frame for output frame `f` is
-`int(f * N / 450)` with `N` = the clip's 921 frames, so the whole clip spans
-the act.
+270 output frames (9 s @ 30 fps). Source video frame for output frame `f` is
+`WINDOW_START + int(f * WINDOW_LEN / N_OUT)`, i.e. a CONTIGUOUS sub-range of
+the clip's 921 frames (`WINDOW_START..WINDOW_START+WINDOW_LEN-1`), not the
+whole clip -- see `WINDOW_START`/`WINDOW_LEN` below for why this window and
+not another, and the speed-label derivation.
 
-Timeline:
-  f   0- 89  video only, panels labelled camera name + true elevation.
-  f  90-209  2D keypoints fade in, alpha = (f-90)/120; low-confidence markers
+Timeline (rescaled proportionally from the original 450-frame/921-frame
+version -- same fractions of the act, just fewer frames):
+  f   0- 53  video only, panels labelled camera name + true elevation.
+  f  54-125  2D keypoints fade in, alpha = (f-54)/72; low-confidence markers
              are drawn dimmer (`draw.draw_keypoints(..., conf=...)` shrinks
              their radius itself).
-  f 210-449  full overlay, video advancing.
+  f 126-269  full overlay, video advancing.
 
 EXPECTATION if this is right: f=0 shows raw video with no markers anywhere;
-f=150 shows markers at ~50% opacity on all 7 panels; f=400 shows markers ON
+f=90 shows markers at ~50% opacity on all 7 panels; f=240 shows markers ON
 the fly (not off to one side) in every panel, including the wall-adjacent
 Cam2012857 where the leg keypoints are genuinely the messiest -- that messiness
 is real per-view failure, not a bug, and is the setup for why Act 2 needs
@@ -23,7 +26,8 @@ FALSIFICATION: markers visible at f=0 (fade math inverted), or markers
 sitting off the fly in some panel (crop centre wrong for that camera / smoothing
 lost track of the centroid).
 
-Colours come from viz/core/colors.py via draw.py -- never invented here.
+Colours: per-keypoint, JARVIS per-limb-chain scheme
+(`kp_colors.jarvis_kp_colors`) -- never invented here.
 """
 import argparse
 import sys
@@ -38,10 +42,28 @@ sys.path.insert(0, str(_REPO))
 sys.path.insert(0, str(_REPO / "third_party" / "jarvis_jax"))
 
 from scripts.viz.ik_explainer import clip_io, draw   # noqa: E402
-from viz.core.colors import PALETTE                  # noqa: E402
+from scripts.viz.ik_explainer.kp_colors import (     # noqa: E402
+    jarvis_kp_colors, legend_entries,
+)
 
 # --- layout ------------------------------------------------------------
-N_OUT = 450
+N_OUT = 270
+
+# --- Change 4 (task-14): a contiguous sub-range of the clip, not the whole
+# 921 frames -- keeps the slow-motion factor (real-world seconds per output
+# second) close to the original instead of speeding the fly up to cover the
+# same span in fewer output frames. Chosen by scanning the Scutellum's own
+# 3D trajectory (04_kp3d_filt.npz, script run by hand, not committed) for the
+# window of length ~370 (~40% of 921) with the MOST walking activity: total
+# path length and net displacement are both maximised (not just non-zero) at
+# WINDOW_START=390 -- 10.09 mm of path length, 8.47 mm of net displacement
+# over the window, i.e. genuine directed walking, not idling-in-place or a
+# back-and-forth wobble that a path-length-only metric could reward. The
+# window is real, walking fly footage, not the busiest-looking segment by
+# chance.
+WINDOW_START = 390
+WINDOW_LEN = 370          # 921 * 0.40 = 368.4; 390+370=760 <= 921. ~40.2% of the clip.
+
 CANVAS_W, CANVAS_H = 1920, 1080
 GRID_COLS, GRID_ROWS = 4, 2
 CELL_W = CANVAS_W // GRID_COLS       # 480
@@ -62,11 +84,10 @@ SMOOTH_SIGMA = 12.0                  # frames (~15 ms @ 800 fps): removes
                                       # without lagging real fly motion
 
 # --- timeline ------------------------------------------------------------
-FADE_START, FADE_END = 90, 210       # alpha ramps over frames [90, 210)
+# Rescaled proportionally from the original (90, 210) @ 450 frames by the
+# same 270/450 = 0.6 ratio: 90*0.6=54, 210*0.6=126.
+FADE_START, FADE_END = 54, 126       # alpha ramps over frames [54, 126)
 PX_PER_MM = 80.7
-
-_LEGEND_COLOR = {"head": PALETTE["head"], "thorax": PALETTE["thorax"],
-                 "abdomen": PALETTE["tail"], "legs": PALETTE["fly0"]}
 
 
 def _elevations_deg(cam_names, clip):
@@ -97,9 +118,9 @@ def _smoothed_crop_x0(kp2d_cam: np.ndarray, frame_w: int) -> np.ndarray:
 
 
 def _preload_crops(clip: str, cam_names, x0_by_cam: dict, t_for_f: np.ndarray):
-    """Read each camera's video once; keep only the 450 wanted frames, cropped.
+    """Read each camera's video once; keep only the N_OUT wanted frames, cropped.
 
-    Returns {cam: (450, FRAME_H, CROP_W, 3) uint8}, in output-frame order.
+    Returns {cam: (N_OUT, FRAME_H, CROP_W, 3) uint8}, in output-frame order.
     """
     t_to_f = {int(t): f for f, t in enumerate(t_for_f)}
     out = {}
@@ -128,21 +149,38 @@ def _preload_crops(clip: str, cam_names, x0_by_cam: dict, t_for_f: np.ndarray):
     return out
 
 
-def _build_title_panel(cam_names, elev_deg) -> np.ndarray:
+SRC_FPS = 800.0
+OUT_FPS = 30.0
+
+
+def _speed_factor() -> float:
+    """800 fps -> 1/N slow-motion factor, recomputed for THIS window/frame
+    count (task-14: never copy the old act's number). Real time elapsed by
+    the WINDOW_LEN source frames at SRC_FPS, stretched over N_OUT output
+    frames' worth of viewing time at OUT_FPS: factor = out_duration /
+    real_duration."""
+    real_duration_s = WINDOW_LEN / SRC_FPS
+    out_duration_s = N_OUT / OUT_FPS
+    return out_duration_s / real_duration_s
+
+
+def _build_title_panel(cam_names, elev_deg, kp_names) -> np.ndarray:
     img = np.zeros((CELL_H, CELL_W, 3), np.uint8)
     img = draw.stage_title(img, "ACT 1", "Seven views, one fly")
-    img = draw.label(img, "800 fps -> 1/27 speed", (48, 160), scale=0.6)
-    img = draw.label(img, "keypoints:", (48, 200), scale=0.55)
-    y = 200
-    for name, color in _LEGEND_COLOR.items():
-        y += 32
-        img = draw.label(img, name, (64, y), scale=0.55, color=color)
+    speed = _speed_factor()
+    img = draw.label(img, f"800 fps -> 1/{speed:.1f} speed", (48, 160), scale=0.6)
+    img = draw.label(img, "keypoints (JARVIS per-limb-chain colours):",
+                      (48, 196), scale=0.5)
+    y = 196
+    for name, color in legend_entries(kp_names):
+        y += 22
+        img = draw.label(img, name, (64, y), scale=0.45, color=color)
     img = draw.label(img, "dim marker = low detector confidence",
-                      (48, y + 44), scale=0.45, color=(160, 160, 160))
+                      (48, y + 34), scale=0.42, color=(160, 160, 160))
     lo, hi = float(np.min(elev_deg)), float(np.max(elev_deg))
     img = draw.label(
         img, f"{len(cam_names)} cameras, elev {lo:+.1f} to {hi:+.1f} deg",
-        (48, y + 76), scale=0.45, color=(160, 160, 160))
+        (48, y + 58), scale=0.42, color=(160, 160, 160))
     return img
 
 
@@ -156,9 +194,20 @@ def render_act1(clip: str = clip_io.CLIP_DEFAULT) -> Path:
     assert C == len(cam_names) == 7
 
     elev_deg = _elevations_deg(cam_names, clip)
+    kp_colors = jarvis_kp_colors(kp_names)
+
+    if WINDOW_START + WINDOW_LEN > N:
+        raise ValueError(
+            f"WINDOW_START+WINDOW_LEN ({WINDOW_START + WINDOW_LEN}) exceeds "
+            f"the clip's {N} frames")
 
     src_frame_w = 1936
-    t_for_f = np.array([int(f * N / N_OUT) for f in range(N_OUT)], np.int64)
+    # Change 4 (task-14): a CONTIGUOUS sub-range of the clip
+    # (WINDOW_START..WINDOW_START+WINDOW_LEN-1), not the whole 921 frames --
+    # see WINDOW_START/WINDOW_LEN above.
+    t_for_f = np.array(
+        [WINDOW_START + int(f * WINDOW_LEN / N_OUT) for f in range(N_OUT)],
+        np.int64)
     assert np.all(np.diff(t_for_f) > 0), "expected a strictly increasing map"
 
     x0_by_cam = {cam: _smoothed_crop_x0(kp2d[:, ci], src_frame_w)
@@ -167,7 +216,7 @@ def render_act1(clip: str = clip_io.CLIP_DEFAULT) -> Path:
 
     out_dir = d["frames"] / "act1_views"
     out_dir.mkdir(parents=True, exist_ok=True)
-    title_panel = _build_title_panel(cam_names, elev_deg)
+    title_panel = _build_title_panel(cam_names, elev_deg, kp_names)
 
     for f in range(N_OUT):
         t = int(t_for_f[f])
@@ -191,10 +240,11 @@ def render_act1(clip: str = clip_io.CLIP_DEFAULT) -> Path:
                 uv[:, 0] -= x0
                 c = conf[t, ci]
                 panel_native = draw.draw_leg_chains(panel_native, uv, kp_names,
-                                                     alpha=kp_alpha, thickness=1)
+                                                     alpha=kp_alpha, thickness=1,
+                                                     kp_colors=kp_colors)
                 panel_native = draw.draw_keypoints(panel_native, uv, kp_names,
                                                     conf=c, alpha=kp_alpha,
-                                                    radius=4)
+                                                    radius=4, kp_colors=kp_colors)
             panel_native = draw.scale_bar_mm(
                 panel_native, px_per_mm=PX_PER_MM, mm=1.0,
                 origin=(10, panel_native.shape[0] - 14))
