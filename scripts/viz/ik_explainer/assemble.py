@@ -412,6 +412,28 @@ re-deriving the story from the original plan wording alone would get it wrong:
   female fly on walls / in occlusion is where this pipeline actually fails;
   do not cite this video as general QC evidence.
 
+## Display source: `enhanced/` (presentation only)
+
+Every place the rendered video shows real camera footage (Act 1's seven-panel
+grid, Act 4's side-by-side right panel, and the `act1_data3d*_test.py`
+diagnostics) reads from `<clip>/enhanced/Cam*.mp4` -- a brightness/contrast
+-lifted copy of the same recording -- instead of the raw `<clip>/Cam*.mp4`,
+via `clip_io.video_path`'s `enhanced=True` default (with a documented
+fallback to the raw file, and a load-time assertion that the enhanced copy's
+frame count/dimensions match before it's ever read). Verified before
+switching: all 7 files, same filenames, dimensions 1936x448, rate 800/1, and
+921 frames as the raw copies; normalised cross-correlation against the raw
+frames is 0.9984-0.9986 at frames 0/400/900 with lag 0 (frame-aligned, no
+offset); grey mean 22.1 -> 40.5, std 32.3 -> 47.1.
+
+**This is display-only.** SAM3 masks and the ViTPose detector were run
+against the RAW videos (`detect2d.py`'s detector-input load and
+`clip_io.stage_session_dir`'s SAM3 symlinks both pin `enhanced=False`
+explicitly, so a future re-run of those stages keeps reading the exact
+frames the shipped predictions were derived from) -- none of the 2D
+keypoints, 3D triangulation, or STAC/IK in `predictions/` is re-derived by
+this swap; only the video pixels drawn underneath the overlays changed.
+
 ## Regenerating from scratch
 
 All commands run from the repo root

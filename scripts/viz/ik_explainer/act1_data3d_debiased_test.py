@@ -132,6 +132,10 @@ def _smoothed_crop_x0(kp2d_cam: np.ndarray, frame_w: int) -> np.ndarray:
 
 
 def _preload_crops(clip: str, cam_names, x0_by_cam: dict, t_for_f: np.ndarray):
+    """DISPLAY SOURCE: `clip_io.video_path` defaults to the brightness/
+    contrast-lifted `<clip>/enhanced/` copy, matching `acts/act1_views.py`
+    (presentation-only; the reprojected, bias-corrected data3D.csv keypoints
+    drawn on top are unaffected -- see clip_io.py's module docstring)."""
     t_to_f = {int(t): f for f, t in enumerate(t_for_f)}
     out = {}
     for cam in cam_names:

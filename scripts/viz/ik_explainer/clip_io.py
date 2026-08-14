@@ -8,6 +8,24 @@ instead.
 UNITS: the shipped `data3D_*.csv` is in 0.1 mm while the DLTs expect mm.
 `load_shipped_kp3d_mm` applies the ONLY x0.1 conversion in this package.
 Everything else in the explainer is already mm.
+
+DISPLAY SOURCE (`enhanced/`): `video_path` defaults to the brightness/contrast
+-lifted copies in `<clip>/enhanced/` instead of the raw `<clip>/Cam*.mp4`.
+Verified before switching (not re-derived here): all 7 files, same
+filenames, same dimensions 1936x448, same rate 800/1, same 921 frames as the
+raw copies; normalised cross-correlation against the raw frames is
+0.9984-0.9986 at frames 0/400/900 with lag 0 giving the highest correlation
+(frame-aligned, no offset); grey mean 22.1 -> 40.5, std 32.3 -> 47.1 (that's
+the whole difference -- lifted brightness/contrast, not different content).
+This is a PRESENTATION-ONLY change: SAM3 masks and the ViTPose detector were
+run against the RAW videos, and nothing downstream of the detector (2D, 3D,
+STAC/IK) is re-derived from the enhanced copies. Call sites that feed the
+actual detection/masking pipeline pin `enhanced=False` explicitly
+(`detect2d.run_detect`'s `caps`, `stage_session_dir`'s SAM3 symlinks,
+`prepare_clip.n_frames`) so a future re-run of those stages keeps reading
+the exact frames the shipped predictions were derived from; every other
+caller (the rendered acts, QC panels, diagnostics) picks up `enhanced/`
+automatically through this one function.
 """
 import csv
 import glob
@@ -29,6 +47,14 @@ CLIP_DEFAULT = ("/data2/users/eabe/datasets/3d_tracking/clips/Session6/"
 
 # The shipped CSV is in 0.1 mm. See module docstring; do not use elsewhere.
 _SHIPPED_CSV_TO_MM = 0.1
+
+# What every enhanced/ file is expected to match (see module docstring's
+# DISPLAY SOURCE section for how these were verified). A mismatch here means
+# a different/incomplete enhanced copy has been dropped in since verification
+# -- fail loudly rather than let it silently desync from the overlays, which
+# were computed against the raw video's frame indices.
+_ENHANCED_EXPECTED_WH = (1936, 448)
+_ENHANCED_EXPECTED_N_FRAMES = 921
 
 
 def shipped_csv_path(clip: str = CLIP_DEFAULT) -> str:
@@ -94,10 +120,57 @@ def load_shipped_kp3d_mm(csv_path: str):
     return arr[:, :, :3] * _SHIPPED_CSV_TO_MM, arr[:, :, 3], names
 
 
-def video_path(clip: str, cam_name: str) -> str:
+def _assert_enhanced_video_shape(path: str) -> None:
+    """Fail loudly if an `enhanced/` file doesn't match the raw copy it
+    stands in for -- see module docstring's DISPLAY SOURCE section for the
+    verified numbers this checks against. A silently mismatched enhanced copy
+    (wrong dimensions, or a truncated/longer re-encode) would desync every
+    overlay computed against the raw video's frame indices without any other
+    signal, so this runs on every resolution of an enhanced path, not once by
+    hand.
+    """
+    cap = cv2.VideoCapture(path)
+    w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    n = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    cap.release()
+    want_w, want_h = _ENHANCED_EXPECTED_WH
+    if (w, h) != (want_w, want_h):
+        raise ValueError(
+            f"{path}: enhanced video is {w}x{h}, expected {want_w}x{want_h} "
+            "-- refusing to use it as a drop-in for the raw video (overlays "
+            "would desync)")
+    if n != _ENHANCED_EXPECTED_N_FRAMES:
+        raise ValueError(
+            f"{path}: enhanced video has {n} frames, expected "
+            f"{_ENHANCED_EXPECTED_N_FRAMES} -- refusing to use it as a "
+            "drop-in for the raw video (overlays would desync)")
+
+
+def video_path(clip: str, cam_name: str, *, enhanced: bool = True) -> str:
+    """Locate this camera's video file.
+
+    Prefers the brightness/contrast-lifted copy in `<clip>/enhanced/` (see
+    module docstring's DISPLAY SOURCE section) -- checked at load time
+    against the exact frame count/dimensions the raw copy has, so a
+    mismatched enhanced file fails loudly instead of silently desyncing
+    overlays. Falls back to the raw `<clip>/Cam*.mp4` when no enhanced copy
+    exists for this camera, or when the caller explicitly passes
+    `enhanced=False` (pipeline stages that must keep reading the exact frames
+    SAM3/the detector were run against, e.g. `detect2d.run_detect`,
+    `stage_session_dir`, `prepare_clip.n_frames` -- see module docstring).
+    Raises `FileNotFoundError` if neither an enhanced nor a raw file exists.
+    """
+    if enhanced:
+        hits = sorted(glob.glob(os.path.join(clip, "enhanced", f"{cam_name}_*.mp4")))
+        if hits:
+            path = hits[0]
+            _assert_enhanced_video_shape(path)
+            return path
     hits = sorted(glob.glob(os.path.join(clip, f"{cam_name}_*.mp4")))
     if not hits:
-        raise FileNotFoundError(f"no video for {cam_name} under {clip}")
+        where = "enhanced/ or raw" if enhanced else "raw"
+        raise FileNotFoundError(f"no {where} video for {cam_name} under {clip}")
     return hits[0]
 
 
@@ -243,7 +316,11 @@ def stage_session_dir(clip: str) -> Path:
     root.mkdir(parents=True, exist_ok=True)
     _mats, names = load_dlt(str(Path(clip) / "calibration"))
     for name in names:
-        src = Path(video_path(clip, name))
+        # enhanced=False: SAM3 must see the exact raw frames the shipped
+        # masks/detector predictions were derived from (see module
+        # docstring's DISPLAY SOURCE section) -- this is provenance-critical
+        # staging, not a display panel, and must not silently switch sources.
+        src = Path(video_path(clip, name, enhanced=False))
         link = root / f"{name}.mp4"
         # Path.exists() follows symlinks, so a DANGLING symlink (target
         # missing/moved) reports False here and symlink_to would then raise

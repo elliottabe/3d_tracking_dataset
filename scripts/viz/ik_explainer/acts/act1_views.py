@@ -227,6 +227,11 @@ def _preload_crops(clip: str, cam_names, x0_by_cam: dict, t_for_f: np.ndarray):
     """Read each camera's video once; keep only the N_OUT wanted frames, cropped.
 
     Returns {cam: (N_OUT, FRAME_H, CROP_W, 3) uint8}, in output-frame order.
+
+    DISPLAY SOURCE: `clip_io.video_path` defaults to the brightness/contrast
+    -lifted `<clip>/enhanced/` copies (presentation-only -- the 2D keypoints
+    drawn on top were detected against the RAW videos and are not
+    re-derived here; see clip_io.py's module docstring).
     """
     t_to_f = {int(t): f for f, t in enumerate(t_for_f)}
     out = {}

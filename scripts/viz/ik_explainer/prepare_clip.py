@@ -21,7 +21,12 @@ from scripts.viz.ik_explainer import clip_io   # noqa: E402
 def n_frames(clip: str) -> int:
     """Frames common to every camera; the clip is only as long as its shortest view."""
     _mats, names = clip_io.load_dlt(str(Path(clip) / "calibration"))
-    counts = [clip_io.n_video_frames(clip_io.video_path(clip, n)) for n in names]
+    # enhanced=False: this defines the bout SAM3/the detector actually ran
+    # over -- keep it pinned to the raw frame count regardless of
+    # clip_io.video_path's display default (see clip_io's DISPLAY SOURCE
+    # docstring section). Both counts agree (921) on this clip anyway.
+    counts = [clip_io.n_video_frames(clip_io.video_path(clip, n, enhanced=False))
+              for n in names]
     if max(counts) - min(counts) > 1:
         raise ValueError(f"cameras disagree on frame count by >1: {dict(zip(names, counts))}")
     return min(counts)

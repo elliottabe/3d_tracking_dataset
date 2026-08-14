@@ -1060,6 +1060,11 @@ def render_act4(clip: str = clip_io.CLIP_DEFAULT, start_frame: int = 0) -> Path:
     # closing 120-frame Phase C -- the side-by-side spans the whole rest of
     # the act now, so its right panel needs a real frame for every one of
     # those output frames.
+    # DISPLAY SOURCE: `clip_io.video_path` defaults to the brightness/
+    # contrast-lifted `<clip>/enhanced/` copy (presentation-only -- the
+    # overlaid keypoints are `kp_data_prod` reprojected, from the production
+    # solve fit against the RAW videos; nothing is re-derived here; see
+    # clip_io.py's module docstring).
     video_frames = clip_io.read_frames(clip_io.video_path(clip, CAM_2UP), t_playback)
     t_to_video_row = {}
     for row, t in enumerate(t_playback):

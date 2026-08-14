@@ -41,7 +41,12 @@ def run_detect(clip: str, *, ckpt: str = CKPT, batch: int = 64,
     valid = np.asarray(bm["valid"], bool)              # (N,C)
     N = masks.shape[0]
 
-    caps = [clip_io.video_path(clip, c) for c in cam_names]
+    # enhanced=False: this is the actual detector input -- ViTPose was run
+    # against the raw frames, and this repo's clip_io.py module docstring
+    # (DISPLAY SOURCE) records that as a fact to preserve, not just today's
+    # behaviour. `qc_kp2d` below is a display-only QC montage and is
+    # unaffected -- it picks up clip_io.video_path's enhanced default.
+    caps = [clip_io.video_path(clip, c, enhanced=False) for c in cam_names]
 
     def frames_iter():
         import cv2
