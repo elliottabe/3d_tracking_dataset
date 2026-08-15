@@ -5,6 +5,7 @@ consumer, and draw.py's helpers are markers-on-footage primitives. Promote it
 if a second caller appears.
 """
 import sys
+import warnings
 from pathlib import Path
 
 import cv2
@@ -39,9 +40,13 @@ def render_trace_panel(w, h, series, frames, cursor, *, ylabel,
     y0, y1 = _PAD_T, h - _PAD_B
 
     vals = np.concatenate([np.asarray(v, np.float64).ravel() for _n, v, _c in series])
-    lo, hi = float(np.nanmin(vals)), float(np.nanmax(vals))
-    if not np.isfinite(lo) or not np.isfinite(hi) or hi - lo < 1e-9:
-        lo, hi = lo - 1.0, lo + 1.0        # flat series: give it a visible band
+    with warnings.catch_warnings():
+        warnings.filterwarnings('ignore', message='All-NaN slice encountered')
+        lo, hi = float(np.nanmin(vals)), float(np.nanmax(vals))
+    if not np.isfinite(lo) or not np.isfinite(hi):
+        lo, hi = 0.0, 1.0                # nothing finite: draw empty axes, don't crash
+    elif hi - lo < 1e-9:
+        lo, hi = lo - 1.0, lo + 1.0      # flat series: give it a visible band
     pad = 0.08 * (hi - lo)
     lo, hi = lo - pad, hi + pad
 

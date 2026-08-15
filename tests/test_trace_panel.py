@@ -64,3 +64,11 @@ def test_coincident_series_both_remain_visible():
     for _n, _v, col in s:
         assert np.all(p == np.array(col, np.uint8), axis=-1).sum() > 0, \
             f"{col} fully occluded by a coincident series"
+
+
+def test_all_nan_series_renders_empty_axes_without_crashing():
+    """A fully-missing window is plausible input for an occlusion tool."""
+    n = 20
+    s = [("a", np.full(n, np.nan), (255, 255, 255))]
+    p = tp.render_trace_panel(400, 300, s, np.arange(n), 5, ylabel="mm")
+    assert p.shape == (300, 400, 3) and p.dtype == np.uint8
