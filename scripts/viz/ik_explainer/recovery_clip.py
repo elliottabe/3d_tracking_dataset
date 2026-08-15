@@ -228,6 +228,20 @@ def render_recovery_clip(clip: str = clip_io.CLIP_DEFAULT) -> Path:
     print(f"[recovery_clip] fixed native crop: x0={x0} y0={y0} w={crop_w} h={crop_h} "
           f"(native {frame_w}x{frame_h})")
 
+    # The crop is aspect-matched to the panel, so the resize is (near) uniform;
+    # the scale bar is horizontal, so it follows the x factor. Printed with the
+    # y factor beside it so a non-uniform resize (crop clipped at a frame edge)
+    # is visible in the render's own stdout rather than silently mis-scaling
+    # the bar.
+    sx, sy = PANEL_W / float(crop_w), PANEL_H / float(crop_h)
+    px_per_mm_panel = PX_PER_MM_NATIVE * sx
+    print(f"[recovery_clip] resize factors sx={sx:.4f} sy={sy:.4f} -> panel scale "
+          f"{px_per_mm_panel:.1f} px/mm (native {PX_PER_MM_NATIVE} px/mm)")
+    if abs(sx - sy) / max(sx, sy) > 0.01:
+        raise RuntimeError(
+            f"crop resize is not uniform (sx={sx:.4f}, sy={sy:.4f}) -- the "
+            "1 mm scale bar would be wrong in one axis")
+
     kp_map = kp_colors.jarvis_kp_colors()
     det_color = kp_map[e["kp"]]
 
@@ -250,10 +264,16 @@ def render_recovery_clip(clip: str = clip_io.CLIP_DEFAULT) -> Path:
         crop = draw.draw_keypoints(crop, rep_local, ["_filtered_reprojection"],
                                    radius=5,
                                    kp_colors={"_filtered_reprojection": (255, 255, 255)})
-        crop = draw.scale_bar_mm(crop, px_per_mm=PX_PER_MM_NATIVE, mm=1.0,
-                                 origin=(10, crop.shape[0] - 14))
-
         left = cv2.resize(crop, (PANEL_W, PANEL_H), interpolation=cv2.INTER_LINEAR)
+        # Scale bar drawn AFTER the upscale, at the panel's own px/mm. Drawing
+        # it on the native crop (the Acts 1-2 convention) kept the bar's
+        # real-world length correct through the resize, but carried its "1 mm"
+        # text along too: SMALL_SCALE 0.5 x 2.99 upscale = an effective ~1.5
+        # against TITLE_SCALE 1.6, i.e. the second-largest text on screen.
+        # Here the bar length is pre-scaled instead, so the label lands at
+        # SMALL_SCALE in FINAL pixels and the bar still measures 1 real mm.
+        left = draw.scale_bar_mm(left, px_per_mm=px_per_mm_panel, mm=1.0,
+                                 origin=(24, PANEL_H - 40))
         left = draw.label(left, f"{cam_label}   detector conf {tracks['conf'][i]:.2f}",
                           (24, 225), scale=draw.CAPTION_SCALE)
 
