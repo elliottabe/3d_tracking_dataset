@@ -260,6 +260,32 @@ FALSIFICATION: frame 0 showing any trace of the regular T0 texture (`_intro_
 alpha(0) != 1.0`), the intro content still visible well past `FLY_END`, or
 `T_ACT1_LAST` silently drifting from Act 1's own last rendered frame (e.g. if
 someone re-hardcodes it as a literal instead of deriving it).
+
+TASK-36 (task-34's grid-start fix landed Act 2's opening panels exactly on
+Act 1's grid cells -- this fixes a side effect of that: the fixed-position
+title ("3D triangulation"), header ("7 cameras, 180 deg arc, 30 deg
+spacing") and bottom-left frame counter now sit ON TOP of Camera 1's and
+Camera 5's panels for roughly the first 20-30 frames, both unreadable, until
+the panels fly far enough from the grid to clear that screen area). Text
+CONTENT/position/colour/type-scale are unchanged -- only their opacity now
+ramps with frame number via `_text_alpha`, drawn with `draw.fade` (the
+existing image-blend helper, not a hand-rolled per-pixel blend) between the
+plain canvas and a copy with the three text calls burned in.
+
+`_text_alpha(0) == 0.0`: frame 0 has NO text overlay at all, matching Act
+1's own last frame (`act1_views/f00149.png` has no text in these screen
+positions either -- Act 1's title lives in its empty 8th grid cell, never
+over a camera panel), which also tightens the task-34/35 seam since the
+Act1->Act2 cut now matches on this axis too. Held at 0 through
+`_TEXT_FADE_START` (a short pure-invisible hold covering the worst of the
+overlap, panels still essentially on the grid), then eases up
+(`_smoothstep`) to 1.0 by `FLY_END` (79) -- the same frame the panel fly-out
+itself completes and panels have reached the arc, clear of the text's fixed
+screen position. `_TEXT_FADE_START`/`FLY_END` are the only two knobs; the
+ramp shape reuses the same `_smoothstep` every other phase in this module
+uses, so it eases in and out consistently with everything else on screen.
+FALSIFICATION: any text visible at f=0, text still fully transparent by
+`FLY_END`, or the fade looking like a hard cut rather than a smooth ramp.
 """
 import argparse
 import sys
@@ -301,6 +327,14 @@ KP_EARLY_END = 59                    # task-14 round 4: keypoints fade in EARLY
 RAY_START, RAY_END = 80, 129         # 80-129 inclusive: video->constellation, rays extend (TASK-31: was 60-99; TASK-29: was 120-199)
 CLOUD_START, CLOUD_END = 130, 179    # 130-179 inclusive: cloud alpha ramp (TASK-31: was 100-129; TASK-29: was 200-259)
 FADE_START, FADE_END = 180, 239      # 180-239 inclusive: panels+rays fade out, cloud held alone (TASK-31: was 130-149 -- widened 20->60 frames; TASK-29: was 260-299)
+
+# TASK-36: title/header/frame-counter fade-in. At frame 0 the panels sit
+# exactly on Act 1's grid cells (task-34), so drawing this fixed-position
+# text from frame 0 puts it on top of Camera 1's and Camera 5's panels.
+# Hold fully invisible through this many frames, then ease up (same
+# `_smoothstep` as every other phase) to full opacity by `FLY_END`, once the
+# panels have flown clear to the arc.
+_TEXT_FADE_START = 15
 
 # --- rig / crop constants (match Act 1's conventions) ----------------------
 CROP_W, FRAME_H = 430, 448
@@ -611,6 +645,20 @@ def _cloud_alpha(f):
     if f >= CLOUD_END:
         return 1.0
     return (f - CLOUD_START) / float(CLOUD_END - CLOUD_START)
+
+
+def _text_alpha(f):
+    """TASK-36: opacity for the title/header/frame-counter overlay. 0.0 at
+    f=0 (no text at all, matching Act 1's own last frame -- its title lives
+    in the empty 8th grid cell, never over a camera panel), held at 0.0
+    through `_TEXT_FADE_START` (panels still essentially on the Act 1 grid),
+    then eases via `_smoothstep` to 1.0 by `FLY_END` (panels have reached the
+    arc and cleared this fixed screen position)."""
+    if f <= _TEXT_FADE_START:
+        return 0.0
+    if f >= FLY_END:
+        return 1.0
+    return float(_smoothstep((f - _TEXT_FADE_START) / float(FLY_END - _TEXT_FADE_START)))
 
 
 def _panel_overall_alpha(f):
@@ -992,12 +1040,20 @@ def render_act2(clip: str = clip_io.CLIP_DEFAULT) -> Path:
 
         canvas = _draw_cloud(canvas, kp3d_local, kp_names, pres_cam, cloud_a, kp_colors)
 
-        canvas = draw.stage_title(canvas, "3D triangulation")
-        canvas = draw.label(
-            canvas, "7 cameras, 180 deg arc, 30 deg spacing",
-            (48, 150), scale=draw.CAPTION_SCALE, color=(190, 190, 190))
-        canvas = draw.label(canvas, f"frame {f + 1}/{N_OUT}", (48, CANVAS_H - 24),
-                             scale=draw.SMALL_SCALE, color=(150, 150, 150))
+        # TASK-36: title/header/frame-counter fade in as the panels fly out
+        # (see `_text_alpha`'s docstring) -- at f=0 the text is fully absent
+        # rather than drawn at alpha 0 of some other blend, and `draw.fade`
+        # (the existing image-blend helper) does the actual opacity ramp so
+        # nothing here hand-rolls per-pixel blending.
+        text_a = _text_alpha(f)
+        if text_a > 0.0:
+            text_layer = draw.stage_title(canvas, "3D triangulation")
+            text_layer = draw.label(
+                text_layer, "7 cameras, 180 deg arc, 30 deg spacing",
+                (48, 150), scale=draw.CAPTION_SCALE, color=(190, 190, 190))
+            text_layer = draw.label(text_layer, f"frame {f + 1}/{N_OUT}", (48, CANVAS_H - 24),
+                                     scale=draw.SMALL_SCALE, color=(150, 150, 150))
+            canvas = draw.fade(canvas, text_layer, text_a)
 
         # Task-32: PNG_COMPRESSION 1 (vs cv2's default 3) -- lossless, faster
         # zlib pass; decoded pixels are bit-identical (verified in the task-32
