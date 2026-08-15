@@ -38,6 +38,38 @@ CAPTION_THICKNESS = 1
 SMALL_SCALE = 0.5
 SMALL_THICKNESS = 1
 
+# --- shared grid geometry (task-34) -----------------------------------------
+# Act 1's 4x2 video grid (7 camera panels, ARC order 0->180 deg, + 1 title
+# cell). Factored here -- rather than each act re-deriving its own copy of
+# the cell rectangles -- so Act 2's fly-out start pose (`_grid_start_frame` in
+# act2_triangulate.py) is DEFINED to match Act 1's on-screen panel rectangles
+# exactly: a change to this grid (columns, margins, panel size) can no longer
+# silently drift the two acts apart the way two separately-hardcoded copies
+# could. Values are Act 1's pre-existing ones, unchanged.
+GRID_COLS, GRID_ROWS = 4, 2
+CANVAS_W, CANVAS_H = 1920, 1080
+CELL_W = CANVAS_W // GRID_COLS       # 480
+CELL_H = CANVAS_H // GRID_ROWS       # 540
+GRID_MARGIN = 6
+GRID_LABEL_H = 32
+PANEL_W = CELL_W - 2 * GRID_MARGIN               # 468
+PANEL_H = CELL_H - GRID_LABEL_H - 2 * GRID_MARGIN  # 496
+TITLE_CELL = 7                        # last cell (row1, col3) holds the title
+
+
+def panel_cell_rect(panel_idx):
+    """Exact on-screen rectangle `(px, py, w, h)` Act 1 blits ARC-order panel
+    `panel_idx` (0-6) into: `(px, py)` is the pixel just inside that cell's
+    margin/label offset, `(w, h) = (PANEL_W, PANEL_H)`. Act 2 inverts this
+    same rectangle through its own presentation-camera projection
+    (`act2_triangulate._grid_start_frame`) to place its fly-out start pose,
+    so both acts' panels occupy identical screen rectangles at the Act1->
+    Act2 seam."""
+    row, col = divmod(panel_idx, GRID_COLS)
+    cellx, celly = col * CELL_W, row * CELL_H
+    py, px = celly + GRID_LABEL_H + GRID_MARGIN, cellx + GRID_MARGIN
+    return px, py, PANEL_W, PANEL_H
+
 
 def fade(img_a, img_b, t: float):
     t = float(np.clip(t, 0.0, 1.0))

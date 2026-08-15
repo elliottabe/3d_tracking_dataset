@@ -191,6 +191,27 @@ by dropping the stale elevation parenthetical; the header is now just
 "7 cameras, 180 deg arc, 30 deg spacing", consistent with the panel labels.
 `elev_deg` (only ever computed to feed that parenthetical) is removed as
 dead code along with it.
+
+TASK-34 (user: make the Act1->Act2 cut a continuation, not a jump -- panel
+fly-out should start FROM the Act 1 grid, not somewhere already different):
+`_grid_start_frame` always claimed to place frame-0 panels "at Act 1's
+(row,col) cell", but its formula never actually inverted Act 1's own pixel
+rectangle -- it placed a flat panel at `pres_cam.forward * pres_cam.dist`
+(measured from the scene origin/fly centroid) and sized it assuming that
+point's on-screen depth (`zc`, the `rel@forward` `PresentationCamera.project`
+divides by) equals `pres_cam.dist`. It does not: `PresentationCamera.project`
+computes `rel = X_local - eye` with `eye = eye_dir*dist = -forward*dist`, so
+a point at `forward*dist` has `zc = rel@forward = 2*dist`, not `dist` --
+twice the assumed depth, so every start panel actually rendered at roughly
+HALF its intended on-screen size, offset from Act 1's cell. Fixed by
+inverting Act 1's OWN pixel rectangle (`draw.panel_cell_rect`, now shared
+with `act1_views.py` instead of a second hardcoded grid-pitch copy) directly
+through the camera's projection algebra at a fixed depth -- see
+`_grid_start_frame`'s own docstring for the exact derivation. Measured at
+render time (task-34 report): per-camera centroid shift and area ratio
+between `act1_views/f00149.png`'s grid and `act2_triangulate/f00000.png`'s
+opening pose. Ray geometry, panel arc pose/orientation, and every phase
+boundary below are UNCHANGED -- only the fly-out's STARTING pose moved.
 """
 import argparse
 import sys
@@ -239,7 +260,9 @@ T0 = 525                             # representative frame: see _pick_frame not
 # i.e. a frame where "recognisably fly-shaped, six legs" is a fair ask.
 
 R_STAGE = 35.0        # mm; ARBITRARY panel distance -- staging only, captioned on screen.
-GRID_COLS, GRID_ROWS = 4, 2          # Act 1's cell grid (cell 7 was the title card, left empty here)
+# TASK-34: Act 1's cell grid (cell 7 was the title card, left empty here) is
+# now `draw.panel_cell_rect` (shared with act1_views.py), not a second
+# hardcoded copy -- see `_grid_start_frame` below.
 
 # --- presentation (viewer) camera ------------------------------------------
 _EYE_DIR = np.array([0.60, 0.25, 0.65])
@@ -427,23 +450,57 @@ def _check_geometry(cam_mats, names, view_dirs, centroid, kp3d_t0, kp2d_t0,
     assert max_dev_all < 1.0, "presentation perspective is making rays look non-parallel"
 
 
-def _grid_start_frame(pres_cam, ci):
-    """Start pose for camera index `ci`: Act 1's (row,col) cell, flat, facing
-    the viewer -- pure staging, matches Act 1's on-screen layout so the
-    panels visibly "detach" from a familiar grid."""
-    row, col = divmod(ci, GRID_COLS)
-    depth = pres_cam.dist
-    w_mm = 468.0 / pres_cam.f_px * depth
-    h_mm = 496.0 / pres_cam.f_px * depth
-    pitch_x, pitch_y = w_mm * 1.02, h_mm * 1.02
-    x_off = (col - (GRID_COLS - 1) / 2.0) * pitch_x
-    y_off = ((GRID_ROWS - 1) / 2.0 - row) * pitch_y
-    center_local = (pres_cam.forward * depth + pres_cam.right * x_off
-                    + pres_cam.up * y_off)
-    right, up = pres_cam.right, pres_cam.up
+def _grid_start_frame(pres_cam, panel_idx):
+    """Start pose for ARC-order panel `panel_idx` (0-6): an EXACT inversion of
+    `draw.panel_cell_rect(panel_idx)` -- Act 1's own on-screen pixel rectangle
+    for that panel -- through this weak-perspective camera's projection, flat
+    and facing the viewer.
+
+    TASK-34 (was: an approximate hand-placed grid -- flat panels arranged
+    around `pres_cam.forward*depth` by a fixed pitch, with `depth =
+    pres_cam.dist` fed into `width_mm = PANEL_W/f_px*depth` as if that were
+    the point's on-screen depth `zc`. It is not: a point at
+    `pres_cam.forward*depth` (measured from the scene origin, i.e. the fly
+    centroid) is at `zc = 2*depth` once `PresentationCamera.project` subtracts
+    `pres_cam.eye = pres_cam.eye_dir*dist`, since `forward = -eye_dir` -- so
+    every start panel actually rendered at roughly HALF `PANEL_W/H`'s
+    intended screen size, off-position, which is exactly why Act 2 used to
+    open somewhere other than Act 1's grid):
+
+    Fix each corner's desired SCREEN pixel (from `draw.panel_cell_rect`) and
+    solve the camera's own (invertible, affine-in-u/v at fixed depth `Z`)
+    projection backwards for the 3D point that lands there. `project`'s
+    forward map is `rel = X_local - eye; u = ppx + f_px*(rel@right)/(rel@
+    forward); v = ppy - f_px*(rel@up)/(rel@forward)`; fixing `rel@forward =
+    Z` (any positive `Z` -- weak perspective, so the choice does not change
+    the answer) makes this a LINEAR bijection between `(u, v)` and
+    `(rel@right, rel@up)`, inverted directly below. This is exact (to float
+    precision) given `pres_cam` is in the SAME state (dist/f_px/right/up/
+    forward/ppx/ppy) it will be in at output frame 0 -- true here: this is
+    called right after `_calibrate_scene_radius` sets `pres_cam.dist` to
+    `wide_radius`, and frame 0's own `_scene_radius(0, wide_radius) ==
+    wide_radius` / `set_principal_point_offset(..., t=0)` (see render_act2)
+    reproduce that identical state, so the two evaluations of `project`
+    agree exactly."""
+    px, py, w, h = draw.panel_cell_rect(panel_idx)
+    Z = pres_cam.dist   # any positive depth works (weak perspective); see docstring
+    corners_px = {"TL": (px, py), "TR": (px + w, py),
+                  "BR": (px + w, py + h), "BL": (px, py + h)}
+
+    def _invert(u, v):
+        xc = (u - pres_cam.ppx) * Z / pres_cam.f_px
+        yc = -(v - pres_cam.ppy) * Z / pres_cam.f_px
+        return pres_cam.eye + xc * pres_cam.right + yc * pres_cam.up + Z * pres_cam.forward
+
+    W = {k: _invert(*uv) for k, uv in corners_px.items()}
+    right = W["TR"] - W["TL"]
+    up = W["TL"] - W["BL"]
+    width_mm, height_mm = np.linalg.norm(right), np.linalg.norm(up)
+    right, up = right / width_mm, up / height_mm
     normal = np.cross(right, up)
+    center_local = np.mean(list(W.values()), axis=0)
     return dict(right=right, up=up, normal=normal, center_local=center_local,
-                width_mm=w_mm, height_mm=h_mm)
+                width_mm=width_mm, height_mm=height_mm)
 
 
 def _basis_rotation(frame):

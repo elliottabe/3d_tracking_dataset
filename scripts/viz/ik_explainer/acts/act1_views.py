@@ -121,15 +121,17 @@ N_OUT = 150   # TASK-30: was 210 -- the 60-frame reprojection reveal
 WINDOW_START = 390
 WINDOW_LEN = 370          # 921 * 0.40 = 368.4; 390+370=760 <= 921. ~40.2% of the clip.
 
-CANVAS_W, CANVAS_H = 1920, 1080
-GRID_COLS, GRID_ROWS = 4, 2
-CELL_W = CANVAS_W // GRID_COLS       # 480
-CELL_H = CANVAS_H // GRID_ROWS       # 540
-MARGIN = 6
-LABEL_H = 32
-PANEL_W = CELL_W - 2 * MARGIN        # 468
-PANEL_H = CELL_H - LABEL_H - 2 * MARGIN  # 496
-TITLE_CELL = 7                       # last cell (row1, col3) holds the title
+# TASK-34: grid geometry (canvas/grid/cell/panel/title-cell dimensions) now
+# lives in `draw.py` (`draw.panel_cell_rect` etc.) so Act 2's fly-out start
+# pose can be defined as an exact inversion of THIS act's own cell rectangles
+# instead of a second, separately-hardcoded copy that could silently drift.
+# Values are unchanged -- this is a re-source, not a re-derivation.
+CANVAS_W, CANVAS_H = draw.CANVAS_W, draw.CANVAS_H
+GRID_COLS, GRID_ROWS = draw.GRID_COLS, draw.GRID_ROWS
+CELL_W, CELL_H = draw.CELL_W, draw.CELL_H
+MARGIN, LABEL_H = draw.GRID_MARGIN, draw.GRID_LABEL_H
+PANEL_W, PANEL_H = draw.PANEL_W, draw.PANEL_H
+TITLE_CELL = draw.TITLE_CELL
 
 # --- fly-centred crop (native video pixels, before resize to panel size) -
 CROP_W = 430                         # covers the observed max x-span (322 px)
@@ -331,8 +333,12 @@ def render_act1(clip: str = clip_io.CLIP_DEFAULT) -> Path:
             panel = cv2.resize(panel_native, (PANEL_W, PANEL_H),
                                 interpolation=cv2.INTER_LINEAR)
 
-            py, px = celly + MARGIN + LABEL_H, cellx + MARGIN
-            canvas[py:py + PANEL_H, px:px + PANEL_W] = panel
+            # TASK-34: the exact rectangle Act 2's fly-out start pose inverts
+            # (`draw.panel_cell_rect`) -- was inline `celly+MARGIN+LABEL_H,
+            # cellx+MARGIN`; identical arithmetic, now the single source.
+            px, py, pw, ph = draw.panel_cell_rect(panel_idx)
+            assert (pw, ph) == (PANEL_W, PANEL_H)
+            canvas[py:py + ph, px:px + pw] = panel
             canvas = draw.label(canvas, disp_name[cam],
                                  (cellx + MARGIN, celly + MARGIN + 20),
                                  scale=draw.SMALL_SCALE)
