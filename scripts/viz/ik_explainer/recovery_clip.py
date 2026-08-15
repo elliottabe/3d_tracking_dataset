@@ -1,7 +1,13 @@
 #!/usr/bin/env python3
 """Recovery clip: a real 2D detection failure, absorbed downstream.
 
-Left  : Camera 3 footage, detector marker vs the reprojected filtered 3D.
+Left  : a stack of three camera views of the same instant, each with the
+        detector marker vs the reprojected filtered 3D. Top is the event
+        camera; the two below are chosen by measurement
+        (`recovery_event.select_panel_cams`) as the worst and the cleanest of
+        the remaining six, so the stack brackets the on-screen caveat instead
+        of illustrating one half of it. Each has its own crop and therefore
+        its own 1 mm scale bar.
 Right : raw / filtered / IK traces for the same keypoint, with a playhead.
 
 See docs/specs/2026-08-14-recovery-clip-design.md. The event
@@ -24,14 +30,21 @@ range is COMPUTED at render time by `caveat_lines()` from `load_tracks`'s
 appears in this file.
 
 EXPECTATION (checked by reading rendered frames, not assumed):
-- output frame 0: video only, no marker separation, playhead at the window's
-  first frame (420).
-- the output frames covering source frame 441: the JARVIS-coloured detector
-  marker sits ~163 px off the fly's foot; the white reprojected marker stays
-  on the foot; the confidence readout reads ~0.49; the right panel's raw
-  trace is already turning while filtered/IK stay smooth.
+- output frame 0: all three camera panels show both markers coincident, no
+  separation anywhere, playhead at the window's first frame (420).
+- the output frames covering source frame 441: in the TOP panel the
+  JARVIS-coloured detector marker sits ~163 px off the fly's foot while the
+  white reprojected marker stays on it, and its readout says ~0.49; the middle
+  (worst-of-the-rest) panel shows a visible but smaller separation; the bottom
+  (cleanest) panel shows the two markers still essentially together. That
+  gradient IS the caveat: the failure is shared but uneven, so no single
+  camera was simply outvoted. The right panel's raw trace is already turning
+  while filtered/IK stay smooth.
 - output frame 359: video only at source frame 464, playhead at the window's
   last frame.
+FALSIFICATION specific to the stack: all three panels showing the SAME
+separation would mean one camera's tracks were drawn three times; the bottom
+panel separating as badly as the top would contradict the measured selection.
 FALSIFICATION: both markers landing together => wrong camera/keypoint/frame
 mapping. All three traces spiking together => wrong arrays plotted. The
 playhead not tracking the left panel's source frame => two independent frame
@@ -66,6 +79,15 @@ SRC_FPS = 800
 OUT_FPS = 30
 CANVAS_W, CANVAS_H = 1920, 1080
 PANEL_W, PANEL_H = CANVAS_W // 2, CANVAS_H     # 960x1080, 2-up
+
+# Extra camera views stacked under the event camera in the left panel. The
+# event camera alone shows THAT the detector failed; it cannot show that the
+# failure is partly shared, which is exactly what the on-screen caveat claims.
+# The extras are chosen by measurement (`recovery_event.select_panel_cams`):
+# the worst remaining view and the cleanest remaining view, so the stack
+# brackets the claim instead of illustrating one half of it.
+N_EXTRA_CAMS = 2
+SUB_H = PANEL_H // (1 + N_EXTRA_CAMS)          # 360 px per camera sub-panel
 
 # Native-resolution pixels-per-mm for this rig's cropped video strip -- the
 # SAME constant the explainer acts use (`PX_PER_MM` in acts/act1_views.py and
@@ -154,6 +176,96 @@ def caveat_lines(tracks, event=None):
             "the recovery is triangulation + filter + IK, not an outvoted camera")
 
 
+def _build_cam_panels(clip, cam_names, tracks, frames_idx, display):
+    """Everything each camera sub-panel needs, computed once (not per frame).
+
+    Every panel is centred on its OWN markers -- the fly projects to a
+    different place in each view -- but they all share ONE crop size, so all
+    three are at the same zoom and their marker separations can be compared by
+    eye. See `_shared_crop_size`.
+    """
+    idx = [tracks["cam_names"].index(n) for n in cam_names]
+    dets = [np.asarray(tracks["det2d_all"][:, j], np.float64) for j in idx]
+    reps = [np.asarray(tracks["rep2d_all"][:, j], np.float64) for j in idx]
+    videos = [clip_io.read_frames(clip_io.video_path(clip, n), frames_idx)
+              for n in cam_names]
+    shapes = {v.shape[1:3] for v in videos}
+    if len(shapes) != 1:
+        raise RuntimeError(
+            f"cameras differ in native frame size {shapes} -- a shared crop "
+            "size would not mean a shared zoom")
+    fh, fw = videos[0].shape[1:3]
+
+    extents = [_crop_extent(d, r, PANEL_W, SUB_H) for d, r in zip(dets, reps)]
+    cw, ch = _shared_crop_size(extents, fw, fh)
+    sx, sy = PANEL_W / float(cw), SUB_H / float(ch)
+    if abs(sx - sy) / max(sx, sy) > 0.01:
+        raise RuntimeError(
+            f"crop resize is not uniform (sx={sx:.4f}, sy={sy:.4f}) -- the "
+            "1 mm scale bar would be wrong in one axis")
+    px_per_mm = PX_PER_MM_NATIVE * sx
+    print(f"[recovery_clip] shared crop {cw}x{ch} (native {fw}x{fh}) -> "
+          f"sx={sx:.3f} sy={sy:.3f}, {px_per_mm:.1f} px/mm in every panel")
+
+    panels = []
+    for n, j, d, r, (cx, cy, _w, _h), vid in zip(cam_names, idx, dets, reps,
+                                                 extents, videos):
+        x0, y0 = _crop_origin(cx, cy, cw, ch, fw, fh)
+        print(f"[recovery_clip]   {n} ({display[n]}): crop origin x0={x0} y0={y0}")
+        panels.append({"name": n, "display": display[n], "frames": vid,
+                       "det": d, "rep": r,
+                       "conf": np.asarray(tracks["conf_all"][:, j]),
+                       "x0": x0, "y0": y0, "cw": cw, "ch": ch,
+                       "sx": sx, "sy": sy, "px_per_mm": px_per_mm})
+    return panels
+
+
+def _assert_text_clear_of_markers(cp, boxes, frames_idx):
+    """Fail the render if any text box would cover either marker, in any frame.
+
+    A legend that hides the marker it names is worse than no legend (learned by
+    reading a rendered frame during the F3 fix). With three sub-panels at three
+    different zooms the safe placements are no longer obvious by inspection, so
+    every panel's boxes are checked against that panel's own tracks.
+    """
+    for track_name in ("det", "rep"):
+        p = (cp[track_name] - [cp["x0"], cp["y0"]]) * [cp["sx"], cp["sy"]]
+        r = MARKER_RADIUS * cp["sx"]
+        for what, (bx0, by0, bx1, by1) in boxes:
+            inside = ((p[:, 0] > bx0 - r) & (p[:, 0] < bx1 + r)
+                      & (p[:, 1] > by0 - r) & (p[:, 1] < by1 + r))
+            if inside.any():
+                raise RuntimeError(
+                    f"{cp['name']} ({cp['display']}): the {what} box "
+                    f"{(bx0, by0, bx1, by1)} would cover the {track_name} marker "
+                    f"at source frames {np.asarray(frames_idx)[inside].tolist()} "
+                    "-- move it")
+
+
+def _text_box(text, xy, *, scale=None, pad=8, dot=False):
+    """The rectangle `_label_on_strip` will blacken for `text` at `xy`."""
+    scale = draw.CAPTION_SCALE if scale is None else scale
+    (tw, th), _b = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, scale,
+                                   draw.CAPTION_THICKNESS)
+    x, y = int(xy[0]), int(xy[1])
+    dot_w = 2 * LEGEND_DOT_RADIUS + 10 if dot else 0
+    return (x - pad, y - th - pad, x + dot_w + tw + pad, y + pad)
+
+
+def _cam_text(cp, conf):
+    """Per-panel readout: real display name, arc angle, and THIS camera's own
+    detector confidence -- so a low-confidence view is identifiable as such
+    rather than looking like an unexplained miss."""
+    return f"{cp['display']}   detector conf {conf:.2f}"
+
+
+def _right_aligned_x(text, right_edge, *, scale=None, pad=8):
+    scale = draw.CAPTION_SCALE if scale is None else scale
+    (tw, _th), _b = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, scale,
+                                    draw.CAPTION_THICKNESS)
+    return right_edge - pad - tw
+
+
 def _label_on_strip(img, text, xy, *, scale=None, color=(255, 255, 255),
                     pad=8, dot_color=None):
     """`draw.label` on a solid black backing strip, optionally with a marker dot.
@@ -183,12 +295,14 @@ def _label_on_strip(img, text, xy, *, scale=None, color=(255, 255, 255),
     return draw.label(out, text, (x + dot_w, y), scale=scale, color=color)
 
 
-def _fixed_crop_box(det2d, rep2d, frame_w, frame_h, panel_w, panel_h,
-                     pad_frac=CROP_PAD_FRAC):
-    """One (x0, y0, w, h) native-pixel crop box covering BOTH marker tracks
-    over the whole window, with `pad_frac` margin, matched to the panel's
-    aspect ratio -- fixed for every output frame (never recentred per-frame),
-    so the camera view cannot jitter."""
+def _crop_extent(det2d, rep2d, panel_w, panel_h, pad_frac=CROP_PAD_FRAC):
+    """(cx, cy, crop_w, crop_h) covering BOTH marker tracks over the whole
+    window, with `pad_frac` margin, matched to the panel's aspect ratio.
+
+    Unclamped and unrounded: `_crop_origin` places it in a real frame. Split
+    from the placement so several cameras can share ONE crop size (see
+    `_shared_crop_size`) while each centres on its own markers.
+    """
     pts = np.concatenate([np.asarray(det2d, np.float64),
                           np.asarray(rep2d, np.float64)], axis=0)
     x_min, y_min = pts.min(axis=0)
@@ -198,12 +312,31 @@ def _fixed_crop_box(det2d, rep2d, frame_w, frame_h, panel_w, panel_h,
     y_span = max((y_max - y_min) * (1.0 + 2.0 * pad_frac), 1.0)
     aspect = panel_w / float(panel_h)          # w/h
     crop_h = max(y_span, x_span / aspect)
-    crop_w = crop_h * aspect
-    crop_h = min(int(round(crop_h)), frame_h)
-    crop_w = min(int(round(crop_w)), frame_w)
+    return cx, cy, crop_h * aspect, crop_h
+
+
+def _shared_crop_size(extents, frame_w, frame_h):
+    """One (crop_w, crop_h) big enough for every camera's extent.
+
+    All camera panels MUST share a crop size, because they share a native
+    px/mm: that is what makes the marker separations visually comparable
+    between panels. Sizing each panel to its own markers instead zoomed the
+    cleanest camera to 4.0x against the event camera's 1.0x, which would have
+    rendered its ~20 px miss LARGER on screen than the event camera's 122 px
+    one -- a figure that inverts the very comparison it exists to make.
+    """
+    crop_w = min(int(round(max(w for _cx, _cy, w, _h in extents))), frame_w)
+    crop_h = min(int(round(max(h for _cx, _cy, _w, h in extents))), frame_h)
+    return crop_w, crop_h
+
+
+def _crop_origin(cx, cy, crop_w, crop_h, frame_w, frame_h):
+    """Top-left of a `crop_w x crop_h` box centred on (cx, cy), clamped into
+    the frame -- fixed for every output frame (never recentred per-frame), so
+    the camera view cannot jitter."""
     x0 = int(np.clip(round(cx - crop_w / 2.0), 0, frame_w - crop_w))
     y0 = int(np.clip(round(cy - crop_h / 2.0), 0, frame_h - crop_h))
-    return x0, y0, crop_w, crop_h
+    return x0, y0
 
 
 def _src_frame_for_output(f: int, t0: int, t1: int, n_out: int = N_OUT) -> int:
@@ -257,31 +390,15 @@ def render_recovery_clip(clip: str = clip_io.CLIP_DEFAULT) -> Path:
 
     caveat = caveat_lines(tracks, e)
 
-    # --- left panel: fixed crop from both marker tracks -------------------
+    # --- left panel: a stack of camera views, each with its own crop --------
     disp = clip_io.display_names(tracks["cam_names"], clip)
-    cam_label = disp[e["cam"]].split("  ")[0]              # "Camera 3  60 deg" -> "Camera 3"
-
-    video_path = clip_io.video_path(clip, e["cam"])
-    frames_native = clip_io.read_frames(video_path, frames_idx)   # (n_win,H,W,3)
-    frame_h, frame_w = frames_native.shape[1:3]
-    x0, y0, crop_w, crop_h = _fixed_crop_box(
-        tracks["det2d"], tracks["rep2d"], frame_w, frame_h, PANEL_W, PANEL_H)
-    print(f"[recovery_clip] fixed native crop: x0={x0} y0={y0} w={crop_w} h={crop_h} "
-          f"(native {frame_w}x{frame_h})")
-
-    # The crop is aspect-matched to the panel, so the resize is (near) uniform;
-    # the scale bar is horizontal, so it follows the x factor. Printed with the
-    # y factor beside it so a non-uniform resize (crop clipped at a frame edge)
-    # is visible in the render's own stdout rather than silently mis-scaling
-    # the bar.
-    sx, sy = PANEL_W / float(crop_w), PANEL_H / float(crop_h)
-    px_per_mm_panel = PX_PER_MM_NATIVE * sx
-    print(f"[recovery_clip] resize factors sx={sx:.4f} sy={sy:.4f} -> panel scale "
-          f"{px_per_mm_panel:.1f} px/mm (native {PX_PER_MM_NATIVE} px/mm)")
-    if abs(sx - sy) / max(sx, sy) > 0.01:
-        raise RuntimeError(
-            f"crop resize is not uniform (sx={sx:.4f}, sy={sy:.4f}) -- the "
-            "1 mm scale bar would be wrong in one axis")
+    panel_cams = ev.select_panel_cams(tracks, e, n_extra=N_EXTRA_CAMS)
+    peak_by_cam = np.nanmax(np.asarray(tracks["cam_disagree"], np.float64), axis=0)
+    print("[recovery_clip] camera panels (event camera first, then worst and "
+          "cleanest of the rest, by window-peak disagreement):")
+    for n in panel_cams:
+        print(f"    {n}  {disp[n]:22s} peak {peak_by_cam[tracks['cam_names'].index(n)]:6.1f} px")
+    panels = _build_cam_panels(clip, panel_cams, tracks, frames_idx, disp)
 
     kp_map = kp_colors.jarvis_kp_colors()
     det_color = kp_map[e["kp"]]
@@ -289,29 +406,49 @@ def render_recovery_clip(clip: str = clip_io.CLIP_DEFAULT) -> Path:
     # so the legend says WHICH keypoint the whole clip is about.
     legend_entries = ((f"detector 2D ({e['kp']})", det_color),
                       ("reprojected 3D (filtered)", _FILT_BGR))
-    # Bottom-left gutter, NOT under the camera label: at the failure frame the
-    # detector marker sits at panel (253, 272), i.e. inside the panel's
-    # top-left corner, and a legend there hid the very marker it names (seen
-    # by reading a rendered frame). Verified, not trusted -- the check below
-    # fails the render if either marker track ever enters the legend's box.
-    legend_xy = [(24, PANEL_H - 150 + 34 * li) for li in range(len(legend_entries))]
-    l_w, l_h = max((cv2.getTextSize(t, cv2.FONT_HERSHEY_SIMPLEX, draw.CAPTION_SCALE,
-                                    draw.CAPTION_THICKNESS)[0] for t, _c in legend_entries),
-                   key=lambda wh: wh[0])
-    l_box = (legend_xy[0][0] - 8, legend_xy[0][1] - l_h - 8,
-             legend_xy[0][0] + 2 * LEGEND_DOT_RADIUS + 10 + l_w + 8,
-             legend_xy[-1][1] + 8)
-    for track_name in ("det2d", "rep2d"):
-        p = (np.asarray(tracks[track_name], np.float64) - [x0, y0]) * [sx, sy]
-        r = MARKER_RADIUS * sx
-        inside = ((p[:, 0] > l_box[0] - r) & (p[:, 0] < l_box[2] + r)
-                  & (p[:, 1] > l_box[1] - r) & (p[:, 1] < l_box[3] + r))
-        if inside.any():
-            raise RuntimeError(
-                f"the legend box {l_box} would cover the {track_name} marker at "
-                f"source frames {(np.asarray(frames_idx)[inside]).tolist()} -- "
-                "move the legend; a legend that hides the marker it names is "
-                "worse than no legend")
+    # Text is spread across the stack rather than piled onto the top panel:
+    # title + speed on panel 0, the marker legend on panel 0's bottom gutter
+    # (it must be read before the failure is interpreted), and the caveat under
+    # panel 2 -- it is a claim ABOUT the whole stack, so it belongs beneath it.
+    # Camera labels go top-RIGHT so they never collide with the title, and the
+    # scale bars bottom-RIGHT so they never collide with the legend or caveat.
+    legend_xy = [(24, SUB_H - 60 + 34 * li) for li in range(len(legend_entries))]
+    # The caveat is ~700 px wide, so unlike the legend it cannot dodge the
+    # markers horizontally -- every panel's markers sit in x 403..557, dead
+    # centre. It has to go BELOW them, and only the bottom panel has room:
+    # its markers stop at y~262 (the cleanest camera moves least, which is
+    # why it is the one that can carry the caveat). The frame counter was
+    # moved to the bottom-right for the same reason; at - 96 and - 68 this
+    # collided with the markers and the counter respectively, both caught by
+    # `_assert_text_clear_of_markers` and by reading a rendered frame.
+    caveat_xy = [(24, SUB_H - 60 + 34 * li) for li in range(len(caveat))]
+    # Camera labels sit bottom-right, just above each scale bar, NOT top-right:
+    # the title is 1.6-scale and runs to x~900, so a top-right label on the
+    # first panel collided with it (again, seen in a rendered frame). Bottom
+    # right is the one corner no other element claims -- the legend and caveat
+    # are both bottom-LEFT.
+    # ...except on the LAST panel, whose bottom edge is the caveat's. There the
+    # label goes top-right instead, which is free because that panel is the
+    # cleanest camera and its markers never rise above y~203.
+    def cam_label_y(pi):
+        return 40 if pi == len(panel_cams) - 1 else SUB_H - 56
+
+    # Every text box, per panel, checked against that panel's own marker tracks.
+    for pi, cp in enumerate(panels):
+        boxes = []
+        cam_text = _cam_text(cp, 0.0)
+        boxes.append(("camera label",
+                      _text_box(cam_text,
+                                (_right_aligned_x(cam_text, PANEL_W), cam_label_y(pi)))))
+        boxes.append(("scale bar", (PANEL_W - 40 - int(cp["px_per_mm"]) - 8,
+                                    SUB_H - 24 - 24, PANEL_W - 32, SUB_H - 16)))
+        if pi == 0:
+            for (text, _c), xy in zip(legend_entries, legend_xy):
+                boxes.append(("legend", _text_box(text, xy, dot=True)))
+        if pi == len(panels) - 1:
+            for text, xy in zip(caveat, caveat_xy):
+                boxes.append(("caveat", _text_box(text, xy)))
+        _assert_text_clear_of_markers(cp, boxes, frames_idx)
 
     dirs = clip_io.out_dirs(clip)
     out_dir = dirs["frames"] / "recovery_clip"
@@ -321,40 +458,52 @@ def render_recovery_clip(clip: str = clip_io.CLIP_DEFAULT) -> Path:
         src = int(src_for_f[f])
         i = src - t0
 
-        native = frames_native[i]
-        crop = native[y0:y0 + crop_h, x0:x0 + crop_w].copy()
-
-        det_local = np.asarray([tracks["det2d"][i] - [x0, y0]])
-        rep_local = np.asarray([tracks["rep2d"][i] - [x0, y0]])
-        crop = draw.draw_keypoints(crop, det_local, [e["kp"]],
-                                   conf=np.asarray([tracks["conf"][i]]),
-                                   radius=MARKER_RADIUS,
-                                   kp_colors={e["kp"]: det_color})
-        crop = draw.draw_keypoints(crop, rep_local, ["_filtered_reprojection"],
-                                   radius=MARKER_RADIUS,
-                                   kp_colors={"_filtered_reprojection": _FILT_BGR})
-        left = cv2.resize(crop, (PANEL_W, PANEL_H), interpolation=cv2.INTER_LINEAR)
-        # Scale bar drawn AFTER the upscale, at the panel's own px/mm. Drawing
-        # it on the native crop (the Acts 1-2 convention) kept the bar's
-        # real-world length correct through the resize, but carried its "1 mm"
-        # text along too: SMALL_SCALE 0.5 x 2.99 upscale = an effective ~1.5
-        # against TITLE_SCALE 1.6, i.e. the second-largest text on screen.
-        # Here the bar length is pre-scaled instead, so the label lands at
-        # SMALL_SCALE in FINAL pixels and the bar still measures 1 real mm.
-        left = draw.scale_bar_mm(left, px_per_mm=px_per_mm_panel, mm=1.0,
-                                 origin=(24, PANEL_H - 40))
-        left = _label_on_strip(
-            left, f"{cam_label}   detector conf {tracks['conf'][i]:.2f}",
-            (24, 225))
-        # Marker legend (F3). Without it the panel is genuinely ambiguous, and
-        # the naive reading is BACKWARDS: at the peak the true tarsal tip is
-        # tucked at the fly's face while the detector's error lands on a
-        # visually obvious extended leg, so an uninformed viewer reads the
-        # detector marker as the correct one. Each entry carries its own
-        # marker's colour and a sample dot, like the right panel's trace
-        # legend; placement is checked above.
-        for (text, col), xy in zip(legend_entries, legend_xy):
-            left = _label_on_strip(left, text, xy, color=col, dot_color=col)
+        subs = []
+        for pi, cp in enumerate(panels):
+            crop = cp["frames"][i][cp["y0"]:cp["y0"] + cp["ch"],
+                                   cp["x0"]:cp["x0"] + cp["cw"]].copy()
+            det_local = np.asarray([cp["det"][i] - [cp["x0"], cp["y0"]]])
+            rep_local = np.asarray([cp["rep"][i] - [cp["x0"], cp["y0"]]])
+            crop = draw.draw_keypoints(crop, det_local, [e["kp"]],
+                                       conf=np.asarray([cp["conf"][i]]),
+                                       radius=MARKER_RADIUS,
+                                       kp_colors={e["kp"]: det_color})
+            crop = draw.draw_keypoints(crop, rep_local, ["_filtered_reprojection"],
+                                       radius=MARKER_RADIUS,
+                                       kp_colors={"_filtered_reprojection": _FILT_BGR})
+            sub = cv2.resize(crop, (PANEL_W, SUB_H), interpolation=cv2.INTER_LINEAR)
+            # Scale bar drawn AFTER the upscale, at this panel's own px/mm.
+            # Drawing it on the native crop (the Acts 1-2 convention) kept the
+            # bar's real-world length correct through the resize, but carried
+            # its "1 mm" text along too: SMALL_SCALE 0.5 x ~3 upscale = an
+            # effective ~1.5 against TITLE_SCALE 1.6, i.e. the second-largest
+            # text on screen. Here the bar length is pre-scaled instead, so the
+            # label lands at SMALL_SCALE in FINAL pixels and the bar still
+            # measures 1 real mm -- in EACH panel's own zoom, which differ.
+            sub = draw.scale_bar_mm(
+                sub, px_per_mm=cp["px_per_mm"], mm=1.0,
+                origin=(PANEL_W - 40 - int(cp["px_per_mm"]), SUB_H - 24))
+            cam_text = _cam_text(cp, cp["conf"][i])
+            sub = _label_on_strip(
+                sub, cam_text, (_right_aligned_x(cam_text, PANEL_W), cam_label_y(pi)))
+            if pi == 0:
+                # Marker legend (F3). Without it the panel is genuinely
+                # ambiguous, and the naive reading is BACKWARDS: at the peak
+                # the true tarsal tip is tucked at the fly's face while the
+                # detector's error lands on a visually obvious extended leg,
+                # so an uninformed viewer reads the detector marker as the
+                # correct one. Drawn once, on the top panel, since all three
+                # panels use the same two marker colours.
+                for (text, col), xy in zip(legend_entries, legend_xy):
+                    sub = _label_on_strip(sub, text, xy, color=col, dot_color=col)
+            if pi == len(panels) - 1:
+                for text, xy in zip(caveat, caveat_xy):
+                    sub = _label_on_strip(sub, text, xy)
+            # 1 px rule so three video panels don't read as one image.
+            if pi:
+                sub[0, :] = (60, 60, 60)
+            subs.append(sub)
+        left = np.vstack(subs)
 
         right = tp.render_trace_panel(PANEL_W, PANEL_H, series, frames_idx, src,
                                       ylabel=ylabel, annotation=annotation)
@@ -376,14 +525,16 @@ def render_recovery_clip(clip: str = clip_io.CLIP_DEFAULT) -> Path:
         # by reading a rendered frame (not assumed) -- see task-3 fix report.
         canvas = draw.stage_title(canvas, TITLE)
         canvas = _label_on_strip(canvas, speed_label, (48, 122))
-        # Same treatment for the caveat: same colour, same thickness, same
-        # light-teal background as the speed label -- it washed out for the
-        # same reason (M4).
-        canvas = _label_on_strip(canvas, caveat[0], (48, 158))
-        canvas = _label_on_strip(canvas, caveat[1], (48, 185))
-        canvas = draw.label(canvas, f"output frame {f + 1}/{N_OUT}  (src {src})",
-                           (48, CANVAS_H - 16), scale=draw.SMALL_SCALE,
-                           color=(150, 150, 150))
+        # The caveat is drawn on the BOTTOM camera sub-panel, not here: it is a
+        # claim about the whole camera stack ("the other cameras miss it too"),
+        # so it reads correctly only underneath the stack it describes.
+        # Bottom-RIGHT, under the trace panel: the bottom-left of the canvas is
+        # now the caveat's, and the caveat is the load-bearing text of the two.
+        counter = f"output frame {f + 1}/{N_OUT}  (src {src})"
+        canvas = draw.label(canvas, counter,
+                           (_right_aligned_x(counter, CANVAS_W,
+                                             scale=draw.SMALL_SCALE) - 16, 28),
+                           scale=draw.SMALL_SCALE, color=(150, 150, 150))
 
         cv2.imwrite(str(out_dir / f"f{f:05d}.png"), canvas,
                    [cv2.IMWRITE_PNG_COMPRESSION, 1])

@@ -96,20 +96,38 @@ The spike spans source frames 441–443, i.e. **24 output frames ≈ 0.8 s** —
 enough to read. The on-screen speed label must state the computed value, not a
 copied one.
 
-## Layout — 2-up
+## Layout — 2-up (left column is a 3-camera stack)
 
-**Left panel: what the detector saw.** `Camera 3` (`Cam2012853`) enhanced
-footage, cropped to the right foreleg. Two markers on `T1R_TaTip`:
+**Left panel: what the detectors saw.** A vertical stack of **three** camera
+views of the same instant, enhanced footage, each cropped to the right foreleg.
+Two markers on `T1R_TaTip` in every panel:
 
 - the **detector's own 2D**, in its JARVIS chain colour
 - the **reprojection of the filtered 3D**, in white
 
-At frame 441 the detector marker leaps **162.6 px** off the foot while the
-reprojected marker stays on it. Note this is a different measurement from the
-122.2 px above: the panel draws the detector's 2D against the reprojected
-**filtered** 3D, while the event was selected on detector vs the **raw**
-triangulation. A readout shows the live detector confidence (0.49 at the
-failure). Both markers are legended by name in the panel.
+The top panel is the event camera, `Camera 3` (`Cam2012853`). The two below are
+chosen by measurement (`recovery_event.select_panel_cams`) as the **worst** and
+the **cleanest** of the remaining six by peak disagreement over the window —
+here `Camera 2` (`Cam2012855`, peak 120.8 px) and `Camera 6` (`Cam2012631`,
+peak 20.7 px). One camera alone can only show *that* the detector failed; the
+stack is what shows the failure is **shared but uneven**, which is what the
+caveat claims. Each panel carries its own live detector confidence: at frame
+441 they read **0.49 / 0.92 / 0.95**. Both markers are legended by name once,
+on the top panel.
+
+All three panels **share one crop size and therefore one px/mm**. This is a
+correctness requirement, not a cosmetic one: sizing each panel to its own
+markers zooms the cleanest camera ~4× against the event camera's ~1×, drawing
+its ~20 px miss *larger* on screen than the event camera's 122 px one and
+inverting the comparison the panel exists to make. Asserted by
+`test_all_camera_panels_share_one_zoom`.
+
+At frame 441 the top panel's detector marker leaps **162.6 px** off the foot
+while its reprojected marker stays on it; the middle panel shows a visible but
+smaller separation; the bottom panel's two markers are still essentially
+together. Note 162.6 px is a different measurement from the 122.2 px above: the
+panel draws the detector's 2D against the reprojected **filtered** 3D, while
+the event was selected on detector vs the **raw** triangulation.
 
 **Right panel: what the pipeline did about it.** A time-series over frames
 420–465 with three traces — **raw triangulation**, **filtered**, **IK-fitted** —

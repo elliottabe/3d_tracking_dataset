@@ -166,3 +166,81 @@ def test_worst_axis_picks_the_largest_excursion():
     a = np.zeros((n, 3))
     a[10, 1] = 5.0                      # a big kick on y only
     assert ev.worst_axis(a) == 1
+
+
+# ---------------------------------------------------------------------------
+# Multi-camera panel stack
+# ---------------------------------------------------------------------------
+
+def test_per_camera_arrays_are_consistent_with_the_single_camera_ones():
+    """The event camera's panel must be a SLICE of the all-camera arrays, not a
+    second computation -- otherwise the top panel and the extra panels could
+    silently disagree about the same camera."""
+    t = ev.load_tracks()
+    n, c = len(t["frames"]), len(t["cam_names"])
+    assert t["det2d_all"].shape == (n, c, 2)
+    assert t["rep2d_all"].shape == (n, c, 2)
+    assert t["conf_all"].shape == (n, c)
+    j = t["cam_names"].index(ev.EVENT["cam"])
+    np.testing.assert_array_equal(t["det2d"], t["det2d_all"][:, j])
+    np.testing.assert_allclose(t["rep2d"], t["rep2d_all"][:, j])
+    np.testing.assert_array_equal(t["conf"], t["conf_all"][:, j])
+
+
+def test_select_panel_cams_brackets_the_caveat():
+    """Event camera first, then the WORST and the CLEANEST of the rest.
+
+    Both halves matter: the worst shows the failure is not confined to one
+    view, the cleanest shows some views see it correctly. A selection that
+    returned the two worst would illustrate only half the on-screen claim.
+    """
+    t = ev.load_tracks()
+    picks = ev.select_panel_cams(t, n_extra=2)
+    assert len(picks) == len(set(picks)) == 3
+    assert picks[0] == ev.EVENT["cam"]
+    assert all(p in t["cam_names"] for p in picks)
+
+    peak = np.nanmax(t["cam_disagree"], axis=0)
+    others = {n: peak[t["cam_names"].index(n)]
+              for n in t["cam_names"] if n != ev.EVENT["cam"]}
+    assert picks[1] == max(others, key=others.get)
+    assert picks[2] == min(others, key=others.get)
+    # The bracket must be a real spread, else the stack shows nothing new.
+    assert others[picks[1]] > 2.0 * others[picks[2]]
+
+
+def test_select_panel_cams_rejects_impossible_requests():
+    t = ev.load_tracks()
+    with pytest.raises(ValueError, match="only"):
+        ev.select_panel_cams(t, n_extra=len(t["cam_names"]))
+
+
+def test_all_camera_panels_share_one_zoom(restore_sys_path):
+    """Every panel must be at the SAME px/mm.
+
+    Sizing each panel to its own markers zoomed the cleanest camera to ~4x
+    against the event camera's ~1x, which would have drawn its ~20 px miss
+    LARGER on screen than the event camera's 122 px one -- a figure that
+    inverts the comparison it exists to make. This is the honesty property of
+    the stack, so it is asserted rather than left to inspection.
+    """
+    from scripts.viz.ik_explainer import recovery_clip as rc
+
+    t = ev.load_tracks()
+    cams = ev.select_panel_cams(t, n_extra=rc.N_EXTRA_CAMS)
+    idx = [t["cam_names"].index(c) for c in cams]
+    extents = [rc._crop_extent(t["det2d_all"][:, j], t["rep2d_all"][:, j],
+                               rc.PANEL_W, rc.SUB_H) for j in idx]
+    cw, ch = rc._shared_crop_size(extents, 1936, 448)
+
+    # One size for all, and big enough that no camera's markers are cropped out.
+    for (cx, cy, w, h), j, name in zip(extents, idx, cams):
+        assert w <= cw + 1 and h <= ch + 1, f"{name} needs a bigger crop than shared"
+        x0, y0 = rc._crop_origin(cx, cy, cw, ch, 1936, 448)
+        for key in ("det2d_all", "rep2d_all"):
+            p = np.asarray(t[key][:, j], np.float64) - [x0, y0]
+            assert (p[:, 0] >= 0).all() and (p[:, 0] < cw).all(), f"{name} {key} x out of crop"
+            assert (p[:, 1] >= 0).all() and (p[:, 1] < ch).all(), f"{name} {key} y out of crop"
+
+    sx, sy = rc.PANEL_W / float(cw), rc.SUB_H / float(ch)
+    assert abs(sx - sy) / max(sx, sy) <= 0.01

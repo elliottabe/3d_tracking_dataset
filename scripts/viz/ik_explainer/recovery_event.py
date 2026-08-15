@@ -88,10 +88,15 @@ def load_tracks(clip=clip_io.CLIP_DEFAULT, kp_name=EVENT["kp"],
                 t0=EVENT["t0"], t1=EVENT["t1"], cam_name=EVENT["cam"]):
     """Three 3D tracks + the detector's 2D for one keypoint over [t0, t1).
 
-    Keys: `raw`/`filt`/`ik` (n,3) mm; `det2d`/`rep2d` (n,2) px in `cam_name`;
-    `conf` (n,); `cam_disagree` (n, n_cams) px detector-vs-raw-reprojection for
-    EVERY camera, with `cam_names` giving that array's column order;
-    `frames` (n,) source frame indices.
+    Keys: `raw`/`filt`/`ik` (n,3) mm; `det2d`/`rep2d` (n,2) px and `conf` (n,)
+    for `cam_name`; `det2d_all`/`rep2d_all` (n, n_cams, 2) px and `conf_all`
+    (n, n_cams) for EVERY camera; `cam_disagree` (n, n_cams) px
+    detector-vs-raw-reprojection; `cam_names` giving the camera-axis order of
+    all four `*_all` arrays; `frames` (n,) source frame indices.
+
+    The single-camera `det2d`/`rep2d`/`conf` are slices of the `*_all` arrays
+    at `cam_names.index(cam_name)`, not separately computed, so the event
+    camera's panel and the extra camera panels cannot diverge.
     """
     d = clip_io.out_dirs(clip)
     kp_names = clip_io.model_kp_names()
@@ -122,8 +127,11 @@ def load_tracks(clip=clip_io.CLIP_DEFAULT, kp_name=EVENT["kp"],
     if dlt_names != cam_names:
         raise ValueError("calibration and kp2d disagree on camera order")
 
-    # reproject the FILTERED 3D into this camera: what the pipeline believes
-    rep = np.stack([clip_io.project(cam_mats, flt[t])[c, k] for t in range(t0, t1)])
+    # Reproject the FILTERED 3D into EVERY camera: what the pipeline believes,
+    # seen from each view. The event camera's own `rep2d` is a slice of this
+    # (below) rather than a second projection, so the panels cannot disagree.
+    rep_flt_all = np.stack([clip_io.project(cam_mats, flt[t])[:, k]
+                            for t in range(t0, t1)])            # (n, C, 2)
 
     # Per-camera detector-vs-RAW-triangulation disagreement, (n_frames, n_cams)
     # px, via the same DLT path `rep` uses. This is the quantity the on-screen
@@ -147,8 +155,44 @@ def load_tracks(clip=clip_io.CLIP_DEFAULT, kp_name=EVENT["kp"],
         "raw": raw[t0:t1, k].astype(np.float64),
         "filt": flt[t0:t1, k].astype(np.float64),
         "ik": np.asarray(ik, np.float64),
-        "det2d": z2["kp2d"][t0:t1, c, k].astype(np.float64),
+        "det2d_all": det_all,
+        "rep2d_all": rep_flt_all.astype(np.float64),
+        "conf_all": z2["conf"][t0:t1, :, k].astype(np.float64),
+        "det2d": det_all[:, c],
         "conf": z2["conf"][t0:t1, c, k].astype(np.float64),
-        "rep2d": rep.astype(np.float64),
+        "rep2d": rep_flt_all[:, c].astype(np.float64),
         "frames": np.arange(t0, t1),
     }
+
+
+def select_panel_cams(tracks, event=None, n_extra=2):
+    """The event camera plus `n_extra` others, chosen by measurement.
+
+    The extras bracket the caveat's claim rather than illustrating one half of
+    it: the worst remaining camera (the failure is not confined to one view)
+    and the cleanest remaining camera (yet some views see it correctly). Picked
+    on each camera's PEAK disagreement across the whole window, not its value
+    at a single frame, so a camera that fails a few frames early or late still
+    counts as a bad view.
+
+    Returns real `Cam20128xx` names -- the display "Camera N" labels are
+    derived from these downstream, never the other way round.
+    """
+    e = EVENT if event is None else event
+    cam_names = list(tracks["cam_names"])
+    if e["cam"] not in cam_names:
+        raise ValueError(f"event camera {e['cam']} not in {cam_names}")
+    peak = np.nanmax(np.asarray(tracks["cam_disagree"], np.float64), axis=0)
+    others = [n for n in cam_names if n != e["cam"]]
+    if n_extra > len(others):
+        raise ValueError(f"asked for {n_extra} extra cameras, only {len(others)} exist")
+    ranked = sorted(others, key=lambda n: peak[cam_names.index(n)], reverse=True)
+    # worst, cleanest, then second-worst, second-cleanest, ... -- so any
+    # n_extra keeps the bracketing property rather than degenerating to
+    # "the n worst".
+    picks, lo, hi = [], 0, len(ranked) - 1
+    while len(picks) < n_extra:
+        picks.append(ranked[lo]); lo += 1
+        if len(picks) < n_extra:
+            picks.append(ranked[hi]); hi -= 1
+    return [e["cam"]] + picks
