@@ -57,6 +57,41 @@ def test_recovery_is_present_and_ordered():
     assert ar.max() / af.max() > 10.0
 
 
+def test_shared_scale_is_read_from_disk_not_hardcoded():
+    """The IK trace's mm conversion must follow the scale the IK was solved at.
+    A stale constant would render the IK trace in wrong mm while it still
+    looked perfectly smooth -- the clip's claim would survive and be false."""
+    scale = ev.load_shared_scale(CLIP)
+    with np.load(clip_io.out_dirs(CLIP)["predictions"] / "06_stages.npz",
+                 allow_pickle=True) as z:
+        on_disk = float(z["shared_scale"])
+    assert scale == on_disk, "load_shared_scale did not return the on-disk value"
+    assert scale != ev.SHARED_SCALE_NOMINAL, \
+        "on-disk scale coincidentally equals the bound -- test cannot tell them apart"
+    assert abs(scale - ev.SHARED_SCALE_NOMINAL) / ev.SHARED_SCALE_NOMINAL \
+        <= ev.SHARED_SCALE_TOL_FRAC
+
+
+def test_a_different_body_scale_fails_loudly(tmp_path, monkeypatch):
+    """Re-running IK at another scale must raise, not quietly rescale mm."""
+    real = clip_io.out_dirs
+
+    def fake_out_dirs(clip=CLIP):
+        d = dict(real(clip))
+        pred = tmp_path / "predictions"
+        pred.mkdir(exist_ok=True)
+        with np.load(d["predictions"] / "06_stages.npz", allow_pickle=True) as z:
+            payload = {k: z[k] for k in z.files}
+        payload["shared_scale"] = np.array(ev.SHARED_SCALE_NOMINAL * 1.5)
+        np.savez(pred / "06_stages.npz", **payload)
+        d["predictions"] = pred
+        return d
+
+    monkeypatch.setattr(ev.clip_io, "out_dirs", fake_out_dirs)
+    with pytest.raises(ValueError, match="different body scale"):
+        ev.load_shared_scale(CLIP)
+
+
 def test_accel_is_zero_for_constant_velocity():
     t = np.arange(10)[:, None] * np.array([[1.0, 2.0, 3.0]])
     assert np.allclose(ev.accel(t), 0.0, atol=1e-9)

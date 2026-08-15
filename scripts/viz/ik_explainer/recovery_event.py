@@ -18,8 +18,19 @@ sys.path.insert(0, str(_REPO))
 
 from scripts.viz.ik_explainer import clip_io   # noqa: E402
 
-# marker_sites in the production h5 are in model units; mm = value / SHARED_SCALE
-SHARED_SCALE = 0.1261
+# marker_sites in the production h5 are in model units; mm = value / shared_scale.
+# The EXACT value is read at load time from `06_stages.npz` (the same field
+# `assemble.py:272` reads), never hardcoded: if the IK is ever re-run at a
+# different body scale, a stale constant would render the IK trace in wrong mm
+# while it still looked perfectly smooth -- the clip's claim would survive and
+# be false. CLAUDE.md records a 38x body-scale error that residual/NaN checks
+# were blind to for exactly this reason.
+#
+# The constant below is only a SANITY BOUND on the loaded value (the scale this
+# clip was measured at): a genuinely different scale must fail loudly here
+# rather than render quietly.
+SHARED_SCALE_NOMINAL = 0.1261
+SHARED_SCALE_TOL_FRAC = 0.01          # +-1% of nominal
 
 EVENT = {
     "kp": "T1R_TaTip",
@@ -29,6 +40,30 @@ EVENT = {
     "peak_2d": 441,   # worst detector-vs-consensus disagreement in the bout
     "peak_3d": 443,   # worst raw triangulation spike
 }
+
+
+def load_shared_scale(clip=clip_io.CLIP_DEFAULT):
+    """The body scale the production IK was actually solved at, from disk.
+
+    Read from `<clip>/ik_explainer/predictions/06_stages.npz` -- the file
+    `stage_ik.py` writes it to and `assemble.py:272` already reads it from --
+    and checked against `SHARED_SCALE_NOMINAL` so a different scale raises
+    instead of silently rescaling the clip's IK trace.
+    """
+    d = clip_io.out_dirs(clip)
+    with np.load(d["predictions"] / "06_stages.npz", allow_pickle=True) as z:
+        scale = float(z["shared_scale"])
+    if not np.isfinite(scale) or scale <= 0.0:
+        raise ValueError(f"06_stages.npz shared_scale is not usable: {scale!r}")
+    dev = abs(scale - SHARED_SCALE_NOMINAL) / SHARED_SCALE_NOMINAL
+    if dev > SHARED_SCALE_TOL_FRAC:
+        raise ValueError(
+            f"06_stages.npz shared_scale {scale:.6f} differs from the nominal "
+            f"{SHARED_SCALE_NOMINAL} by {dev * 100:.2f}% (tol "
+            f"{SHARED_SCALE_TOL_FRAC * 100:.0f}%) -- the IK was solved at a "
+            "different body scale than this clip was measured at; refusing to "
+            "render mm values against it")
+    return scale
 
 
 def accel(track):
@@ -70,10 +105,11 @@ def load_tracks(clip=clip_io.CLIP_DEFAULT, kp_name=EVENT["kp"],
     if [str(n) for n in z_flt["kp_names"]] != kp_names:
         raise ValueError("04_kp3d_filt.npz is not in MODEL keypoint order")
     flt = z_flt["kp3d"]
+    shared_scale = load_shared_scale(clip)                  # from disk, not a constant
     with h5py.File(Path(clip) / "ik_production" / "stac_ik_full.h5", "r") as f:
         if [s.decode() for s in f["kp_names"][:]] != kp_names:
             raise ValueError("stac_ik_full.h5 is not in MODEL keypoint order")
-        ik = f["marker_sites"][t0:t1, k] / SHARED_SCALE     # -> mm
+        ik = f["marker_sites"][t0:t1, k] / shared_scale     # -> mm
 
     cam_mats, dlt_names = clip_io.load_dlt(str(Path(clip) / "calibration"))
     if dlt_names != cam_names:
