@@ -11,11 +11,13 @@ disagreement (frame 441, 162.6 px, confidence 0.49 -- see
 `test_the_detector_really_fails_at_the_peak_frame`) and its worst raw-3D
 acceleration spike (frame 443, 1.627 mm/frame^2).
 
-The on-screen caveat is load-bearing: the other six cameras ALSO disagree at
-this instant (83-121 px, per the design doc's measurement) -- this is NOT
-"one camera failed and six rescued it". The recovery is triangulation
-absorbing part of the error, then the temporal filter and IK's anatomical
-constraints absorbing the rest.
+The on-screen caveat is load-bearing: the other six cameras ALSO miss the raw
+3D consensus at this instant -- this is NOT "one camera failed and six rescued
+it". The recovery is triangulation absorbing part of the error, then the
+temporal filter and IK's anatomical constraints absorbing the rest. Its px
+range is COMPUTED at render time by `caveat_lines()` from `load_tracks`'s
+`cam_disagree` array, like every other number in this clip; no px literal
+appears in this file.
 
 EXPECTATION (checked by reading rendered frames, not assumed):
 - output frame 0: video only, no marker separation, playhead at the window's
@@ -78,12 +80,6 @@ PX_PER_MM_NATIVE = 80.7
 CROP_PAD_FRAC = 0.25
 
 TITLE = "2D detection fails, the fit doesn't"
-# Wrapped to two lines that each stay well inside the LEFT panel's width
-# (measured: 648px / 612px at CAPTION_SCALE on a 1920-wide canvas) -- a
-# single full-width line collided with the right panel's trace-panel axis
-# border and legend text (seen and fixed after reading a rendered frame).
-CAVEAT_LINES = ("all 7 cameras disagree here (83-121 px) -- the recovery is",
-                "triangulation + filter + IK, not one camera being outvoted")
 
 # Trace colours: raw = PALETTE["detector"]-style cyan (closest in lineage to
 # the raw detection this clip is about), filtered = white (matches the white
@@ -96,10 +92,44 @@ _IK_BGR = (0, 255, 0)
 _AXIS_LETTERS = ("x", "y", "z")
 
 
-def _all_cam_names(clip: str) -> list:
-    d = clip_io.out_dirs(clip)
-    with np.load(d["predictions"] / "02_kp2d.npz", allow_pickle=True) as z:
-        return [str(c) for c in z["cam_names"]]
+def caveat_lines(tracks, event=None):
+    """The on-screen caveat, with its px range COMPUTED from the loaded arrays.
+
+    Measured at the frame the caveat is on screen over -- the displayed peak
+    `EVENT["peak_2d"]`, the frame whose detector failure the left panel shows
+    -- across the six cameras OTHER than the one on the left panel. Each value
+    is that camera's own 2D detection vs the reprojection of the raw
+    triangulation, i.e. how far each camera sits from the consensus all seven
+    produced.
+
+    The claim this supports: the other cameras are not in clean agreement that
+    a single bad camera was outvoted; every one of them is some distance off
+    the raw consensus, so triangulation alone does not clean this up -- the
+    temporal filter and IK do the remaining work. The number is deliberately
+    NOT a literal in this file: it is the only figure the clip states, and the
+    design doc's own quoted range was wrong (see
+    docs/specs/2026-08-14-recovery-clip-design.md).
+    """
+    e = ev.EVENT if event is None else event
+    cam_names = list(tracks["cam_names"])
+    i = int(e["peak_2d"]) - int(e["t0"])
+    others = [j for j, n in enumerate(cam_names) if n != e["cam"]]
+    if len(others) != len(cam_names) - 1:
+        raise RuntimeError(
+            f"event camera {e['cam']} not found exactly once in {cam_names}")
+    d = np.asarray(tracks["cam_disagree"], np.float64)[i, others]
+    if not np.all(np.isfinite(d)):
+        raise RuntimeError(
+            f"non-finite per-camera disagreement at frame {e['peak_2d']}: {d}")
+    lo, hi = float(d.min()), float(d.max())
+    print(f"[recovery_clip] per-camera detector-vs-raw disagreement at f{e['peak_2d']}: "
+          + ", ".join(f"{cam_names[j]}={float(v):.1f}"
+                      for j, v in zip(others, d))
+          + f"  (event cam {e['cam']}="
+            f"{float(tracks['cam_disagree'][i, cam_names.index(e['cam'])]):.1f})")
+    return (f"the other {len(others)} cameras miss the raw 3D by "
+            f"{lo:.0f}-{hi:.0f} px here too --",
+            "the recovery is triangulation + filter + IK, not an outvoted camera")
 
 
 def _fixed_crop_box(det2d, rep2d, frame_w, frame_h, panel_w, panel_h,
@@ -174,9 +204,10 @@ def render_recovery_clip(clip: str = clip_io.CLIP_DEFAULT) -> Path:
              ("filtered", tracks["filt"][:, axis], _FILT_BGR),
              ("ik", tracks["ik"][:, axis], _IK_BGR)]      # ik last -> dashed
 
+    caveat = caveat_lines(tracks, e)
+
     # --- left panel: fixed crop from both marker tracks -------------------
-    cam_names_all = _all_cam_names(clip)
-    disp = clip_io.display_names(cam_names_all, clip)
+    disp = clip_io.display_names(tracks["cam_names"], clip)
     cam_label = disp[e["cam"]].split("  ")[0]              # "Camera 3  60 deg" -> "Camera 3"
 
     video_path = clip_io.video_path(clip, e["cam"])
@@ -241,8 +272,8 @@ def render_recovery_clip(clip: str = clip_io.CLIP_DEFAULT) -> Path:
                      (0, 0, 0), -1)
         canvas = draw.label(canvas, speed_label, (48, 122), scale=draw.CAPTION_SCALE,
                            color=(255, 255, 255))
-        canvas = draw.label(canvas, CAVEAT_LINES[0], (48, 158), scale=draw.CAPTION_SCALE)
-        canvas = draw.label(canvas, CAVEAT_LINES[1], (48, 185), scale=draw.CAPTION_SCALE)
+        canvas = draw.label(canvas, caveat[0], (48, 158), scale=draw.CAPTION_SCALE)
+        canvas = draw.label(canvas, caveat[1], (48, 185), scale=draw.CAPTION_SCALE)
         canvas = draw.label(canvas, f"output frame {f + 1}/{N_OUT}  (src {src})",
                            (48, CANVAS_H - 16), scale=draw.SMALL_SCALE,
                            color=(150, 150, 150))

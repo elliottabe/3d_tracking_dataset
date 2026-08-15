@@ -54,8 +54,27 @@ failure.
 
 ### What the data does NOT support
 
-At this instant the other six cameras also disagree with the consensus (peaks
-**83–121 px**). This is **not** "one camera failed and six rescued it." The
+At this instant the other six cameras also disagree with the consensus. Each
+camera's own 2D detection vs the reprojection of the **raw** triangulation, for
+`T1R_TaTip` (px, measured at render time by `recovery_event.load_tracks`'s
+`cam_disagree`; recomputed independently in
+`tests/test_recovery_event.py::test_cam_disagree_matches_a_direct_recomputation`):
+
+| slice | …630 | …631 | **…853** | …855 | …857 | …861 | …862 |
+|---|---|---|---|---|---|---|---|
+| at the peak frame **441** | 44.4 | 10.8 | **122.2** | 41.2 | 19.6 | 21.0 | 32.6 |
+| per-camera peak over the window 420–465 | 76.9 | 20.7 | **122.2** | 120.8 | 54.9 | 52.1 | 41.8 |
+
+`Cam2012853` (bold) is the camera on the clip's left panel. **At frame 441 the
+other six span 11–44 px** — that is the range the clip states on screen, and it
+is computed at render time, not quoted from here. (An earlier revision of this
+document claimed "peaks **83–121 px**"; no slice of the data yields that. It
+overstated the disagreement. Note also that neither row is a like-for-like
+comparison with the 162.6 px quoted elsewhere for this camera, which is
+detector-vs-**filtered** reprojection rather than detector-vs-raw.)
+
+Even so, none of the six is *on* the consensus. This is **not** "one camera
+failed and six rescued it." The
 recovery comes from triangulation absorbing part of the error and then the
 temporal filter and IK's anatomical constraints absorbing the rest. The clip
 must say so on screen; the cleaner story would be a more satisfying one and is

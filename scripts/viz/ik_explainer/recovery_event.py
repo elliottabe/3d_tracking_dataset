@@ -1,5 +1,6 @@
 """Data for the recovery clip: one keypoint's three 3D tracks plus the
-detector's own 2D, over the window where detection failed.
+detector's own 2D (and every camera's disagreement with the raw consensus),
+over the window where detection failed.
 
 The event was chosen by measurement (see
 docs/specs/2026-08-14-recovery-clip-design.md): T1R_TaTip on Cam2012853 is
@@ -85,7 +86,13 @@ def worst_axis(raw):
 
 def load_tracks(clip=clip_io.CLIP_DEFAULT, kp_name=EVENT["kp"],
                 t0=EVENT["t0"], t1=EVENT["t1"], cam_name=EVENT["cam"]):
-    """Three 3D tracks + the detector's 2D for one keypoint over [t0, t1)."""
+    """Three 3D tracks + the detector's 2D for one keypoint over [t0, t1).
+
+    Keys: `raw`/`filt`/`ik` (n,3) mm; `det2d`/`rep2d` (n,2) px in `cam_name`;
+    `conf` (n,); `cam_disagree` (n, n_cams) px detector-vs-raw-reprojection for
+    EVERY camera, with `cam_names` giving that array's column order;
+    `frames` (n,) source frame indices.
+    """
     d = clip_io.out_dirs(clip)
     kp_names = clip_io.model_kp_names()
     k = kp_names.index(kp_name)          # by NAME -- never a positional guess
@@ -118,7 +125,25 @@ def load_tracks(clip=clip_io.CLIP_DEFAULT, kp_name=EVENT["kp"],
     # reproject the FILTERED 3D into this camera: what the pipeline believes
     rep = np.stack([clip_io.project(cam_mats, flt[t])[c, k] for t in range(t0, t1)])
 
+    # Per-camera detector-vs-RAW-triangulation disagreement, (n_frames, n_cams)
+    # px, via the same DLT path `rep` uses. This is the quantity the on-screen
+    # caveat quotes ("the other cameras also disagree here"): it says how far
+    # each camera's own 2D detection sits from the consensus 3D that all seven
+    # produced, so it must be measured against the RAW triangulation (the
+    # consensus itself), not against the filtered track (which has already
+    # absorbed part of the failure). Returned so the clip can compute the
+    # caveat's number at render time instead of quoting the design doc.
+    rep_raw_all = np.stack([clip_io.project(cam_mats, raw[t])[:, k]
+                            for t in range(t0, t1)])            # (n, C, 2)
+    det_all = z2["kp2d"][t0:t1, :, k].astype(np.float64)        # (n, C, 2)
+    cam_disagree = np.linalg.norm(det_all - rep_raw_all, axis=-1)
+
     return {
+        # real Cam20128xx names, in the column order of `cam_disagree` -- the
+        # ONE camera-identity path in this clip (display "Camera N" labels are
+        # derived from these, never the other way round).
+        "cam_names": cam_names,
+        "cam_disagree": cam_disagree.astype(np.float64),
         "raw": raw[t0:t1, k].astype(np.float64),
         "filt": flt[t0:t1, k].astype(np.float64),
         "ik": np.asarray(ik, np.float64),

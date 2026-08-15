@@ -46,6 +46,52 @@ def test_the_detector_really_fails_at_the_peak_frame():
     assert t["conf"][i] < 0.7, f"confidence {t['conf'][i]:.2f} not low"
 
 
+def test_cam_disagree_matches_a_direct_recomputation():
+    """Every camera's detector-vs-raw-triangulation distance, recomputed here
+    from the on-disk arrays by an independent path."""
+    e = ev.EVENT
+    t = ev.load_tracks(CLIP, e["kp"], e["t0"], e["t1"])
+    kp_names = clip_io.model_kp_names()
+    k = kp_names.index(e["kp"])
+    d = clip_io.out_dirs(CLIP)
+    z2 = np.load(d["predictions"] / "02_kp2d.npz", allow_pickle=True)
+    cam_names = [str(c) for c in z2["cam_names"]]
+    raw = np.load(d["predictions"] / "03_kp3d.npz", allow_pickle=True)["kp3d"]
+    mats, names = clip_io.load_dlt(str(Path(CLIP) / "calibration"))
+    assert names == cam_names
+    want = np.stack([
+        np.linalg.norm(z2["kp2d"][f, :, k] - clip_io.project(mats, raw[f])[:, k],
+                       axis=-1)
+        for f in range(e["t0"], e["t1"])])
+    assert list(t["cam_names"]) == cam_names
+    assert t["cam_disagree"].shape == (e["t1"] - e["t0"], len(cam_names))
+    assert np.allclose(t["cam_disagree"], want, equal_nan=True)
+
+
+def test_the_caveat_states_the_numbers_it_measured():
+    """The one figure the clip puts on screen must be the one in the data.
+    Recomputed from the loaded arrays -- NOT compared to a fixed string."""
+    from scripts.viz.ik_explainer import recovery_clip as rc
+
+    e = ev.EVENT
+    t = ev.load_tracks(CLIP, e["kp"], e["t0"], e["t1"])
+    lines = rc.caveat_lines(t, e)
+
+    i = e["peak_2d"] - e["t0"]
+    cams = list(t["cam_names"])
+    others = [j for j, n in enumerate(cams) if n != e["cam"]]
+    d = t["cam_disagree"][i, others]
+    text = " ".join(lines)
+    assert f"{len(others)} cameras" in text
+    assert f"{d.min():.0f}-{d.max():.0f} px" in text, \
+        f"caveat {text!r} does not state the measured range"
+    # and no stale literal survived from the design doc
+    assert "83-121" not in text
+    # the qualitative claim must be true of those numbers: the failure is not
+    # confined to the one camera on screen.
+    assert d.max() > 5.0, "other cameras agree with the consensus after all"
+
+
 def test_recovery_is_present_and_ordered():
     """raw spikes; filtered and IK do not. This is the claim the clip makes."""
     e = ev.EVENT
