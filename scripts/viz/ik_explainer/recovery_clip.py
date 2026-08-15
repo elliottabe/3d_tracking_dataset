@@ -80,6 +80,10 @@ PX_PER_MM_NATIVE = 80.7
 # frames -- "fixed crop size" per the brief, so the camera view never jitters.
 CROP_PAD_FRAC = 0.25
 
+# Radius of both marker dots, in NATIVE crop pixels (they are drawn before the
+# ~3x upscale, so ~15 px on screen).
+MARKER_RADIUS = 5
+
 TITLE = "2D detection fails, the fit doesn't"
 
 # Trace colours.
@@ -140,6 +144,29 @@ def caveat_lines(tracks, event=None):
     return (f"the other {len(others)} cameras miss the raw 3D by "
             f"{lo:.0f}-{hi:.0f} px here too --",
             "the recovery is triangulation + filter + IK, not an outvoted camera")
+
+
+def _label_on_strip(img, text, xy, *, scale=None, color=(255, 255, 255), pad=8):
+    """`draw.label` on a solid black backing strip.
+
+    Every caption in this clip is thin (CAPTION_THICKNESS 1) text over the
+    left panel's light-teal video, where it washes out completely -- the
+    problem commit 4a82231 fixed for the speed label by putting a black strip
+    behind it. That rationale applies verbatim to the caveat and the
+    camera/confidence readout, which are the same colour and thickness on the
+    same background, so they all use this one helper. Fixed HERE rather than
+    in `draw.label`, which Acts 1-4 (delivered, accepted, only ever drawn over
+    black) depend on the current appearance of.
+
+    """
+    scale = draw.CAPTION_SCALE if scale is None else scale
+    (tw, th), _base = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, scale,
+                                      draw.CAPTION_THICKNESS)
+    x, y = int(xy[0]), int(xy[1])
+    out = np.asarray(img).copy()
+    cv2.rectangle(out, (x - pad, y - th - pad), (x + tw + pad, y + pad),
+                  (0, 0, 0), -1)
+    return draw.label(out, text, (x, y), scale=scale, color=color)
 
 
 def _fixed_crop_box(det2d, rep2d, frame_w, frame_h, panel_w, panel_h,
@@ -260,10 +287,11 @@ def render_recovery_clip(clip: str = clip_io.CLIP_DEFAULT) -> Path:
         rep_local = np.asarray([tracks["rep2d"][i] - [x0, y0]])
         crop = draw.draw_keypoints(crop, det_local, [e["kp"]],
                                    conf=np.asarray([tracks["conf"][i]]),
-                                   radius=5, kp_colors={e["kp"]: det_color})
+                                   radius=MARKER_RADIUS,
+                                   kp_colors={e["kp"]: det_color})
         crop = draw.draw_keypoints(crop, rep_local, ["_filtered_reprojection"],
-                                   radius=5,
-                                   kp_colors={"_filtered_reprojection": (255, 255, 255)})
+                                   radius=MARKER_RADIUS,
+                                   kp_colors={"_filtered_reprojection": _FILT_BGR})
         left = cv2.resize(crop, (PANEL_W, PANEL_H), interpolation=cv2.INTER_LINEAR)
         # Scale bar drawn AFTER the upscale, at the panel's own px/mm. Drawing
         # it on the native crop (the Acts 1-2 convention) kept the bar's
@@ -274,8 +302,9 @@ def render_recovery_clip(clip: str = clip_io.CLIP_DEFAULT) -> Path:
         # SMALL_SCALE in FINAL pixels and the bar still measures 1 real mm.
         left = draw.scale_bar_mm(left, px_per_mm=px_per_mm_panel, mm=1.0,
                                  origin=(24, PANEL_H - 40))
-        left = draw.label(left, f"{cam_label}   detector conf {tracks['conf'][i]:.2f}",
-                          (24, 225), scale=draw.CAPTION_SCALE)
+        left = _label_on_strip(
+            left, f"{cam_label}   detector conf {tracks['conf'][i]:.2f}",
+            (24, 225))
 
         right = tp.render_trace_panel(PANEL_W, PANEL_H, series, frames_idx, src,
                                       ylabel=ylabel, annotation=annotation)
@@ -296,14 +325,12 @@ def render_recovery_clip(clip: str = clip_io.CLIP_DEFAULT) -> Path:
         # dark backing strip, which survives a bright background. Verified
         # by reading a rendered frame (not assumed) -- see task-3 fix report.
         canvas = draw.stage_title(canvas, TITLE)
-        (sw, sh), _base = cv2.getTextSize(speed_label, cv2.FONT_HERSHEY_SIMPLEX,
-                                          draw.CAPTION_SCALE, draw.CAPTION_THICKNESS)
-        cv2.rectangle(canvas, (40, 122 - sh - 10), (56 + sw, 122 + 10),
-                     (0, 0, 0), -1)
-        canvas = draw.label(canvas, speed_label, (48, 122), scale=draw.CAPTION_SCALE,
-                           color=(255, 255, 255))
-        canvas = draw.label(canvas, caveat[0], (48, 158), scale=draw.CAPTION_SCALE)
-        canvas = draw.label(canvas, caveat[1], (48, 185), scale=draw.CAPTION_SCALE)
+        canvas = _label_on_strip(canvas, speed_label, (48, 122))
+        # Same treatment for the caveat: same colour, same thickness, same
+        # light-teal background as the speed label -- it washed out for the
+        # same reason (M4).
+        canvas = _label_on_strip(canvas, caveat[0], (48, 158))
+        canvas = _label_on_strip(canvas, caveat[1], (48, 185))
         canvas = draw.label(canvas, f"output frame {f + 1}/{N_OUT}  (src {src})",
                            (48, CANVAS_H - 16), scale=draw.SMALL_SCALE,
                            color=(150, 150, 150))
