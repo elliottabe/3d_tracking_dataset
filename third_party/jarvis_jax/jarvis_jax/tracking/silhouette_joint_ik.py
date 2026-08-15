@@ -165,7 +165,9 @@ class SilhouetteJaxlsBatchSolver:
 
     def __init__(self, n_iter=50, linear_solver="auto", lambda_initial=1.0,
                  smooth_weight=0.0, use_se3_root=True, beta=8.0, huber_delta=0.0,
-                 cg_tolerance_max=1e-2, cg_tolerance_min=1e-7, verbose=False):
+                 cg_tolerance_max=1e-2, cg_tolerance_min=1e-7, verbose=False,
+                 cost_tolerance=1e-5, gradient_tolerance=1e-8,
+                 parameter_tolerance=1e-10):
         assert use_se3_root, "Phase 6 sibling supports SE3-root mode only"
         self.n_iter = n_iter
         self.linear_solver = linear_solver
@@ -175,6 +177,16 @@ class SilhouetteJaxlsBatchSolver:
         self.beta = beta
         self.huber_delta = huber_delta
         self.verbose = verbose
+        # jaxls termination tolerances, kept IDENTICAL to
+        # stac_core_jaxls.JaxlsBatchSolver's explicit defaults (cost at jaxls'
+        # own 1e-5; gradient/parameter tightened from jaxls' 1e-4/1e-6) so the
+        # no-silhouette solve keeps reproducing JaxlsBatchSolver to atol=1e-5
+        # (test_no_silhouette_matches_jaxls_batch_solver). See the parent
+        # repo's docs/benchmark/2026-08-13-stac-weak-dof-convergence/notes.md
+        # ("Known divergence" section) for why these must move in lock-step.
+        self.cost_tolerance = cost_tolerance
+        self.gradient_tolerance = gradient_tolerance
+        self.parameter_tolerance = parameter_tolerance
         # Conjugate-gradient inexact-Newton tolerance (Eisenstat-Walker). jaxls
         # caps CG at maxiter=len(x)=T*(6+n_hinges) (~44k for a 513-frame bout)
         # and tightens toward tolerance_min; with the ill-conditioned silhouette
@@ -344,7 +356,12 @@ class SilhouetteJaxlsBatchSolver:
         sol = analyzed.solve(
             verbose=self.verbose, linear_solver=linear_solver_arg,
             trust_region=jaxls.TrustRegionConfig(lambda_initial=self.lambda_initial),
-            termination=jaxls.TerminationConfig(max_iterations=self.n_iter),
+            termination=jaxls.TerminationConfig(
+                max_iterations=self.n_iter,
+                cost_tolerance=self.cost_tolerance,
+                gradient_tolerance=self.gradient_tolerance,
+                parameter_tolerance=self.parameter_tolerance,
+            ),
             initial_vals=jaxls.VarValues.make(init_list))
         sol_roots = sol[SE3Var(jnp.arange(T))]
         sol_joints = sol[JointVar(jnp.arange(T))]
