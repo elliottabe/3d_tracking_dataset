@@ -23,8 +23,119 @@ def view_median_conf(conf):
     return np.median(conf, axis=2)
 
 
+def _reproject_px(cam_mats, X):
+    """X (M,3) world -> (M,C,2) pixels under the (C,4,3) matrices (p_h @ M)."""
+    ph = np.concatenate([np.asarray(X, np.float64),
+                         np.ones((len(X), 1), np.float64)], axis=1)   # (M,4)
+    pr = np.einsum("mj,cjk->mck", ph, np.asarray(cam_mats, np.float64))
+    return (pr[..., :2] / pr[..., 2:3]).astype(np.float32)
+
+
+def _point_residuals(pts, val, cam_mats, idx):
+    """Residuals of the all-valid-view DLT solve for the points in idx.
+
+    Returns (len(idx), C) float32; invalid views hold -1. Non-finite solves
+    leave the whole row at -1 (nothing droppable there).
+    """
+    from jarvis_jax.geometry.center3d import triangulate_dlt_batched
+    C = val.shape[1]
+    cams = np.broadcast_to(cam_mats[None], (len(idx), C, 4, 3))
+    X = np.asarray(triangulate_dlt_batched(pts[idx], cams, val[idx]))
+    finite = np.isfinite(X).all(1)
+    resid = np.full((len(idx), C), -1.0, np.float32)
+    if finite.any():
+        uv = _reproject_px(cam_mats, X[finite])                    # (m,C,2)
+        r = np.linalg.norm(uv - pts[idx][finite], axis=-1)         # (m,C)
+        r[~val[idx][finite]] = -1.0
+        resid[finite] = r
+    return resid
+
+
+# A point enters consensus only when some view is TRIGGER_FACTOR*thr_px
+# inconsistent, and a consensus must keep >= MIN_CONSENSUS_VIEWS views to be
+# applied. Measured on the frozen 13-bout benchmark (2026-08-14 notes.md):
+# without the trigger margin, bouts whose 2D is diffusely noisy just above
+# thr_px (hard wall/occlusion poses) get "fixed" on most frames and the
+# winning view-subset churns frame to frame -- spike rate INCREASED up to 80%
+# on such bouts. Real single-view swaps are 100-400 px, so a 3x margin
+# separates them cleanly from diffuse noise. Likewise a 2-view consensus can
+# lock onto one of two equally-sized clusters arbitrarily (female b8: +25%
+# spikes); requiring 3 views keeps the solve overdetermined or leaves the
+# point alone.
+TRIGGER_FACTOR = 3.0
+MIN_CONSENSUS_VIEWS = 3
+
+
+def _reject_outlier_views(pts, val, cam_mats, thr_px):
+    """Restrict each grossly-inconsistent point to its largest self-consistent
+    view set.
+
+    pts (N,C,2), val (N,C) bool -> new val. A point qualifies when its
+    all-valid-view DLT solve leaves some view reprojecting more than
+    TRIGGER_FACTOR * thr_px from its own 2D (an unambiguous swap, not diffuse
+    noise -- see the constants above). For those points (and only those), run
+    a deterministic consensus search: triangulate from EVERY valid view pair,
+    count how many valid views reproject within thr_px of that two-view
+    solution, and keep the largest consensus set (ties broken by lower mean
+    inlier residual) provided it keeps >= MIN_CONSENSUS_VIEWS views. NOT
+    greedy worst-view dropping -- with 2+ swapped views the dragged
+    least-squares solution can hang its worst residual on a GOOD view, so
+    greedy removal walks downhill discarding good views (measured: err 248 ->
+    534 mm on a 2-of-6-outlier point). Points with < 3 valid views are never
+    touched (two disagreeing rays cannot vote; dropping one trades a fixable
+    point for a NaN).
+    """
+    from itertools import combinations
+
+    from jarvis_jax.geometry.center3d import triangulate_dlt_batched
+    val = np.asarray(val, bool)
+    N, C = val.shape
+    eligible = np.flatnonzero(val.sum(1) >= 3)
+    if len(eligible) == 0:
+        return val
+    resid = _point_residuals(pts, val, cam_mats, eligible)
+    idx = eligible[resid.max(1) > TRIGGER_FACTOR * thr_px]         # (n,) active
+    if len(idx) == 0:
+        return val
+    p, v = pts[idx], val[idx]                                      # (n,C,2),(n,C)
+    best_count = np.full(len(idx), -1, np.int64)
+    best_meanr = np.full(len(idx), np.inf, np.float32)
+    best_inl = v.copy()                          # fall back to "keep all"
+    cams2 = np.broadcast_to(cam_mats[None], (len(idx), C, 4, 3))
+    for i, j in combinations(range(C), 2):
+        ok = v[:, i] & v[:, j]                                     # (n,)
+        if not ok.any():
+            continue
+        pair_val = np.zeros_like(v)
+        pair_val[:, i] = pair_val[:, j] = True
+        X = np.asarray(triangulate_dlt_batched(p, cams2, pair_val))
+        finite = np.isfinite(X).all(1) & ok
+        if not finite.any():
+            continue
+        uv = _reproject_px(cam_mats, X[finite])
+        r = np.linalg.norm(uv - p[finite], axis=-1)                # (m,C)
+        inl = (r <= thr_px) & v[finite]
+        cnt = inl.sum(1)
+        meanr = np.where(cnt > 0, np.where(inl, r, 0).sum(1) / np.maximum(cnt, 1),
+                         np.inf).astype(np.float32)
+        rows = np.flatnonzero(finite)
+        better = (cnt > best_count[rows]) | (
+            (cnt == best_count[rows]) & (meanr < best_meanr[rows]))
+        upd = rows[better]
+        best_count[upd] = cnt[better]
+        best_meanr[upd] = meanr[better]
+        best_inl[upd] = inl[better]
+    # A smaller consensus (2-view lock-on, or a degenerate pair) is refused:
+    # keep the original views for those points (identical to the plain solve).
+    keep = best_count >= MIN_CONSENSUS_VIEWS
+    out = val.copy()
+    out[idx[keep]] = best_inl[keep]
+    return out
+
+
 def triangulate_keypoints(kp2d, conf, cam_mats, *, conf_thresh: float = 0.3,
-                          view_conf_thresh: float | None = None):
+                          view_conf_thresh: float | None = None,
+                          reproj_resid_px: float | None = None):
     """kp2d (T,C,K,2), conf (T,C,K), cam_mats (C,4,3) -> (kp3d (T,K,3), conf3d (T,K)).
 
     NOTE: kp2d must be FINITE even where conf < conf_thresh (invalid views are zeroed by
@@ -45,6 +156,18 @@ def triangulate_keypoints(kp2d, conf, cam_mats, *, conf_thresh: float = 0.3,
     0.963 with a fly present against 0.379 without, so a threshold of 0.6 keeps
     100% of genuine views while rejecting ~92% of empty ones. It is a strong
     mitigation, not a cure -- ~5% of empty crops still score above 0.9.
+
+    `reproj_resid_px` (None = off) rejects OUTLIER views by consensus: any
+    point whose all-view solve leaves a view reprojecting more than
+    TRIGGER_FACTOR times this many px from its own 2D is re-solved from its
+    largest self-consistent view set, with this value as the inlier band
+    (see `_reject_outlier_views`). This is the gate confidence cannot
+    provide: the dominant 3D jitter spikes are one camera whose 2D swapped to
+    the wrong leg at conf 0.4-0.8 -- confidently wrong, invisible to both
+    thresholds above, but ~100s of px inconsistent with the other views
+    (measured: docs/benchmark/2026-08-14-jax-vs-jarvis-stability/notes.md in
+    the parent repo -- 12 px touches 1.8% of view-points and removes most
+    accel spikes on the Session6 clip). conf3d averages only surviving views.
     """
     kp2d = np.asarray(kp2d, np.float32); conf = np.asarray(conf, np.float32)
     cam_mats = np.asarray(cam_mats, np.float32)
@@ -58,6 +181,8 @@ def triangulate_keypoints(kp2d, conf, cam_mats, *, conf_thresh: float = 0.3,
     # batch over (T*K) points; each has C views
     pts = kp2d.transpose(0, 2, 1, 3).reshape(T * K, C, 2)         # (TK,C,2)
     val = valid.transpose(0, 2, 1).reshape(T * K, C)             # (TK,C)
+    if reproj_resid_px is not None:
+        val = _reject_outlier_views(pts, val, cam_mats, float(reproj_resid_px))
     cams = np.broadcast_to(cam_mats[None], (T * K, C, 4, 3))
     nvalid = val.sum(1)                                          # (TK,)
     ok = nvalid >= 2

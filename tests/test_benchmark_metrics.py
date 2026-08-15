@@ -5,8 +5,8 @@ import numpy as np
 import pytest
 
 from scripts.benchmark.metrics import (
-    jitter_series, joint_bounds, joint_limit_violation_rate, kp_group,
-    proximity_bl, reproj_series_by_group,
+    jitter_series, joint_bounds, joint_limit_violation_rate, kp3d_spike_rate,
+    kp_group, proximity_bl, reproj_series_by_group,
 )
 
 
@@ -32,6 +32,45 @@ def test_jitter_series_flags_noisy_legs():
     js, jn = jitter_series(smooth, names), jitter_series(noisy, names)
     assert js.shape == (T - 2,)
     assert np.median(jn) > 10 * max(np.median(js), 1e-12)
+
+
+def _spike_fixture(T=100, K=4, body=10.0):
+    """Smooth-moving keypoints with a known Antenna_Base<->Abd_tip length."""
+    kp_names = ["Antenna_Base", "Abd_tip"] + [f"kp{i}" for i in range(K - 2)]
+    kp3d = np.zeros((T, K, 3))
+    kp3d[:, :, 0] = np.linspace(0, 5, T)[:, None]     # smooth fast motion
+    kp3d[:, 1, 1] = body                              # fixed body length
+    return kp3d, kp_names
+
+
+def test_kp3d_spike_rate_counts_isolated_jumps():
+    # Median-style jitter metrics are blind to the tail this measures (the
+    # 2026-08-14 jax-vs-jarvis A/B found identical medians but a 5x spike
+    # gap): one keypoint jumping for one frame must register, smooth motion
+    # must not.
+    T, K = 100, 4
+    kp3d, kp_names = _spike_fixture(T, K)
+    assert kp3d_spike_rate(kp3d, kp_names) == 0.0
+    spiky = kp3d.copy()
+    spiky[50, 2, 1] += 1.0                            # 0.1 body-length jump
+    r = kp3d_spike_rate(spiky, kp_names)
+    # a 1-frame jump bends 3 consecutive second differences of that keypoint
+    assert np.isclose(r, 3 / ((T - 2) * K))
+
+
+def test_kp3d_spike_rate_is_unit_free():
+    # The frozen benchmark tree triangulates in ~0.1 mm units, the Session6
+    # clip in mm: the SAME motion must score the SAME in any unit.
+    kp3d, kp_names = _spike_fixture()
+    kp3d[50, 2, 1] += 1.0
+    assert np.isclose(kp3d_spike_rate(kp3d, kp_names),
+                      kp3d_spike_rate(kp3d * 11.3, kp_names))
+
+
+def test_kp3d_spike_rate_ignores_nan_gaps():
+    kp3d, kp_names = _spike_fixture(T=50, K=2)
+    kp3d[10:20, 0] = np.nan                           # occlusion gap, no spike
+    assert kp3d_spike_rate(kp3d, kp_names) == 0.0
 
 
 def test_joint_limits_synthetic_model():

@@ -27,6 +27,25 @@ conf_thresh: 0.3      # min 2D peak conf for a KEYPOINT to enter triangulation
 # 0.8 buys no extra rejection and starts costing real views. Not a cure: ~5%
 # of empty crops still score above 0.9.
 view_conf_thresh: 0.6
+# Reprojection-residual consensus gate for single-view 2D leg swaps -- the
+# failure neither threshold above can see: one camera's tarsal tip jumps to
+# the wrong leg at conf 0.4-0.8 ("confidently wrong") and drags the DLT,
+# producing the 3D jitter spikes measured in
+# docs/benchmark/2026-08-14-jax-vs-jarvis-stability/notes.md. This value is
+# the consensus INLIER BAND in px; a point is re-solved from its largest
+# self-consistent view set only when some view is 3x this inconsistent
+# (triangulate.TRIGGER_FACTOR -- gross swaps are 100-400 px; diffuse noise on
+# hard wall/occlusion poses must NOT trigger or the winning view-subset
+# churns frame to frame, measured +80% spikes on benchmark b12-fly1), and
+# only when >= 3 views survive (2-view consensus locked onto the wrong
+# cluster on female b8: +25% spikes). null = off (byte-identical to the
+# pre-feature pipeline). Enabled at 10 px from the 2026-08-14 benchmark A/B
+# (dlt_robust_t30 vs dlt_plain, full STAC scorecards): female soft-IoU +46%
+# and close-frame reproj -38%, spike rate free-running -56% / male -23% /
+# female -14%, every other cohort metric within a few %; 3/21 bout-flies
+# regress >5%, all small or on bouts whose 2D is broken upstream (wall-edge
+# OOD poses). Session6 clip: 834 -> 515 accel spikes.
+reproj_resid_px: 10.0
 decode_sharpen: 3.0   # soft-argmax sharpening power; 1.0 = original centroid.
                       # Set from the Task-4 wobble diagnostic (mean wobble soft
                       # s1=0.727 -> s3=0.573 px); matches the repo's existing

@@ -39,7 +39,16 @@ def _link_or_copy(src: Path, dst: Path) -> None:
         shutil.copy2(src, dst)
 
 
-def build_variant_root(manifest: dict, dest_root: Path, variant: str) -> Path:
+def build_variant_root(manifest: dict, dest_root: Path, variant: str,
+                       frozen_inputs: tuple[str, ...] = FROZEN_INPUTS) -> Path:
+    """`frozen_inputs` selects which stage artifacts the variant inherits.
+
+    Default: all three (Track 1, STAC-level treatments). A treatment that
+    changes an EARLIER stage must freeze only that stage's inputs -- e.g.
+    a triangulation change freezes just kp2d.npz so Stage B/B2 recompute;
+    linking kp3d would make stage-skipping serve the baseline triangulation
+    and the A/B would compare a run against itself.
+    """
     dest_root = Path(dest_root)
     frozen = dest_root / "frozen"
     vroot = dest_root / "variants" / variant
@@ -47,7 +56,7 @@ def build_variant_root(manifest: dict, dest_root: Path, variant: str) -> Path:
         for fly in e["flies"]:
             rel = (Path(e["run_key"]) / "bouts"
                    / f"bout_{int(e['bout']):05d}" / f"fly{fly}")
-            for name in FROZEN_INPUTS:
+            for name in frozen_inputs:
                 src = frozen / rel / name
                 if src.exists():
                     _link_or_copy(src, vroot / rel / name)
@@ -149,6 +158,13 @@ def main(argv=None) -> None:
     ap.add_argument("--manifest", type=Path,
                     default=Path("configs/benchmark/bouts.yaml"))
     ap.add_argument("--variant", type=str, default=None)
+    ap.add_argument("--freeze", action="append", default=None,
+                    metavar="NAME.npz",
+                    help="stage input(s) to inherit from frozen/ (repeatable). "
+                         f"Default: all of {FROZEN_INPUTS}. A treatment that "
+                         "changes an earlier stage must freeze only that "
+                         "stage's inputs, e.g. --freeze kp2d.npz for a "
+                         "triangulation change.")
     ap.add_argument("--override", action="append", default=[])
     ap.add_argument("--mjcf", type=str, default=None)
     ap.add_argument("--out", type=Path, default=None)
@@ -156,7 +172,9 @@ def main(argv=None) -> None:
     manifest = load_manifest(args.manifest)
     dest_root = Path(manifest["benchmark_root"])
     if args.mode in ("build", "commands"):
-        vroot = build_variant_root(manifest, dest_root, args.variant)
+        frozen_inputs = FROZEN_INPUTS if args.freeze is None else tuple(args.freeze)
+        vroot = build_variant_root(manifest, dest_root, args.variant,
+                                   frozen_inputs=frozen_inputs)
         if args.mode == "commands":
             for c in variant_commands(manifest, vroot, args.override):
                 print(c)

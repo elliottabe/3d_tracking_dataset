@@ -605,9 +605,16 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
                 print(f"[view-gate] bout {bout_idx} fly{fly}: dropped "
                       f"{_dropped}/{_vmed.size} (frame,camera) views below "
                       f"median conf {_view_thresh}")
+        # Reprojection-residual outlier rejection: the gate confidence cannot
+        # provide (a single camera's 2D swapped to the wrong leg at conf
+        # 0.4-0.8 passes both thresholds above and drags the DLT). Absent from
+        # the config (None) is a strict no-op, same contract as
+        # view_conf_thresh. See triangulate_keypoints.
+        _resid_px = cfg.detector.get("reproj_resid_px", None)
+        _resid_px = None if _resid_px is None else float(_resid_px)
         kp3d, conf3d = triangulate_keypoints(
             kp2d, conf, cam_mats, conf_thresh=float(cfg.detector.conf_thresh),
-            view_conf_thresh=_view_thresh)
+            view_conf_thresh=_view_thresh, reproj_resid_px=_resid_px)
         # Gate frames with too few valid-camera masks to NaN instead of
         # triangulating from too few views (see mask-coverage comment above
         # masks_dict). cfg.masks.min_views absent (_min_views_cfg is None)

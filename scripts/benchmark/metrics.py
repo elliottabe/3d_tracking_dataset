@@ -42,6 +42,38 @@ def jitter_series(qpos: np.ndarray, names_qpos: list[str]) -> np.ndarray:
     return np.nanmedian(np.abs(d2), axis=1)
 
 
+def kp3d_spike_rate(kp3d: np.ndarray, kp_names: list[str],
+                    thr_bl: float = 0.04) -> float:
+    """Fraction of (frame, keypoint) samples whose 3D acceleration exceeds
+    thr_bl body lengths.
+
+    kp3d (T,K,3) raw triangulated keypoints in ANY consistent unit -- the
+    threshold is normalised by the median Antenna_Base<->Abd_tip distance
+    because the frozen benchmark tree triangulates in ~0.1 mm units while
+    clip-format calibrations give mm. Acceleration = magnitude of the second
+    temporal difference. thr_bl=0.04 reproduces the 0.1 mm threshold on a
+    2.4 mm fly. This is the TAIL metric the median-style scores above cannot
+    see: the 2026-08-14 jax-vs-jarvis A/B
+    (docs/benchmark/2026-08-14-jax-vs-jarvis-stability/notes.md) measured
+    identical median jitter but a 5x spike-count gap between plain DLT and
+    fused lifting -- single-view leg swaps surface here and nowhere else.
+    NaN samples (occlusion gaps) never count as spikes.
+    """
+    a = np.asarray(kp3d, dtype=np.float64)
+    if a.shape[0] < 3:
+        return 0.0
+    names = [n.decode() if isinstance(n, bytes) else str(n) for n in kp_names]
+    i_ant, i_abd = names.index('Antenna_Base'), names.index('Abd_tip')
+    with np.errstate(invalid='ignore'):
+        body = float(np.nanmedian(
+            np.linalg.norm(a[:, i_ant] - a[:, i_abd], axis=-1)))
+    if not np.isfinite(body) or body <= 0:
+        raise ValueError("cannot estimate body length for spike threshold")
+    d2 = np.linalg.norm(a[2:] - 2 * a[1:-1] + a[:-2], axis=-1)   # (T-2,K)
+    with np.errstate(invalid='ignore'):
+        return float(np.mean(d2 > thr_bl * body))
+
+
 # --- joint limits -----------------------------------------------------------
 
 def joint_bounds(mj_model) -> tuple[np.ndarray, np.ndarray]:
@@ -154,6 +186,13 @@ def compute_bout_metrics(bout_dir: Path, partner_dir: Path | None = None,
         'soft_iou_median': qc['silhouette_iou']['soft_median'],
         'hard_iou_median': qc['silhouette_iou']['hard_median'],
     }
+    # Raw-triangulation spike rate (pre-filter, pre-scale): the tail metric
+    # median jitter/IoU cannot see -- see kp3d_spike_rate. Optional so bouts
+    # frozen before this metric existed still score.
+    kp3d_raw_path = bout_dir / 'kp3d.npz'
+    if kp3d_raw_path.exists():
+        with np.load(kp3d_raw_path) as z:
+            scalars['kp3d_spike_rate'] = kp3d_spike_rate(z['kp3d'], kp_names)
 
     if calib_dir is not None:
         from jarvis_jax.geometry.reprojection_tool import ReprojectionTool

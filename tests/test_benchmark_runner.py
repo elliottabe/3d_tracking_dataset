@@ -30,6 +30,20 @@ def test_build_variant_root_links_inputs_not_shared_artifacts(tmp_path):
     assert not (vroot / "courtship_r" / "scale.json").exists()
 
 
+def test_build_variant_root_freeze_subset_recomputes_downstream(tmp_path):
+    # A Stage-B treatment (e.g. detector.reproj_resid_px) must see frozen kp2d
+    # but RECOMPUTE kp3d/kp3d_filt: linking them would make run_bout.py's
+    # stage-skipping silently serve the baseline triangulation for every
+    # variant, and the A/B would compare a run against itself.
+    m, dest = _frozen(tmp_path)
+    vroot = build_variant_root(m, dest, "stageb",
+                               frozen_inputs=("kp2d.npz",))
+    fly0 = vroot / "courtship_r" / "bouts" / "bout_00001" / "fly0"
+    assert (fly0 / "kp2d.npz").exists()
+    assert not (fly0 / "kp3d.npz").exists()
+    assert not (fly0 / "kp3d_filt.npz").exists()
+
+
 def test_variant_commands_shape(tmp_path):
     m, dest = _frozen(tmp_path)
     vroot = build_variant_root(m, dest, "v")
