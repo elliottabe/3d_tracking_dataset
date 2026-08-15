@@ -226,7 +226,21 @@ def render_recovery_clip(clip: str = clip_io.CLIP_DEFAULT) -> Path:
                            scale=draw.SMALL_SCALE, color=(150, 150, 150))
 
         canvas = np.hstack([left, right])
-        canvas = draw.stage_title(canvas, TITLE, subtitle=speed_label)
+        # `draw.stage_title`'s own subtitle styling (light grey, thickness 1)
+        # is tuned for Acts 1-4, which only ever show it over black -- here
+        # it sits over this clip's light-teal video and washes out
+        # completely. Fixed LOCALLY (not in draw.stage_title, which Acts 1-4
+        # already rely on and have been accepted at): no subtitle from
+        # stage_title; the speed label is drawn separately, white, on its own
+        # dark backing strip, which survives a bright background. Verified
+        # by reading a rendered frame (not assumed) -- see task-3 fix report.
+        canvas = draw.stage_title(canvas, TITLE)
+        (sw, sh), _base = cv2.getTextSize(speed_label, cv2.FONT_HERSHEY_SIMPLEX,
+                                          draw.CAPTION_SCALE, draw.CAPTION_THICKNESS)
+        cv2.rectangle(canvas, (40, 122 - sh - 10), (56 + sw, 122 + 10),
+                     (0, 0, 0), -1)
+        canvas = draw.label(canvas, speed_label, (48, 122), scale=draw.CAPTION_SCALE,
+                           color=(255, 255, 255))
         canvas = draw.label(canvas, CAVEAT_LINES[0], (48, 158), scale=draw.CAPTION_SCALE)
         canvas = draw.label(canvas, CAVEAT_LINES[1], (48, 185), scale=draw.CAPTION_SCALE)
         canvas = draw.label(canvas, f"output frame {f + 1}/{N_OUT}  (src {src})",
