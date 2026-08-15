@@ -58,9 +58,12 @@ _ENHANCED_EXPECTED_N_FRAMES = 921
 
 
 def shipped_csv_path(clip: str = CLIP_DEFAULT) -> str:
-    hits = sorted(glob.glob(os.path.join(clip, "data3D_*.csv")))
+    # The workstation copy of the clip names the shipped JARVIS export
+    # data3D_<suffix>.csv; the Hyak copy has a bare data3D.csv. Accept both.
+    hits = sorted(glob.glob(os.path.join(clip, "data3D_*.csv"))
+                  + glob.glob(os.path.join(clip, "data3D.csv")))
     if not hits:
-        raise FileNotFoundError(f"no data3D_*.csv under {clip}")
+        raise FileNotFoundError(f"no data3D*.csv under {clip}")
     return hits[0]
 
 

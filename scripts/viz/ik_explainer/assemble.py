@@ -205,16 +205,23 @@ def _detector_facts() -> dict:
     # therefore recorded directly and cross-checked two ways instead of
     # resolved through hydra: it must end with the config's own ckpt suffix,
     # and it must exist on disk.
-    ckpt_real = ("/data2/users/eabe/datasets/3d_tracking/jax_vitpose_runs/"
-                 "v4_8gpu_20260808/final")
+    _CKPT_ROOTS = (
+        "/data2/users/eabe/datasets/3d_tracking/jax_vitpose_runs",   # workstation
+        "/gscratch/portia/eabe/data/Johnson_lab/jax_vitpose_runs",   # hyak
+    )
+    candidates = [f"{root}/{ckpt_suffix}" for root in _CKPT_ROOTS]
+    ckpt_real = next((c for c in candidates if Path(c).exists()), None)
+    if ckpt_real is None:
+        raise RuntimeError(
+            f"detector ckpt not found on this machine under any known root: "
+            f"{candidates} (configs/detector/vitpose_v3.yaml ckpt template "
+            f"{ckpt_template!r})")
     if not ckpt_real.endswith(ckpt_suffix):
         raise RuntimeError(
             f"detector ckpt path {ckpt_real!r} does not end with the "
             f"configured suffix {ckpt_suffix!r} (configs/detector/vitpose_v3.yaml "
             f"ckpt template {ckpt_template!r}) -- config and recorded path have "
             f"drifted apart.")
-    if not Path(ckpt_real).exists():
-        raise RuntimeError(f"detector ckpt does not exist on disk: {ckpt_real}")
     return {
         "ckpt": ckpt_real,
         "ckpt_config_template": ckpt_template,

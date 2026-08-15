@@ -25,6 +25,11 @@ from scripts.viz.ik_explainer import clip_io   # noqa: E402
 # Matches configs/detector/vitpose_v3.yaml.
 CONF_THRESH = 0.3
 VIEW_CONF_THRESH = 0.6
+# Consensus outlier-view rejection (inlier band px; engages at 3x this).
+# Same default as production; see the 2026-08-14 benchmark notes -- on this
+# clip it removes the single-camera tarsal-tip swaps (e.g. T1R_TaTip
+# f441/443 on Cam2012853) that plain DLT let drag the 3D.
+REPROJ_RESID_PX = 10.0
 
 
 def _default_filter_cfg() -> dict:
@@ -50,7 +55,8 @@ FILTER_CFG = _default_filter_cfg()
 
 
 def triangulate(kp2d, conf, cam_mats, *, conf_thresh=CONF_THRESH,
-                view_conf_thresh=VIEW_CONF_THRESH):
+                view_conf_thresh=VIEW_CONF_THRESH,
+                reproj_resid_px=REPROJ_RESID_PX):
     """kp2d (T,C,K,2), conf (T,C,K), cam_mats (C,4,3) -> (kp3d (T,K,3) mm, conf3d)."""
     from jarvis_jax.tracking.triangulate import triangulate_keypoints
     kp2d = np.nan_to_num(np.asarray(kp2d, np.float32), nan=0.0,
@@ -58,7 +64,8 @@ def triangulate(kp2d, conf, cam_mats, *, conf_thresh=CONF_THRESH,
     return triangulate_keypoints(kp2d, np.asarray(conf, np.float32),
                                  np.asarray(cam_mats, np.float32),
                                  conf_thresh=conf_thresh,
-                                 view_conf_thresh=view_conf_thresh)
+                                 view_conf_thresh=view_conf_thresh,
+                                 reproj_resid_px=reproj_resid_px)
 
 
 def filter_kp3d(kp3d, conf3d, kp_names, filter_cfg=None):
