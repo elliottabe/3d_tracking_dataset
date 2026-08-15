@@ -81,8 +81,10 @@ PX_PER_MM_NATIVE = 80.7
 CROP_PAD_FRAC = 0.25
 
 # Radius of both marker dots, in NATIVE crop pixels (they are drawn before the
-# ~3x upscale, so ~15 px on screen).
+# ~3x upscale, so ~15 px on screen), and of the legend's colour samples, which
+# are drawn on the already-upscaled panel and so are sized in FINAL pixels.
 MARKER_RADIUS = 5
+LEGEND_DOT_RADIUS = 7
 
 TITLE = "2D detection fails, the fit doesn't"
 
@@ -146,27 +148,33 @@ def caveat_lines(tracks, event=None):
             "the recovery is triangulation + filter + IK, not an outvoted camera")
 
 
-def _label_on_strip(img, text, xy, *, scale=None, color=(255, 255, 255), pad=8):
-    """`draw.label` on a solid black backing strip.
+def _label_on_strip(img, text, xy, *, scale=None, color=(255, 255, 255),
+                    pad=8, dot_color=None):
+    """`draw.label` on a solid black backing strip, optionally with a marker dot.
 
     Every caption in this clip is thin (CAPTION_THICKNESS 1) text over the
     left panel's light-teal video, where it washes out completely -- the
     problem commit 4a82231 fixed for the speed label by putting a black strip
-    behind it. That rationale applies verbatim to the caveat and the
-    camera/confidence readout, which are the same colour and thickness on the
-    same background, so they all use this one helper. Fixed HERE rather than
-    in `draw.label`, which Acts 1-4 (delivered, accepted, only ever drawn over
-    black) depend on the current appearance of.
+    behind it. That rationale applies verbatim to the caveat, the
+    camera/confidence readout and the marker legend, so they all use this one
+    helper. Fixed HERE rather than in `draw.label`, which Acts 1-4 (delivered,
+    accepted, only ever drawn over black) depend on the current appearance of.
 
+    `dot_color`: draws a filled circle in the marker's own colour just left of
+    the text, so a legend entry shows the marker and not only a colour of text.
     """
     scale = draw.CAPTION_SCALE if scale is None else scale
     (tw, th), _base = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, scale,
                                       draw.CAPTION_THICKNESS)
     x, y = int(xy[0]), int(xy[1])
+    dot_w = 2 * LEGEND_DOT_RADIUS + 10 if dot_color is not None else 0
     out = np.asarray(img).copy()
-    cv2.rectangle(out, (x - pad, y - th - pad), (x + tw + pad, y + pad),
+    cv2.rectangle(out, (x - pad, y - th - pad), (x + dot_w + tw + pad, y + pad),
                   (0, 0, 0), -1)
-    return draw.label(out, text, (x, y), scale=scale, color=color)
+    if dot_color is not None:
+        cv2.circle(out, (x + LEGEND_DOT_RADIUS, y - th // 2), LEGEND_DOT_RADIUS,
+                   tuple(int(c) for c in dot_color), -1, cv2.LINE_AA)
+    return draw.label(out, text, (x + dot_w, y), scale=scale, color=color)
 
 
 def _fixed_crop_box(det2d, rep2d, frame_w, frame_h, panel_w, panel_h,
@@ -271,6 +279,33 @@ def render_recovery_clip(clip: str = clip_io.CLIP_DEFAULT) -> Path:
 
     kp_map = kp_colors.jarvis_kp_colors()
     det_color = kp_map[e["kp"]]
+    # Real names, not "blue dot"/"white dot" -- and the keypoint's real name,
+    # so the legend says WHICH keypoint the whole clip is about.
+    legend_entries = ((f"detector 2D ({e['kp']})", det_color),
+                      ("reprojected 3D (filtered)", _FILT_BGR))
+    # Bottom-left gutter, NOT under the camera label: at the failure frame the
+    # detector marker sits at panel (253, 272), i.e. inside the panel's
+    # top-left corner, and a legend there hid the very marker it names (seen
+    # by reading a rendered frame). Verified, not trusted -- the check below
+    # fails the render if either marker track ever enters the legend's box.
+    legend_xy = [(24, PANEL_H - 150 + 34 * li) for li in range(len(legend_entries))]
+    l_w, l_h = max((cv2.getTextSize(t, cv2.FONT_HERSHEY_SIMPLEX, draw.CAPTION_SCALE,
+                                    draw.CAPTION_THICKNESS)[0] for t, _c in legend_entries),
+                   key=lambda wh: wh[0])
+    l_box = (legend_xy[0][0] - 8, legend_xy[0][1] - l_h - 8,
+             legend_xy[0][0] + 2 * LEGEND_DOT_RADIUS + 10 + l_w + 8,
+             legend_xy[-1][1] + 8)
+    for track_name in ("det2d", "rep2d"):
+        p = (np.asarray(tracks[track_name], np.float64) - [x0, y0]) * [sx, sy]
+        r = MARKER_RADIUS * sx
+        inside = ((p[:, 0] > l_box[0] - r) & (p[:, 0] < l_box[2] + r)
+                  & (p[:, 1] > l_box[1] - r) & (p[:, 1] < l_box[3] + r))
+        if inside.any():
+            raise RuntimeError(
+                f"the legend box {l_box} would cover the {track_name} marker at "
+                f"source frames {(np.asarray(frames_idx)[inside]).tolist()} -- "
+                "move the legend; a legend that hides the marker it names is "
+                "worse than no legend")
 
     dirs = clip_io.out_dirs(clip)
     out_dir = dirs["frames"] / "recovery_clip"
@@ -305,6 +340,15 @@ def render_recovery_clip(clip: str = clip_io.CLIP_DEFAULT) -> Path:
         left = _label_on_strip(
             left, f"{cam_label}   detector conf {tracks['conf'][i]:.2f}",
             (24, 225))
+        # Marker legend (F3). Without it the panel is genuinely ambiguous, and
+        # the naive reading is BACKWARDS: at the peak the true tarsal tip is
+        # tucked at the fly's face while the detector's error lands on a
+        # visually obvious extended leg, so an uninformed viewer reads the
+        # detector marker as the correct one. Each entry carries its own
+        # marker's colour and a sample dot, like the right panel's trace
+        # legend; placement is checked above.
+        for (text, col), xy in zip(legend_entries, legend_xy):
+            left = _label_on_strip(left, text, xy, color=col, dot_color=col)
 
         right = tp.render_trace_panel(PANEL_W, PANEL_H, series, frames_idx, src,
                                       ylabel=ylabel, annotation=annotation)
