@@ -14,6 +14,24 @@ pytestmark = pytest.mark.skipif(
     not Path(CLIP).exists(), reason="source clip not present")
 
 
+@pytest.fixture
+def restore_sys_path():
+    """Undo `sys.path` edits an import performs, for the rest of the session.
+
+    Importing `recovery_clip` pulls in `kp_colors`, which prepends
+    `third_party/JARVIS-HybridNet` to `sys.path` at import time (and JARVIS in
+    turn prepends its own `jarvis/` subdirectory). That subdirectory contains a
+    `utils` package, so after this import a plain `import utils` in the SAME
+    process resolves to JARVIS's utils instead of this repo's -- which breaks
+    `tests/test_ik_explainer_triangulate.py`'s keypoint filter
+    (`utils.keypoint_filter`) when both run in one pytest session. Restoring
+    the path keeps this test from deciding what a later, unrelated one imports.
+    """
+    saved = list(sys.path)
+    yield
+    sys.path[:] = saved
+
+
 def test_event_constants_match_the_spec():
     assert ev.EVENT["kp"] == "T1R_TaTip"
     assert ev.EVENT["cam"] == "Cam2012853"
@@ -68,7 +86,7 @@ def test_cam_disagree_matches_a_direct_recomputation():
     assert np.allclose(t["cam_disagree"], want, equal_nan=True)
 
 
-def test_the_caveat_states_the_numbers_it_measured():
+def test_the_caveat_states_the_numbers_it_measured(restore_sys_path):
     """The one figure the clip puts on screen must be the one in the data.
     Recomputed from the loaded arrays -- NOT compared to a fixed string."""
     from scripts.viz.ik_explainer import recovery_clip as rc
