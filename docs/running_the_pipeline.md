@@ -121,6 +121,30 @@ helper (idempotent, so it skips the already-done one).
 
 ---
 
+## NewBouts curated bout set (free-running, batch IK route)
+
+`processed/free_running/NewBouts/<ts>/` holds, per recording, the
+workstation's 3D keypoint predictions (`data3D.csv`), `info.yaml`, and a
+manually curated `running_bouts_summary.csv` (schema
+`bout,start_frame,end_frame,...,status`). These run on the OLD batch route —
+no video, masks, or 2D detection needed:
+
+```bash
+# 1. materialize Predictions_3D_newbouts/ per recording (accepted bouts only,
+#    bout -> bout_idx, fly_id from info.yaml recording_path):
+python scripts/data/convert_newbouts_summary.py \
+    --root /gscratch/portia/eabe/data/Johnson_lab/processed/free_running/NewBouts
+# 2. one array task per recording (preprocess -> STAC -> postprocess), then
+#    a dependent combine/pack/audit finalize:
+python scripts/slurm_dir_array.py \
+    --base-dir /gscratch/portia/eabe/data/Johnson_lab/processed/free_running/NewBouts \
+    --anatomy v1 --postprocessing default --partition ckpt-g2 \
+    --out-h5 <packed-output.h5>   # MUST override: the default targets the
+                                  # v2_3 walking reference dataset
+```
+
+---
+
 ## Outputs (per bout, per fly)
 
 Under `<out>/bouts/bout_<idx:05d>/fly<f>/`:

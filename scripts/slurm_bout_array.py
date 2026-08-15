@@ -110,6 +110,7 @@ def build_sam3_array_script(
     session_dir: str,
     masks_out: str,
     num_animals: int = 2,
+    bouts_csv: str = "",
     dependency: str = "",
 ) -> str:
     """Stage-0 SAM3 mask+identity array (PyTorch env, cu13 CUDA libs).
@@ -120,9 +121,16 @@ def build_sam3_array_script(
     TASK_ID` always names a bout that exists. `sam3.reuse_masks=true` skips
     bouts whose sam3_masks.npz already exists, so this is cheap to resubmit
     and safe even when only a handful of bouts are actually missing masks.
+
+    `bouts_csv` (when set) pins the SAM3 stage to the SAME bout set the jax
+    stage reads via cfg.recording.bouts_csv. Without it, sam3_masks.py
+    auto-resolves the canonical CSV in the processed dir, which can be a
+    STALE bout set (Session11 NewBouts: renumbered bouts would silently pair
+    with masks from the wrong frame ranges).
     """
     requeue_line = "#SBATCH --requeue" if requeue else ""
     dependency_line = f"#SBATCH --dependency={dependency}" if dependency else ""
+    bouts_csv_arg = f" sam3.bouts_csv={bouts_csv}" if bouts_csv else ""
     return f"""#!/bin/bash
 #SBATCH --job-name={job_name}
 #SBATCH --partition={partition}
@@ -149,7 +157,7 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 echo "Node: $SLURMD_NODENAME  job: $SLURM_JOB_ID  task: $SLURM_ARRAY_TASK_ID"
 cd {PKG_DIR}
 python -u scripts/sam3_masks.py sam3.session_dir={session_dir} sam3.out={masks_out} \\
-    sam3.num_animals={num_animals} \\
+    sam3.num_animals={num_animals}{bouts_csv_arg} \\
     sam3.bout_ids=${{SLURM_ARRAY_TASK_ID}} sam3.sam3_compile=false sam3.reuse_masks=true
 """
 
@@ -448,7 +456,8 @@ def main():
             cpus=sl.cpus, mem=sl.mem, gpus=gpus, time_limit=sl.time,
             requeue=requeue, conda_env=sl.conda_env,
             idxs=idxs, session_dir=session_dir, masks_out=predictions_dir,
-            num_animals=int(cfg.recording.num_animals))
+            num_animals=int(cfg.recording.num_animals),
+            bouts_csv=str(cfg.recording.get("bouts_csv", "") or ""))
         _run("sam3", sam3_script, None)
         sam3_dep = f"afterok:{submitted['sam3']}"
     else:

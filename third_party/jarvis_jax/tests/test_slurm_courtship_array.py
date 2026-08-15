@@ -37,6 +37,28 @@ def test_sam3_script_uses_pytorch_env():
     assert "cu13/lib" in s and "LD_PRELOAD" in s and "--array=1,2,3,5,8,13,21,34" in s
 
 
+def test_sam3_script_forwards_bouts_csv():
+    """The SAM3 stage must run on the SAME bout set as the jax stage. Without
+    an explicit sam3.bouts_csv, sam3_masks.py auto-resolves the canonical CSV
+    in the processed dir -- which can be a STALE bout set (Session11 NewBouts:
+    the processed dir holds the old summary while recording.bouts_csv points
+    at the new curated one; renumbered bouts would then silently pair with
+    masks from the wrong frame ranges)."""
+    m = _load()
+    s = m.build_sam3_array_script(job_name="s", partition="ckpt-g2", account="portia",
+                                  cpus=8, mem=48, gpus=1, time_limit="8:00:00", requeue=True,
+                                  conda_env="3d_tracking", idxs=[1], session_dir="/x",
+                                  masks_out="/y", bouts_csv="/x/new_summary.csv")
+    assert "sam3.bouts_csv=/x/new_summary.csv" in s
+    # backwards compatible: no bouts_csv -> keep auto-resolution (no literal
+    # 'None'/'' override that would break hydra parsing)
+    s2 = m.build_sam3_array_script(job_name="s", partition="ckpt-g2", account="portia",
+                                   cpus=8, mem=48, gpus=1, time_limit="8:00:00", requeue=True,
+                                   conda_env="3d_tracking", idxs=[1], session_dir="/x",
+                                   masks_out="/y")
+    assert "sam3.bouts_csv" not in s2
+
+
 def test_precompute_script_uses_real_bout_id():
     """bout_00000 does not exist (bouts are 1-based); precompute must target a
     real discovered bout id, not the old hardcoded ++bout_ids=0."""

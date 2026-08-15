@@ -1,5 +1,10 @@
 # @package sam3
-project: red_data_unified
+# The project supplies ONLY the reprojection-tool cfg (camera names via its
+# DATASET annotations; the actual DLT params come from the session's own
+# calibration/ dir). red_data_unified was deleted from the Github checkout
+# (projects/ emptied 2026-07-18); unified_V3_masked in third_party points at
+# the same 7-camera rig (red_data_unified_V3 annotations) and is a drop-in.
+project: unified_V3_masked
 session_dir: /gscratch/portia/eabe/data/Johnson_lab/Video_recordings/courtship/Session0/2025_10_20_13_20_04
 bouts_csv: auto   # auto -> resolve canonical {dataset}_bout_summary.csv in the processed dir
 out: auto   # auto -> <processed_dir>/sam3_masks
@@ -76,8 +81,8 @@ sam3_checkpoint: null
 # card single-pass. chunk_len=0 disables (always single-pass).
 chunk_len: 1000
 chunk_overlap: 120
-# JARVIS checkout that owns the projects/ directory (red_data_unified lives here,
-# not in third_party/JARVIS-HybridNet). Set to null to fall back to the
-# JARVIS_ROOT env var, then third_party/JARVIS-HybridNet (which has no
-# red_data_unified project and will fail — always set one or the other).
-jarvis_root: /mmfs1/gscratch/portia/eabe/Research/Github/JARVIS-HybridNet
+# JARVIS checkout that owns the projects/ directory. unified_V3_masked lives
+# in the third_party checkout (the Github checkout's projects/ was emptied
+# 2026-07-18, deleting red_data_unified). Set to null to fall back to the
+# JARVIS_ROOT env var, then third_party/JARVIS-HybridNet.
+jarvis_root: /mmfs1/gscratch/portia/eabe/Research/MyRepos/3d_tracking_dataset/third_party/JARVIS-HybridNet
