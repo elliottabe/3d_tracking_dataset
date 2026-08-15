@@ -7,9 +7,13 @@ Right : raw / filtered / IK traces for the same keypoint, with a playhead.
 See docs/specs/2026-08-14-recovery-clip-design.md. The event
 (`recovery_event.EVENT`) is measured, not chosen by eye: `T1R_TaTip` on
 `Cam2012853` is simultaneously the bout's worst detector-vs-consensus
-disagreement (frame 441, 162.6 px, confidence 0.49 -- see
-`test_the_detector_really_fails_at_the_peak_frame`) and its worst raw-3D
-acceleration spike (frame 443, 1.627 mm/frame^2).
+disagreement -- frame 441, **122.2 px** from the RAW triangulation (the
+quantity the design doc measured and ranked the bout by) and **162.6 px** from
+the reprojected FILTERED 3D (the marker separation this clip's left panel
+actually draws, and what
+`test_the_detector_really_fails_at_the_peak_frame` asserts); detector
+confidence 0.49 -- and its worst raw-3D acceleration spike (frame 443,
+1.627 mm/frame^2). Two different comparisons, so two different numbers.
 
 The on-screen caveat is load-bearing: the other six cameras ALSO miss the raw
 3D consensus at this instant -- this is NOT "one camera failed and six rescued

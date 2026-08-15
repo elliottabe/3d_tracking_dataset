@@ -104,9 +104,12 @@ footage, cropped to the right foreleg. Two markers on `T1R_TaTip`:
 - the **detector's own 2D**, in its JARVIS chain colour
 - the **reprojection of the filtered 3D**, in white
 
-At frame 441 the detector marker leaps 122 px off the foot while the reprojected
-marker stays on it. A readout shows the live detector confidence (0.49 at the
-failure).
+At frame 441 the detector marker leaps **162.6 px** off the foot while the
+reprojected marker stays on it. Note this is a different measurement from the
+122.2 px above: the panel draws the detector's 2D against the reprojected
+**filtered** 3D, while the event was selected on detector vs the **raw**
+triangulation. A readout shows the live detector confidence (0.49 at the
+failure). Both markers are legended by name in the panel.
 
 **Right panel: what the pipeline did about it.** A time-series over frames
 420–465 with three traces — **raw triangulation**, **filtered**, **IK-fitted** —
@@ -156,7 +159,7 @@ Stated before rendering, checked by reading the frames afterwards.
 
 | Check | Expectation | Falsification |
 |---|---|---|
-| Failure is visible | at f441 the detector marker sits ~122 px off the foot while the white reprojected marker stays on it | both markers together ⇒ wrong camera, keypoint, or frame mapping |
+| Failure is visible | at f441 the detector marker sits ~163 px off the foot (detector vs reprojected filtered 3D) while the white reprojected marker stays on it | both markers together ⇒ wrong camera, keypoint, or frame mapping |
 | Recovery is visible | the raw trace spikes at f443; filtered and IK stay smooth through it | all three spiking ⇒ wrong arrays plotted |
 | Panels agree | playhead frame == left panel's source frame at every output frame | drift ⇒ two independent indices; use one |
 | Caveat present | the "other six cameras also disagree" line is on screen | absent ⇒ the clip overstates the mechanism |
