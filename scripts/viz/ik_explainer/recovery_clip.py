@@ -68,12 +68,14 @@ CANVAS_W, CANVAS_H = 1920, 1080
 PANEL_W, PANEL_H = CANVAS_W // 2, CANVAS_H     # 960x1080, 2-up
 
 # Native-resolution pixels-per-mm for this rig's cropped video strip -- the
-# SAME constant the four explainer acts use (act1_views.py/act2_triangulate.py/
-# act4_solve.py `PX_PER_MM`), reused rather than re-derived. Applied to the
-# NATIVE crop (before it is resized up to panel size), exactly like those
-# acts' own `draw.scale_bar_mm` calls -- the resize then carries the drawn
-# bar's real-world meaning along with it, so no separate "effective" px/mm
-# needs to be computed for the enlarged panel.
+# SAME constant the explainer acts use (`PX_PER_MM` in acts/act1_views.py and
+# acts/act2_triangulate.py), reused rather than re-derived.
+#
+# Unlike those acts, this clip draws its scale bar AFTER the crop is resized up
+# to panel size, so that the "1 mm" text lands at SMALL_SCALE in final pixels
+# instead of being magnified along with the crop. That means the bar needs the
+# effective px/mm of the enlarged panel, not this native value -- see
+# `px_per_mm_panel` below, which scales this constant by the resize factor.
 PX_PER_MM_NATIVE = 80.7
 
 # Margin added, on every side, around the tight bounding box of BOTH marker
