@@ -54,6 +54,7 @@ sys.path.insert(0, str(_REPO))
 from scripts.viz.ik_explainer import clip_io, draw, kp_colors     # noqa: E402
 from scripts.viz.ik_explainer import recovery_event as ev         # noqa: E402
 from scripts.viz.ik_explainer import trace_panel as tp            # noqa: E402
+from viz.core.colors import PALETTE                                 # noqa: E402
 from viz.core.io import write_video                                # noqa: E402
 
 N_OUT = 360
@@ -81,14 +82,23 @@ CROP_PAD_FRAC = 0.25
 
 TITLE = "2D detection fails, the fit doesn't"
 
-# Trace colours: raw = PALETTE["detector"]-style cyan (closest in lineage to
-# the raw detection this clip is about), filtered = white (matches the white
-# reprojected marker on the left panel -- same stage, same colour), IK =
-# PALETTE["fit"] green, drawn LAST so trace_panel dashes it (filtered and IK
-# nearly coincide; the dashing is what keeps both visible).
+# Trace colours.
+#   raw      -- cyan, deliberately a LOCAL constant and NOT imported from
+#               PALETTE["detector"]. The left panel already spends a
+#               detector-ish blue on the actual detector marker (T1R_TaTip's
+#               JARVIS chain colour), and tying this trace to the shared
+#               "detector" entry would make one palette role mean two
+#               different things across the two panels of the same frame.
+#               Raw triangulation is a 3D stage, not the detector.
+#   filtered -- white, matching the white reprojected marker on the left panel:
+#               same pipeline stage, same colour.
+#   ik       -- the repo-wide "fit" green from viz.core.colors, so this clip
+#               reads with every other figure in the project. Listed LAST so
+#               trace_panel dashes it (filtered and IK nearly coincide; the
+#               dashing is what keeps both visible).
 _RAW_BGR = (255, 255, 0)
 _FILT_BGR = (255, 255, 255)
-_IK_BGR = (0, 255, 0)
+_IK_BGR = PALETTE["fit"]
 _AXIS_LETTERS = ("x", "y", "z")
 
 
