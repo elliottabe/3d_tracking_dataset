@@ -61,8 +61,15 @@ def load_tracks(clip=clip_io.CLIP_DEFAULT, kp_name=EVENT["kp"],
         raise ValueError("02_kp2d.npz is not in MODEL keypoint order")
     c = cam_names.index(cam_name)        # by NAME
 
-    raw = np.load(d["predictions"] / "03_kp3d.npz", allow_pickle=True)["kp3d"]
-    flt = np.load(d["predictions"] / "04_kp3d_filt.npz", allow_pickle=True)["kp3d"]
+    z_raw = np.load(d["predictions"] / "03_kp3d.npz", allow_pickle=True)
+    if [str(n) for n in z_raw["kp_names"]] != kp_names:
+        raise ValueError("03_kp3d.npz is not in MODEL keypoint order")
+    raw = z_raw["kp3d"]
+
+    z_flt = np.load(d["predictions"] / "04_kp3d_filt.npz", allow_pickle=True)
+    if [str(n) for n in z_flt["kp_names"]] != kp_names:
+        raise ValueError("04_kp3d_filt.npz is not in MODEL keypoint order")
+    flt = z_flt["kp3d"]
     with h5py.File(Path(clip) / "ik_production" / "stac_ik_full.h5", "r") as f:
         if [s.decode() for s in f["kp_names"][:]] != kp_names:
             raise ValueError("stac_ik_full.h5 is not in MODEL keypoint order")
