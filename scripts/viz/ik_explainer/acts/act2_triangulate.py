@@ -212,6 +212,54 @@ render time (task-34 report): per-camera centroid shift and area ratio
 between `act1_views/f00149.png`'s grid and `act2_triangulate/f00000.png`'s
 opening pose. Ray geometry, panel arc pose/orientation, and every phase
 boundary below are UNCHANGED -- only the fly-out's STARTING pose moved.
+
+TASK-35 (user: the rectangles now line up (task-34) but the PICTURE inside
+them still jumps -- Act 1's last frame shows source frame ~758 with the full
+raw-detector overlay; Act 2's frame 0 showed its own static T0=525 with no
+keypoints yet): task-34 fixed panel GEOMETRY only; this fixes panel CONTENT.
+
+`T_ACT1_LAST` below is DERIVED, not hardcoded: it is Act 1's own
+`t_for_f[N_OUT-1]` (`act1_views.WINDOW_START + int((N_OUT-1)*WINDOW_LEN/
+N_OUT)`, read straight from `act1_views`'s module constants), so it tracks
+Act 1's window/length automatically if either ever changes. An "intro"
+texture per camera is built ONCE (it is a single static frame, exactly as
+`T0`'s video_crop/tex_uv already are) by literally reusing Act 1's own
+private helpers -- `act1_views._smoothed_crop_x0` (the SAME smoothed-crop-
+centre curve, evaluated on the SAME full-length `02_kp2d.npz` array Act 1
+smooths, so the crop offset at `T_ACT1_LAST` is identical to what Act 1's own
+`_preload_crops` used for its last output frame) and
+`act1_views._draw_raw_overlay` (the SAME leg-chain/keypoint draw calls, same
+JARVIS colours, same radius/thickness) -- so the intro texture is Act 1's
+last frame, reproduced via Act 1's own code paths, not a re-implementation
+that could drift.
+
+Each output frame's panel texture is `draw.fade(regular_texture,
+intro_texture, _intro_alpha(f))`. `_intro_alpha(0) == 1.0`, so frame 0 is
+EXACTLY the intro texture (matching Act 1's last frame) with no contribution
+from the regular T0-based texture; `_intro_alpha` eases to 0.0 by `FLY_END`
+(the same frame the panel fly-out itself completes and immediately before
+`RAY_START`), so the Act-1-matching content is fully handed off to the
+regular T0-based texture (which by then already shows its own triangulated-
+keypoint overlay at full alpha, `KP_EARLY_END < FLY_END`) before rays begin
+extending -- it does not linger for the rest of the act. The 3D cloud this
+act converges to is UNCHANGED: it is still built from `kp3d[T0]`
+(`T0=525`, unchanged) -- only the OPENING PANEL IMAGERY/OVERLAY (a 2D video
+crop + 2D overlay, never fed into the 3D construction) is re-sourced to Act
+1's last frame. Ray geometry, panel arc pose, phase boundaries, and every
+other visual element are unaffected by this change.
+
+EXPECTATION: `act2_triangulate/f00000.png`'s seven panels are visually
+indistinguishable from `act1_views/f00149.png`'s (same crop, same raw 2D
+overlay, same rectangle -- task-34 already guarantees the rectangle).
+Reprojection through the panels' own geometry to a partway frame (e.g. f=20)
+should show the Act-1-style overlay still dominant but visibly softening
+toward the regular constellation as the panel begins to move; by `FLY_END`
+(79) the panel shows only the regular T0-based content, matching every later
+frame in the act.
+FALSIFICATION: frame 0 showing any trace of the regular T0 texture (`_intro_
+alpha(0) != 1.0`), the intro content still visible well past `FLY_END`, or
+`T_ACT1_LAST` silently drifting from Act 1's own last rendered frame (e.g. if
+someone re-hardcodes it as a literal instead of deriving it).
 """
 import argparse
 import sys
@@ -227,6 +275,11 @@ sys.path.insert(0, str(_REPO / "third_party" / "jarvis_jax"))
 
 from scripts.viz.ik_explainer import clip_io, draw          # noqa: E402
 from scripts.viz.ik_explainer.kp_colors import jarvis_kp_colors  # noqa: E402
+# TASK-35 (opening-content match): read-only reuse of Act 1's own window
+# constants + private crop/overlay helpers so the opening panel content is
+# DERIVED from Act 1, never a second hardcoded copy. Nothing in act1_views.py
+# is modified by this import.
+from scripts.viz.ik_explainer.acts import act1_views          # noqa: E402
 
 # --- canvas / timeline ----------------------------------------------------
 CANVAS_W, CANVAS_H = 1920, 1080
@@ -568,6 +621,19 @@ def _panel_overall_alpha(f):
     return 1.0 - (f - FADE_START) / float(FADE_END - FADE_START)
 
 
+def _intro_alpha(f):
+    """TASK-35: blend weight for the Act-1-matching "intro" texture (Act 1's
+    own last frame -- real video crop + full raw-detector overlay) against
+    this act's regular T0-based texture. `_intro_alpha(0) == 1.0` (frame 0
+    must equal Act 1's last frame exactly, no regular-texture contribution);
+    eases to 0.0 by `FLY_END` -- the same frame the panel fly-out itself
+    finishes and one frame before `RAY_START` -- so the hand-off completes
+    before rays begin extending and does not linger for the rest of the act
+    (`KP_EARLY_END < FLY_END`, so the regular texture's own triangulated
+    overlay is already fully visible by the time intro content fades out)."""
+    return float(1.0 - _smoothstep(f / float(FLY_END)))
+
+
 def _scene_radius(f, wide_radius):
     """Wide arc framing (`wide_radius`, calibrated by `_calibrate_scene_radius`
     to fill most of the canvas -- see render_act2) through the panel/ray
@@ -722,7 +788,8 @@ def _draw_cloud(canvas, kp3d_local, kp_names, pres_cam, alpha, kp_colors):
 def render_act2(clip: str = clip_io.CLIP_DEFAULT) -> Path:
     d = clip_io.out_dirs(clip)
     z2d = np.load(d["predictions"] / "02_kp2d.npz", allow_pickle=True)
-    kp2d, cam_names = z2d["kp2d"], [str(c) for c in z2d["cam_names"]]
+    kp2d, conf2d = z2d["kp2d"], z2d["conf"]
+    cam_names = [str(c) for c in z2d["cam_names"]]
     kp_names = [str(n) for n in z2d["kp_names"]]
     z3d = np.load(d["predictions"] / "03_kp3d.npz", allow_pickle=True)
     kp3d = z3d["kp3d"]
@@ -806,6 +873,41 @@ def render_act2(clip: str = clip_io.CLIP_DEFAULT) -> Path:
         x0 = int(round(np.clip(end_frames[cam]["x0"], 0, fw - CROP_W)))
         video_crop[cam] = frame[:FRAME_H, x0:x0 + CROP_W].copy()
 
+    # TASK-35: Act 2's opening panel content must match Act 1's own LAST
+    # rendered frame, DERIVED from Act 1's own window constants -- see the
+    # module docstring's TASK-35 section -- never a separate hardcoded frame
+    # number, so this stays correct if Act 1's window/length ever changes.
+    T_ACT1_LAST = act1_views.WINDOW_START + int(
+        (act1_views.N_OUT - 1) * act1_views.WINDOW_LEN / act1_views.N_OUT)
+    assert 0 <= T_ACT1_LAST < kp2d.shape[0], (
+        f"derived Act 1 last frame {T_ACT1_LAST} outside 02_kp2d.npz's "
+        f"{kp2d.shape[0]} frames")
+    print(f"[act2] opening panel content sourced from Act 1's own last "
+          f"rendered frame: t={T_ACT1_LAST} (derived from act1_views."
+          f"WINDOW_START={act1_views.WINDOW_START}, WINDOW_LEN="
+          f"{act1_views.WINDOW_LEN}, N_OUT={act1_views.N_OUT})")
+
+    # "Intro" texture per camera: Act 1's own last-frame crop + full raw-
+    # detector overlay, built via Act 1's own private helpers (same smoothed
+    # crop-centre curve, same draw calls) so this is a re-source, not a
+    # re-derivation. Static (single frame), computed once like `video_crop`.
+    _act1_frame_w = clip_io._ENHANCED_EXPECTED_WH[0]
+    intro_crop = {}
+    for ci, cam in enumerate(names):
+        x0_curve = act1_views._smoothed_crop_x0(kp2d[:, ci], _act1_frame_w)
+        x0_f = float(x0_curve[T_ACT1_LAST])
+        frame = clip_io.read_frames(clip_io.video_path(clip, cam), [T_ACT1_LAST])[0]
+        fh, fw = frame.shape[:2]
+        left = int(round(x0_f))
+        panel_native = frame[:FRAME_H, left:left + CROP_W].copy()
+        panel_native = act1_views._draw_raw_overlay(
+            panel_native, kp2d[T_ACT1_LAST, ci], conf2d[T_ACT1_LAST, ci],
+            x0_f, kp_names, kp_colors, alpha=1.0)
+        panel_native = draw.scale_bar_mm(
+            panel_native, px_per_mm=PX_PER_MM, mm=1.0,
+            origin=(10, panel_native.shape[0] - 14))
+        intro_crop[cam] = panel_native
+
     # Task-33: grid start pose keyed off ARC order (matches Act 1's now-arc-
     # ordered panel placement), not `names`' sorted-by-serial order.
     start_frames = {cam: _grid_start_frame(pres_cam, panel_idx_by_name[cam])
@@ -838,6 +940,8 @@ def render_act2(clip: str = clip_io.CLIP_DEFAULT) -> Path:
         v_a, k_a = _video_alpha(f), _kp_alpha(f)
         ray_p = _ray_progress(f)
         cloud_a = _cloud_alpha(f)
+        intro_a = _intro_alpha(f)   # TASK-35: 1.0 at f=0 (Act 1's last frame
+                                     # exactly), eased to 0.0 by FLY_END.
 
         frames_now = {}
         for cam in names:
@@ -853,6 +957,12 @@ def render_act2(clip: str = clip_io.CLIP_DEFAULT) -> Path:
         if panel_a > 0.0:
             for cam in order:
                 tex = _build_texture(video_crop[cam], tex_uv[cam], kp_names, v_a, k_a, kp_colors)
+                if intro_a > 0.0:
+                    # TASK-35: blend in Act 1's own last-frame content; at
+                    # f=0 this REPLACES `tex` entirely (intro_a == 1.0), so
+                    # the very first output frame is Act 1's last frame, not
+                    # this act's regular T0-based texture.
+                    tex = draw.fade(tex, intro_crop[cam], intro_a)
                 canvas = _warp_panel(canvas, tex, frames_now[cam], pres_cam, panel_a)
                 # Camera label ("Camera N  <arc> deg", task-33) just above the
                 # panel's SCREEN-SPACE topmost corner (not the world "+up" edge --
