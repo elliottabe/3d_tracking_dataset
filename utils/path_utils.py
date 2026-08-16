@@ -93,12 +93,26 @@ def convert_dict_to_string(d):
     """Convert all values in a dictionary to strings."""
     return {k: convert_to_string(v) for k, v in d.items()}
 
+# Keys in cfg.paths that are RUN OUTPUT dirs and must exist before the run
+# writes logs/figures/checkpoints into them. Everything else is an input root
+# or derived location: artifact writers create their own parents
+# (io_dict_to_hdf5.save, the batch drivers' out_path.parent.mkdir), and
+# blanket-creating every key scaffolds junk -- batch_run_stac overrides
+# paths.base_dir to the Predictions_3D_* folder, so out_root/processed_root/
+# vit_runs_root/red_data_v3_root resolve inside it, and the old behaviour
+# left empty courtship/, processed/, jax_vitpose_runs/ and red_data/ dirs in
+# every predictions folder.
+_MKDIR_KEYS = ("save_dir", "log_dir", "ckpt_dir", "fig_dir")
+
+
 def convert_dict_to_path(d):
-    """Convert all values in a dictionary to Path objects."""
+    """Convert all values in a dictionary to Path objects; create only the
+    run-output dirs (see _MKDIR_KEYS)."""
     for k in d.keys():
         if k != 'user':
             d[k] = convert_to_path(d[k])
-            d[k].mkdir(parents=True, exist_ok=True)
+            if k in _MKDIR_KEYS:
+                d[k].mkdir(parents=True, exist_ok=True)
     return d
 
 
