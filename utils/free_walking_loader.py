@@ -137,14 +137,16 @@ def _build_csv_index(
 
 def _build_preproc_index(
     preproc_h5_paths: Sequence[str | Path],
-) -> Dict[str, List[Tuple[np.ndarray, int]]]:
-    """Return ``{fly_id: [(orig_keypoints_array, n_frames), ...]}``.
+) -> Dict[str, List[Tuple[np.ndarray, int, Optional[int]]]]:
+    """Return ``{fly_id: [(orig_keypoints_array, n_frames, start_frame), ...]}``.
 
     Order is preserved within each preprocessing h5. ``n_frames`` comes from
     ``info['clip_lengths']`` when present, otherwise from the orig array's
-    leading dimension.
+    leading dimension. ``start_frame`` comes from ``info['start_frames']``
+    (the ORIGINAL curated start, unaffected by NaN-edge trimming) and is
+    None when absent.
     """
-    out: Dict[str, List[Tuple[np.ndarray, int]]] = collections.defaultdict(list)
+    out: Dict[str, List[Tuple[np.ndarray, int, Optional[int]]]] = collections.defaultdict(list)
     for p in preproc_h5_paths:
         try:
             d = h5_load(str(p))
@@ -153,6 +155,7 @@ def _build_preproc_index(
         info = d.get('info', {}) or {}
         fids = _info_seq(info, 'fly_ids')
         cls  = _info_seq(info, 'clip_lengths')
+        sfs  = _info_seq(info, 'start_frames')
         bout_keys = sorted(k for k in d.keys() if k != 'info')
         for i, k in enumerate(bout_keys):
             if i >= len(fids):
@@ -165,7 +168,8 @@ def _build_preproc_index(
             if okp.ndim == 2 and okp.shape[-1] != 3:
                 okp = okp.reshape(okp.shape[0], -1, 3)
             n = int(cls[i]) if i < len(cls) else int(okp.shape[0])
-            out[str(fids[i])].append((okp, n))
+            sf = int(sfs[i]) if i < len(sfs) else None
+            out[str(fids[i])].append((okp, n, sf))
     return dict(out)
 
 
@@ -185,6 +189,36 @@ def _match_by_n_frames(
             used_flags[i] = True
             return i
     return None
+
+
+def _match_bout(
+    candidates: list,
+    *,
+    used_flags: list,
+    start_frame: Optional[int],
+    start_getter,
+    n_frames: int,
+    n_frames_getter,
+) -> Optional[int]:
+    """Unique-match a combined bout to a candidate row.
+
+    Prefers the exact key ``(fly_id, start_frame)`` — the ORIGINAL curated
+    start frame survives preprocessing's NaN-edge trimming in every source
+    (CSV ``start_frame``, preproc/combined ``info/start_frames``) — and only
+    falls back to the legacy greedy n_frames rule when either side lacks a
+    start frame. The legacy rule alone mismatches most bouts (trimming makes
+    curated n_frames != clip length; NewBouts: 413/2203 CSV rows matched)."""
+    if start_frame is not None:
+        for i, cand in enumerate(candidates):
+            if used_flags[i]:
+                continue
+            s = start_getter(cand)
+            if s is not None and int(s) == int(start_frame):
+                used_flags[i] = True
+                return i
+    return _match_by_n_frames(
+        candidates, n_frames, used_flags=used_flags,
+        n_frames_getter=n_frames_getter)
 
 
 def export_raw_free_running_h5(
@@ -250,6 +284,7 @@ def export_raw_free_running_h5(
 
     fly_ids_seq    = _info_seq(info, 'fly_ids')
     clip_lens_seq  = _info_seq(info, 'clip_lengths')
+    start_seq      = _info_seq(info, 'start_frames')   # may be [] on old files
     if len(fly_ids_seq) != n_input or len(clip_lens_seq) != n_input:
         raise RuntimeError(
             f"info length mismatch: fly_ids={len(fly_ids_seq)}, "
@@ -297,13 +332,17 @@ def export_raw_free_running_h5(
 
         fid = str(fly_ids_seq[new_idx])
         n_frames = int(clip_lens_seq[new_idx])
+        start_frame = int(start_seq[new_idx]) if new_idx < len(start_seq) else None
 
-        # CSV match.
+        # CSV match: exact (fly_id, start_frame) first, legacy n_frames fallback.
         csv_row: Optional[dict] = None
         if csv_index and fid in csv_index:
-            j = _match_by_n_frames(
-                csv_index[fid], n_frames,
+            j = _match_bout(
+                csv_index[fid],
                 used_flags=csv_used[fid],
+                start_frame=start_frame,
+                start_getter=lambda r: r.get('start_frame'),
+                n_frames=n_frames,
                 n_frames_getter=lambda r: r['n_frames'] - 1,  # CSV uses end-start+1; combined uses end-start
             )
             if j is not None:
@@ -312,9 +351,12 @@ def export_raw_free_running_h5(
 
         # orig_keypoints match.
         if preproc_index and fid in preproc_index:
-            j = _match_by_n_frames(
-                preproc_index[fid], n_frames,
+            j = _match_bout(
+                preproc_index[fid],
                 used_flags=pre_used[fid],
+                start_frame=start_frame,
+                start_getter=lambda r: r[2],
+                n_frames=n_frames,
                 n_frames_getter=lambda r: r[1],
             )
             if j is not None:
