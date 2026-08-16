@@ -187,7 +187,7 @@ def _match_by_n_frames(
     return None
 
 
-def export_raw__h5(
+def export_raw_free_running_h5(
     combined_h5_path: str | Path,
     out_path: str | Path,
     *,

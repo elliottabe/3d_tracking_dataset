@@ -23,7 +23,7 @@ from pathlib import Path
 
 project_root = Path(__file__).resolve().parent.parent.parent  # scripts/export/ -> repo root
 sys.path.insert(0, str(project_root))
-from utils._loader import export_raw__h5
+from utils.free_walking_loader import export_raw_free_running_h5
 
 
 def main():
@@ -51,7 +51,7 @@ def main():
         print(f'Error: combined_h5 not found: {args.combined_h5}', file=sys.stderr)
         sys.exit(1)
 
-    summary = export_raw__h5(
+    summary = export_raw_free_running_h5(
         args.combined_h5,
         args.out,
         bout_summary_csvs=args.bout_summary_csvs,
