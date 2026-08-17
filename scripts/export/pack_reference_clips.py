@@ -35,6 +35,12 @@ from pathlib import Path
 import h5py
 import numpy as np
 
+# scripts/export/ -> repo root, so `utils` imports work when run as a script
+# (sys.path[0] is this file's directory, not the repo root).
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
+
 from utils.stac_data_utils import sorted_bout_keys
 
 ARRAY_KEYS = ['qpos', 'qvel', 'xpos', 'xquat', 'kp_data']
