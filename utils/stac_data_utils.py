@@ -1,8 +1,28 @@
 """Utilities for reorganizing STAC output data into bout-based structures."""
 
+import re
+
 import numpy as np
 import jax.numpy as jnp
 from typing import Dict, List, Union, Optional
+
+
+def bout_key_pad(n_bouts: int) -> int:
+    """Zero-pad width for bout keys, sized to the bout count (min 3, the
+    legacy width). A fixed :03d breaks past 999 bouts: mixed-width keys
+    (bout_999, bout_1000) sort lexicographically out of numeric order, so
+    every consumer that pairs sorted(keys) with index-ordered info arrays
+    misaligns (NewBouts combine: 2099/2203 bouts scrambled)."""
+    return max(3, len(str(max(n_bouts - 1, 0))))
+
+
+def sorted_bout_keys(keys) -> list:
+    """Bout keys in NUMERIC order (bout_2 < bout_10 < bout_100), regardless
+    of zero-pad width. Non-numeric suffixes sort after, alphabetically."""
+    def _key(k):
+        m = re.search(r'(\d+)\s*$', k)
+        return (0, int(m.group(1)), k) if m else (1, 0, k)
+    return sorted(keys, key=_key)
 
 
 def reorganize_stac_by_bouts(
@@ -101,7 +121,8 @@ def reorganize_stac_by_bouts(
     
     # Generate bout names if not provided
     if bout_names is None:
-        bout_names = [f'bout_{i:03d}' for i in range(n_bouts)]
+        pad = bout_key_pad(n_bouts)
+        bout_names = [f'bout_{i:0{pad}d}' for i in range(n_bouts)]
     elif len(bout_names) != n_bouts:
         raise ValueError(
             f"Number of bout_names ({len(bout_names)}) must match "
@@ -670,8 +691,11 @@ def concatenate_bout_dicts(
         print(f"Loading {len(file_paths)} files...\n")
     
     combined_dict = {'info': {}}
+    # Bouts are collected in order and only NAMED at the end, once the total
+    # count is known, so the zero-pad width fits (see bout_key_pad).
+    bouts_in_order = []
     bout_counter = 0
-    
+
     # Track concatenated info fields (including fly_ids)
     concatenated_fields = ['clip_lengths', 'clip_lengths_original', 'clip_lengths_interp_unpadded', 'fly_ids', 'source_flies', 'start_frames', 'end_frames', 'bucket']
     
@@ -688,16 +712,15 @@ def concatenate_bout_dicts(
         # Load file
         bout_dict = ioh5.load(file_path, enable_jax=enable_jax)
         
-        # Get bout keys (exclude 'info')
-        bout_keys = sorted([k for k in bout_dict.keys() if k != 'info'])
-        
+        # Get bout keys (exclude 'info'), in numeric order
+        bout_keys = sorted_bout_keys([k for k in bout_dict.keys() if k != 'info'])
+
         if verbose:
             print(f"  Found {len(bout_keys)} bouts")
-        
-        # Copy bouts with new sequential numbering
+
+        # Collect bouts in order; named after the loop with a width that fits.
         for bout_key in bout_keys:
-            new_key = f'bout_{bout_counter:03d}'
-            combined_dict[new_key] = bout_dict[bout_key]
+            bouts_in_order.append(bout_dict[bout_key])
             bout_counter += 1
         
         # Handle info section
@@ -733,6 +756,11 @@ def concatenate_bout_dicts(
         if verbose:
             print(f"  Total bouts so far: {bout_counter}\n")
     
+    # Name the bouts with uniform zero-pad width sized to the total count.
+    pad = bout_key_pad(len(bouts_in_order))
+    for i, bout in enumerate(bouts_in_order):
+        combined_dict[f'bout_{i:0{pad}d}'] = bout
+
     # Convert concatenated info lists back to arrays (keep string lists as-is)
     for key in concatenated_fields:
         if key in combined_dict['info'] and isinstance(combined_dict['info'][key], list):

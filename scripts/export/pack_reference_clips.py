@@ -35,6 +35,8 @@ from pathlib import Path
 import h5py
 import numpy as np
 
+from utils.stac_data_utils import sorted_bout_keys
+
 ARRAY_KEYS = ['qpos', 'qvel', 'xpos', 'xquat', 'kp_data']
 
 
@@ -76,7 +78,9 @@ def _decode(values) -> list[str]:
 def load_bouts(path: Path) -> tuple[list[dict], list[str]]:
     """Read bout_NNN groups in sorted order, plus info/names_qpos."""
     with h5py.File(path, 'r') as f:
-        keys = sorted(k for k in f if k.startswith('bout'))
+        # NUMERIC order: mixed zero-pad widths (bout_999/bout_1000) sort
+        # lexicographically out of order vs the index-ordered info arrays.
+        keys = sorted_bout_keys(k for k in f if k.startswith('bout'))
         bouts = [{k: np.asarray(f[bk][k]) for k in ARRAY_KEYS} for bk in keys]
         info = f['info']
         raw = info['names_qpos']

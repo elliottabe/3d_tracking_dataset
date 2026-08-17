@@ -56,7 +56,8 @@ from utils.stac_data_utils import (
 from utils.path_utils import load_config_with_path_template, convert_dict_to_path, convert_dict_to_string
 from utils.io import load_stac_data
 from utils.mjx_preprocess import process_clip, ReferenceClip
-from utils.stac_data_utils import concatenate_bout_dicts
+from utils.stac_data_utils import (
+    concatenate_bout_dicts, bout_key_pad, sorted_bout_keys)
 from utils.mask_combine import concatenate_per_folder_masks
 
 
@@ -128,10 +129,11 @@ def main(cfg: DictConfig):
     def _filter_dict_by_bucket(src: dict, keep_indices: list[int]) -> dict:
         """Build a sub combined_dict containing only bouts at the given indices,
         renumbered sequentially. Concatenated info fields are sliced to match."""
-        all_keys = sorted([k for k in src.keys() if k != 'info'])
+        all_keys = sorted_bout_keys([k for k in src.keys() if k != 'info'])
         out = {}
+        pad = bout_key_pad(len(keep_indices))
         for new_idx, old_idx in enumerate(keep_indices):
-            new_key = f'bout_{new_idx:03d}'
+            new_key = f'bout_{new_idx:0{pad}d}'
             out[new_key] = src[all_keys[old_idx]]
         out['info'] = {}
         concat_fields = {'clip_lengths', 'clip_lengths_original',
@@ -175,7 +177,7 @@ def main(cfg: DictConfig):
     
         # Get clip_lengths_original for unpadding
         clip_lengths_original = combined_dict.get('info', {}).get('clip_lengths_original', [])
-        bout_keys = sorted([k for k in combined_dict.keys() if k != 'info'])
+        bout_keys = sorted_bout_keys([k for k in combined_dict.keys() if k != 'info'])
 
         if clip_lengths_original is not None and len(clip_lengths_original) > 0:
             print(f"Unpadding {len(bout_keys)} bouts to original lengths...")

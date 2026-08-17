@@ -14,6 +14,7 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 import numpy as np
 
 from utils.io_dict_to_hdf5 import load as h5_load, save as h5_save
+from utils.stac_data_utils import sorted_bout_keys
 
 
 def _resolve_kp_idx(info: dict, kp_name: str) -> int:
@@ -63,7 +64,7 @@ def load__scutellum_z(
 
     keys: List[str] = (
         list(bout_keys) if bout_keys is not None
-        else sorted(k for k in data.keys() if k != 'info')
+        else sorted_bout_keys(k for k in data.keys() if k != 'info')
     )
 
     if per_bout:
@@ -156,7 +157,7 @@ def _build_preproc_index(
         fids = _info_seq(info, 'fly_ids')
         cls  = _info_seq(info, 'clip_lengths')
         sfs  = _info_seq(info, 'start_frames')
-        bout_keys = sorted(k for k in d.keys() if k != 'info')
+        bout_keys = sorted_bout_keys(k for k in d.keys() if k != 'info')
         for i, k in enumerate(bout_keys):
             if i >= len(fids):
                 break
@@ -277,7 +278,7 @@ def export_raw_free_running_h5(
         print(f'loading combined h5: {combined_h5_path}')
     data = h5_load(str(combined_h5_path))
     info = data.get('info', {}) or {}
-    bout_keys = sorted(k for k in data.keys() if k != 'info')
+    bout_keys = sorted_bout_keys(k for k in data.keys() if k != 'info')
     n_input = len(bout_keys)
     if not bout_keys:
         raise ValueError(f'no bouts in {combined_h5_path}')
