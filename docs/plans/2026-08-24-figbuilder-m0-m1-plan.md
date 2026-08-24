@@ -2779,11 +2779,12 @@ git commit -m "feat(figbuilder): export pipeline and CLI"
 
 ## Task 10: Fig 4 bundle export script
 
-> **Runs only on the machine with `/data2` mounted.** It is NOT runnable on
-> Hyak, and it has no unit test that executes the pipeline. Its correctness is
-> established by Task 12's visual gate. The two extra panel adapters land here
-> because their bundle encoding is only decidable once the real structures are
-> in hand.
+> **Runnable on this Hyak GPU node** (Ruling 12 — inputs surveyed and verified).
+> Present: the combined courtship h5, the MuJoCo model, the raw data3D CSVs.
+> Absent: SAM3 masks/aligned, DLT calibration, courtship mp4, free-walking h5.
+> So `main()` builds every panel it can and REPORTS what it skipped; it must
+> never fail silently on a missing input. `build_fig4_panels` stays pure and
+> unit-tested on synthetic data; `main()` is exercised for real by Task 12.
 
 **Files:**
 - Create: `scripts/figures/export_fig4_bundle.py`
@@ -3041,49 +3042,173 @@ def build_fig4_panels(results: List[dict], ex: dict,
     return panels
 
 
+#: Verified present on this node (Ruling 12). Override with CLI flags.
+DEFAULT_H5 = ("/gscratch/portia/eabe/data/Johnson_lab/courtship/Data_analysis/"
+              "analysis/v1/ik_output_combined_v1_courtship_both.h5")
+DEFAULT_MODEL = "models/fruitfly_v1/fruitfly_v1_free.xml"
+
+#: Camera for the single-fly render strip. Chosen by sweeping distance against
+#: the fraction of frame the fly occupies: 0.30 -> 51% (clipped), 0.60 -> 18%
+#: (whole fly, wings and eye legible), 1.00 -> 5% (too small). The model's
+#: stat.extent is 0.647, so panel_render_strip's own 0.03 default is ~20x too
+#: close and puts the camera inside the animal.
+RENDER_CAM = {"distance": 0.6, "azimuth": 90.0, "elevation": -20.0}
+
+
+def _render_frames(model_xml, qpos, frame_idx, size=256):
+    """Bake MuJoCo frames to uint8 RGB. Mirrors panel_render_strip's mj_model
+    fallback path, but returns arrays instead of drawing into axes."""
+    import mujoco
+    m = mujoco.MjModel.from_xml_path(str(model_xml))
+    d = mujoco.MjData(m)
+    if qpos.shape[1] != m.nq:
+        raise ValueError(f"qpos has {qpos.shape[1]} dof but model nq={m.nq}")
+    out = []
+    with mujoco.Renderer(m, height=size, width=size) as r:
+        for fi in frame_idx:
+            d.qpos[:] = qpos[int(fi)]
+            mujoco.mj_forward(m, d)
+            cam = mujoco.MjvCamera()
+            cam.type = mujoco.mjtCamera.mjCAMERA_FREE
+            cam.lookat[:] = qpos[int(fi)][0:3]
+            cam.distance = RENDER_CAM["distance"]
+            cam.azimuth = RENDER_CAM["azimuth"]
+            cam.elevation = RENDER_CAM["elevation"]
+            r.update_scene(d, camera=cam)
+            r.scene.flags[mujoco.mjtRndFlag.mjRND_SHADOW] = False
+            out.append(np.asarray(r.render(), dtype=np.uint8))
+    return out
+
+
 def main(argv=None) -> int:
+    """Build the bundle from whatever inputs are present, and say what is not.
+
+    Requires MUJOCO_GL=egl and a GPU node for the render strip. Never run heavy
+    work on the Hyak login node.
+    """
+    import argparse
+    from scipy.signal import hilbert
+
+    from utils.courtship_loader import load_courtship_h5, pair_bouts, analyze_all_pairs
+    from utils.song_analysis import SongAnalysisConfig
+    from utils.sex_id import SexIdConfig
+    from utils.locomotion import LocomotionConfig
+    from utils.pair_validity import PairValidityConfig
+    from utils.pulse_type_cache import get_pulse_type_labels
+
     ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--h5", default=DEFAULT_H5)
+    ap.add_argument("--model-xml", default=DEFAULT_MODEL)
+    ap.add_argument("--free-walk-h5", default=None,
+                    help="optional; without it the zheight panel omits the "
+                         "free-walking arm")
     ap.add_argument("--out", default="figures/paper_figures/fig4_bundle.h5")
     ap.add_argument("--width-mm", type=float, default=183.0)
     ap.add_argument("--height-mm", type=float, default=140.0)
+    ap.add_argument("--n-render", type=int, default=4)
+    ap.add_argument("--exemplar", type=int, default=0,
+                    help="index into the filtered results list")
     args = ap.parse_args(argv)
 
-    # Port the data-loading half of notebook cell 8 here. Each `extras` key
-    # below maps to a specific region of that cell; `results` and `ex` come
-    # straight from `analyze_all_pairs` + the exemplar lookup.
-    #
-    #   fs                 song_cfg.fs
-    #   start_frame        START_FRAME after the CSV-override clamp
-    #   end_frame          END_FRAME   after the CSV-override clamp
-    #   t_ms_full          (arange(clip_T_full) / fs) * 1000
-    #   male_pitch         cfp.body_pitch_deg_from_quat(qpos[:, 3:7])
-    #   target_pitch       arcsin(target_vec_z / |target_vec|), degrees
-    #   per_bout_align     compute_pitch_alignment_all_sessions(...)
-    #                        ['median_abs_alignment_deg']
-    #   exemplar_bout_idx  index of the exemplar in per_bout_align
-    #   walking_z          load__scutellum_z(FREE_WALK_H5_PATH, per_bout=True)
-    #   phase_diffs        per-sine-segment Hilbert L-R phase difference
-    #   ext_pulse/ext_sine pooled |extended-wing horizontal angle| by label
-    #   pulse_centroids    dict {'Pslow': (W,), 'Pfast': (W,)} — the
-    #                        'centroids' entry of get_pulse_type_labels(...)
-    #   pulse_pooled       dict {'Pslow': (n,W), 'Pfast': (n,W)} — its
-    #                        'pooled_waveforms' entry; std shading derives from
-    #                        this, so omitting it silently disables show_std
-    #   pulse_counts       dict {'Pslow': int, 'Pfast': int} — goes into the
-    #                        pulse_class panel's figure.json `spec`, not `data`
-    #   video_frames       list of uint8 HxWx3 crops, already keypoint- and
-    #                        mask-overlayed (reuse cfp.panel_video_strip_with_kp
-    #                        by drawing into an offscreen axes and grabbing the
-    #                        buffer, OR project + draw directly with cfp._dlt_*)
-    #   render_frames      list of uint8 HxWx3 MuJoCo renders, post-crop
-    #
-    # Every array must be plain float64/uint8 numpy — no object dtypes, or
-    # write_bundle will fail.
-    raise SystemExit(
-        "main() is a porting task: move notebook cell 8's data-loading half "
-        "here. See REQUIRED_EXTRAS below and the docstring. "
-        "build_fig4_panels() is already implemented and tested."
-    )
+    skipped: List[str] = []
+
+    data, info, kp_names, bout_keys = load_courtship_h5(args.h5)
+    pairs = pair_bouts(bout_keys, info)
+    song = SongAnalysisConfig(); song.pipeline = "both"
+    results = analyze_all_pairs(
+        data, pairs, kp_names, song_cfg=song, sex_cfg=SexIdConfig(),
+        loc_cfg=LocomotionConfig(), pair_cfg=PairValidityConfig())
+    if not results:
+        raise SystemExit("no pairs survived filtering; nothing to bundle")
+    ex = results[min(args.exemplar, len(results) - 1)]
+    fs = float(song.fs)
+    T = int(ex["T"])
+
+    # --- pooled aggregates -------------------------------------------------
+    phase_diffs = []
+    for r in results:
+        wd = r["song0"]["wing_data"]
+        zL = np.asarray(wd["WingL_V13"]["z"], float)
+        zR = np.asarray(wd["WingR_V13"]["z"], float)
+        for seg in r["song0"]["sides"]["L"]["segments"]:
+            if seg.get("type") != "sine":
+                continue
+            i0, i1 = int(seg["start"]), int(seg["end"]) + 1
+            if i1 - i0 < 16:
+                continue
+            a, b = zL[i0:i1], zR[i0:i1]
+            if not (np.all(np.isfinite(a)) and np.all(np.isfinite(b))):
+                continue
+            R = np.mean(np.exp(1j * (np.angle(hilbert(a - a.mean()))
+                                     - np.angle(hilbert(b - b.mean())))))
+            if np.isfinite(R):
+                phase_diffs.append(np.angle(R))
+
+    ext_pulse, ext_sine = [], []
+    for r in results:
+        hL, hR = r["song0"].get("horiz_angle_L"), r["song0"].get("horiz_angle_R")
+        if hL is None or hR is None:
+            continue
+        yL, yR = np.asarray(hL, float), np.asarray(hR, float)
+        ext = np.abs(np.where(np.abs(yL) > np.abs(yR), yL, yR))
+        lab = np.asarray(r["male_labels"])
+        base = np.asarray(r["male_valid"], bool) & np.isfinite(ext)
+        if (base & (lab == "pulse")).any():
+            ext_pulse.append(ext[base & (lab == "pulse")])
+        if (base & (lab == "sine")).any():
+            ext_sine.append(ext[base & (lab == "sine")])
+
+    ptr = get_pulse_type_labels(results, fs=fs)
+
+    walking_z = np.zeros(0)
+    if args.free_walk_h5:
+        from utils._loader import load__scutellum_z
+        walking_z = load__scutellum_z(args.free_walk_h5, per_bout=True)
+    else:
+        skipped.append("zheight.walking_z (no --free-walk-h5)")
+
+    # --- render strip ------------------------------------------------------
+    render_frames = []
+    try:
+        qpos = np.asarray(data[ex["key0"]]["qpos"])
+        idx = np.linspace(0, min(T, qpos.shape[0]) - 1, args.n_render, dtype=int)
+        render_frames = _render_frames(args.model_xml, qpos, idx)
+    except Exception as e:                       # noqa: BLE001 - report, don't die
+        skipped.append(f"render strip ({type(e).__name__}: {e})")
+
+    # --- panels that need inputs this node does not have --------------------
+    skipped.append("video strip (no courtship mp4 / DLT calibration on this node)")
+    skipped.append("pitch + align_violin (no SAM3 masks for the female COM)")
+
+    extras = {
+        "fs": fs, "start_frame": 0, "end_frame": T,
+        "walking_z": walking_z,
+        "phase_diffs": np.asarray(phase_diffs, float),
+        "ext_pulse": np.concatenate(ext_pulse) if ext_pulse else np.zeros(0),
+        "ext_sine": np.concatenate(ext_sine) if ext_sine else np.zeros(0),
+        "pulse_centroids": ptr.get("centroids", {}),
+        "pulse_pooled": ptr.get("pooled_waveforms", {}),
+        "pulse_counts": ptr.get("counts", {}),
+        "per_bout_align": np.zeros(0),
+        "male_pitch": np.zeros(0), "target_pitch": np.zeros(0),
+        "video_frames": [], "render_frames": render_frames,
+    }
+    panels = build_fig4_panels(results, ex, extras)
+    # Drop panels with no data rather than bundling empty ones.
+    panels = {k: v for k, v in panels.items()
+              if v.data or v.assets or k in ("wing", "scut")}
+
+    write_bundle(args.out,
+                 meta={"fig_width_mm": args.width_mm,
+                       "fig_height_mm": args.height_mm,
+                       "source_h5": args.h5,
+                       "n_pairs": len(results),
+                       "skipped": "; ".join(skipped)},
+                 panels=panels)
+    print(f"wrote {args.out}: {len(panels)} panels from {len(results)} pairs")
+    for sk in skipped:
+        print(f"  SKIPPED: {sk}")
+    return 0
 
 
 if __name__ == "__main__":
@@ -3509,18 +3634,35 @@ Expected: FAIL — `ModuleNotFoundError: No module named 'scripts.viz.compare_fi
 
 EXPECTATION (state before looking, per CLAUDE.md):
 
-    The figbuilder export should place every panel at the same rect as
-    figures/paper_figures/fig4_050426_ETTA.svg, with visually identical
-    traces, tick labels, and colors.
+    SCOPE FIRST, so this is not overclaimed. The reference
+    figures/paper_figures/fig4_050426_ETTA.svg was made from the Session0
+    2025_10_20 recording with SAM3 masks, DLT calibration and camera video.
+    This node has a DIFFERENT dataset (the 04092026 combined h5) and no SAM3,
+    no calibration and no courtship mp4 (Ruling 12). So this is NOT a
+    content-identical comparison and must never be reported as one.
 
-    Panel LETTERS and CAPTIONS are expected to DIFFER: in the reference they
-    were hand-placed in Inkscape, and M0's seeded layout positions them
-    programmatically. Differences confined to letter/caption placement are a
-    PASS. Any difference in a panel's position, size, trace shape, axis range,
-    or color is a FAIL and means the seeding or the renderer is wrong.
+    What the gate DOES assert:
 
-    If the two images differ in ways NOT confined to letters and captions,
-    say so plainly and do not claim the gate passed.
+    1. LAYOUT. Every panel in the export sits at the rect seeded from the
+       existing `assemble_figure`, i.e. the two figures share a layout
+       skeleton even though their pixels differ. A panel at the wrong rect
+       means the root-fraction conversion in Task 11 is wrong.
+    2. CONTENT PRESENT. Panels the bundle contains render real data: the wing
+       trace shows pulse/sine structure with segment shading, the scutellum
+       trace tracks body height, the polar panel shows a phase distribution,
+       and the render strip shows a recognisable fly at legible scale
+       (not a blank frame, and not the camera-inside-the-animal framing that
+       panel_render_strip's own 0.03 default produces on this model).
+    3. ABSENCES ARE DECLARED. Panels that could not be built — video strip,
+       pitch, align_violin — must be ABSENT and named in the bundle's
+       `skipped` meta. A silently blank panel is a FAIL; a declared skip is a
+       PASS.
+    4. TEXT IS TEXT. The exported SVG contains real <text> elements, not
+       glyph outlines — this is the whole point of replacing the Inkscape
+       retyping step.
+
+    Report what the image actually shows against each of these. If the render
+    disagrees, say so plainly and do not claim the gate passed.
 """
 from __future__ import annotations
 
