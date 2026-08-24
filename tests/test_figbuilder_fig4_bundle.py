@@ -14,7 +14,7 @@ import figbuilder.panels  # noqa: F401
 from figbuilder.panels.base import get_panel_type
 from scripts.figures.export_fig4_bundle import (
     build_fig4_panels, _pair_qpos, _pair_center_xyz, _resolve_session_bout,
-    _load_kp3d, _processed_fly_dir)
+    _load_kp3d, _processed_fly_dir, _free_running_com_z)
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -447,3 +447,75 @@ def test_processed_fly_dir_resolves_the_real_inverted_case():
     key1_fly_id = "Session1/2026_04_02_16_21_32_fly0"
     assert _processed_fly_dir(key0_fly_id) == "fly1"
     assert _processed_fly_dir(key1_fly_id) == "fly0"
+
+
+def _write_free_running_h5(tmp_path, bouts, kp_names):
+    """bouts: dict bout_key -> (T, n_kp, 3) kp_data array."""
+    from utils.io_dict_to_hdf5 import save as h5_save
+    d = {"info": {"kp_names": kp_names}}
+    for k, kp in bouts.items():
+        d[k] = {"kp_data": kp}
+    path = tmp_path / "free_running.h5"
+    h5_save(str(path), d)
+    return path
+
+
+def test_free_running_com_z_subtracts_the_floor(tmp_path):
+    """Round 9 finding: the estimator must subtract each bout's OWN floor
+    (5th percentile of ground keypoints), not return raw z -- unambiguous
+    by construction: a constant C above a constant ground level G must
+    return ~C, not ~(G+C)."""
+    kp_names = ["Scutellum", "Tarsus1", "Tarsus2"]
+    T = 50
+    G, C = 2.5, 0.3
+    kp = np.zeros((T, 3, 3))
+    kp[:, 0, 2] = G + C   # Scutellum
+    kp[:, 1, 2] = G       # ground kp 1 (matches "Tarsus*")
+    kp[:, 2, 2] = G       # ground kp 2
+    h5_path = _write_free_running_h5(tmp_path, {"bout_0000": kp}, kp_names)
+
+    out = _free_running_com_z(h5_path)
+    assert out.shape == (1,)
+    assert out[0] == pytest.approx(C, abs=1e-6)
+
+
+def test_free_running_com_z_skips_all_nan_scutellum(tmp_path):
+    """A bout whose Scutellum z is entirely NaN contributes nothing, rather
+    than polluting the result with a NaN mean."""
+    kp_names = ["Scutellum", "Tarsus1", "Tarsus2"]
+    T = 20
+    kp_good = np.zeros((T, 3, 3))
+    kp_good[:, 0, 2] = 2.0 + 0.2
+    kp_good[:, 1, 2] = 2.0
+    kp_good[:, 2, 2] = 2.0
+    kp_bad = np.zeros((T, 3, 3))
+    kp_bad[:, 0, 2] = np.nan
+    kp_bad[:, 1, 2] = 1.5
+    kp_bad[:, 2, 2] = 1.5
+    h5_path = _write_free_running_h5(
+        tmp_path, {"bout_0000": kp_good, "bout_0001": kp_bad}, kp_names)
+
+    out = _free_running_com_z(h5_path)
+    assert out.shape == (1,)
+    assert out[0] == pytest.approx(0.2, abs=1e-6)
+
+
+def test_free_running_com_z_returns_one_entry_per_contributing_bout(tmp_path):
+    kp_names = ["Scutellum", "Tarsus1", "Tarsus2"]
+    T = 10
+
+    def _mk(offset):
+        kp = np.zeros((T, 3, 3))
+        kp[:, 0, 2] = 3.0 + offset
+        kp[:, 1, 2] = 3.0
+        kp[:, 2, 2] = 3.0
+        return kp
+
+    h5_path = _write_free_running_h5(tmp_path, {
+        "bout_0000": _mk(0.1), "bout_0001": _mk(0.4), "bout_0002": _mk(0.7),
+    }, kp_names)
+
+    out = _free_running_com_z(h5_path)
+    assert out.ndim == 1
+    assert out.shape == (3,)
+    np.testing.assert_allclose(sorted(out.tolist()), [0.1, 0.4, 0.7], atol=1e-6)

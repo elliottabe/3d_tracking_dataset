@@ -186,6 +186,55 @@ def _pair_qpos(q0: np.ndarray, q1: np.ndarray, n: int) -> np.ndarray:
     return np.concatenate([q0, q1], axis=-1)
 
 
+def _free_running_com_z(h5_path) -> np.ndarray:
+    """Per-bout mean scutellum height ABOVE THE FLOOR for a free-running h5.
+
+    ``utils.free_walking_loader.load__scutellum_z`` returns RAW z with no
+    floor subtraction, while the courtship arms (``pulse_z``/``sine_z``,
+    from ``r["com_z"]``) use ``utils.locomotion.compute_com_height``
+    (scutellum z minus the 5th-percentile ground-keypoint z for that bout).
+    Plotting the two together compared different quantities and overstated
+    the courtship-vs-walking height difference roughly 2x (measured: raw
+    free-running mean 0.250 vs floor-corrected 0.147, against courtship's
+    0.127). Use the same estimator for both sides — this is a figbuilder-
+    layer fix (not `utils/`, which is consumed unmodified): a local
+    per-bout floor correction that mirrors `compute_com_height` exactly,
+    using its own default `LocomotionConfig` so the two sides genuinely
+    agree, rather than a single global floor across all bouts (which would
+    reintroduce the same class of error `compute_com_height` exists to
+    avoid — the floor can differ bout to bout).
+
+    Returns the per-bout array, matching the shape
+    ``load__scutellum_z(..., per_bout=True)`` returned so nothing
+    downstream changes. Bouts with no finite `com_z` samples are skipped.
+    """
+    from utils.io_dict_to_hdf5 import load as h5_load
+    from utils.locomotion import LocomotionConfig, compute_com_height
+    from utils.stac_data_utils import sorted_bout_keys
+
+    data = h5_load(str(h5_path))
+    info = data.get("info", {}) or {}
+    raw = info.get("kp_names", info.get("site_names_egocentric", []))
+    if isinstance(raw, dict):
+        kp_names = [raw[k] for k in sorted(raw.keys(), key=lambda x: int(x))]
+    else:
+        kp_names = list(raw)
+
+    cfg = LocomotionConfig()
+    keys = sorted_bout_keys(k for k in data.keys() if k != "info")
+    means: List[float] = []
+    for k in keys:
+        kp = np.asarray(data[k]["kp_data"])
+        if kp.ndim == 2:
+            kp = kp.reshape(kp.shape[0], -1, 3)
+        com_z, _floor_z = compute_com_height(kp, kp_names, cfg)
+        com_z = com_z[np.isfinite(com_z)]
+        if com_z.size == 0:
+            continue
+        means.append(float(np.nanmean(com_z)))
+    return np.asarray(means, dtype=float)
+
+
 def _pair_center_xyz(kp0: np.ndarray, kp1: np.ndarray, scut_idx: int, T: int) -> np.ndarray:
     """Per-frame midpoint of the two flies' Scutellum, given two already-
     loaded ``(T, n_kp, 3)`` kp3d arrays in the TRUE DLT world frame — feeds
@@ -558,10 +607,15 @@ def main(argv=None) -> int:
 
     ptr = get_pulse_type_labels(results, fs=fs)
 
+    # Floor-corrected (round 9 finding): the courtship arms (pulse_z/sine_z,
+    # via r["com_z"]) already subtract each bout's own floor
+    # (utils.locomotion.compute_com_height); the free-running arm must use
+    # the SAME estimator or panel G compares two different quantities (was:
+    # raw z ~0.25 vs courtship's floor-corrected ~0.127, overstating the
+    # gap ~2x). See `_free_running_com_z`.
     walking_z = np.zeros(0)
     try:
-        from utils.free_walking_loader import load__scutellum_z
-        walking_z = load__scutellum_z(args.free_run_h5, per_bout=True)
+        walking_z = _free_running_com_z(args.free_run_h5)
     except Exception as e:                       # noqa: BLE001 - report, don't die
         skipped.append(f"zheight free-running arm ({type(e).__name__}: {e})")
 
@@ -752,6 +806,7 @@ def main(argv=None) -> int:
                        "video_frame_offset": int(video_frame_offset or 0),
                        "kp3d_source": kp3d_source,
                        "kp3d_fly_dirs": f"key0={key0_dir};key1={key1_dir}",
+                       "zheight_free_running": "com_z (floor-corrected)",
                        "skipped": "; ".join(skipped)},
                  panels=panels)
     print(f"wrote {args.out}: {len(panels)} panels from {len(results)} pairs")
