@@ -2383,7 +2383,49 @@ git commit -m "feat(figbuilder): annotation layer SVG emitter"
 
 **Files:**
 - Create: `figbuilder/export.py`, `figbuilder/cli.py`, `figbuilder/__main__.py`
+- Modify: `figbuilder/style.py` (one line — see "Reproducible SVG ids" below)
 - Test: `tests/test_figbuilder_export.py`
+
+**Reproducible SVG ids (Ruling 10) — do this first, it is one line.**
+matplotlib mints RANDOM ids for marker path definitions on every save
+(`<path id="m48137af203">` one run, `m6a8bd92ccb` the next), so its SVG output
+is **not byte-reproducible** by default. `test_export_is_deterministic` below
+would fail intermittently without this fix. matplotlib provides
+`svg.hashsalt` precisely for reproducible output: fixing it makes those ids a
+deterministic function of content. Verified — two renders produce the
+identical `m2e9b37ff53` with the salt set, and different ids without it.
+
+It belongs in `FORCED_RCPARAMS`, not `DEFAULT_RCPARAMS`: determinism is part of
+the export contract, and a caller's `style` dict must not be able to switch it
+off silently. In `figbuilder/style.py`, change:
+
+```python
+FORCED_RCPARAMS: Dict[str, Any] = {
+    "svg.fonttype": "none",
+    "pdf.fonttype": 42,
+    "ps.fonttype": 42,
+}
+```
+
+to:
+
+```python
+FORCED_RCPARAMS: Dict[str, Any] = {
+    "svg.fonttype": "none",
+    "pdf.fonttype": 42,
+    "ps.fonttype": 42,
+    # matplotlib otherwise mints RANDOM marker-definition ids per save, making
+    # its SVG non-reproducible. A fixed salt makes them content-derived, so the
+    # same inputs export byte-identical SVG. Forced, not defaulted: determinism
+    # is part of the export contract. Ruling 10.
+    "svg.hashsalt": "figbuilder",
+}
+```
+
+The other source of per-run variation, matplotlib's `<dc:date>` metadata block,
+is already removed by `compose()`, which skips `metadata` children — so with
+both in place the COMPOSED document is reproducible even though a raw tile
+is not.
 
 **Interfaces:**
 - Consumes: everything from Tasks 1–8
@@ -2476,11 +2518,28 @@ def test_exported_svg_includes_the_annotation_layer(project, tmp_path):
 
 
 def test_export_is_deterministic(project, tmp_path):
+    """Same inputs -> byte-identical SVG.
+
+    Guards Ruling 10: without a fixed `svg.hashsalt` matplotlib mints random
+    marker-definition ids per save and this assertion fails intermittently.
+    Note both exports here render FRESH (no cache_dir), so this really does
+    exercise reproducibility rather than replaying cached bytes.
+    """
     fig_path, bundle_path = project
     spec, bundle = load_figure(fig_path), read_bundle(bundle_path)
     a = export_figure(spec, bundle, tmp_path / "a.svg").paths["svg"].read_bytes()
     b = export_figure(spec, bundle, tmp_path / "b.svg").paths["svg"].read_bytes()
     assert a == b
+
+
+def test_forced_rcparams_pin_the_svg_hashsalt():
+    """A caller's style must not be able to switch determinism off."""
+    import matplotlib
+
+    from figbuilder.style import FORCED_RCPARAMS, apply_style
+    assert FORCED_RCPARAMS["svg.hashsalt"] == "figbuilder"
+    apply_style({"svg.hashsalt": "something-else"})
+    assert matplotlib.rcParams["svg.hashsalt"] == "figbuilder"
 
 
 @pytest.mark.skipif(shutil.which("rsvg-convert") is None,
