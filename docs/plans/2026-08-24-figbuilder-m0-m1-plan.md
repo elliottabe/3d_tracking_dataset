@@ -3442,7 +3442,33 @@ every panel wrongly.
 
 **Files:**
 - Create: `scripts/figures/seed_fig4_layout.py`
+- Modify: `.gitignore` (one character — see below)
 - Test: `tests/test_figbuilder_seed_layout.py`
+
+**Fix the unanchored gitignore rule first (Ruling 18).** `.gitignore` line 218 is
+`figures/`, which is UNANCHORED and therefore matches a directory named
+`figures` at ANY depth — including `scripts/figures/`, where this task and
+Task 10 both put source files. Task 10 had to `git add -f` its module because
+of this, which is fragile: the next person to add a file there will have it
+silently not committed. Change line 218 from:
+
+```
+figures/
+```
+
+to:
+
+```
+/figures/
+```
+
+This is safe, verified: the only currently-ignored match is the top-level
+`figures/` (still ignored after anchoring), and the other candidate,
+`third_party/JARVIS-HybridNet/tools/figures`, lives inside a git SUBMODULE
+whose contents the parent repo does not track anyway. After the change,
+`git check-ignore -v scripts/figures/seed_fig4_layout.py` must print nothing
+and `git add` must work WITHOUT `-f`, while
+`git check-ignore -v figures/anything.png` must still report line 218.
 
 **Interfaces:**
 - Consumes: `assemble_figure` from `utils.courtship_figure_panels`; `FigureSpec`, `PanelSpec`, `save_figure` (Tasks 2, 4)
