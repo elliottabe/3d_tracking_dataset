@@ -12,7 +12,8 @@ import pytest
 
 import figbuilder.panels  # noqa: F401
 from figbuilder.panels.base import get_panel_type
-from scripts.figures.export_fig4_bundle import build_fig4_panels, _pair_qpos, _pair_center_xyz
+from scripts.figures.export_fig4_bundle import (
+    build_fig4_panels, _pair_qpos, _pair_center_xyz, _resolve_session_bout)
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -198,3 +199,63 @@ def test_pair_center_xyz_clamps_to_the_shorter_bout():
     out = _pair_center_xyz(data, ex, kp_names, T=30)
     assert out.shape == (18, 3)
     np.testing.assert_array_equal(out, 0.5 * (kp0[:18, 3, :] + kp1[:18, 3, :]))
+
+
+_SUMMARY_CSV_HEADER = "fly_id,bout_idx,start_frame,end_frame,source_fly\n"
+
+
+def _write_summary_csv(tmp_path, rows):
+    """rows: list of (fly_id, bout_idx, start_frame, end_frame)."""
+    path = tmp_path / "courtship_bouts_unified_summary.csv"
+    lines = [_SUMMARY_CSV_HEADER]
+    for fly_id, bout_idx, start, end in rows:
+        lines.append(f"{fly_id},{bout_idx},{start},{end},both\n")
+    path.write_text("".join(lines))
+    return path
+
+
+def test_resolve_session_bout_exact_single_match(tmp_path):
+    """Round-3 finding: the real case — recording 2026_04_02_16_21_32,
+    bout_idx 5, start_frame 380781, end_frame 381558 (n=778)."""
+    _write_summary_csv(tmp_path, [
+        ("Session1/2026_04_02_16_21_32", 1, 248710, 249361),
+        ("Session1/2026_04_02_16_21_32", 4, 344050, 346068),
+        ("Session1/2026_04_02_16_21_32", 5, 380781, 381558),
+    ])
+    bout_dir, start_frame = _resolve_session_bout(
+        tmp_path, "2026_04_02_16_21_32", clip_len=778)
+    assert bout_dir == "bout_00005"
+    assert start_frame == 380781
+
+
+def test_resolve_session_bout_zero_matches_raises_naming_clip_len(tmp_path):
+    _write_summary_csv(tmp_path, [
+        ("Session1/2026_04_02_16_21_32", 1, 248710, 249361),
+    ])
+    with pytest.raises(ValueError, match="777"):
+        _resolve_session_bout(tmp_path, "2026_04_02_16_21_32", clip_len=777)
+
+
+def test_resolve_session_bout_ambiguous_match_lists_candidates(tmp_path):
+    """Two rows with the same length must raise, never silently pick one —
+    this IS the failure mode the fix exists to prevent."""
+    _write_summary_csv(tmp_path, [
+        ("Session1/2026_04_02_16_21_32", 5, 380781, 381558),   # n=778
+        ("Session1/2026_04_02_16_21_32", 9, 505035, 505812),   # n=778
+    ])
+    with pytest.raises(ValueError, match="5") as excinfo:
+        _resolve_session_bout(tmp_path, "2026_04_02_16_21_32", clip_len=778)
+    assert "9" in str(excinfo.value)
+
+
+def test_resolve_session_bout_ignores_other_recordings(tmp_path):
+    """A same-length bout from a DIFFERENT recording must not count as a
+    match — only rows whose fly_id contains the requested recording id."""
+    _write_summary_csv(tmp_path, [
+        ("Session1/2025_10_20_13_20_04", 3, 1000, 1777),        # n=778, wrong recording
+        ("Session1/2026_04_02_16_21_32", 5, 380781, 381558),    # n=778, right recording
+    ])
+    bout_dir, start_frame = _resolve_session_bout(
+        tmp_path, "2026_04_02_16_21_32", clip_len=778)
+    assert bout_dir == "bout_00005"
+    assert start_frame == 380781

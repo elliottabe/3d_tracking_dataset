@@ -192,6 +192,44 @@ def _pair_center_xyz(data: dict, ex: dict, kp_names: List[str], T: int) -> np.nd
     return 0.5 * (kp0[:n, scut_i, :] + kp1[:n, scut_i, :])
 
 
+def _resolve_session_bout(session_dir, recording: str, clip_len: int,
+                          tol: int = 1) -> tuple:
+    """Map a combined-h5 exemplar onto its session bout via the recording's
+    ``courtship_bouts_unified_summary.csv``.
+
+    Returns ``(bout_dir_name, start_frame)``. Matching is on the recording id
+    AND the clip length, because ordinal position does NOT hold: verified
+    that the exemplar is the 4th pair of its recording but session bout_idx
+    5, while bout_idx 4 has n=2019 — nothing about the combined-h5 pair order
+    lines up with the session's own bout numbering.
+
+    Without this, `main()` previously hardcoded `--sam3-bout bout_00006` and
+    `video_frame_offset=0`, so panel A's video and panel I's female-COM
+    triangulation silently read an unrelated bout's masks starting at the
+    wrong frame (Finding, round 3) — a scientific-correctness defect, not a
+    missing-data one, so ambiguity here must raise rather than guess.
+    """
+    import pandas as pd
+
+    csv_path = Path(session_dir) / "courtship_bouts_unified_summary.csv"
+    df = pd.read_csv(csv_path)
+    rows = df[df["fly_id"].astype(str).str.contains(recording, regex=False)]
+    n = rows["end_frame"] - rows["start_frame"] + 1
+    matches = rows[(n - int(clip_len)).abs() <= tol]
+    if len(matches) == 0:
+        raise ValueError(
+            f"no bout in {csv_path} for recording {recording!r} with "
+            f"clip_len={clip_len} (tol={tol})")
+    if len(matches) > 1:
+        idxs = sorted(int(v) for v in matches["bout_idx"])
+        raise ValueError(
+            f"ambiguous bout match in {csv_path} for recording {recording!r} "
+            f"with clip_len={clip_len} (tol={tol}): candidate bout_idx "
+            f"{idxs} — refusing to guess")
+    row = matches.iloc[0]
+    return (f"bout_{int(row['bout_idx']):05d}", int(row["start_frame"]))
+
+
 def _render_frames(flybody_xml, floor_xml, qpos_pair, frame_idx,
                    camera=VIZ_CAMERA, track_midpoint=True, size=256):
     """Bake two-fly courtship-pair MuJoCo frames to uint8 RGB via the styled
@@ -271,7 +309,9 @@ def main(argv=None) -> int:
     ap.add_argument("--free-run-h5", default=DEFAULT_FREE_RUN_H5)
     ap.add_argument("--session", default=DEFAULT_SESSION)
     ap.add_argument("--sam3-root", default=DEFAULT_SAM3_ROOT)
-    ap.add_argument("--sam3-bout", default="bout_00006")
+    ap.add_argument("--sam3-bout", default=None,
+                    help="explicit SAM3 bout dir (e.g. bout_00006); OVERRIDES "
+                         "the automatic session-CSV mapping when given")
     ap.add_argument("--cam", default=DEFAULT_CAM)
     ap.add_argument("--recording", default=DEFAULT_EXEMPLAR_RECORDING,
                     help="substring of info/fly_ids selecting the exemplar")
@@ -347,6 +387,34 @@ def main(argv=None) -> int:
     fs = float(song.fs)
     T = int(ex["T"])
 
+    # --- resolve the exemplar's SAM3 bout + frame offset (round-3 finding) -
+    # Ordinal position in the combined h5 does NOT match the session's own
+    # bout_idx (verified: the exemplar is the 4th surviving pair of its
+    # recording but session bout_idx 5; bout_idx 4 has n=2019), so the prior
+    # hardcoded --sam3-bout="bout_00006" + video_frame_offset=0 silently
+    # overlaid an UNRELATED bout's masks starting at the wrong video frame —
+    # a scientific-correctness defect (panel A didn't show its own traces'
+    # bout; panel I's target_pitch triangulated a different bout's female).
+    # `--sam3-bout` stays an explicit override for a user who wants to force
+    # a specific bout; otherwise this is resolved from the session's own
+    # `courtship_bouts_unified_summary.csv`, which refuses to guess on an
+    # ambiguous match rather than silently picking one.
+    if args.sam3_bout is not None:
+        sam3_bout, video_frame_offset = args.sam3_bout, 0
+        print(f"sam3 bout mapping OVERRIDDEN by --sam3-bout={sam3_bout!r} "
+              f"(video_frame_offset=0)")
+    else:
+        sam3_bout = video_frame_offset = None
+        try:
+            sam3_bout, video_frame_offset = _resolve_session_bout(
+                args.session, recording_of(ex), T)
+            print(f"exemplar -> {sam3_bout} @ start_frame {video_frame_offset}")
+        except Exception as e:                   # noqa: BLE001 - report, don't die
+            skipped.append(
+                f"sam3 bout MAPPING failed, not absent data "
+                f"({type(e).__name__}: {e}) -- video strip and "
+                f"male-pitch/target_pitch will also be skipped")
+
     # --- pooled aggregates -------------------------------------------------
     phase_diffs = []
     for r in results:
@@ -412,13 +480,16 @@ def main(argv=None) -> int:
     # projection here.
     video_frames = []
     try:
+        if sam3_bout is None:
+            raise RuntimeError(
+                "no resolved sam3 bout (see the sam3 bout mapping skip above)")
         import matplotlib.pyplot as plt
         from utils.sam3_female_com import sam3_camera_index, unpack_sam3_masks_for_frames
 
         calib_dir = Path(args.session) / "calibration"
         dlt_csv = calib_dir / f"{args.cam}_dlt.csv"
         mp4 = Path(args.session) / f"{args.cam}.mp4"
-        sam3_npz = Path(args.sam3_root) / args.sam3_bout / "sam3_masks.npz"
+        sam3_npz = Path(args.sam3_root) / sam3_bout / "sam3_masks.npz"
         dlt = cfp._dlt_load(dlt_csv)
         cam_idx = sam3_camera_index(calib_dir, dlt_csv.name)
         vidx = np.linspace(0, T - 1, args.n_video, dtype=int)
@@ -440,7 +511,7 @@ def main(argv=None) -> int:
         cfp.panel_video_strip_with_kp(
             list(axv), mp4, vidx, kp_xyz_per_frame=kp_xyz, kp_names=kp_names,
             dlt_coeffs=dlt, fs=fs, kp_scale=args.kp_scale,
-            video_frame_offset=0, masks_per_fly=masks,
+            video_frame_offset=video_frame_offset, masks_per_fly=masks,
             mask_colors=["#e74c3c", "#3a7bff"], mask_alpha=0.35,
             **roi_kwargs)
         figv.canvas.draw()
@@ -463,10 +534,13 @@ def main(argv=None) -> int:
     # they simply keep whatever partial value they had, same as before.
     male_pitch = target_pitch = np.zeros(0)
     try:
+        if sam3_bout is None:
+            raise RuntimeError(
+                "no resolved sam3 bout (see the sam3 bout mapping skip above)")
         from utils.sam3_female_com import triangulate_sam3_female_com
 
         female = triangulate_sam3_female_com(
-            str(Path(args.sam3_root) / args.sam3_bout / "sam3_masks.npz"),
+            str(Path(args.sam3_root) / sam3_bout / "sam3_masks.npz"),
             str(Path(args.session) / "calibration"),
             fly_idx=0, min_cams=2, verbose=False) / args.kp_scale
         qm = np.asarray(data[ex["key0"]]["qpos"])
@@ -542,6 +616,8 @@ def main(argv=None) -> int:
                        "source_h5": args.h5,
                        "n_pairs": len(results),
                        "align_sessions": align_sessions_str,
+                       "sam3_bout": sam3_bout or "",
+                       "video_frame_offset": int(video_frame_offset or 0),
                        "skipped": "; ".join(skipped)},
                  panels=panels)
     print(f"wrote {args.out}: {len(panels)} panels from {len(results)} pairs")
