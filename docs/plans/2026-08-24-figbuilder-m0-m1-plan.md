@@ -63,6 +63,7 @@ their absence here is not mistaken for an oversight.
 | Group solver (children's rects from a gutter) | M2 | `figure.json` stores every panel's SOLVED rect, so rendering never needs the solver. It is only needed once panels can be dragged. |
 | Layout math — snap, align, distribute | M2 | Pure TypeScript, browser-only, no Python counterpart. |
 | Panel selection, drag, resize, numeric entry, undo | M2 | M1 is deliberately read-only. |
+| Panel-vs-panel overlap detection | M2 | Found by the Task 7 end-to-end visual check: `overflows` tests only CANVAS bounds, so two panels whose ink boxes collide (a neighbour's axis label landing inside another panel) are reported as fine. The per-tile `ink_box` needed to detect it is already returned; the editor should flag colliding ink boxes. |
 | Annotation EDITING (create, drag, restyle in the browser) | M3 | Task 8 + Task 14 build the emitters; authoring UI comes later. Task 11 seeds letters programmatically so the export is complete without it. |
 | Data rebinding UI, panel add/delete | M4 | `/api/bundle` and `/api/panel-types` already expose what the UI will need. |
 | Live pipeline mode | M5 | Optional; the bundle contract is the abstraction that makes it swappable. |
