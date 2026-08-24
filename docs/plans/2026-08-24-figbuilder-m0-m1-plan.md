@@ -2839,10 +2839,19 @@ def build_fig4_panels(results: List[dict], ex: dict,
         "angle_2d": PanelData(type="courtship.angle_density", data={
             "ext_pulse": np.asarray(extras.get("ext_pulse", np.zeros(0)), float),
             "ext_sine": np.asarray(extras.get("ext_sine", np.zeros(0)), float)}),
-        "pulse_class": PanelData(type="courtship.pulse_class", data={
-            "centroids": np.asarray(extras.get("pulse_centroids", np.zeros((0, 2))), float),
-            "counts": np.asarray(extras.get("pulse_counts", np.zeros(0)), float),
-            "stds": np.asarray(extras.get("pulse_stds", np.zeros((0, 2))), float)}),
+        "pulse_class": PanelData(
+            type="courtship.pulse_class",
+            data={
+                # Flat per-type arrays; the adapter re-nests them into the
+                # {'Pslow': ..., 'Pfast': ...} dicts the panel function wants.
+                **{f"centroid_{t}": np.asarray(
+                    extras.get("pulse_centroids", {}).get(t, np.zeros(0)), float)
+                   for t in ("Pslow", "Pfast")},
+                **{f"pooled_{t}": np.asarray(
+                    extras.get("pulse_pooled", {}).get(t, np.zeros((0, 0))), float)
+                   for t in ("Pslow", "Pfast")},
+            },
+            attrs={"fs": fs}),
         "zheight": PanelData(type="courtship.zheight", data={
             "pulse_z": _mean_z_by_label(results, "pulse"),
             "sine_z": _mean_z_by_label(results, "sine"),
@@ -2889,9 +2898,13 @@ def main(argv=None) -> int:
     #   walking_z          load__scutellum_z(FREE_WALK_H5_PATH, per_bout=True)
     #   phase_diffs        per-sine-segment Hilbert L-R phase difference
     #   ext_pulse/ext_sine pooled |extended-wing horizontal angle| by label
-    #   pulse_centroids/   from get_pulse_type_labels(...)  — match the keys
-    #     pulse_counts/      that cfp.panel_pulse_classification indexes
-    #     pulse_stds
+    #   pulse_centroids    dict {'Pslow': (W,), 'Pfast': (W,)} — the
+    #                        'centroids' entry of get_pulse_type_labels(...)
+    #   pulse_pooled       dict {'Pslow': (n,W), 'Pfast': (n,W)} — its
+    #                        'pooled_waveforms' entry; std shading derives from
+    #                        this, so omitting it silently disables show_std
+    #   pulse_counts       dict {'Pslow': int, 'Pfast': int} — goes into the
+    #                        pulse_class panel's figure.json `spec`, not `data`
     #   video_frames       list of uint8 HxWx3 crops, already keypoint- and
     #                        mask-overlayed (reuse cfp.panel_video_strip_with_kp
     #                        by drawing into an offscreen axes and grabbing the
@@ -2932,29 +2945,51 @@ class SineInPhasePanel(PanelType):
         )
 
 
+_PULSE_TYPES = ("Pslow", "Pfast")
+
+
 @register
 class PulseClassPanel(PanelType):
+    """Reassembles the nested `pulse_type_results` dict from flat datasets.
+
+    `panel_pulse_classification` wants {'centroids': {'Pslow': wf, 'Pfast': wf},
+    'counts': {...}, 'pooled_waveforms': {'Pslow': (n, W), ...}, 'fs': float}.
+    The bundle stores flat named arrays, so per-type arrays live as
+    `centroid_<T>` / `pooled_<T>` and are re-nested here. Std shading is derived
+    by the panel function from `pooled_waveforms` — there is no `stds` input.
+    """
+
     id = "courtship.pulse_class"
     label = "Pslow / Pfast typed centroids"
-    needs = ["centroids", "counts"]
+    needs = ["centroid_Pslow", "centroid_Pfast"]
     schema = {"type": "object", "properties": {
         "show_std": {"type": "boolean", "default": True},
+        "fs": {"type": "number", "default": 800.0},
+        "count_Pslow": {"type": "integer", "default": 0},
+        "count_Pfast": {"type": "integer", "default": 0},
         "title": {"type": "string", "default": ""}}}
 
     def draw(self, ax, data, spec):
-        results = {"centroids": np.asarray(data["centroids"]),
-                   "counts": np.asarray(data["counts"]),
-                   "stds": np.asarray(data.get("stds", np.zeros((0, 2))))}
+        results = {
+            "centroids": {t: np.asarray(data[f"centroid_{t}"], dtype=float)
+                          for t in _PULSE_TYPES if f"centroid_{t}" in data},
+            "counts": {t: int(spec.get(f"count_{t}", 0)) for t in _PULSE_TYPES},
+            "pooled_waveforms": {t: np.asarray(data[f"pooled_{t}"], dtype=float)
+                                 for t in _PULSE_TYPES if f"pooled_{t}" in data},
+            "fs": float(spec.get("fs", 800.0)),
+        }
         cfp.panel_pulse_classification(
             ax, results, show_std=bool(spec.get("show_std", True)),
             title=spec.get("title", ""),
         )
 ```
 
-> **Implementer note:** `panel_pulse_classification` reads specific keys from
-> `pulse_type_results`. Before writing the adapter, read
-> `utils/courtship_figure_panels.py:2100-2181` and mirror the exact keys it
-> indexes. Adjust `needs` and the reconstructed dict to match. Do not guess.
+> **Already resolved (Ruling 5).** `panel_pulse_classification`
+> (`utils/courtship_figure_panels.py:2124-2127`) reads exactly four keys:
+> `centroids`, `counts`, `pooled_waveforms` (each a dict keyed `'Pslow'` /
+> `'Pfast'`) and `fs` (float). Std shading is derived from `pooled_waveforms`
+> and needs `pooled.shape[0] > 1` to appear. There is no `stds` input. The
+> adapter above already matches this — do not re-derive it.
 
 - [ ] **Step 4: Run test to verify it passes**
 
@@ -3058,6 +3093,16 @@ def test_seed_layout_creates_a_panel_letter_annotation_per_lettered_panel():
     assert {"A", "B", "C", "D"} <= letters
 
 
+def test_seed_layout_seeds_render_params_into_panel_spec():
+    """Bundle attrs are metadata only, so fs must land in figure.json spec."""
+    spec = seed_layout()
+    by_id = {p.id: p for p in spec.panels}
+    assert by_id["wing"].spec["fs"] == pytest.approx(800.0)
+    assert by_id["wing"].spec["time_unit"] == "s"
+    assert by_id["wing_phase_polar"].spec["center_stat"] == "median"
+    assert by_id["zheight"].spec["kind"] == "violin"
+
+
 def test_seed_layout_uses_the_requested_canvas_size():
     spec = seed_layout(width_mm=183.0, height_mm=140.0)
     assert spec.width_mm == pytest.approx(183.0)
@@ -3098,6 +3143,19 @@ from utils.courtship_figure_panels import (
     DEFAULT_PANEL_LETTERS, assemble_figure,
 )
 
+#: Per-panel render parameters seeded into figure.json `spec`. The bundle's
+#: `attrs` are metadata only; the render path reads `spec`. Ruling 6.
+DEFAULT_PANEL_SPEC: Dict[str, Dict[str, object]] = {
+    "wing":             {"fs": 800.0, "time_unit": "s", "min_segment_ms": 10.0},
+    "scut":             {"fs": 800.0, "time_unit": "s"},
+    "sine_phase":       {"fs": 800.0, "time_unit": "s"},
+    "pitch":            {"fs": 800.0, "time_unit": "s"},
+    "pulse_class":      {"fs": 800.0, "show_std": True},
+    "angle_2d":         {"range_deg": [0.0, 90.0]},
+    "wing_phase_polar": {"center_stat": "median"},
+    "zheight":          {"kind": "violin"},
+}
+
 #: axes-dict key -> figbuilder panel type
 TYPE_FOR_KEY: Dict[str, str] = {
     "wing": "courtship.wing_z",
@@ -3131,11 +3189,14 @@ def seed_layout(width_mm: float = 183.0, height_mm: float = 140.0,
         panels: List[PanelSpec] = []
         groups: List[GroupSpec] = []
 
+        # Render parameters live in figure.json `spec` — nothing in the render
+        # path reads the bundle's `attrs`. Seed `fs` etc. here rather than
+        # relying on each adapter's default. See Ruling 6 in the SDD ledger.
         for key, ptype in TYPE_FOR_KEY.items():
             ax = axd[key]
             panels.append(PanelSpec(
                 id=key, type=ptype, rect=root_rect(fig, ax),
-                data={}, spec={}))
+                data={}, spec=dict(DEFAULT_PANEL_SPEC.get(key, {}))))
 
         for strip_key, gid in (("video", "video_strip"),
                                ("render", "render_strip")):
