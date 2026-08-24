@@ -1502,7 +1502,36 @@ a panel's labels fall off the canvas.
 
 **Files:**
 - Create: `figbuilder/render.py`
+- Modify: `figbuilder/style.py` (one line — see "Font metrics" below)
 - Test: `tests/test_figbuilder_render.py`
+
+**Font metrics (Ruling 7) — do this first, it is one line.**
+`render_tile` computes `ink_box` from matplotlib's text layout, but the composed
+SVG is drawn by the *renderer* (browser / rsvg), which resolves the font stack
+itself. When Arial is absent — as on the Hyak nodes — matplotlib lays out with
+DejaVu Sans while the renderer substitutes Liberation Sans, and measurement at
+6 pt showed DejaVu running **13-16% wider** ("z (mm)" +13.9%, "time (s)"
++16.1%). That inflates every `ink_box` and makes the `overflows` flag fire on
+panels that actually fit.
+
+Liberation Sans is metric-compatible with Arial and is exactly what fontconfig
+substitutes, so adding it to the stack makes matplotlib's layout font match the
+render font whenever Arial is missing — and changes nothing on a machine that
+has Arial. In `figbuilder/style.py`, change:
+
+```python
+    "font.sans-serif": ["Arial", "Helvetica", "DejaVu Sans"],
+```
+
+to:
+
+```python
+    # Liberation Sans is metric-compatible with Arial and is what fontconfig
+    # substitutes when Arial is absent. Including it keeps matplotlib's LAYOUT
+    # font identical to the font the SVG renderer actually DRAWS with, so
+    # ink_box measurements stay truthful on machines without Arial. Ruling 7.
+    "font.sans-serif": ["Arial", "Helvetica", "Liberation Sans", "DejaVu Sans"],
+```
 
 **Interfaces:**
 - Consumes: `FigureSpec`, `PanelSpec` (Tasks 2, 4); `get_panel_type` (Task 3); `Bundle` (Task 1)
@@ -1546,6 +1575,33 @@ def _panel(rect=(0.15, 0.2, 0.7, 0.6)):
 def _bundle():
     return Bundle(meta={}, panels={"p": PanelData(
         type="line", data={"y": np.linspace(0, 1, 50)}, assets={}, attrs={})})
+
+
+def test_font_stack_includes_a_metric_compatible_arial_substitute():
+    """Ruling 7: matplotlib's layout font must match the renderer's draw font.
+
+    The SVG declares the whole stack and the renderer picks from it; matplotlib
+    lays out with the first family it can resolve locally. Without Liberation
+    Sans in the stack, a machine lacking Arial lays out in DejaVu Sans (13-16%
+    wider at 6pt) while the renderer draws Liberation Sans, inflating ink_box.
+    """
+    from figbuilder.style import DEFAULT_RCPARAMS
+    stack = DEFAULT_RCPARAMS["font.sans-serif"]
+    assert stack[:2] == ["Arial", "Helvetica"], "Arial must stay first"
+    assert "Liberation Sans" in stack
+    assert stack.index("Liberation Sans") < stack.index("DejaVu Sans")
+
+
+def test_layout_font_is_one_the_exported_svg_also_declares():
+    """Whatever matplotlib measures with must appear in the declared stack."""
+    from matplotlib import font_manager as fm
+    from figbuilder.style import apply_style
+    apply_style({})
+    path = fm.findfont(fm.FontProperties(
+        family=matplotlib.rcParams["font.sans-serif"]))
+    resolved = fm.FontProperties(fname=path).get_name()
+    assert resolved in matplotlib.rcParams["font.sans-serif"], (
+        f"laying out with {resolved!r}, which the SVG never declares")
 
 
 def test_tile_is_rendered_at_full_figure_size_in_points():
