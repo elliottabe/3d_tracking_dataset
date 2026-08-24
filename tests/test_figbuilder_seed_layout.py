@@ -4,6 +4,7 @@ from __future__ import annotations
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+import numpy as np
 import pytest
 
 from scripts.figures.seed_fig4_layout import root_rect, seed_layout
@@ -77,3 +78,41 @@ def test_seed_layout_uses_the_requested_canvas_size():
     spec = seed_layout(width_mm=183.0, height_mm=140.0)
     assert spec.width_mm == pytest.approx(183.0)
     assert spec.height_mm == pytest.approx(140.0)
+
+
+def test_seed_layout_wires_panel_data_refs_from_a_real_bundle(tmp_path):
+    """Regression: real run (Task 12) found every panel's ``data`` empty.
+
+    ``seed_layout`` built rects only and left ``PanelSpec.data == {}`` for
+    every panel, so `figbuilder export` KeyErrors on the first panel that
+    reads `data["..."]` (e.g. WingZPanel needs `data["t_ms"]`). When a real
+    bundle path is supplied, the seeded refs must point at that bundle's
+    actual dataset/asset names so `panel_data()` can resolve them.
+    """
+    from figbuilder.bundle import PanelData, write_bundle
+
+    bundle_path = tmp_path / "fig4_bundle.h5"
+    write_bundle(bundle_path, meta={}, panels={
+        "wing": PanelData(type="courtship.wing_z", data={
+            "t_ms": np.arange(10.0), "wingL_z": np.zeros(10),
+            "wingR_z": np.zeros(10),
+        }),
+        "video_0": PanelData(type="image",
+                             assets={"img": np.zeros((4, 4, 3), np.uint8)}),
+    })
+
+    spec = seed_layout(n_video_frames=2, n_render_strip=2,
+                       bundle_path=bundle_path)
+    by_id = {p.id: p for p in spec.panels}
+
+    wing_data = by_id["wing"].data
+    assert wing_data["t_ms"] == {"dataset": "/panels/wing/data/t_ms"}
+    assert wing_data["wingL_z"] == {"dataset": "/panels/wing/data/wingL_z"}
+    assert wing_data["wingR_z"] == {"dataset": "/panels/wing/data/wingR_z"}
+
+    video0_data = by_id["video_0"].data
+    assert video0_data["img"] == {"dataset": "/panels/video_0/assets/img"}
+
+    # No bundle path (e.g. plain unit tests): unchanged, data stays empty —
+    # not a regression for every other test in this file.
+    assert seed_layout().panel("wing").data == {}

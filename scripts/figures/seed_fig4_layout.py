@@ -12,12 +12,14 @@ through the ROOT figure's `transFigure`.
 from __future__ import annotations
 
 import argparse
-from typing import Dict, List, Tuple
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
 
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
+from figbuilder.bundle import Bundle, read_bundle
 from figbuilder.figure import FigureSpec, GroupSpec, PanelSpec, save_figure
 from utils.courtship_figure_panels import (
     DEFAULT_PANEL_LETTERS, assemble_figure,
@@ -57,14 +59,40 @@ def root_rect(fig, ax) -> Tuple[float, float, float, float]:
     return (float(bb.x0), float(bb.y0), float(bb.width), float(bb.height))
 
 
+def _data_refs(bundle: Optional[Bundle], pid: str) -> Dict[str, dict]:
+    """Wire a panel's ``data`` dict from a real bundle's own dataset/asset
+    names (identity mapping: bundle panel id == figure panel id).
+
+    Without a bundle (plain layout skeleton, e.g. unit tests) this returns
+    `{}`, same as before this fix. With one, every dataset the bundle
+    actually stored under `panels/<pid>/data` and `panels/<pid>/assets` gets
+    a `{"dataset": "/panels/<pid>/(data|assets)/<key>"}` ref — not just the
+    (possibly stale) `PanelType.needs` hint — so `figbuilder export` can
+    resolve every key a panel's `draw()` reads, including ones `.get()`-read
+    optionally (e.g. `scut`'s `segments`, `pulse_class`'s `pooled_*`).
+    """
+    if bundle is None:
+        return {}
+    pd = bundle.panels.get(pid)
+    if pd is None:
+        return {}
+    refs = {name: {"dataset": f"/panels/{pid}/data/{name}"} for name in pd.data}
+    refs.update({name: {"dataset": f"/panels/{pid}/assets/{name}"}
+                for name in pd.assets})
+    return refs
+
+
 def seed_layout(width_mm: float = 183.0, height_mm: float = 140.0,
                 n_frames_strip: int = 6, n_render_strip: int = 4,
-                n_video_frames: int = 4) -> FigureSpec:
+                n_video_frames: int = 4,
+                bundle_path: Optional[str | Path] = None) -> FigureSpec:
     fig, axd = assemble_figure(
         fig_width_mm=width_mm, fig_height_mm=height_mm,
         n_frames_strip=n_frames_strip, n_render_strip=n_render_strip,
         n_video_frames=n_video_frames,
     )
+    bundle = read_bundle(bundle_path) if bundle_path is not None else None
+    bundle_name = Path(bundle_path).name if bundle_path is not None else "fig4_bundle.h5"
     try:
         panels: List[PanelSpec] = []
         groups: List[GroupSpec] = []
@@ -76,7 +104,8 @@ def seed_layout(width_mm: float = 183.0, height_mm: float = 140.0,
             ax = axd[key]
             panels.append(PanelSpec(
                 id=key, type=ptype, rect=root_rect(fig, ax),
-                data={}, spec=dict(DEFAULT_PANEL_SPEC.get(key, {}))))
+                data=_data_refs(bundle, key),
+                spec=dict(DEFAULT_PANEL_SPEC.get(key, {}))))
 
         for strip_key, gid in (("video", "video_strip"),
                                ("render", "render_strip")):
@@ -91,8 +120,10 @@ def seed_layout(width_mm: float = 183.0, height_mm: float = 140.0,
                                     gutter_mm=max(0.0, gutter_frac * width_mm),
                                     equal=True, rect=(x0, y0, x1 - x0, y1 - y0)))
             for i, r in enumerate(rects):
-                panels.append(PanelSpec(id=f"{strip_key}_{i}", type="image",
+                pid = f"{strip_key}_{i}"
+                panels.append(PanelSpec(id=pid, type="image",
                                         rect=r, group=gid,
+                                        data=_data_refs(bundle, pid),
                                         spec={"asset": "img"}))
 
         by_id = {p.id: p for p in panels}
@@ -110,7 +141,7 @@ def seed_layout(width_mm: float = 183.0, height_mm: float = 140.0,
                           "font": "Arial, Helvetica, sans-serif"},
             })
 
-        spec = FigureSpec(bundle="fig4_bundle.h5", panels=panels,
+        spec = FigureSpec(bundle=bundle_name, panels=panels,
                           groups=groups, annotations=annotations,
                           style={"font.size": 6.0})
         spec.set_size(width_mm, height_mm)
@@ -124,8 +155,13 @@ def main(argv=None) -> int:
     ap.add_argument("--out", default="figures/paper_figures/fig4.json")
     ap.add_argument("--width-mm", type=float, default=183.0)
     ap.add_argument("--height-mm", type=float, default=140.0)
+    ap.add_argument("--bundle", default=None,
+                    help="bundle.h5 to read real dataset/asset names from "
+                         "when wiring each panel's `data` refs; omit for a "
+                         "data-free layout skeleton (PanelSpec.data == {})")
     args = ap.parse_args(argv)
-    save_figure(seed_layout(args.width_mm, args.height_mm), args.out)
+    save_figure(seed_layout(args.width_mm, args.height_mm,
+                            bundle_path=args.bundle), args.out)
     print(f"wrote {args.out}")
     return 0
 
