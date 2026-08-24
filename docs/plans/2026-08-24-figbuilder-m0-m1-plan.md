@@ -1519,6 +1519,8 @@ a panel's labels fall off the canvas.
 """Tile rendering: full-canvas placement, ink box, caching."""
 from __future__ import annotations
 
+import re
+
 import matplotlib
 matplotlib.use('Agg')
 import numpy as np
@@ -1547,10 +1549,14 @@ def _bundle():
 
 
 def test_tile_is_rendered_at_full_figure_size_in_points():
+    """matplotlib writes 6-decimal pt lengths ("283.464567pt"), so compare the
+    parsed number, never a re-formatted string."""
     res = render_tile(_fig(), _panel(), {"y": np.linspace(0, 1, 50)})
     head = res.svg[:400].decode("utf-8")
-    assert f'width="{100.0 / 25.4 * 72:g}pt"' in head
-    assert f'height="{60.0 / 25.4 * 72:g}pt"' in head
+    w = float(re.search(r'width="([\d.]+)pt"', head).group(1))
+    h = float(re.search(r'height="([\d.]+)pt"', head).group(1))
+    assert w == pytest.approx(100.0 / 25.4 * 72, rel=1e-4)
+    assert h == pytest.approx(60.0 / 25.4 * 72, rel=1e-4)
 
 
 def test_tile_carries_a_gid_for_the_panel():
@@ -1837,8 +1843,9 @@ def test_compose_wraps_each_tile_in_a_named_group():
 def test_composed_root_carries_figure_size_in_points():
     out = compose(_fig(), [("a", _tile("a", (0.2, 0.2, 0.6, 0.6), "#000000"))])
     root = etree.fromstring(out)
-    assert root.get("width") == f"{100.0 / 25.4 * 72:g}pt"
-    assert root.get("viewBox") == f"0 0 {100.0 / 25.4 * 72:g} {60.0 / 25.4 * 72:g}"
+    assert root.get("width") == f"{100.0 / 25.4 * 72:.6f}pt"
+    assert root.get("viewBox") == (
+        f"0 0 {100.0 / 25.4 * 72:.6f} {60.0 / 25.4 * 72:.6f}")
 
 
 def test_annotation_elements_are_appended_after_tiles():
@@ -1939,9 +1946,11 @@ def compose(fig_spec: FigureSpec,
     h_pt = fig_spec.height_mm * PT_PER_MM
 
     root = etree.Element(qname("svg"), nsmap=NSMAP)
-    root.set("width", f"{w_pt:g}pt")
-    root.set("height", f"{h_pt:g}pt")
-    root.set("viewBox", f"0 0 {w_pt:g} {h_pt:g}")
+    # Six decimals, matching matplotlib's own pt formatting in the tiles this
+    # document overlays — see Ruling 4 in the SDD ledger.
+    root.set("width", f"{w_pt:.6f}pt")
+    root.set("height", f"{h_pt:.6f}pt")
+    root.set("viewBox", f"0 0 {w_pt:.6f} {h_pt:.6f}")
     root.set("version", "1.1")
 
     for panel_id, svg in tiles:
@@ -2026,6 +2035,16 @@ def test_y_is_flipped_from_figure_space_to_svg_space():
         {"id": "t", "kind": "text", "pos_mm": [0.0, 0.0], "text": "x"}])
     # y=0 mm from the figure bottom -> y = height in pt
     assert float(els[0].get("y")) == pytest.approx(50.0 * 72 / 25.4)
+    # ...and it is written at full precision, not 6 significant figures.
+    assert els[0].get("y") == "141.732283"
+
+
+def test_num_formatter_trims_trailing_zeros_and_keeps_six_decimals():
+    from figbuilder.annot import _num
+    assert _num(0.8) == "0.8"
+    assert _num(8) == "8"
+    assert _num(141.73228346456693) == "141.732283"
+    assert _num(-0.0) == "0"   # must match JS toFixed, which has no -0
 
 
 def test_panel_parented_annotation_offsets_from_that_panel_corner():
@@ -2108,6 +2127,21 @@ from figbuilder.svgutil import qname
 
 PT_PER_MM = 72.0 / 25.4
 
+
+def _num(v: float) -> str:
+    """Format a number identically in Python and TypeScript.
+
+    Six decimals, trailing zeros trimmed. `:g` is NOT usable here: it gives
+    6 SIGNIFICANT figures, so 141.73228346 becomes "141.732" — a 2e-6 relative
+    error that breaks both pytest.approx and character-exact agreement with the
+    TS emitter. See Ruling 3 in the SDD ledger.
+    """
+    out = f"{float(v):.6f}".rstrip("0").rstrip(".")
+    # Negative zero must render as "0": JS toFixed(-0.0) has no sign, and a
+    # coordinate of exactly -0.0 is reachable (a panel at the canvas edge).
+    return "0" if out.lstrip("-") in ("", "0") else out
+
+
 ANNOTATION_KINDS = frozenset({
     "text", "line", "arrow", "leader", "rect", "ellipse", "bracket",
     "scalebar", "image",
@@ -2123,15 +2157,15 @@ def _style(d: Dict[str, Any]) -> str:
     if "stroke" in d:
         parts.append(f"stroke:{d['stroke']}")
     if "lw_pt" in d:
-        parts.append(f"stroke-width:{float(d['lw_pt']):g}")
+        parts.append(f"stroke-width:{_num(d['lw_pt'])}")
     if "font_size_pt" in d:
-        parts.append(f"font-size:{float(d['font_size_pt']):g}px")
+        parts.append(f"font-size:{_num(d['font_size_pt'])}px")
     if d.get("weight") in ("bold", 700):
         parts.append("font-weight:700")
     if "font" in d:
         parts.append(f"font-family:{d['font']}")
     if "opacity" in d:
-        parts.append(f"opacity:{float(d['opacity']):g}")
+        parts.append(f"opacity:{_num(d['opacity'])}")
     return ";".join(parts)
 
 
@@ -2179,8 +2213,8 @@ def emit_annotations(fig_spec, annotations: List[dict]) -> List:
 
         if kind == "text":
             el = etree.Element(qname("text"))
-            el.set("x", f"{f.x(px):g}")
-            el.set("y", f"{f.y(py):g}")
+            el.set("x", _num(f.x(px)))
+            el.set("y", _num(f.y(py)))
             st.setdefault("font", "Arial, Helvetica, sans-serif")
             el.set("style", _style(st))
             el.text = str(ann.get("text", ""))
@@ -2188,8 +2222,8 @@ def emit_annotations(fig_spec, annotations: List[dict]) -> List:
         elif kind in ("line", "leader"):
             tx, ty = _pt(ann.get("to_mm"))
             el = etree.Element(qname("line"))
-            el.set("x1", f"{f.x(px):g}"); el.set("y1", f"{f.y(py):g}")
-            el.set("x2", f"{f.x(tx):g}"); el.set("y2", f"{f.y(ty):g}")
+            el.set("x1", _num(f.x(px))); el.set("y1", _num(f.y(py)))
+            el.set("x2", _num(f.x(tx))); el.set("y2", _num(f.y(ty)))
             st.setdefault("stroke", "#000000"); st.setdefault("lw_pt", 0.8)
             el.set("style", _style(st))
 
@@ -2204,18 +2238,18 @@ def emit_annotations(fig_spec, annotations: List[dict]) -> List:
         elif kind == "rect":
             w, h = _pt(ann.get("size_mm"), (1.0, 1.0))
             el = etree.Element(qname("rect"))
-            el.set("x", f"{f.x(px):g}")
-            el.set("y", f"{f.y(py + h):g}")
-            el.set("width", f"{f.d(w):g}"); el.set("height", f"{f.d(h):g}")
+            el.set("x", _num(f.x(px)))
+            el.set("y", _num(f.y(py + h)))
+            el.set("width", _num(f.d(w))); el.set("height", _num(f.d(h)))
             st.setdefault("stroke", "#000000"); st.setdefault("lw_pt", 0.8)
             el.set("style", _style(st) + ";fill:none" if "color" not in st else _style(st))
 
         elif kind == "ellipse":
             w, h = _pt(ann.get("size_mm"), (1.0, 1.0))
             el = etree.Element(qname("ellipse"))
-            el.set("cx", f"{f.x(px + w / 2):g}")
-            el.set("cy", f"{f.y(py + h / 2):g}")
-            el.set("rx", f"{f.d(w / 2):g}"); el.set("ry", f"{f.d(h / 2):g}")
+            el.set("cx", _num(f.x(px + w / 2)))
+            el.set("cy", _num(f.y(py + h / 2)))
+            el.set("rx", _num(f.d(w / 2))); el.set("ry", _num(f.d(h / 2)))
             st.setdefault("stroke", "#000000"); st.setdefault("lw_pt", 0.8)
             el.set("style", _style(st) + ";fill:none" if "color" not in st else _style(st))
 
@@ -2233,12 +2267,12 @@ def emit_annotations(fig_spec, annotations: List[dict]) -> List:
             length = float(ann.get("length_mm", 5.0))
             el = etree.Element(qname("g"))
             ln = etree.SubElement(el, qname("line"))
-            ln.set("x1", f"{f.x(px):g}"); ln.set("y1", f"{f.y(py):g}")
-            ln.set("x2", f"{f.x(px + length):g}"); ln.set("y2", f"{f.y(py):g}")
+            ln.set("x1", _num(f.x(px))); ln.set("y1", _num(f.y(py)))
+            ln.set("x2", _num(f.x(px + length))); ln.set("y2", _num(f.y(py)))
             ln.set("style", _style({"stroke": st.get("stroke", "#000000"),
                                     "lw_pt": st.get("lw_pt", 1.2)}))
             tx_el = etree.SubElement(el, qname("text"))
-            tx_el.set("x", f"{f.x(px + length / 2):g}")
+            tx_el.set("x", _num(f.x(px + length / 2)))
             tx_el.set("y", f"{f.y(py) + f.d(2.0):g}")
             tx_el.set("style", _style({"font_size_pt": st.get("font_size_pt", 6),
                                        "font": "Arial, Helvetica, sans-serif"})
@@ -2248,9 +2282,9 @@ def emit_annotations(fig_spec, annotations: List[dict]) -> List:
         elif kind == "image":
             w, h = _pt(ann.get("size_mm"), (10.0, 10.0))
             el = etree.Element(qname("image"))
-            el.set("x", f"{f.x(px):g}")
-            el.set("y", f"{f.y(py + h):g}")
-            el.set("width", f"{f.d(w):g}"); el.set("height", f"{f.d(h):g}")
+            el.set("x", _num(f.x(px)))
+            el.set("y", _num(f.y(py + h)))
+            el.set("width", _num(f.d(w))); el.set("height", _num(f.d(h)))
             el.set("{http://www.w3.org/1999/xlink}href", ann.get("href", ""))
 
         if ann.get("id"):
@@ -3688,7 +3722,7 @@ def test_python_and_typescript_emitters_agree():
 ```typescript
 // web/src/annot/emit.test.ts
 import { describe, expect, it } from 'vitest';
-import { emitAnnotations, type FigureSpec } from './emit';
+import { emitAnnotations, num, type FigureSpec } from './emit';
 
 const fig: FigureSpec = {
   width_mm: 100, height_mm: 50,
@@ -3699,13 +3733,21 @@ describe('emitAnnotations', () => {
   it('flips y from figure space to SVG space', () => {
     const svg = emitAnnotations(fig, [
       { id: 't', kind: 'text', pos_mm: [0, 0], text: 'x' }]);
-    expect(svg).toContain(`y="${(50 * 72) / 25.4}"`);
+    // Must match figbuilder/annot.py byte-for-byte, not JS full precision.
+    expect(svg).toContain('y="141.732283"');
   });
 
   it('offsets a panel-parented annotation from that panel corner', () => {
     const svg = emitAnnotations(fig, [
       { id: 'L', kind: 'text', parent: 'wing', pos_mm: [0, 0], text: 'A' }]);
-    expect(svg).toContain(`x="${(10 * 72) / 25.4}"`);
+    expect(svg).toContain('x="28.346457"');
+  });
+
+  it('formats numbers the same way the Python emitter does', () => {
+    expect(num(0.8)).toBe('0.8');
+    expect(num(8)).toBe('8');
+    expect(num(141.73228346456693)).toBe('141.732283');
+    expect(num(-0)).toBe('0');
   });
 
   it('rejects an unknown kind by name', () => {
@@ -3760,6 +3802,17 @@ test will fail on any divergence. Structure:
 // web/src/annot/emit.ts
 export const PT_PER_MM = 72 / 25.4;
 
+/**
+ * Mirrors figbuilder.annot._num EXACTLY. Six decimals, trailing zeros trimmed.
+ * Do not substitute template interpolation of a raw number — that prints
+ * JS full precision and diverges from Python. See Ruling 3 in the SDD ledger.
+ */
+export function num(v: number): string {
+  const out = v.toFixed(6).replace(/0+$/, '').replace(/\.$/, '');
+  // Mirrors the Python guard: "-0" and "" both collapse to "0".
+  return ['', '-', '0', '-0'].includes(out) ? '0' : out;
+}
+
 export const ANNOTATION_KINDS = [
   'text', 'line', 'arrow', 'leader', 'rect', 'ellipse', 'bracket',
   'scalebar', 'image',
@@ -3801,11 +3854,11 @@ function styleStr(d: Record<string, string | number>): string {
   const out: string[] = [];
   if ('color' in d) out.push(`fill:${d.color}`);
   if ('stroke' in d) out.push(`stroke:${d.stroke}`);
-  if ('lw_pt' in d) out.push(`stroke-width:${Number(d.lw_pt)}`);
-  if ('font_size_pt' in d) out.push(`font-size:${Number(d.font_size_pt)}px`);
+  if ('lw_pt' in d) out.push(`stroke-width:${num(Number(d.lw_pt))}`);
+  if ('font_size_pt' in d) out.push(`font-size:${num(Number(d.font_size_pt))}px`);
   if (d.weight === 'bold' || d.weight === 700) out.push('font-weight:700');
   if ('font' in d) out.push(`font-family:${d.font}`);
-  if ('opacity' in d) out.push(`opacity:${Number(d.opacity)}`);
+  if ('opacity' in d) out.push(`opacity:${num(Number(d.opacity))}`);
   return out.join(';');
 }
 
@@ -3828,7 +3881,7 @@ export function emitAnnotations(fig: FigureSpec, anns: Annotation[]): string {
       case 'text': {
         if (!('font' in st)) st.font = 'Arial, Helvetica, sans-serif';
         parts.push(
-          `<text x="${f.x(px)}" y="${f.y(py)}" ` +
+          `<text x="${num(f.x(px))}" y="${num(f.y(py))}" ` +
           `style="${styleStr(st)}"${idAttr}>${a.text ?? ''}</text>`);
         break;
       }
@@ -3838,7 +3891,7 @@ export function emitAnnotations(fig: FigureSpec, anns: Annotation[]): string {
         if (!('lw_pt' in st)) st.lw_pt = 0.8;
         needsMarker = true;
         parts.push(
-          `<path d="M ${f.x(px)},${f.y(py)} L ${f.x(tx)},${f.y(ty)}" ` +
+          `<path d="M ${num(f.x(px))},${num(f.y(py))} L ${num(f.x(tx))},${num(f.y(ty))}" ` +
           `style="${styleStr(st)};fill:none;` +
           `marker-end:url(#fb_arrowhead)"${idAttr}/>`);
         break;
