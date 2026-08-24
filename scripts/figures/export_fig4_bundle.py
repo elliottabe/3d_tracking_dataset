@@ -221,6 +221,23 @@ def _load_kp3d(npz_path) -> np.ndarray:
         return np.asarray(z["kp3d"])
 
 
+def _processed_fly_dir(fly_id: str) -> str:
+    """``'Session1/2026_04_02_16_21_32_fly1'`` -> ``'fly1'``.
+
+    Round 7: the combined h5's key0/key1 ordering is the PAIR ordering and
+    does NOT correspond to the processed tree's fly0/fly1 directory names —
+    verified: for the exemplar, key0=bout_183 has fly_id
+    ``..._fly1`` and key1=bout_182 has fly_id ``..._fly0`` (INVERTED).
+    `analyze_pair`'s `male_id='fly0'` refers to the pair's first element
+    (key0), not to this fly_id suffix. Always derive the directory from the
+    fly_id suffix; never assume key0 -> `fly0` / key1 -> `fly1`.
+    """
+    tail = fly_id.rsplit("_", 1)[-1]
+    if not tail.startswith("fly"):
+        raise ValueError(f"cannot derive fly dir from fly_id {fly_id!r}")
+    return tail
+
+
 def _resolve_session_bout(session_dir, sam3_root, recording: str, clip_len: int,
                           tol: int = 1) -> tuple:
     """Map a combined-h5 exemplar onto its session bout: `start_frame` from
@@ -478,6 +495,16 @@ def main(argv=None) -> int:
     recording_base = str(recording_of(ex)).rsplit("_fly", 1)[0]
     processed_recording_dir = Path(args.processed_root) / recording_base
     processed_sam3_root = processed_recording_dir / "sam3_masks"
+    # Round 7: key0/key1's processed fly0/fly1 directory is NOT positionally
+    # fixed either (same "don't assume, derive it" lesson as round 5's sam3
+    # bout numbering) -- resolve each from its OWN fly_id suffix rather than
+    # assuming key0 -> fly0 / key1 -> fly1. Verified inverted for the
+    # exemplar: key0=bout_183 is `_fly1`, key1=bout_182 is `_fly0`.
+    key0_fly_id = fly_ids[bout_keys.index(ex["key0"])]
+    key1_fly_id = fly_ids[bout_keys.index(ex["key1"])]
+    key0_dir = _processed_fly_dir(key0_fly_id)
+    key1_dir = _processed_fly_dir(key1_fly_id)
+    print(f"exemplar fly dirs -> key0={key0_dir} key1={key1_dir}")
     if args.sam3_bout is not None:
         sam3_bout, video_frame_offset = args.sam3_bout, 0
         print(f"sam3 bout mapping OVERRIDDEN by --sam3-bout={sam3_bout!r} "
@@ -579,8 +606,10 @@ def main(argv=None) -> int:
         mp4 = Path(args.session) / f"{args.cam}.mp4"
         sam3_npz = processed_sam3_root / sam3_bout / "sam3_masks.npz"
         pose_bout_dir = processed_recording_dir / "pose" / "bouts" / sam3_bout
-        male_kp3d = _load_kp3d(pose_bout_dir / "fly0" / "kp3d.npz")
-        female_kp3d = _load_kp3d(pose_bout_dir / "fly1" / "kp3d.npz")
+        # key0/key1 -> fly0/fly1 is per-exemplar, resolved above (round 7);
+        # never hardcode fly0=male here.
+        male_kp3d = _load_kp3d(pose_bout_dir / key0_dir / "kp3d.npz")
+        female_kp3d = _load_kp3d(pose_bout_dir / key1_dir / "kp3d.npz")
         kp3d_source = str(pose_bout_dir)
         dlt = cfp._dlt_load(dlt_csv)
         cam_idx = sam3_camera_index(calib_dir, dlt_csv.name)
@@ -644,8 +673,10 @@ def main(argv=None) -> int:
             str(Path(args.session) / "calibration"),
             fly_idx=0, min_cams=2, verbose=False) / args.kp_scale
         qm = np.asarray(data[ex["key0"]]["qpos"])
+        # key0's processed directory, resolved above (round 7) -- never
+        # hardcode fly0=male here either.
         scut_all = _load_kp3d(
-            processed_recording_dir / "pose" / "bouts" / sam3_bout / "fly0" / "kp3d.npz")
+            processed_recording_dir / "pose" / "bouts" / sam3_bout / key0_dir / "kp3d.npz")
         n = min(T, qm.shape[0], female.shape[0], len(scut_all))
         male_pitch = cfp.body_pitch_deg_from_quat(qm[:n, 3:7])
         scut = scut_all[:n, kp_names.index("Scutellum"), :]
@@ -720,6 +751,7 @@ def main(argv=None) -> int:
                        "sam3_bout": sam3_bout or "",
                        "video_frame_offset": int(video_frame_offset or 0),
                        "kp3d_source": kp3d_source,
+                       "kp3d_fly_dirs": f"key0={key0_dir};key1={key1_dir}",
                        "skipped": "; ".join(skipped)},
                  panels=panels)
     print(f"wrote {args.out}: {len(panels)} panels from {len(results)} pairs")

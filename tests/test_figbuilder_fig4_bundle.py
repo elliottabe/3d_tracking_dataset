@@ -14,7 +14,7 @@ import figbuilder.panels  # noqa: F401
 from figbuilder.panels.base import get_panel_type
 from scripts.figures.export_fig4_bundle import (
     build_fig4_panels, _pair_qpos, _pair_center_xyz, _resolve_session_bout,
-    _load_kp3d)
+    _load_kp3d, _processed_fly_dir)
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -425,3 +425,25 @@ def test_load_kp3d_raises_a_clear_error_when_key_missing(tmp_path):
     np.savez(npz_path, not_kp3d=np.zeros((778, 50, 3)))
     with pytest.raises(KeyError, match="kp3d"):
         _load_kp3d(npz_path)
+
+
+def test_processed_fly_dir_extracts_the_fly_suffix():
+    assert _processed_fly_dir("Session1/2026_04_02_16_21_32_fly1") == "fly1"
+    assert _processed_fly_dir("Session1/2026_04_02_16_21_32_fly0") == "fly0"
+
+
+def test_processed_fly_dir_raises_on_missing_suffix():
+    with pytest.raises(ValueError, match="fly_id"):
+        _processed_fly_dir("Session1/2026_04_02_16_21_32")
+
+
+def test_processed_fly_dir_resolves_the_real_inverted_case():
+    """Round 7 regression: key0/key1's processed fly0/fly1 directory is NOT
+    positionally fixed. Verified on the real exemplar: key0=bout_183 has
+    fly_id '..._fly1', key1=bout_182 has fly_id '..._fly0' -- INVERTED
+    relative to a naive key0->fly0 assumption. The directory must be
+    derived from the fly_id suffix, never assumed from pair position."""
+    key0_fly_id = "Session1/2026_04_02_16_21_32_fly1"
+    key1_fly_id = "Session1/2026_04_02_16_21_32_fly0"
+    assert _processed_fly_dir(key0_fly_id) == "fly1"
+    assert _processed_fly_dir(key1_fly_id) == "fly0"
