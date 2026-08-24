@@ -1814,7 +1814,7 @@ def render_tile(fig_spec: FigureSpec, panel: PanelSpec,
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `python -m pytest tests/test_figbuilder_render.py -v`
-Expected: 10 passed
+Expected: 12 passed (10 renderer tests + the 2 font-metric tests from Ruling 7)
 
 - [ ] **Step 5: Commit**
 
