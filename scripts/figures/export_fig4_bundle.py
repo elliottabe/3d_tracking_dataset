@@ -134,36 +134,81 @@ DEFAULT_EXEMPLAR_RECORDING = "2026_04_02_16_21_32"
 #: unmodified, so the corrected label is applied at the figbuilder layer.
 ZHEIGHT_LABELS = ("pulse", "sine", "free running")
 
-#: Camera for the single-fly render strip. Chosen by sweeping distance against
-#: the fraction of frame the fly occupies: 0.30 -> 51% (clipped), 0.60 -> 18%
+#: Two-fly courtship-pair render (requirement change, 2026-08-24): the panel
+#: is about courtship — two interacting flies — so the render strip must show
+#: the styled PAIR (red fly0 / teal fly1), not one vanilla fly.
+DEFAULT_FLOOR = "models/fruitfly_v1/floor.xml"
+VIZ_SETTINGS = ("Earthy_V1_courtship_fly0", "Earthy_V1_courtship_fly1")
+VIZ_CAMERA = "track1_fly0"
+
+#: Camera for the pair render strip. Chosen by sweeping distance against the
+#: fraction of frame the fly occupies: 0.30 -> 51% (clipped), 0.60 -> 18%
 #: (whole fly, wings and eye legible), 1.00 -> 5% (too small). The model's
 #: stat.extent is 0.647, so panel_render_strip's own 0.03 default is ~20x too
-#: close and puts the camera inside the animal.
-RENDER_CAM = {"distance": 0.6, "azimuth": 90.0, "elevation": -20.0}
+#: close and puts the camera inside the animal. azimuth=85.0 is the pair view
+#: verified to show fly0 (red) and fly1 (teal) with an extended wing visible.
+RENDER_CAM = {"distance": 0.6, "azimuth": 85.0, "elevation": -20.0}
 
 
-def _render_frames(model_xml, qpos, frame_idx, size=256):
-    """Bake MuJoCo frames to uint8 RGB. Mirrors panel_render_strip's mj_model
-    fallback path, but returns arrays instead of drawing into axes."""
+def _pair_qpos(q0: np.ndarray, q1: np.ndarray, n: int) -> np.ndarray:
+    """Concatenate two single-fly qpos arrays into the pair layout
+    ``[fly0_qpos | fly1_qpos]`` that `build_courtship_pair_visualizer`'s model
+    expects (nq = 2 * fly_nq). Pure; split out so the concatenation logic is
+    unit-testable without MuJoCo."""
+    q0 = np.asarray(q0, dtype=float)[:n]
+    q1 = np.asarray(q1, dtype=float)[:n]
+    return np.concatenate([q0, q1], axis=-1)
+
+
+def _render_frames(flybody_xml, floor_xml, qpos_pair, frame_idx,
+                   camera=VIZ_CAMERA, track_midpoint=True, size=256):
+    """Bake two-fly courtship-pair MuJoCo frames to uint8 RGB via the styled
+    visualizer (`Earthy_V1_courtship_fly0`/`fly1` presets: red fly0, teal
+    fly1), floor-aligned.
+
+    `rig_pos` MUST stay None: `floor_xml`'s only geom is `floor`, and the
+    rig-pose override (`rig_geom_name='Happy_house'` by default) would raise
+    `ValueError` looking for a geom that isn't there. The override only
+    aligns cosmetic chamber walls, so omitting it is free.
+
+    Mirrors panel_render_strip's own `track_midpoint` + `viz.render_frame`
+    path (verified: red fly0, teal fly1, extended wing visible), inlined here
+    to return raw arrays without a matplotlib axes round-trip. When
+    `track_midpoint` (default) a free camera tracks the fly0/fly1 midpoint
+    every frame using `RENDER_CAM`; set it False to use the named `camera`
+    (e.g. a model-defined `track1_fly0`) unmodified instead.
+    """
     import mujoco
-    m = mujoco.MjModel.from_xml_path(str(model_xml))
-    d = mujoco.MjData(m)
-    if qpos.shape[1] != m.nq:
-        raise ValueError(f"qpos has {qpos.shape[1]} dof but model nq={m.nq}")
+
+    from utils.courtship_figure_panels import (
+        build_courtship_pair_visualizer, floor_align_qpos_pair)
+
+    viz = build_courtship_pair_visualizer(
+        flybody_xml=str(flybody_xml), floor_xml=str(floor_xml),
+        settings_fly0=VIZ_SETTINGS[0], settings_fly1=VIZ_SETTINGS[1],
+        rig_pos=None)
+    qpos_pair = np.asarray(qpos_pair, dtype=float)
+    if qpos_pair.shape[1] != viz.model.nq:
+        raise ValueError(f"qpos_pair has {qpos_pair.shape[1]} dof but "
+                         f"pair model nq={viz.model.nq}")
+    qpos_pair = floor_align_qpos_pair(viz.model, qpos_pair)
+    fly_nq = qpos_pair.shape[1] // 2
+
     out = []
-    with mujoco.Renderer(m, height=size, width=size) as r:
-        for fi in frame_idx:
-            d.qpos[:] = qpos[int(fi)]
-            mujoco.mj_forward(m, d)
-            cam = mujoco.MjvCamera()
-            cam.type = mujoco.mjtCamera.mjCAMERA_FREE
-            cam.lookat[:] = qpos[int(fi)][0:3]
-            cam.distance = RENDER_CAM["distance"]
-            cam.azimuth = RENDER_CAM["azimuth"]
-            cam.elevation = RENDER_CAM["elevation"]
-            r.update_scene(d, camera=cam)
-            r.scene.flags[mujoco.mjtRndFlag.mjRND_SHADOW] = False
-            out.append(np.asarray(r.render(), dtype=np.uint8))
+    for fi in frame_idx:
+        q_row = qpos_pair[int(fi)]
+        if track_midpoint:
+            mid = 0.5 * (q_row[0:3] + q_row[fly_nq:fly_nq + 3])
+            cam_arg = mujoco.MjvCamera()
+            cam_arg.type = mujoco.mjtCamera.mjCAMERA_FREE
+            cam_arg.lookat[:] = mid
+            cam_arg.distance = RENDER_CAM["distance"]
+            cam_arg.azimuth = RENDER_CAM["azimuth"]
+            cam_arg.elevation = RENDER_CAM["elevation"]
+        else:
+            cam_arg = camera
+        pixels = viz.render_frame(q_row, camera=cam_arg, height=size, width=size)
+        out.append(np.asarray(pixels, dtype=np.uint8))
     return out
 
 
@@ -189,6 +234,8 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--h5", default=DEFAULT_H5)
     ap.add_argument("--model-xml", default=DEFAULT_MODEL)
+    ap.add_argument("--floor-xml", default=DEFAULT_FLOOR)
+    ap.add_argument("--viz-camera", default=VIZ_CAMERA)
     ap.add_argument("--free-run-h5", default=DEFAULT_FREE_RUN_H5)
     ap.add_argument("--session", default=DEFAULT_SESSION)
     ap.add_argument("--sam3-root", default=DEFAULT_SAM3_ROOT)
@@ -305,12 +352,17 @@ def main(argv=None) -> int:
     except Exception as e:                       # noqa: BLE001 - report, don't die
         skipped.append(f"zheight free-running arm ({type(e).__name__}: {e})")
 
-    # --- render strip ------------------------------------------------------
+    # --- render strip (styled two-fly courtship pair) -----------------------
     render_frames = []
     try:
-        qpos = np.asarray(data[ex["key0"]]["qpos"])
-        idx = np.linspace(0, min(T, qpos.shape[0]) - 1, args.n_render, dtype=int)
-        render_frames = _render_frames(args.model_xml, qpos, idx)
+        q0 = np.asarray(data[ex["key0"]]["qpos"])
+        q1 = np.asarray(data[ex["key1"]]["qpos"])
+        n = min(len(q0), len(q1), T)
+        qpos_pair = _pair_qpos(q0, q1, n)
+        idx = np.linspace(0, n - 1, args.n_render, dtype=int)
+        render_frames = _render_frames(
+            args.model_xml, args.floor_xml, qpos_pair, idx,
+            camera=args.viz_camera)
     except Exception as e:                       # noqa: BLE001 - report, don't die
         skipped.append(f"render strip ({type(e).__name__}: {e})")
 

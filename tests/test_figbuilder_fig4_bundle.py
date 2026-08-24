@@ -8,7 +8,7 @@ import pytest
 
 import figbuilder.panels  # noqa: F401
 from figbuilder.panels.base import get_panel_type
-from scripts.figures.export_fig4_bundle import build_fig4_panels
+from scripts.figures.export_fig4_bundle import build_fig4_panels, _pair_qpos
 
 FS = 800.0
 T = 300
@@ -113,3 +113,24 @@ def test_each_panel_satisfies_its_types_declared_needs(pid):
     pd = panels[pid]
     pt = get_panel_type(pd.type)
     assert set(pt.needs) <= set(pd.data), f"{pid} missing {set(pt.needs) - set(pd.data)}"
+
+
+def test_pair_qpos_concatenates_two_flies_side_by_side():
+    """Requirement change: the render strip needs the PAIR qpos layout
+    [fly0_qpos | fly1_qpos] that build_courtship_pair_visualizer's model
+    expects (nq = 2 * fly_nq), not one fly's qpos alone."""
+    rng = np.random.default_rng(1)
+    q0 = rng.normal(size=(50, 93))
+    q1 = rng.normal(size=(50, 93))
+    out = _pair_qpos(q0, q1, 50)
+    assert out.shape == (50, 186)
+    np.testing.assert_array_equal(out[:, :93], q0)
+    np.testing.assert_array_equal(out[:, 93:], q1)
+
+
+def test_pair_qpos_truncates_to_the_shared_frame_count():
+    rng = np.random.default_rng(2)
+    q0 = rng.normal(size=(80, 93))
+    q1 = rng.normal(size=(60, 93))
+    out = _pair_qpos(q0, q1, 60)
+    assert out.shape == (60, 186)
