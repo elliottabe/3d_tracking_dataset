@@ -2230,7 +2230,8 @@ def emit_annotations(fig_spec, annotations: List[dict]) -> List:
         elif kind == "arrow":
             tx, ty = _pt(ann.get("to_mm"))
             el = etree.Element(qname("path"))
-            el.set("d", f"M {f.x(px):g},{f.y(py):g} L {f.x(tx):g},{f.y(ty):g}")
+            el.set("d", f"M {_num(f.x(px))},{_num(f.y(py))} "
+                        f"L {_num(f.x(tx))},{_num(f.y(ty))}")
             st.setdefault("stroke", "#000000"); st.setdefault("lw_pt", 0.8)
             el.set("style", _style(st) + f";fill:none;marker-end:url(#{_ARROW_MARKER_ID})")
             needs_marker = True
@@ -2258,8 +2259,10 @@ def emit_annotations(fig_spec, annotations: List[dict]) -> List:
             tick = f.d(float(ann.get("tick_mm", 1.0)))
             x1, y1, x2, y2 = f.x(px), f.y(py), f.x(tx), f.y(ty)
             el = etree.Element(qname("path"))
-            el.set("d", f"M {x1:g},{y1 + tick:g} L {x1:g},{y1:g} "
-                        f"L {x2:g},{y2:g} L {x2:g},{y2 + tick:g}")
+            el.set("d", f"M {_num(x1)},{_num(y1 + tick)} "
+                        f"L {_num(x1)},{_num(y1)} "
+                        f"L {_num(x2)},{_num(y2)} "
+                        f"L {_num(x2)},{_num(y2 + tick)}")
             st.setdefault("stroke", "#000000"); st.setdefault("lw_pt", 0.8)
             el.set("style", _style(st) + ";fill:none")
 
@@ -2273,7 +2276,7 @@ def emit_annotations(fig_spec, annotations: List[dict]) -> List:
                                     "lw_pt": st.get("lw_pt", 1.2)}))
             tx_el = etree.SubElement(el, qname("text"))
             tx_el.set("x", _num(f.x(px + length / 2)))
-            tx_el.set("y", f"{f.y(py) + f.d(2.0):g}")
+            tx_el.set("y", _num(f.y(py) + f.d(2.0)))
             tx_el.set("style", _style({"font_size_pt": st.get("font_size_pt", 6),
                                        "font": "Arial, Helvetica, sans-serif"})
                       + ";text-anchor:middle")
