@@ -179,3 +179,60 @@ class WingPolarPanel(PanelType):
             center_stat=spec.get("center_stat", "median"),
             title=spec.get("title", ""),
         )
+
+
+@register
+class SineInPhasePanel(PanelType):
+    id = "courtship.sine_inphase"
+    label = "Sine song: extended vs folded wing in phase"
+    needs = ["t_ms", "ext_z", "fold_z"]
+    schema = {"type": "object", "properties": {
+        **_TIME_SCHEMA, "title": {"type": "string", "default": ""}}}
+
+    def draw(self, ax, data, spec):
+        cfp.panel_sine_wing_inphase(
+            ax, np.asarray(data["t_ms"]), np.asarray(data["ext_z"]),
+            np.asarray(data["fold_z"]), fs=float(spec.get("fs", 800.0)),
+            frame_range=_frame_range(spec),
+            sine_segments=_segs_arg(data.get("sine_segments")),
+            title=spec.get("title", ""),
+        )
+
+
+_PULSE_TYPES = ("Pslow", "Pfast")
+
+
+@register
+class PulseClassPanel(PanelType):
+    """Reassembles the nested `pulse_type_results` dict from flat datasets.
+
+    `panel_pulse_classification` wants {'centroids': {'Pslow': wf, 'Pfast': wf},
+    'counts': {...}, 'pooled_waveforms': {'Pslow': (n, W), ...}, 'fs': float}.
+    The bundle stores flat named arrays, so per-type arrays live as
+    `centroid_<T>` / `pooled_<T>` and are re-nested here. Std shading is derived
+    by the panel function from `pooled_waveforms` — there is no `stds` input.
+    """
+
+    id = "courtship.pulse_class"
+    label = "Pslow / Pfast typed centroids"
+    needs = ["centroid_Pslow", "centroid_Pfast"]
+    schema = {"type": "object", "properties": {
+        "show_std": {"type": "boolean", "default": True},
+        "fs": {"type": "number", "default": 800.0},
+        "count_Pslow": {"type": "integer", "default": 0},
+        "count_Pfast": {"type": "integer", "default": 0},
+        "title": {"type": "string", "default": ""}}}
+
+    def draw(self, ax, data, spec):
+        results = {
+            "centroids": {t: np.asarray(data[f"centroid_{t}"], dtype=float)
+                          for t in _PULSE_TYPES if f"centroid_{t}" in data},
+            "counts": {t: int(spec.get(f"count_{t}", 0)) for t in _PULSE_TYPES},
+            "pooled_waveforms": {t: np.asarray(data[f"pooled_{t}"], dtype=float)
+                                 for t in _PULSE_TYPES if f"pooled_{t}" in data},
+            "fs": float(spec.get("fs", 800.0)),
+        }
+        cfp.panel_pulse_classification(
+            ax, results, show_std=bool(spec.get("show_std", True)),
+            title=spec.get("title", ""),
+        )
