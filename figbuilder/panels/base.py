@@ -7,7 +7,7 @@ the UI is generated from the schema.
 """
 from __future__ import annotations
 
-from typing import Any, Dict, List, Type
+from typing import Any, Dict, List, Optional, Type
 
 import matplotlib.pyplot as plt
 
@@ -21,6 +21,8 @@ class PanelType:
     needs: List[str] = []
     #: JSON Schema for the `spec` object; drives the properties UI.
     schema: Dict[str, Any] = {"type": "object", "properties": {}}
+    #: matplotlib projection this panel needs, e.g. "polar". None = rectilinear.
+    projection: Optional[str] = None
 
     def draw(self, ax: plt.Axes, data: Dict[str, Any], spec: Dict[str, Any]) -> None:
         raise NotImplementedError
@@ -47,4 +49,5 @@ def get_panel_type(type_id: str) -> PanelType:
 
 def list_panel_types() -> List[Dict[str, Any]]:
     return [{"id": p.id, "label": p.label, "needs": list(p.needs),
-             "schema": p.schema} for p in sorted(_REGISTRY.values(), key=lambda p: p.id)]
+             "schema": p.schema, "projection": p.projection}
+            for p in sorted(_REGISTRY.values(), key=lambda p: p.id)]
