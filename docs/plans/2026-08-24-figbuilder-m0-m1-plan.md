@@ -2123,10 +2123,16 @@ def test_line_and_rect_and_ellipse_emit_expected_tags():
 
 
 def test_arrow_emits_a_path_with_a_marker_reference():
+    """A single arrow returns [defs, path]: the arrowhead <defs> is prepended.
+
+    Locate the path by TAG, not by index — element order is pinned by the
+    TS/Python conformance test in Task 14, which requires defs-first.
+    """
     els = emit_annotations(_fig(), [
         {"id": "a", "kind": "arrow", "pos_mm": [1, 1], "to_mm": [9, 5]}])
-    assert etree.QName(els[0]).localname == "path"
-    assert "marker-end" in els[0].get("style", "")
+    assert etree.QName(els[0]).localname == "defs"
+    path = next(e for e in els if etree.QName(e).localname == "path")
+    assert "marker-end" in path.get("style", "")
 
 
 def test_scalebar_emits_a_group_with_a_line_and_a_label():
