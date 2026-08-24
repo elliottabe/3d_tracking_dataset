@@ -3169,9 +3169,26 @@ def main(argv=None) -> int:
     cands = [r for r in results if args.recording in recording_of(r)]
     if not cands:
         skipped.append(f"exemplar from {args.recording!r} (no surviving pair); "
-                       f"falling back to the longest available bout")
+                       f"falling back to all recordings")
         cands = results
-    ex = max(cands, key=lambda r: int(r["T"]))
+
+    def song_balance(r) -> float:
+        """min(frac_pulse, frac_sine) over valid male frames.
+
+        The figure's point is that wing kinematics distinguish song TYPES, so
+        the exemplar must contain BOTH in usable proportion. Ranking by
+        duration instead (Ruling 17) picked a 3.06 s bout that was 63% sine and
+        23% pulse: one long sine region, nothing like the published figure.
+        Maximising the WEAKER fraction selects genuinely mixed song.
+        """
+        lab = np.asarray(r["male_labels"])
+        v = np.asarray(r["male_valid"], bool)
+        if not v.any():
+            return -1.0
+        sel = lab[v]
+        return min(float((sel == "pulse").mean()), float((sel == "sine").mean()))
+
+    ex = max(cands, key=song_balance)
     print(f"exemplar {ex['key0']}/{ex['key1']} from {recording_of(ex)} "
           f"(T={int(ex['T'])}, {len(cands)} candidates)")
     fs = float(song.fs)
