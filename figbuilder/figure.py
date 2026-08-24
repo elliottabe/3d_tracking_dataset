@@ -11,6 +11,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from figbuilder.canvas import DEFAULT_MAX_WIDTH_MM, resolve_preset, to_mm
+
 MM_PER_INCH = 25.4
 
 Rect = Tuple[float, float, float, float]
@@ -48,6 +50,8 @@ class FigureSpec:
     height_mm: float = 140.0
     dpi: int = 300
     transparent: bool = True
+    preset: Optional[str] = None
+    max_width_mm: Optional[float] = DEFAULT_MAX_WIDTH_MM
     bundle: str = "bundle.h5"
     style: Dict[str, Any] = field(default_factory=dict)
     panels: List[PanelSpec] = field(default_factory=list)
@@ -62,6 +66,16 @@ class FigureSpec:
             if p.id == panel_id:
                 return p
         raise KeyError(panel_id)
+
+    def set_size(self, width: float, height: Optional[float] = None,
+                 unit: str = "mm") -> None:
+        """Set the canvas size in mm, cm, inches, or points.
+
+        `height=None` keeps the current height, so width can be changed alone.
+        """
+        self.width_mm = to_mm(width, unit)
+        if height is not None:
+            self.height_mm = to_mm(height, unit)
 
 
 def _parse(d: dict) -> FigureSpec:
@@ -89,11 +103,24 @@ def _parse(d: dict) -> FigureSpec:
             group=grp, z=int(p.get("z", 0)),
         ))
 
+    preset = figd.get("preset")
+    if preset is not None:
+        pw, ph = resolve_preset(preset)
+    else:
+        pw, ph = 183.0, 140.0
+    width_mm = float(figd["width_mm"]) if "width_mm" in figd else pw
+    height_mm = float(figd["height_mm"]) if "height_mm" in figd else (
+        ph if ph is not None else 140.0)
+
+    max_width = figd["max_width_mm"] if "max_width_mm" in figd else DEFAULT_MAX_WIDTH_MM
+
     return FigureSpec(
-        width_mm=float(figd.get("width_mm", 183.0)),
-        height_mm=float(figd.get("height_mm", 140.0)),
+        width_mm=width_mm,
+        height_mm=height_mm,
         dpi=int(figd.get("dpi", 300)),
         transparent=bool(figd.get("transparent", True)),
+        preset=preset,
+        max_width_mm=(None if max_width is None else float(max_width)),
         bundle=d.get("bundle", "bundle.h5"),
         style=d.get("style", {}),
         panels=panels, groups=groups,
@@ -106,7 +133,8 @@ def _unparse(spec: FigureSpec) -> dict:
         "version": 1,
         "bundle": spec.bundle,
         "figure": {"width_mm": spec.width_mm, "height_mm": spec.height_mm,
-                   "dpi": spec.dpi, "transparent": spec.transparent},
+                   "dpi": spec.dpi, "transparent": spec.transparent,
+                   "preset": spec.preset, "max_width_mm": spec.max_width_mm},
         "style": spec.style,
         "panels": [{"id": p.id, "type": p.type, "rect": list(p.rect),
                     "data": p.data, "spec": p.spec, "group": p.group, "z": p.z}
