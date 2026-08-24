@@ -14,6 +14,11 @@ FORCED_RCPARAMS: Dict[str, Any] = {
     "svg.fonttype": "none",
     "pdf.fonttype": 42,
     "ps.fonttype": 42,
+    # matplotlib otherwise mints RANDOM marker-definition ids per save, making
+    # its SVG non-reproducible. A fixed salt makes them content-derived, so the
+    # same inputs export byte-identical SVG. Forced, not defaulted: determinism
+    # is part of the export contract. Ruling 10.
+    "svg.hashsalt": "figbuilder",
 }
 
 DEFAULT_RCPARAMS: Dict[str, Any] = {
