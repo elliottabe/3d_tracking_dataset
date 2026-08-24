@@ -3042,10 +3042,29 @@ def build_fig4_panels(results: List[dict], ex: dict,
     return panels
 
 
-#: Verified present on this node (Ruling 12). Override with CLI flags.
+#: All verified present on this node (Ruling 14). Override with CLI flags.
+#:
+#: These MUST stay mutually consistent: the combined h5 holds 11 Session1
+#: recordings, and the exemplar bout, its camera video, its calibration and its
+#: SAM3 masks all come from 2026_04_02_16_21_32. Pointing any one of them at a
+#: different recording silently produces a figure whose traces and video frames
+#: describe different flies.
 DEFAULT_H5 = ("/gscratch/portia/eabe/data/Johnson_lab/courtship/Data_analysis/"
               "analysis/v1/ik_output_combined_v1_courtship_both.h5")
 DEFAULT_MODEL = "models/fruitfly_v1/fruitfly_v1_free.xml"
+DEFAULT_SESSION = ("/gscratch/portia/eabe/data/Johnson_lab/Video_recordings/"
+                   "courtship/Session1/2026_04_02_16_21_32")
+DEFAULT_SAM3_ROOT = DEFAULT_SESSION + "/Predictions_3D_34662592"
+DEFAULT_CAM = "Cam2012630"
+DEFAULT_FREE_RUN_H5 = ("/gscratch/portia/eabe/data/Johnson_lab/processed/"
+                       "free_running/NewBouts/v1/ik_output_combined_v1_free_running.h5")
+#: The exemplar recording; bouts are matched by this substring of info/fly_ids.
+DEFAULT_EXEMPLAR_RECORDING = "2026_04_02_16_21_32"
+
+#: The assay is FREE RUNNING, not free walking (Ruling 15). The underlying
+#: panel function hardcodes a 'free walk' tick label and `utils/` is consumed
+#: unmodified, so the corrected label is applied at the figbuilder layer.
+ZHEIGHT_LABELS = ("pulse", "sine", "free running")
 
 #: Camera for the single-fly render strip. Chosen by sweeping distance against
 #: the fraction of frame the fly occupies: 0.30 -> 51% (clipped), 0.60 -> 18%
@@ -3099,9 +3118,16 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--h5", default=DEFAULT_H5)
     ap.add_argument("--model-xml", default=DEFAULT_MODEL)
-    ap.add_argument("--free-walk-h5", default=None,
-                    help="optional; without it the zheight panel omits the "
-                         "free-walking arm")
+    ap.add_argument("--free-run-h5", default=DEFAULT_FREE_RUN_H5)
+    ap.add_argument("--session", default=DEFAULT_SESSION)
+    ap.add_argument("--sam3-root", default=DEFAULT_SAM3_ROOT)
+    ap.add_argument("--sam3-bout", default="bout_00006")
+    ap.add_argument("--cam", default=DEFAULT_CAM)
+    ap.add_argument("--recording", default=DEFAULT_EXEMPLAR_RECORDING,
+                    help="substring of info/fly_ids selecting the exemplar")
+    ap.add_argument("--n-video", type=int, default=4)
+    ap.add_argument("--roi", type=int, nargs=4, default=[1350, 0, 500, 500])
+    ap.add_argument("--kp-scale", type=float, default=0.1)
     ap.add_argument("--out", default="figures/paper_figures/fig4_bundle.h5")
     ap.add_argument("--width-mm", type=float, default=183.0)
     ap.add_argument("--height-mm", type=float, default=140.0)
@@ -3161,11 +3187,11 @@ def main(argv=None) -> int:
     ptr = get_pulse_type_labels(results, fs=fs)
 
     walking_z = np.zeros(0)
-    if args.free_walk_h5:
+    try:
         from utils._loader import load__scutellum_z
-        walking_z = load__scutellum_z(args.free_walk_h5, per_bout=True)
-    else:
-        skipped.append("zheight.walking_z (no --free-walk-h5)")
+        walking_z = load__scutellum_z(args.free_run_h5, per_bout=True)
+    except Exception as e:                       # noqa: BLE001 - report, don't die
+        skipped.append(f"zheight free-running arm ({type(e).__name__}: {e})")
 
     # --- render strip ------------------------------------------------------
     render_frames = []
@@ -3176,9 +3202,72 @@ def main(argv=None) -> int:
     except Exception as e:                       # noqa: BLE001 - report, don't die
         skipped.append(f"render strip ({type(e).__name__}: {e})")
 
-    # --- panels that need inputs this node does not have --------------------
-    skipped.append("video strip (no courtship mp4 / DLT calibration on this node)")
-    skipped.append("pitch + align_violin (no SAM3 masks for the female COM)")
+    # --- video strip -------------------------------------------------------
+    # Bake the strip by driving the EXISTING, tested panel function into an
+    # offscreen figure and grabbing the rasterized axes. The video strip is an
+    # image panel by design, so baking pre-drawn frames (keypoints + SAM3 mask
+    # overlay included) reuses verified code rather than reimplementing DLT
+    # projection here.
+    video_frames = []
+    try:
+        import matplotlib.pyplot as plt
+        from utils.sam3_female_com import sam3_camera_index, unpack_sam3_masks_for_frames
+
+        calib_dir = Path(args.session) / "calibration"
+        dlt_csv = calib_dir / f"{args.cam}_dlt.csv"
+        mp4 = Path(args.session) / f"{args.cam}.mp4"
+        sam3_npz = Path(args.sam3_root) / args.sam3_bout / "sam3_masks.npz"
+        dlt = cfp._dlt_load(dlt_csv)
+        cam_idx = sam3_camera_index(calib_dir, dlt_csv.name)
+        vidx = np.linspace(0, T - 1, args.n_video, dtype=int)
+        masks = unpack_sam3_masks_for_frames(
+            sam3_npz, cam_idx, fly_indices=[1, 0],
+            frame_indices=[int(f) for f in vidx])
+        kp_xyz = np.asarray(data[ex["key0"]]["kp_data"]).reshape(T, -1, 3)
+        figv, axv = plt.subplots(1, args.n_video, figsize=(args.n_video * 2, 2), dpi=200)
+        axv = np.atleast_1d(axv)
+        cfp.panel_video_strip_with_kp(
+            list(axv), mp4, vidx, kp_xyz_per_frame=kp_xyz, kp_names=kp_names,
+            dlt_coeffs=dlt, roi=tuple(args.roi), fs=fs, kp_scale=args.kp_scale,
+            video_frame_offset=0, masks_per_fly=masks,
+            mask_colors=["#e74c3c", "#3a7bff"], mask_alpha=0.35)
+        figv.canvas.draw()
+        for a in axv:
+            a.set_position(a.get_position())      # freeze before extraction
+            bb = a.get_window_extent()
+            buf = np.asarray(figv.canvas.buffer_rgba())
+            y0, y1 = int(figv.bbox.height - bb.y1), int(figv.bbox.height - bb.y0)
+            video_frames.append(np.ascontiguousarray(
+                buf[y0:y1, int(bb.x0):int(bb.x1), :3], dtype=np.uint8))
+        plt.close(figv)
+    except Exception as e:                       # noqa: BLE001 - report, don't die
+        skipped.append(f"video strip ({type(e).__name__}: {e})")
+
+    # --- male pitch vs target pitch, and the pooled alignment violin --------
+    male_pitch = target_pitch = np.zeros(0)
+    per_bout_align = np.zeros(0)
+    try:
+        from utils.sam3_female_com import triangulate_sam3_female_com
+        from utils.sam3_aligned_bouts import compute_pitch_alignment_all_sessions
+
+        female = triangulate_sam3_female_com(
+            str(Path(args.sam3_root) / args.sam3_bout / "sam3_masks.npz"),
+            str(Path(args.session) / "calibration"),
+            fly_idx=0, min_cams=2, verbose=False) / args.kp_scale
+        qm = np.asarray(data[ex["key0"]]["qpos"])
+        n = min(T, qm.shape[0], female.shape[0])
+        male_pitch = cfp.body_pitch_deg_from_quat(qm[:n, 3:7])
+        scut = np.asarray(data[ex["key0"]]["kp_data"]).reshape(-1, len(kp_names), 3)
+        scut = scut[:n, kp_names.index("Scutellum"), :]
+        vec = female[:n] - scut
+        nrm = np.linalg.norm(vec, axis=-1)
+        target_pitch = np.degrees(np.arcsin(np.divide(
+            vec[..., 2], nrm, out=np.full_like(nrm, np.nan), where=nrm > 0)))
+        al = compute_pitch_alignment_all_sessions(
+            [args.sam3_root], kp_scale=args.kp_scale)
+        per_bout_align = np.asarray(al["median_abs_alignment_deg"], float)
+    except Exception as e:                       # noqa: BLE001 - report, don't die
+        skipped.append(f"pitch + align_violin ({type(e).__name__}: {e})")
 
     extras = {
         "fs": fs, "start_frame": 0, "end_frame": T,
@@ -3189,9 +3278,11 @@ def main(argv=None) -> int:
         "pulse_centroids": ptr.get("centroids", {}),
         "pulse_pooled": ptr.get("pooled_waveforms", {}),
         "pulse_counts": ptr.get("counts", {}),
-        "per_bout_align": np.zeros(0),
-        "male_pitch": np.zeros(0), "target_pitch": np.zeros(0),
-        "video_frames": [], "render_frames": render_frames,
+        "per_bout_align": per_bout_align,
+        "male_pitch": male_pitch, "target_pitch": target_pitch,
+        "t_ms_full": (np.arange(male_pitch.size) / fs) * 1000.0,
+        "zheight_labels": ZHEIGHT_LABELS,
+        "video_frames": video_frames, "render_frames": render_frames,
     }
     panels = build_fig4_panels(results, ex, extras)
     # Drop panels with no data rather than bundling empty ones.
