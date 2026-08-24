@@ -3067,12 +3067,25 @@ DEFAULT_EXEMPLAR_RECORDING = "2026_04_02_16_21_32"
 #: unmodified, so the corrected label is applied at the figbuilder layer.
 ZHEIGHT_LABELS = ("pulse", "sine", "free running")
 
-#: Camera for the single-fly render strip. Chosen by sweeping distance against
-#: the fraction of frame the fly occupies: 0.30 -> 51% (clipped), 0.60 -> 18%
-#: (whole fly, wings and eye legible), 1.00 -> 5% (too small). The model's
+#: Camera for the TWO-FLY render strip. Distance chosen by sweeping it against
+#: the fraction of frame the subject occupies: 0.30 -> 51% (clipped), 0.60 ->
+#: 18% (whole fly, wings and eye legible), 1.00 -> 5% (too small). The model's
 #: stat.extent is 0.647, so panel_render_strip's own 0.03 default is ~20x too
-#: close and puts the camera inside the animal.
-RENDER_CAM = {"distance": 0.6, "azimuth": 90.0, "elevation": -20.0}
+#: close and puts the camera INSIDE the animal.
+RENDER_CAM = {"distance": 0.6, "azimuth": 85.0, "elevation": -20.0}
+
+#: The figure is about COURTSHIP, so the render must show BOTH flies, styled so
+#: fly0 and fly1 are distinguishable (red vs teal). `mujoco_visualizer` is
+#: already installed in the env — do NOT add a sys.path insert. Ruling 19.
+DEFAULT_FLOOR = "models/fruitfly_v1/floor.xml"
+VIZ_SETTINGS = ("Earthy_V1_courtship_fly0", "Earthy_V1_courtship_fly1")
+VIZ_CAMERA = "track1_fly0"
+#: rig_pos MUST stay None: models/fruitfly_v1/floor.xml exposes only a 'floor'
+#: worldbody geom, so build_courtship_pair_visualizer's default
+#: rig_geom_name='Happy_house' raises ValueError. The override only aligns
+#: chamber walls (cosmetic). The notebook pointed at a DIFFERENT floor.xml
+#: under fruitfly_body_models/ that does carry the chamber geom.
+VIZ_RIG_POS = None
 
 
 def _render_frames(model_xml, qpos, frame_idx, size=256):
