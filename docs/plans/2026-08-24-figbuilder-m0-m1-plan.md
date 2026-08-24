@@ -13,7 +13,7 @@ final rect; compositing is then a pure overlay (no transforms), with per-panel
 id namespacing to prevent collisions. Annotations are plain SVG appended after
 the tiles. A FastAPI server serves tiles to a browser canvas.
 
-**Tech Stack:** Python 3.10, matplotlib 3.10.8 (Agg), h5py 3.16, lxml 6.0,
+**Tech Stack:** Python 3.12 (`environment.yml` pins `python=3.12`), matplotlib 3.10.8 (Agg), h5py 3.16, lxml 6.0,
 FastAPI + uvicorn, `rsvg-convert` for PNG/PDF, pytest 9. Front-end: Vite +
 React + TypeScript.
 
@@ -21,7 +21,8 @@ React + TypeScript.
 
 ## Global Constraints
 
-- Python 3.10 syntax; every module starts `from __future__ import annotations`.
+- Target the repo env: Python 3.12 (per `environment.yml`). Every module starts
+  `from __future__ import annotations`, matching existing repo modules.
 - Tests live flat in `tests/test_<topic>.py`, matching repo convention.
 - Every test module that imports matplotlib does `matplotlib.use('Agg')` BEFORE
   `import matplotlib.pyplot`. See `tests/test_assemble_figure.py`.
