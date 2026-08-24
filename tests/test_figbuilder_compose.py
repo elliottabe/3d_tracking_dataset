@@ -12,7 +12,7 @@ import figbuilder.panels  # noqa: F401
 from figbuilder.compose import compose
 from figbuilder.figure import FigureSpec, PanelSpec
 from figbuilder.render import render_tile
-from figbuilder.svgutil import namespace_ids
+from figbuilder.svgutil import XLINK_NS, namespace_ids
 
 
 def _fig():
@@ -74,3 +74,78 @@ def test_compose_with_no_tiles_still_emits_a_valid_document():
     out = compose(_fig(), [])
     root = etree.fromstring(out)
     assert root.tag.endswith("svg")
+
+
+def test_namespace_ids_does_not_touch_text_content():
+    svg = (b'<svg xmlns="http://www.w3.org/2000/svg" '
+           b'xmlns:xlink="http://www.w3.org/1999/xlink">'
+           b'<defs><marker id="a"/></defs>'
+           b'<text>f(#a)</text>'
+           b'</svg>')
+    root = namespace_ids(svg, "p")
+    marker = root.find(".//{http://www.w3.org/2000/svg}marker")
+    assert marker.get("id") == "p__a"
+    text = root.find(".//{http://www.w3.org/2000/svg}text")
+    assert text.text == "f(#a)", (
+        f"text content must be untouched, got {text.text!r}")
+
+
+def test_namespace_ids_rewrites_clip_path_and_xlink_href():
+    svg = (b'<svg xmlns="http://www.w3.org/2000/svg" '
+           b'xmlns:xlink="http://www.w3.org/1999/xlink">'
+           b'<defs><clipPath id="p1"/><marker id="m1"/></defs>'
+           b'<g clip-path="url(#p1)"><use xlink:href="#m1"/></g>'
+           b'</svg>')
+    root = namespace_ids(svg, "t")
+    g = root.find(".//{http://www.w3.org/2000/svg}g")
+    assert g.get("clip-path") == "url(#t__p1)"
+    use = root.find(".//{http://www.w3.org/2000/svg}use")
+    assert use.get(f"{{{XLINK_NS}}}href") == "#t__m1"
+
+
+def test_namespace_ids_rewrites_url_ref_embedded_in_style_attribute():
+    svg = (b'<svg xmlns="http://www.w3.org/2000/svg">'
+           b'<defs><marker id="arrow"/></defs>'
+           b'<path style="fill:none;marker-end:url(#arrow);stroke:#000"/>'
+           b'</svg>')
+    root = namespace_ids(svg, "s")
+    path = root.find(".//{http://www.w3.org/2000/svg}path")
+    assert path.get("style") == "fill:none;marker-end:url(#s__arrow);stroke:#000"
+
+
+def test_namespace_ids_no_double_prefixing_with_prefix_colliding_ids():
+    svg = (b'<svg xmlns="http://www.w3.org/2000/svg" '
+           b'xmlns:xlink="http://www.w3.org/1999/xlink">'
+           b'<defs>'
+           b'<marker id="a"/><marker id="a1"/>'
+           b'<marker id="line2d_1"/><marker id="line2d_11"/>'
+           b'</defs>'
+           b'<use xlink:href="#a"/><use xlink:href="#a1"/>'
+           b'<use xlink:href="#line2d_1"/><use xlink:href="#line2d_11"/>'
+           b'</svg>')
+    root = namespace_ids(svg, "z")
+    ids = {e.get("id") for e in root.iter() if e.get("id")}
+    assert ids == {"z__a", "z__a1", "z__line2d_1", "z__line2d_11"}
+    hrefs = [e.get(f"{{http://www.w3.org/1999/xlink}}href")
+             for e in root.iter() if e.get(f"{{http://www.w3.org/1999/xlink}}href")]
+    assert set(hrefs) == {"#z__a", "#z__a1", "#z__line2d_1", "#z__line2d_11"}
+
+
+def test_compose_has_no_dangling_references_across_two_real_tiles():
+    out = compose(_fig(), [("a", _tile("a", (0.1, 0.55, 0.8, 0.35), "#38bdf8")),
+                           ("b", _tile("b", (0.1, 0.12, 0.8, 0.35), "#000000"))])
+    root = etree.fromstring(out)
+    ids = {e.get("id") for e in root.iter() if e.get("id")}
+
+    url_refs = set()
+    for e in root.iter():
+        for attr, value in e.attrib.items():
+            if value is None:
+                continue
+            for m in re.finditer(r"url\(#([^)]+)\)", value):
+                url_refs.add(m.group(1))
+            if value.startswith("#"):
+                url_refs.add(value[1:])
+
+    dangling = url_refs - ids
+    assert not dangling, f"dangling references not defined in the document: {dangling}"
