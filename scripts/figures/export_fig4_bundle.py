@@ -16,10 +16,18 @@ notebook should import from here rather than duplicating the logic.
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 from typing import Any, Dict, List
 
 import numpy as np
+
+# scripts/figures/ -> repo root, so `figbuilder`/`utils` imports work when run
+# as a script (sys.path[0] is this file's directory, not the repo root).
+# Same bootstrap as scripts/export/pack_reference_clips.py (commit e030c61).
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
 
 from figbuilder.bundle import PanelData, segments_to_array, write_bundle
 
@@ -128,11 +136,19 @@ DEFAULT_FREE_RUN_H5 = ("/gscratch/portia/eabe/data/Johnson_lab/processed/"
                        "free_running/NewBouts/v1/ik_output_combined_v1_free_running.h5")
 #: The exemplar recording; bouts are matched by this substring of info/fly_ids.
 DEFAULT_EXEMPLAR_RECORDING = "2026_04_02_16_21_32"
+#: Root globbed by `find_courtship_sessions` for `**/sam3_aligned.h5` (the
+#: pooled alignment violin's population). Independent of `--session`/
+#: `--sam3-root`: those point at the ONE recording with per-bout
+#: `sam3_masks.npz` (used by the pitch trace + video strip); this root may
+#: resolve to a DIFFERENT session that has the pooled `sam3_aligned.h5`
+#: instead. Which session(s) actually got pooled is recorded in the bundle
+#: meta's `align_sessions`, never silently cross-sourced.
+DEFAULT_COURTSHIP_VIDEO_ROOT = ("/gscratch/portia/eabe/data/Johnson_lab/"
+                                "Video_recordings/courtship")
 
-#: The assay is FREE RUNNING, not free walking (Ruling 15). The underlying
-#: panel function hardcodes a 'free walk' tick label and `utils/` is consumed
-#: unmodified, so the corrected label is applied at the figbuilder layer.
-ZHEIGHT_LABELS = ("pulse", "sine", "free running")
+# NOTE: the FREE-RUNNING-not-free-walking tick-label fix (Ruling 15) is
+# implemented for real in figbuilder.panels.courtship.ZHeightPanel.draw,
+# which relabels after drawing. There is no constant to plumb through here.
 
 #: Two-fly courtship-pair render (requirement change, 2026-08-24): the panel
 #: is about courtship — two interacting flies — so the render strip must show
@@ -243,6 +259,8 @@ def main(argv=None) -> int:
     ap.add_argument("--cam", default=DEFAULT_CAM)
     ap.add_argument("--recording", default=DEFAULT_EXEMPLAR_RECORDING,
                     help="substring of info/fly_ids selecting the exemplar")
+    ap.add_argument("--courtship-video-root", default=DEFAULT_COURTSHIP_VIDEO_ROOT,
+                    help="root globbed for **/sam3_aligned.h5 (align_violin population)")
     ap.add_argument("--n-video", type=int, default=4)
     ap.add_argument("--roi", type=int, nargs=4, default=[1350, 0, 500, 500])
     ap.add_argument("--kp-scale", type=float, default=0.1)
@@ -407,12 +425,15 @@ def main(argv=None) -> int:
     except Exception as e:                       # noqa: BLE001 - report, don't die
         skipped.append(f"video strip ({type(e).__name__}: {e})")
 
-    # --- male pitch vs target pitch, and the pooled alignment violin --------
+    # --- male pitch vs target pitch (exemplar traces) -----------------------
+    # Independent try/except from the pooled violin below (Finding 1b): a
+    # failure here must not be reported as (or hide) a failure of the
+    # violin, and vice versa — `male_pitch`/`target_pitch` are assigned
+    # incrementally in this block, so if THIS block's own exception fires
+    # they simply keep whatever partial value they had, same as before.
     male_pitch = target_pitch = np.zeros(0)
-    per_bout_align = np.zeros(0)
     try:
         from utils.sam3_female_com import triangulate_sam3_female_com
-        from utils.sam3_aligned_bouts import compute_pitch_alignment_all_sessions
 
         female = triangulate_sam3_female_com(
             str(Path(args.sam3_root) / args.sam3_bout / "sam3_masks.npz"),
@@ -427,11 +448,36 @@ def main(argv=None) -> int:
         nrm = np.linalg.norm(vec, axis=-1)
         target_pitch = np.degrees(np.arcsin(np.divide(
             vec[..., 2], nrm, out=np.full_like(nrm, np.nan), where=nrm > 0)))
-        al = compute_pitch_alignment_all_sessions(
-            [args.sam3_root], kp_scale=args.kp_scale)
-        per_bout_align = np.asarray(al["median_abs_alignment_deg"], float)
     except Exception as e:                       # noqa: BLE001 - report, don't die
-        skipped.append(f"pitch + align_violin ({type(e).__name__}: {e})")
+        skipped.append(f"male pitch trace ({type(e).__name__}: {e})")
+
+    # --- pooled alignment violin (population, possibly a DIFFERENT session) -
+    # `compute_pitch_alignment_all_sessions` wants a list of
+    # (sam3_aligned_h5, bouts_root) TUPLES, discovered via
+    # `find_courtship_sessions` — NOT a bare path string (Finding 1a: passing
+    # `[args.sam3_root]` made its internal `for h5_path, bouts_root in
+    # sessions` unpack the string itself and raise
+    # `ValueError: too many values to unpack`, on every run, permanently
+    # emptying this panel behind a message that looked like ordinary missing
+    # data). Split into its own try/except (Finding 1b) so this failure can
+    # never be blamed on / hide behind the pitch-trace block above.
+    per_bout_align = np.zeros(0)
+    align_sessions: List[tuple] = []
+    try:
+        from utils.sam3_aligned_bouts import (
+            compute_pitch_alignment_all_sessions, find_courtship_sessions)
+
+        align_sessions = find_courtship_sessions(args.courtship_video_root)
+        if not align_sessions:
+            skipped.append(
+                f"align_violin (no sam3_aligned.h5 found under "
+                f"{args.courtship_video_root})")
+        else:
+            al = compute_pitch_alignment_all_sessions(
+                align_sessions, kp_scale=args.kp_scale)
+            per_bout_align = np.asarray(al["median_abs_alignment_deg"], float)
+    except Exception as e:                       # noqa: BLE001 - report, don't die
+        skipped.append(f"align_violin ({type(e).__name__}: {e})")
 
     extras = {
         "fs": fs, "start_frame": 0, "end_frame": T,
@@ -445,7 +491,6 @@ def main(argv=None) -> int:
         "per_bout_align": per_bout_align,
         "male_pitch": male_pitch, "target_pitch": target_pitch,
         "t_ms_full": (np.arange(male_pitch.size) / fs) * 1000.0,
-        "zheight_labels": ZHEIGHT_LABELS,
         "video_frames": video_frames, "render_frames": render_frames,
     }
     panels = build_fig4_panels(results, ex, extras)
@@ -453,11 +498,20 @@ def main(argv=None) -> int:
     panels = {k: v for k, v in panels.items()
               if v.data or v.assets or k in ("wing", "scut")}
 
+    # Finding 1d: record which session(s) the pooled violin actually pooled.
+    # Scientifically load-bearing — on this node `find_courtship_sessions`
+    # resolves to a DIFFERENT session than the exemplar recording (the
+    # exemplar has per-bout sam3_masks.npz for the pitch trace + video strip,
+    # but no sam3_aligned.h5 for the pooled violin), so this must be recorded
+    # rather than silently cross-sourced.
+    align_sessions_str = "; ".join(str(h5) for h5, _ in align_sessions)
+
     write_bundle(args.out,
                  meta={"fig_width_mm": args.width_mm,
                        "fig_height_mm": args.height_mm,
                        "source_h5": args.h5,
                        "n_pairs": len(results),
+                       "align_sessions": align_sessions_str,
                        "skipped": "; ".join(skipped)},
                  panels=panels)
     print(f"wrote {args.out}: {len(panels)} panels from {len(results)} pairs")

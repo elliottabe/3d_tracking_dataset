@@ -1,6 +1,10 @@
 """build_fig4_panels shapes the bundle correctly from synthetic analysis output."""
 from __future__ import annotations
 
+import subprocess
+import sys
+from pathlib import Path
+
 import matplotlib
 matplotlib.use('Agg')
 import numpy as np
@@ -9,6 +13,8 @@ import pytest
 import figbuilder.panels  # noqa: F401
 from figbuilder.panels.base import get_panel_type
 from scripts.figures.export_fig4_bundle import build_fig4_panels, _pair_qpos
+
+REPO = Path(__file__).resolve().parents[1]
 
 FS = 800.0
 T = 300
@@ -134,3 +140,26 @@ def test_pair_qpos_truncates_to_the_shared_frame_count():
     q1 = rng.normal(size=(60, 93))
     out = _pair_qpos(q0, q1, 60)
     assert out.shape == (60, 186)
+
+
+def test_cli_runs_standalone(tmp_path):
+    """export_fig4_bundle.py must bootstrap the repo root itself: running
+    `python scripts/figures/export_fig4_bundle.py` (not `-m`) puts
+    scripts/figures/ on sys.path, not the repo root, so its
+    `from figbuilder...`/`from utils...` imports die with ModuleNotFoundError
+    without the bootstrap. Same pattern as
+    scripts/export/pack_reference_clips.py (commit e030c61)."""
+    r = subprocess.run(
+        [sys.executable, str(REPO / "scripts" / "figures" / "export_fig4_bundle.py"),
+         "--help"],
+        cwd=tmp_path, capture_output=True, text=True, timeout=300)
+    assert r.returncode == 0, r.stderr[-500:]
+
+
+def test_cli_runs_as_module():
+    """The `-m` invocation form must keep working too (it never broke, but
+    both forms are asserted so a future change can't silently regress one)."""
+    r = subprocess.run(
+        [sys.executable, "-m", "scripts.figures.export_fig4_bundle", "--help"],
+        cwd=REPO, capture_output=True, text=True, timeout=300)
+    assert r.returncode == 0, r.stderr[-500:]

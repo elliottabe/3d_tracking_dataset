@@ -92,3 +92,21 @@ def test_wing_z_adapter_converts_segment_arrays_to_dicts():
 def test_polar_panel_is_flagged_so_the_renderer_uses_a_polar_axes():
     assert get_panel_type("courtship.wing_polar").projection == "polar"
     assert get_panel_type("courtship.wing_z").projection is None
+
+
+def test_zheight_relabels_free_walk_to_free_running():
+    """The assay is FREE RUNNING, not free walking (user correction); the
+    underlying panel function hardcodes a 'free walk' tick label, so the
+    adapter must relabel it for real, preserving the '(n=...)' count."""
+    data, spec = CASES["courtship.zheight"]
+    pt = get_panel_type("courtship.zheight")
+    fig, ax = plt.subplots()
+    try:
+        pt.draw(ax, data, spec)
+        labels = [t.get_text() for t in ax.get_xticklabels()]
+        assert not any("free walk" in lb for lb in labels), labels
+        running = [lb for lb in labels if "free running" in lb]
+        assert running, labels
+        assert "(n=" in running[0]
+    finally:
+        plt.close(fig)

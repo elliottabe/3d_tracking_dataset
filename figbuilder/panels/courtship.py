@@ -15,6 +15,13 @@ from utils import courtship_figure_panels as cfp
 from figbuilder.bundle import array_to_segments
 from figbuilder.panels.base import PanelType, register
 
+#: The assay is FREE RUNNING, not free walking. `panel_z_height_singing_vs_
+#: walking` (utils/, consumed unmodified) hardcodes a 'free walk\n(n=...)'
+#: tick label; `ZHeightPanel.draw` substitutes this string in for the
+#: 'free walk' portion after drawing, preserving the '(n=...)' suffix.
+#: Module-level so it is greppable and the schema default can reference it.
+FREE_LABEL = "free running"
+
 
 def _segs_arg(value: Any) -> List[dict]:
     """Accept a structured segment array or an already-decoded list."""
@@ -129,6 +136,8 @@ class ZHeightPanel(PanelType):
     schema = {"type": "object", "properties": {
         "kind": {"type": "string", "enum": ["violin", "box"], "default": "violin"},
         "title": {"type": "string", "default": ""},
+        "free_label": {"type": "string", "default": FREE_LABEL,
+                       "title": "Control-condition label"},
     }}
 
     def draw(self, ax, data, spec):
@@ -139,6 +148,15 @@ class ZHeightPanel(PanelType):
             point_kwargs={"s": 3, "alpha": 0.25},
             title=spec.get("title", ""),
         )
+        # The assay is FREE RUNNING, not free walking; the panel function
+        # above (utils/, consumed unmodified) hardcodes a 'free walk' tick
+        # label, so relabel it here at the figbuilder layer, preserving the
+        # '(n=...)' suffix.
+        free_label = spec.get("free_label", FREE_LABEL)
+        ax.set_xticks(ax.get_xticks())  # avoid FixedFormatter/FixedLocator warning
+        new_labels = [t.get_text().replace("free walk", free_label)
+                     for t in ax.get_xticklabels()]
+        ax.set_xticklabels(new_labels)
 
 
 @register
