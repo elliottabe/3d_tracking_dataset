@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
@@ -60,13 +61,32 @@ def panel_data(bundle: Bundle, panel: PanelSpec) -> Dict[str, np.ndarray]:
     return out
 
 
-def tile_cache_key(fig_spec: FigureSpec, panel: PanelSpec) -> str:
+def _data_digest(data: Dict[str, Any]) -> str:
+    """Digest the RESOLVED arrays, not just their dataset paths.
+
+    A bundle can be regenerated with new values at the same dataset path while
+    the on-disk tile cache survives, so hashing only the reference strings
+    would serve a stale tile for changed data. See Ruling 9 in the SDD ledger.
+    """
+    h = hashlib.blake2b(digest_size=16)
+    for name in sorted(data):
+        arr = np.asarray(data[name])
+        h.update(name.encode("utf-8"))
+        h.update(str(arr.dtype).encode("utf-8"))
+        h.update(str(arr.shape).encode("utf-8"))
+        h.update(np.ascontiguousarray(arr).tobytes())
+    return h.hexdigest()
+
+
+def tile_cache_key(fig_spec: FigureSpec, panel: PanelSpec,
+                   data: Dict[str, Any]) -> str:
     payload = {
         "size_mm": [fig_spec.width_mm, fig_spec.height_mm],
         "style": fig_spec.style,
         "transparent": fig_spec.transparent,
         "panel": {"id": panel.id, "type": panel.type, "rect": list(panel.rect),
                   "data": panel.data, "spec": panel.spec},
+        "data_digest": _data_digest(data),
     }
     blob = json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
     return hashlib.sha256(blob).hexdigest()[:32]
@@ -78,18 +98,37 @@ def _ink_box(fig, ax) -> Rect:
     return (float(bb.x0), float(bb.y0), float(bb.width), float(bb.height))
 
 
+def _atomic_write(path: Path, data: bytes) -> None:
+    """Write `data` to `path` atomically via a same-directory temp file + rename.
+
+    `os.replace` is atomic within a filesystem, so a concurrent reader never
+    observes a partially-written cache file (Finding 3 hardening).
+    """
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    tmp.write_bytes(data)
+    os.replace(tmp, path)
+
+
 def render_tile(fig_spec: FigureSpec, panel: PanelSpec,
                 data: Dict[str, Any],
                 cache_dir: Optional[str | Path] = None) -> TileResult:
     """Render `panel` onto a full-size transparent canvas."""
-    key = tile_cache_key(fig_spec, panel)
+    key = tile_cache_key(fig_spec, panel, data)
     cache_path = Path(cache_dir) / f"{key}.svg" if cache_dir else None
     meta_path = Path(cache_dir) / f"{key}.json" if cache_dir else None
     if cache_path and cache_path.exists() and meta_path and meta_path.exists():
-        meta = json.loads(meta_path.read_text())
-        return TileResult(svg=cache_path.read_bytes(),
-                          ink_box=tuple(meta["ink_box"]),
-                          cache_hit=True, overflows=meta["overflows"])
+        try:
+            meta = json.loads(meta_path.read_text())
+            svg = cache_path.read_bytes()
+            ink_box = tuple(meta["ink_box"])
+            overflows = meta["overflows"]
+        except (json.JSONDecodeError, OSError, KeyError, ValueError):
+            # Corrupt or unreadable sidecar: treat exactly like a cache miss
+            # and fall through to a fresh render, rather than crashing.
+            pass
+        else:
+            return TileResult(svg=svg, ink_box=ink_box,
+                              cache_hit=True, overflows=overflows)
 
     apply_style(fig_spec.style)
     ptype = get_panel_type(panel.type)
@@ -111,7 +150,8 @@ def render_tile(fig_spec: FigureSpec, panel: PanelSpec,
 
     if cache_path and meta_path:
         cache_path.parent.mkdir(parents=True, exist_ok=True)
-        cache_path.write_bytes(svg)
-        meta_path.write_text(json.dumps({"ink_box": list(ink),
-                                         "overflows": bool(overflows)}))
+        _atomic_write(cache_path, svg)
+        meta_bytes = json.dumps({"ink_box": list(ink),
+                                 "overflows": bool(overflows)}).encode("utf-8")
+        _atomic_write(meta_path, meta_bytes)
     return TileResult(svg=svg, ink_box=ink, cache_hit=False, overflows=overflows)

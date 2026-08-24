@@ -96,12 +96,28 @@ def test_overflow_flag_set_when_labels_fall_off_canvas():
 
 
 def test_cache_key_changes_with_rect_and_spec():
-    a = tile_cache_key(_fig(), _panel((0.1, 0.1, 0.5, 0.5)))
-    b = tile_cache_key(_fig(), _panel((0.1, 0.1, 0.5, 0.6)))
+    y = np.linspace(0, 1, 50)
+    a = tile_cache_key(_fig(), _panel((0.1, 0.1, 0.5, 0.5)), {"y": y})
+    b = tile_cache_key(_fig(), _panel((0.1, 0.1, 0.5, 0.6)), {"y": y})
     assert a != b
     p = _panel()
     p.spec["ylabel"] = "different"
-    assert tile_cache_key(_fig(), p) != tile_cache_key(_fig(), _panel())
+    assert (tile_cache_key(_fig(), p, {"y": y})
+            != tile_cache_key(_fig(), _panel(), {"y": y}))
+
+
+def test_cache_key_changes_when_only_the_resolved_data_changes():
+    """Regression for Finding 1: same panel/refs, different array contents.
+
+    `panel.data` only carries dataset REFERENCE STRINGS (e.g.
+    "/panels/p/data/y"); a bundle can be regenerated with new values at that
+    same path. The cache key must fold in a digest of the resolved arrays
+    or a stale tile gets served after re-export.
+    """
+    p = _panel()
+    key_a = tile_cache_key(_fig(), p, {"y": np.linspace(0, 1, 50)})
+    key_b = tile_cache_key(_fig(), p, {"y": np.linspace(0, 1, 50) + 1.0})
+    assert key_a != key_b
 
 
 def test_second_render_hits_the_cache(tmp_path):
@@ -112,6 +128,20 @@ def test_second_render_hits_the_cache(tmp_path):
     assert not first.cache_hit
     assert second.cache_hit
     assert first.svg == second.svg
+
+
+def test_corrupt_cache_sidecar_falls_back_to_a_fresh_render(tmp_path):
+    """Regression for Finding 2: a truncated/corrupt `.json` sidecar next to a
+    valid cached `.svg` must not crash `render_tile` -- treat it exactly like
+    a missing sidecar and re-render."""
+    data = {"y": np.linspace(0, 1, 50)}
+    key = tile_cache_key(_fig(), _panel(), data)
+    (tmp_path / f"{key}.svg").write_bytes(b"<?xml not really an svg")
+    (tmp_path / f"{key}.json").write_text("{not valid json")
+
+    res = render_tile(_fig(), _panel(), data, cache_dir=tmp_path)
+    assert not res.cache_hit
+    assert res.svg.startswith(b"<?xml")
 
 
 def test_panel_data_resolves_dataset_references():
