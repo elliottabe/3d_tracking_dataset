@@ -12,7 +12,7 @@ import pytest
 
 import figbuilder.panels  # noqa: F401
 from figbuilder.panels.base import get_panel_type
-from scripts.figures.export_fig4_bundle import build_fig4_panels, _pair_qpos
+from scripts.figures.export_fig4_bundle import build_fig4_panels, _pair_qpos, _pair_center_xyz
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -163,3 +163,38 @@ def test_cli_runs_as_module():
         [sys.executable, "-m", "scripts.figures.export_fig4_bundle", "--help"],
         cwd=REPO, capture_output=True, text=True, timeout=300)
     assert r.returncode == 0, r.stderr[-500:]
+
+
+def test_pair_center_xyz_is_the_scutellum_midpoint():
+    """Finding 2 (Task 10 review, round 2): the video crop must be centred
+    on the pair's actual position for THIS recording, not a fixed window
+    copied from a different one. The centre is the elementwise midpoint of
+    the two flies' Scutellum keypoint."""
+    rng = np.random.default_rng(5)
+    n_kp = 50
+    kp0 = rng.normal(size=(20, n_kp, 3))
+    kp1 = rng.normal(size=(20, n_kp, 3))
+    kp_names = [f"kp{i}" for i in range(n_kp)]
+    kp_names[7] = "Scutellum"
+    data = {"boutA": {"kp_data": kp0}, "boutB": {"kp_data": kp1}}
+    ex = {"key0": "boutA", "key1": "boutB"}
+
+    out = _pair_center_xyz(data, ex, kp_names, T=20)
+    expected = 0.5 * (kp0[:, 7, :] + kp1[:, 7, :])
+    assert out.shape == (20, 3)
+    np.testing.assert_array_equal(out, expected)
+
+
+def test_pair_center_xyz_clamps_to_the_shorter_bout():
+    rng = np.random.default_rng(6)
+    n_kp = 50
+    kp0 = rng.normal(size=(30, n_kp, 3))
+    kp1 = rng.normal(size=(18, n_kp, 3))
+    kp_names = [f"kp{i}" for i in range(n_kp)]
+    kp_names[3] = "Scutellum"
+    data = {"boutA": {"kp_data": kp0}, "boutB": {"kp_data": kp1}}
+    ex = {"key0": "boutA", "key1": "boutB"}
+
+    out = _pair_center_xyz(data, ex, kp_names, T=30)
+    assert out.shape == (18, 3)
+    np.testing.assert_array_equal(out, 0.5 * (kp0[:18, 3, :] + kp1[:18, 3, :]))

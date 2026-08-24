@@ -229,6 +229,12 @@ class PulseClassPanel(PanelType):
     The bundle stores flat named arrays, so per-type arrays live as
     `centroid_<T>` / `pooled_<T>` and are re-nested here. Std shading is derived
     by the panel function from `pooled_waveforms` — there is no `stds` input.
+
+    Counts default to `pooled_<T>.shape[0]` — the number of pooled waveforms
+    IS n — since counts are data-derived and cannot be seeded as static
+    DEFAULT_PANEL_SPEC values. An explicit `count_<T>` in `spec` still wins,
+    for the case where pooled waveforms are subsampled for display but n
+    should report the true total.
     """
 
     id = "courtship.pulse_class"
@@ -242,10 +248,17 @@ class PulseClassPanel(PanelType):
         "title": {"type": "string", "default": ""}}}
 
     def draw(self, ax, data, spec):
+        counts: Dict[str, int] = {}
+        for t in _PULSE_TYPES:
+            if f"count_{t}" in spec:
+                counts[t] = int(spec[f"count_{t}"])
+            else:
+                pooled = data.get(f"pooled_{t}")
+                counts[t] = int(np.asarray(pooled).shape[0]) if pooled is not None else 0
         results = {
             "centroids": {t: np.asarray(data[f"centroid_{t}"], dtype=float)
                           for t in _PULSE_TYPES if f"centroid_{t}" in data},
-            "counts": {t: int(spec.get(f"count_{t}", 0)) for t in _PULSE_TYPES},
+            "counts": counts,
             "pooled_waveforms": {t: np.asarray(data[f"pooled_{t}"], dtype=float)
                                  for t in _PULSE_TYPES if f"pooled_{t}" in data},
             "fs": float(spec.get("fs", 800.0)),

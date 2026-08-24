@@ -176,6 +176,22 @@ def _pair_qpos(q0: np.ndarray, q1: np.ndarray, n: int) -> np.ndarray:
     return np.concatenate([q0, q1], axis=-1)
 
 
+def _pair_center_xyz(data: dict, ex: dict, kp_names: List[str], T: int) -> np.ndarray:
+    """Per-frame midpoint of the two flies' Scutellum, in the same world
+    frame as `kp_xyz_per_frame` — feeds `panel_video_strip_with_kp`'s
+    `center_xyz`/`crop_wh` auto-centred crop instead of a fixed `roi` copied
+    from a different recording (Finding 2: the notebook's SESSION0 crop is
+    the wrong window for a SESSION1 recording; a static crop is wrong for
+    every new session). Pure; split out so the midpoint logic is
+    unit-testable without video/DLT. Clamps to the shorter of the two bouts
+    (and `T`), same as `_pair_qpos`."""
+    scut_i = kp_names.index("Scutellum")
+    kp0 = np.asarray(data[ex["key0"]]["kp_data"]).reshape(-1, len(kp_names), 3)
+    kp1 = np.asarray(data[ex["key1"]]["kp_data"]).reshape(-1, len(kp_names), 3)
+    n = min(len(kp0), len(kp1), T)
+    return 0.5 * (kp0[:n, scut_i, :] + kp1[:n, scut_i, :])
+
+
 def _render_frames(flybody_xml, floor_xml, qpos_pair, frame_idx,
                    camera=VIZ_CAMERA, track_midpoint=True, size=256):
     """Bake two-fly courtship-pair MuJoCo frames to uint8 RGB via the styled
@@ -262,7 +278,11 @@ def main(argv=None) -> int:
     ap.add_argument("--courtship-video-root", default=DEFAULT_COURTSHIP_VIDEO_ROOT,
                     help="root globbed for **/sam3_aligned.h5 (align_violin population)")
     ap.add_argument("--n-video", type=int, default=4)
-    ap.add_argument("--roi", type=int, nargs=4, default=[1350, 0, 500, 500])
+    ap.add_argument("--crop-wh", type=int, nargs=2, default=[400, 400],
+                    help="(w, h) of the per-frame auto-centred video crop")
+    ap.add_argument("--roi", type=int, nargs=4, default=None,
+                    help="fixed (x, y, w, h) crop; OVERRIDES the auto-centred "
+                         "--crop-wh when explicitly given")
     ap.add_argument("--kp-scale", type=float, default=0.1)
     ap.add_argument("--out", default="figures/paper_figures/fig4_bundle.h5")
     ap.add_argument("--width-mm", type=float, default=183.0)
@@ -408,11 +428,21 @@ def main(argv=None) -> int:
         kp_xyz = np.asarray(data[ex["key0"]]["kp_data"]).reshape(T, -1, 3)
         figv, axv = plt.subplots(1, args.n_video, figsize=(args.n_video * 2, 2), dpi=200)
         axv = np.atleast_1d(axv)
+        # A fixed roi is a crop copied from whatever recording it was tuned
+        # on; a per-frame crop centred on the pair's Scutellum midpoint is
+        # correct for ANY recording. --roi, when explicitly given, overrides
+        # this and forces the fixed window instead (Finding 2).
+        if args.roi is not None:
+            roi_kwargs = {"roi": tuple(args.roi)}
+        else:
+            center_xyz = _pair_center_xyz(data, ex, kp_names, T)
+            roi_kwargs = {"center_xyz": center_xyz, "crop_wh": tuple(args.crop_wh)}
         cfp.panel_video_strip_with_kp(
             list(axv), mp4, vidx, kp_xyz_per_frame=kp_xyz, kp_names=kp_names,
-            dlt_coeffs=dlt, roi=tuple(args.roi), fs=fs, kp_scale=args.kp_scale,
+            dlt_coeffs=dlt, fs=fs, kp_scale=args.kp_scale,
             video_frame_offset=0, masks_per_fly=masks,
-            mask_colors=["#e74c3c", "#3a7bff"], mask_alpha=0.35)
+            mask_colors=["#e74c3c", "#3a7bff"], mask_alpha=0.35,
+            **roi_kwargs)
         figv.canvas.draw()
         for a in axv:
             a.set_position(a.get_position())      # freeze before extraction

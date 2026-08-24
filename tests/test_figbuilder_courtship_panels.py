@@ -110,3 +110,45 @@ def test_zheight_relabels_free_walk_to_free_running():
         assert "(n=" in running[0]
     finally:
         plt.close(fig)
+
+
+def test_pulse_class_count_defaults_to_pooled_waveform_count():
+    """Finding 1 (Task 10 review, round 2): counts are DATA-derived (the
+    number of pooled waveforms IS n) and cannot be seeded as static spec
+    defaults, so when spec supplies no count_<T> the adapter must derive it
+    from pooled_<T>.shape[0] rather than silently reporting n=0."""
+    rng = np.random.default_rng(3)
+    data = {
+        "centroid_Pslow": rng.normal(size=21), "centroid_Pfast": rng.normal(size=21),
+        "pooled_Pslow": rng.normal(size=(7, 21)), "pooled_Pfast": rng.normal(size=(9, 21)),
+    }
+    pt = get_panel_type("courtship.pulse_class")
+    fig, ax = plt.subplots()
+    try:
+        pt.draw(ax, data, {"fs": 800.0, "show_std": True})
+        labels = [ln.get_label() for ln in ax.lines]
+        assert "Pslow (n=7)" in labels, labels
+        assert "Pfast (n=9)" in labels, labels
+    finally:
+        plt.close(fig)
+
+
+def test_pulse_class_explicit_count_overrides_pooled_shape():
+    """An explicit count_<T> in spec still wins over pooled_<T>.shape[0] —
+    useful when pooled waveforms are subsampled for display but n should
+    report the true total."""
+    rng = np.random.default_rng(4)
+    data = {
+        "centroid_Pslow": rng.normal(size=21), "centroid_Pfast": rng.normal(size=21),
+        "pooled_Pslow": rng.normal(size=(7, 21)), "pooled_Pfast": rng.normal(size=(9, 21)),
+    }
+    pt = get_panel_type("courtship.pulse_class")
+    fig, ax = plt.subplots()
+    try:
+        pt.draw(ax, data, {"fs": 800.0, "show_std": True,
+                           "count_Pslow": 755, "count_Pfast": 1387})
+        labels = [ln.get_label() for ln in ax.lines]
+        assert "Pslow (n=755)" in labels, labels
+        assert "Pfast (n=1387)" in labels, labels
+    finally:
+        plt.close(fig)
