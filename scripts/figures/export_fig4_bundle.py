@@ -208,12 +208,23 @@ def _resolve_session_bout(session_dir, recording: str, clip_len: int,
     triangulation silently read an unrelated bout's masks starting at the
     wrong frame (Finding, round 3) — a scientific-correctness defect, not a
     missing-data one, so ambiguity here must raise rather than guess.
+
+    ``recording`` (e.g. from ``recording_of(ex)``, which reads
+    ``info/fly_ids``) carries a trailing ``_flyN`` suffix that the CSV's
+    ``fly_id`` column never has, so the suffix is stripped before matching
+    and compared by EQUALITY, not substring containment (round-4 fix: the
+    prior ``fly_id`` substring-of-``recording`` check ran backwards — the
+    CSV id is a substring of the suffixed recording id, never the reverse,
+    so it matched zero rows on every real run). A recording id with no
+    ``_fly`` suffix is left unchanged by the strip, so the same code path
+    handles both forms without a conditional.
     """
     import pandas as pd
 
     csv_path = Path(session_dir) / "courtship_bouts_unified_summary.csv"
     df = pd.read_csv(csv_path)
-    rows = df[df["fly_id"].astype(str).str.contains(recording, regex=False)]
+    base = str(recording).rsplit("_fly", 1)[0]
+    rows = df[df["fly_id"].astype(str) == base]
     n = rows["end_frame"] - rows["start_frame"] + 1
     matches = rows[(n - int(clip_len)).abs() <= tol]
     if len(matches) == 0:

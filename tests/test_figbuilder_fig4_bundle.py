@@ -215,15 +215,16 @@ def _write_summary_csv(tmp_path, rows):
 
 
 def test_resolve_session_bout_exact_single_match(tmp_path):
-    """Round-3 finding: the real case — recording 2026_04_02_16_21_32,
-    bout_idx 5, start_frame 380781, end_frame 381558 (n=778)."""
+    """Round-3 finding: the real case — recording
+    Session1/2026_04_02_16_21_32, bout_idx 5, start_frame 380781,
+    end_frame 381558 (n=778)."""
     _write_summary_csv(tmp_path, [
         ("Session1/2026_04_02_16_21_32", 1, 248710, 249361),
         ("Session1/2026_04_02_16_21_32", 4, 344050, 346068),
         ("Session1/2026_04_02_16_21_32", 5, 380781, 381558),
     ])
     bout_dir, start_frame = _resolve_session_bout(
-        tmp_path, "2026_04_02_16_21_32", clip_len=778)
+        tmp_path, "Session1/2026_04_02_16_21_32", clip_len=778)
     assert bout_dir == "bout_00005"
     assert start_frame == 380781
 
@@ -233,7 +234,8 @@ def test_resolve_session_bout_zero_matches_raises_naming_clip_len(tmp_path):
         ("Session1/2026_04_02_16_21_32", 1, 248710, 249361),
     ])
     with pytest.raises(ValueError, match="777"):
-        _resolve_session_bout(tmp_path, "2026_04_02_16_21_32", clip_len=777)
+        _resolve_session_bout(
+            tmp_path, "Session1/2026_04_02_16_21_32", clip_len=777)
 
 
 def test_resolve_session_bout_ambiguous_match_lists_candidates(tmp_path):
@@ -244,18 +246,49 @@ def test_resolve_session_bout_ambiguous_match_lists_candidates(tmp_path):
         ("Session1/2026_04_02_16_21_32", 9, 505035, 505812),   # n=778
     ])
     with pytest.raises(ValueError, match="5") as excinfo:
-        _resolve_session_bout(tmp_path, "2026_04_02_16_21_32", clip_len=778)
+        _resolve_session_bout(
+            tmp_path, "Session1/2026_04_02_16_21_32", clip_len=778)
     assert "9" in str(excinfo.value)
 
 
 def test_resolve_session_bout_ignores_other_recordings(tmp_path):
     """A same-length bout from a DIFFERENT recording must not count as a
-    match — only rows whose fly_id contains the requested recording id."""
+    match — only the row whose fly_id equals the (suffix-stripped)
+    requested recording id."""
     _write_summary_csv(tmp_path, [
         ("Session1/2025_10_20_13_20_04", 3, 1000, 1777),        # n=778, wrong recording
         ("Session1/2026_04_02_16_21_32", 5, 380781, 381558),    # n=778, right recording
     ])
     bout_dir, start_frame = _resolve_session_bout(
-        tmp_path, "2026_04_02_16_21_32", clip_len=778)
+        tmp_path, "Session1/2026_04_02_16_21_32", clip_len=778)
+    assert bout_dir == "bout_00005"
+    assert start_frame == 380781
+
+
+def test_resolve_session_bout_strips_fly_suffix_from_recording(tmp_path):
+    """Round-4 regression: recording_of(ex) returns info/fly_ids' value,
+    which carries a trailing _flyN suffix (e.g. 'Session1/..._fly1'), but
+    courtship_bouts_unified_summary.csv's fly_id column has NO such suffix.
+    Matching must strip the suffix before comparing, not require it to
+    appear verbatim in the CSV -- this is exactly what made the round-3 fix
+    resolve zero bouts on the real gate run."""
+    _write_summary_csv(tmp_path, [
+        ("Session1/2026_04_02_16_21_32", 5, 380781, 381558),   # n=778
+    ])
+    bout_dir, start_frame = _resolve_session_bout(
+        tmp_path, "Session1/2026_04_02_16_21_32_fly1", clip_len=777)
+    assert bout_dir == "bout_00005"
+    assert start_frame == 380781
+
+
+def test_resolve_session_bout_tolerates_recording_without_fly_suffix(tmp_path):
+    """A caller passing an already-suffix-free recording id must still
+    resolve -- rsplit("_fly", 1)[0] on a string with no "_fly" leaves it
+    unchanged, so this is the same code path, not a special case."""
+    _write_summary_csv(tmp_path, [
+        ("Session1/2026_04_02_16_21_32", 5, 380781, 381558),
+    ])
+    bout_dir, start_frame = _resolve_session_bout(
+        tmp_path, "Session1/2026_04_02_16_21_32", clip_len=777)
     assert bout_dir == "bout_00005"
     assert start_frame == 380781
