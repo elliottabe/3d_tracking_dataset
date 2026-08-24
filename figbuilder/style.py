@@ -18,7 +18,11 @@ FORCED_RCPARAMS: Dict[str, Any] = {
 
 DEFAULT_RCPARAMS: Dict[str, Any] = {
     "font.family": "sans-serif",
-    "font.sans-serif": ["Arial", "Helvetica", "DejaVu Sans"],
+    # Liberation Sans is metric-compatible with Arial and is what fontconfig
+    # substitutes when Arial is absent. Including it keeps matplotlib's LAYOUT
+    # font identical to the font the SVG renderer actually DRAWS with, so
+    # ink_box measurements stay truthful on machines without Arial. Ruling 7.
+    "font.sans-serif": ["Arial", "Helvetica", "Liberation Sans", "DejaVu Sans"],
     "font.size": 6.0,
     "axes.linewidth": 0.6,
     "xtick.major.width": 0.6,
