@@ -192,22 +192,26 @@ def _pair_center_xyz(data: dict, ex: dict, kp_names: List[str], T: int) -> np.nd
     return 0.5 * (kp0[:n, scut_i, :] + kp1[:n, scut_i, :])
 
 
-def _resolve_session_bout(session_dir, recording: str, clip_len: int,
+def _resolve_session_bout(session_dir, sam3_root, recording: str, clip_len: int,
                           tol: int = 1) -> tuple:
-    """Map a combined-h5 exemplar onto its session bout via the recording's
-    ``courtship_bouts_unified_summary.csv``.
+    """Map a combined-h5 exemplar onto its session bout: `start_frame` from
+    the recording's ``courtship_bouts_unified_summary.csv``, but the SAM3
+    directory name by SCANNING ``sam3_root`` for the one whose own mask
+    frame count matches — never by deriving it from the CSV's ``bout_idx``.
 
-    Returns ``(bout_dir_name, start_frame)``. Matching is on the recording id
-    AND the clip length, because ordinal position does NOT hold: verified
-    that the exemplar is the 4th pair of its recording but session bout_idx
-    5, while bout_idx 4 has n=2019 — nothing about the combined-h5 pair order
-    lines up with the session's own bout numbering.
+    Returns ``(bout_dir_name, start_frame)``.
 
-    Without this, `main()` previously hardcoded `--sam3-bout bout_00006` and
-    `video_frame_offset=0`, so panel A's video and panel I's female-COM
-    triangulation silently read an unrelated bout's masks starting at the
-    wrong frame (Finding, round 3) — a scientific-correctness defect, not a
-    missing-data one, so ambiguity here must raise rather than guess.
+    SAM3 bout directory numbering is a PERMUTATION of the CSV's `bout_idx`,
+    not an offset or any other positional rule — verified on the real
+    session: CSV bout_idx 5 (n=778, the exemplar) lives in `bout_00004`,
+    while `bout_00005` holds CSV bout_idx 6 (n=569). Almost certainly
+    parallel SAM3 shards writing their outputs in completion order. The
+    first three CSV rows happen to line up with a "+1" rule and would tempt
+    exactly that "simplification" — do NOT reintroduce it; row 4 breaks it.
+    (Round-5 finding: round 4's `f"bout_{bout_idx:05d}"` derivation resolved
+    `bout_00005` — a real directory holding a DIFFERENT, wrong bout — which
+    is how the video strip died with `IndexError: index 776 is out of
+    bounds for axis 2 with size 569`.)
 
     ``recording`` (e.g. from ``recording_of(ex)``, which reads
     ``info/fly_ids``) carries a trailing ``_flyN`` suffix that the CSV's
@@ -218,6 +222,10 @@ def _resolve_session_bout(session_dir, recording: str, clip_len: int,
     so it matched zero rows on every real run). A recording id with no
     ``_fly`` suffix is left unchanged by the strip, so the same code path
     handles both forms without a conditional.
+
+    Reads ONLY each npz's tiny ``valid`` array (shape ``(2, 7, N)``) to get
+    its frame count ``N`` — never ``packed`` (``(2, 7, N, 448, 242)``);
+    decompressing all of them would be very slow.
     """
     import pandas as pd
 
@@ -237,8 +245,25 @@ def _resolve_session_bout(session_dir, recording: str, clip_len: int,
             f"ambiguous bout match in {csv_path} for recording {recording!r} "
             f"with clip_len={clip_len} (tol={tol}): candidate bout_idx "
             f"{idxs} — refusing to guess")
-    row = matches.iloc[0]
-    return (f"bout_{int(row['bout_idx']):05d}", int(row["start_frame"]))
+    start_frame = int(matches.iloc[0]["start_frame"])
+
+    sam3_root = Path(sam3_root)
+    counts = []
+    for npz_path in sorted(sam3_root.glob("bout_*/sam3_masks.npz")):
+        with np.load(npz_path) as z:
+            counts.append((npz_path.parent.name, int(z["valid"].shape[-1])))
+    dir_matches = [(d, c) for d, c in counts if abs(c - int(clip_len)) <= tol]
+    if len(dir_matches) == 0:
+        raise ValueError(
+            f"no sam3 bout dir under {sam3_root} with mask frame count "
+            f"matching clip_len={clip_len} (tol={tol}); available: {counts}")
+    if len(dir_matches) > 1:
+        dirs = sorted(d for d, _ in dir_matches)
+        raise ValueError(
+            f"ambiguous sam3 bout dir under {sam3_root} for clip_len="
+            f"{clip_len} (tol={tol}): candidate dirs {dirs} — refusing to guess")
+    bout_dir = dir_matches[0][0]
+    return (bout_dir, start_frame)
 
 
 def _render_frames(flybody_xml, floor_xml, qpos_pair, frame_idx,
@@ -418,7 +443,7 @@ def main(argv=None) -> int:
         sam3_bout = video_frame_offset = None
         try:
             sam3_bout, video_frame_offset = _resolve_session_bout(
-                args.session, recording_of(ex), T)
+                args.session, args.sam3_root, recording_of(ex), T)
             print(f"exemplar -> {sam3_bout} @ start_frame {video_frame_offset}")
         except Exception as e:                   # noqa: BLE001 - report, don't die
             skipped.append(

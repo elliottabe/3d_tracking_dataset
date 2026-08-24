@@ -214,54 +214,80 @@ def _write_summary_csv(tmp_path, rows):
     return path
 
 
+def _write_fake_sam3_npz(sam3_root, bout_dir_name, n_frames, include_packed=False):
+    """A tiny stand-in npz: only `valid` (2, 7, n_frames), matching the real
+    shape's LAST axis (frame count) — `_resolve_session_bout` must only read
+    this. `packed` is (2, 7, N, 448, 242) for real data and deliberately
+    omitted by default so a test can assert the helper never touches it."""
+    d = Path(sam3_root) / bout_dir_name
+    d.mkdir(parents=True, exist_ok=True)
+    arrays = {"valid": np.zeros((2, 7, n_frames), dtype=bool)}
+    if include_packed:
+        arrays["packed"] = np.zeros((2, 7, n_frames, 2, 2), dtype=np.uint8)
+    np.savez(d / "sam3_masks.npz", **arrays)
+
+
 def test_resolve_session_bout_exact_single_match(tmp_path):
     """Round-3 finding: the real case — recording
-    Session1/2026_04_02_16_21_32, bout_idx 5, start_frame 380781,
-    end_frame 381558 (n=778)."""
+    Session1/2026_04_02_16_21_32, CSV bout_idx 5, start_frame 380781,
+    end_frame 381558 (n=778) supplies the frame offset. The sam3 DIRECTORY
+    is resolved independently, by mask frame count (round-5 fix) — here it
+    is bout_00003, not bout_00005, to keep the test honest about that."""
     _write_summary_csv(tmp_path, [
         ("Session1/2026_04_02_16_21_32", 1, 248710, 249361),
         ("Session1/2026_04_02_16_21_32", 4, 344050, 346068),
-        ("Session1/2026_04_02_16_21_32", 5, 380781, 381558),
+        ("Session1/2026_04_02_16_21_32", 5, 380781, 381558),   # n=778
     ])
+    sam3_root = tmp_path / "sam3"
+    _write_fake_sam3_npz(sam3_root, "bout_00001", 652)
+    _write_fake_sam3_npz(sam3_root, "bout_00002", 287)
+    _write_fake_sam3_npz(sam3_root, "bout_00003", 778)
     bout_dir, start_frame = _resolve_session_bout(
-        tmp_path, "Session1/2026_04_02_16_21_32", clip_len=778)
-    assert bout_dir == "bout_00005"
+        tmp_path, sam3_root, "Session1/2026_04_02_16_21_32", clip_len=778)
+    assert bout_dir == "bout_00003"
     assert start_frame == 380781
 
 
 def test_resolve_session_bout_zero_matches_raises_naming_clip_len(tmp_path):
+    """CSV-side zero match (round-4 case) still raises before the sam3
+    scan ever runs, so an empty/nonexistent sam3_root doesn't matter here."""
     _write_summary_csv(tmp_path, [
         ("Session1/2026_04_02_16_21_32", 1, 248710, 249361),
     ])
     with pytest.raises(ValueError, match="777"):
         _resolve_session_bout(
-            tmp_path, "Session1/2026_04_02_16_21_32", clip_len=777)
+            tmp_path, tmp_path / "sam3", "Session1/2026_04_02_16_21_32",
+            clip_len=777)
 
 
-def test_resolve_session_bout_ambiguous_match_lists_candidates(tmp_path):
-    """Two rows with the same length must raise, never silently pick one —
-    this IS the failure mode the fix exists to prevent."""
+def test_resolve_session_bout_ambiguous_csv_match_lists_bout_idx(tmp_path):
+    """Two CSV rows with the same length must raise, never silently pick
+    one — this IS the failure mode the fix exists to prevent (round-4
+    case, on the CSV side)."""
     _write_summary_csv(tmp_path, [
         ("Session1/2026_04_02_16_21_32", 5, 380781, 381558),   # n=778
         ("Session1/2026_04_02_16_21_32", 9, 505035, 505812),   # n=778
     ])
     with pytest.raises(ValueError, match="5") as excinfo:
         _resolve_session_bout(
-            tmp_path, "Session1/2026_04_02_16_21_32", clip_len=778)
+            tmp_path, tmp_path / "sam3", "Session1/2026_04_02_16_21_32",
+            clip_len=778)
     assert "9" in str(excinfo.value)
 
 
 def test_resolve_session_bout_ignores_other_recordings(tmp_path):
     """A same-length bout from a DIFFERENT recording must not count as a
-    match — only the row whose fly_id equals the (suffix-stripped)
+    CSV match — only the row whose fly_id equals the (suffix-stripped)
     requested recording id."""
     _write_summary_csv(tmp_path, [
         ("Session1/2025_10_20_13_20_04", 3, 1000, 1777),        # n=778, wrong recording
         ("Session1/2026_04_02_16_21_32", 5, 380781, 381558),    # n=778, right recording
     ])
+    sam3_root = tmp_path / "sam3"
+    _write_fake_sam3_npz(sam3_root, "bout_00007", 778)
     bout_dir, start_frame = _resolve_session_bout(
-        tmp_path, "Session1/2026_04_02_16_21_32", clip_len=778)
-    assert bout_dir == "bout_00005"
+        tmp_path, sam3_root, "Session1/2026_04_02_16_21_32", clip_len=778)
+    assert bout_dir == "bout_00007"
     assert start_frame == 380781
 
 
@@ -275,9 +301,11 @@ def test_resolve_session_bout_strips_fly_suffix_from_recording(tmp_path):
     _write_summary_csv(tmp_path, [
         ("Session1/2026_04_02_16_21_32", 5, 380781, 381558),   # n=778
     ])
+    sam3_root = tmp_path / "sam3"
+    _write_fake_sam3_npz(sam3_root, "bout_00004", 778)
     bout_dir, start_frame = _resolve_session_bout(
-        tmp_path, "Session1/2026_04_02_16_21_32_fly1", clip_len=777)
-    assert bout_dir == "bout_00005"
+        tmp_path, sam3_root, "Session1/2026_04_02_16_21_32_fly1", clip_len=777)
+    assert bout_dir == "bout_00004"
     assert start_frame == 380781
 
 
@@ -288,7 +316,87 @@ def test_resolve_session_bout_tolerates_recording_without_fly_suffix(tmp_path):
     _write_summary_csv(tmp_path, [
         ("Session1/2026_04_02_16_21_32", 5, 380781, 381558),
     ])
+    sam3_root = tmp_path / "sam3"
+    _write_fake_sam3_npz(sam3_root, "bout_00004", 778)
     bout_dir, start_frame = _resolve_session_bout(
-        tmp_path, "Session1/2026_04_02_16_21_32", clip_len=777)
-    assert bout_dir == "bout_00005"
+        tmp_path, sam3_root, "Session1/2026_04_02_16_21_32", clip_len=777)
+    assert bout_dir == "bout_00004"
+    assert start_frame == 380781
+
+
+def test_resolve_session_bout_dir_numbering_is_not_positionally_related_to_bout_idx(tmp_path):
+    """Round-5 regression: this IS the real permutation. CSV bout_idx 5
+    (n=778) is the exemplar, but its masks live in bout_00004 while
+    bout_00005 holds an unrelated bout (CSV bout_idx 6, n=569). A
+    directory-name-from-bout_idx rule would resolve the WRONG directory
+    and the video strip would later IndexError against its shorter N —
+    exactly what happened on the real gate run."""
+    _write_summary_csv(tmp_path, [
+        ("Session1/2026_04_02_16_21_32", 1, 248710, 249361),
+        ("Session1/2026_04_02_16_21_32", 2, 249564, 249823),
+        ("Session1/2026_04_02_16_21_32", 3, 249816, 250102),
+        ("Session1/2026_04_02_16_21_32", 4, 344050, 346068),
+        ("Session1/2026_04_02_16_21_32", 5, 380781, 381558),   # n=778, the exemplar
+        ("Session1/2026_04_02_16_21_32", 6, 382633, 383201),   # n=569
+    ])
+    sam3_root = tmp_path / "sam3"
+    _write_fake_sam3_npz(sam3_root, "bout_00001", 652)
+    _write_fake_sam3_npz(sam3_root, "bout_00002", 287)
+    _write_fake_sam3_npz(sam3_root, "bout_00003", 2019)
+    _write_fake_sam3_npz(sam3_root, "bout_00004", 778)   # the exemplar's real masks
+    _write_fake_sam3_npz(sam3_root, "bout_00005", 569)   # CSV bout_idx 6's masks
+    bout_dir, start_frame = _resolve_session_bout(
+        tmp_path, sam3_root, "Session1/2026_04_02_16_21_32_fly1", clip_len=777)
+    assert bout_dir == "bout_00004"
+    assert start_frame == 380781
+
+
+def test_resolve_session_bout_zero_mask_matches_raises_listing_available(tmp_path):
+    _write_summary_csv(tmp_path, [
+        ("Session1/2026_04_02_16_21_32", 5, 380781, 381558),   # n=778
+    ])
+    sam3_root = tmp_path / "sam3"
+    _write_fake_sam3_npz(sam3_root, "bout_00001", 652)
+    _write_fake_sam3_npz(sam3_root, "bout_00002", 287)
+    with pytest.raises(ValueError) as excinfo:
+        _resolve_session_bout(
+            tmp_path, sam3_root, "Session1/2026_04_02_16_21_32", clip_len=778)
+    msg = str(excinfo.value)
+    assert "778" in msg
+    assert "bout_00001" in msg and "652" in msg
+    assert "bout_00002" in msg and "287" in msg
+
+
+def test_resolve_session_bout_ambiguous_mask_match_lists_both_dirs(tmp_path):
+    """Two sam3 dirs with the same mask frame count must raise, never
+    silently pick one — this is the sam3-side counterpart of the CSV
+    ambiguous-match case."""
+    _write_summary_csv(tmp_path, [
+        ("Session1/2026_04_02_16_21_32", 5, 380781, 381558),   # n=778
+    ])
+    sam3_root = tmp_path / "sam3"
+    _write_fake_sam3_npz(sam3_root, "bout_00004", 778)
+    _write_fake_sam3_npz(sam3_root, "bout_00006", 778)
+    with pytest.raises(ValueError) as excinfo:
+        _resolve_session_bout(
+            tmp_path, sam3_root, "Session1/2026_04_02_16_21_32", clip_len=778)
+    msg = str(excinfo.value)
+    assert "bout_00004" in msg
+    assert "bout_00006" in msg
+
+
+def test_resolve_session_bout_never_reads_packed(tmp_path):
+    """The real `packed` array is (2, 7, N, 448, 242) and decompressing all
+    bout dirs' worth would be very slow — the helper must resolve correctly
+    from an npz whose `packed` entry is deliberately ABSENT."""
+    _write_summary_csv(tmp_path, [
+        ("Session1/2026_04_02_16_21_32", 5, 380781, 381558),   # n=778
+    ])
+    sam3_root = tmp_path / "sam3"
+    _write_fake_sam3_npz(sam3_root, "bout_00004", 778, include_packed=False)
+    with np.load(sam3_root / "bout_00004" / "sam3_masks.npz") as z:
+        assert "packed" not in z.files   # sanity: the fixture really omits it
+    bout_dir, start_frame = _resolve_session_bout(
+        tmp_path, sam3_root, "Session1/2026_04_02_16_21_32", clip_len=778)
+    assert bout_dir == "bout_00004"
     assert start_frame == 380781
