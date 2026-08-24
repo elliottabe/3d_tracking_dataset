@@ -13,7 +13,8 @@ import pytest
 import figbuilder.panels  # noqa: F401
 from figbuilder.panels.base import get_panel_type
 from scripts.figures.export_fig4_bundle import (
-    build_fig4_panels, _pair_qpos, _pair_center_xyz, _resolve_session_bout)
+    build_fig4_panels, _pair_qpos, _pair_center_xyz, _resolve_session_bout,
+    _load_kp3d)
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -167,20 +168,22 @@ def test_cli_runs_as_module():
 
 
 def test_pair_center_xyz_is_the_scutellum_midpoint():
-    """Finding 2 (Task 10 review, round 2): the video crop must be centred
-    on the pair's actual position for THIS recording, not a fixed window
-    copied from a different one. The centre is the elementwise midpoint of
-    the two flies' Scutellum keypoint."""
+    """Finding 2 (round 2): the video crop must be centred on the pair's
+    actual position for THIS recording, not a fixed window copied from a
+    different one. The centre is the elementwise midpoint of the two
+    flies' Scutellum keypoint.
+
+    Round 6: `_pair_center_xyz` now takes already-loaded kp3d arrays
+    directly (the true DLT world frame from the processed pose tree), not
+    `data`/`ex`/`kp_names` reaching into the combined h5's re-centred
+    `kp_data`."""
     rng = np.random.default_rng(5)
     n_kp = 50
     kp0 = rng.normal(size=(20, n_kp, 3))
     kp1 = rng.normal(size=(20, n_kp, 3))
-    kp_names = [f"kp{i}" for i in range(n_kp)]
-    kp_names[7] = "Scutellum"
-    data = {"boutA": {"kp_data": kp0}, "boutB": {"kp_data": kp1}}
-    ex = {"key0": "boutA", "key1": "boutB"}
+    scut_idx = 7
 
-    out = _pair_center_xyz(data, ex, kp_names, T=20)
+    out = _pair_center_xyz(kp0, kp1, scut_idx, T=20)
     expected = 0.5 * (kp0[:, 7, :] + kp1[:, 7, :])
     assert out.shape == (20, 3)
     np.testing.assert_array_equal(out, expected)
@@ -191,12 +194,9 @@ def test_pair_center_xyz_clamps_to_the_shorter_bout():
     n_kp = 50
     kp0 = rng.normal(size=(30, n_kp, 3))
     kp1 = rng.normal(size=(18, n_kp, 3))
-    kp_names = [f"kp{i}" for i in range(n_kp)]
-    kp_names[3] = "Scutellum"
-    data = {"boutA": {"kp_data": kp0}, "boutB": {"kp_data": kp1}}
-    ex = {"key0": "boutA", "key1": "boutB"}
+    scut_idx = 3
 
-    out = _pair_center_xyz(data, ex, kp_names, T=30)
+    out = _pair_center_xyz(kp0, kp1, scut_idx, T=30)
     assert out.shape == (18, 3)
     np.testing.assert_array_equal(out, 0.5 * (kp0[:18, 3, :] + kp1[:18, 3, :]))
 
@@ -205,8 +205,13 @@ _SUMMARY_CSV_HEADER = "fly_id,bout_idx,start_frame,end_frame,source_fly\n"
 
 
 def _write_summary_csv(tmp_path, rows):
-    """rows: list of (fly_id, bout_idx, start_frame, end_frame)."""
-    path = tmp_path / "courtship_bouts_unified_summary.csv"
+    """rows: list of (fly_id, bout_idx, start_frame, end_frame).
+
+    Round 6: `_resolve_session_bout` now points at the PROCESSED tree, whose
+    CSV is named `courtship_bout_summary.csv` (singular "bout", no
+    "unified") -- a different filename from the Video_recordings tree's
+    `courtship_bouts_unified_summary.csv` used in rounds 3-5."""
+    path = tmp_path / "courtship_bout_summary.csv"
     lines = [_SUMMARY_CSV_HEADER]
     for fly_id, bout_idx, start, end in rows:
         lines.append(f"{fly_id},{bout_idx},{start},{end},both\n")
@@ -400,3 +405,23 @@ def test_resolve_session_bout_never_reads_packed(tmp_path):
         tmp_path, sam3_root, "Session1/2026_04_02_16_21_32", clip_len=778)
     assert bout_dir == "bout_00004"
     assert start_frame == 380781
+
+
+def test_load_kp3d_returns_the_array(tmp_path):
+    """Round 6: the video/pitch blocks load kp3d from the processed pose
+    tree (pose/bouts/<bout>/fly{0,1}/kp3d.npz) instead of the combined h5's
+    re-centred kp_data."""
+    rng = np.random.default_rng(7)
+    arr = rng.normal(size=(778, 50, 3))
+    npz_path = tmp_path / "kp3d.npz"
+    np.savez(npz_path, kp3d=arr, conf3d=rng.normal(size=(778, 50)))
+    out = _load_kp3d(npz_path)
+    assert out.shape == (778, 50, 3)
+    np.testing.assert_array_equal(out, arr)
+
+
+def test_load_kp3d_raises_a_clear_error_when_key_missing(tmp_path):
+    npz_path = tmp_path / "kp3d.npz"
+    np.savez(npz_path, not_kp3d=np.zeros((778, 50, 3)))
+    with pytest.raises(KeyError, match="kp3d"):
+        _load_kp3d(npz_path)

@@ -138,13 +138,23 @@ DEFAULT_FREE_RUN_H5 = ("/gscratch/portia/eabe/data/Johnson_lab/processed/"
 DEFAULT_EXEMPLAR_RECORDING = "2026_04_02_16_21_32"
 #: Root globbed by `find_courtship_sessions` for `**/sam3_aligned.h5` (the
 #: pooled alignment violin's population). Independent of `--session`/
-#: `--sam3-root`: those point at the ONE recording with per-bout
-#: `sam3_masks.npz` (used by the pitch trace + video strip); this root may
-#: resolve to a DIFFERENT session that has the pooled `sam3_aligned.h5`
-#: instead. Which session(s) actually got pooled is recorded in the bundle
-#: meta's `align_sessions`, never silently cross-sourced.
+#: `--sam3-root`: those point at the raw video + calibration for the ONE
+#: exemplar recording; this root may resolve to a DIFFERENT session that has
+#: the pooled `sam3_aligned.h5` instead. Which session(s) actually got
+#: pooled is recorded in the bundle meta's `align_sessions`, never silently
+#: cross-sourced.
 DEFAULT_COURTSHIP_VIDEO_ROOT = ("/gscratch/portia/eabe/data/Johnson_lab/"
                                 "Video_recordings/courtship")
+
+#: Round 6: the combined h5's `kp_data` is body-model-rescaled/re-centred
+#: and must NEVER be projected through DLT (measured: its Scutellum
+#: midpoint projects to uv (13.6, 426.6), the frame's bottom-left corner).
+#: The video strip's keypoint overlay/crop-centring and the pitch block's
+#: male-Scutellum position now come from THIS processed tree's per-bout
+#: `kp3d.npz` (true DLT world frame) instead — see `_load_kp3d`,
+#: `_pair_center_xyz`. `--session`/`--sam3-root` remain the source for the
+#: raw mp4 + camera calibration, which this tree does not have.
+DEFAULT_PROCESSED_ROOT = "/gscratch/portia/eabe/data/Johnson_lab/processed/courtship"
 
 # NOTE: the FREE-RUNNING-not-free-walking tick-label fix (Ruling 15) is
 # implemented for real in figbuilder.panels.courtship.ZHeightPanel.draw,
@@ -176,42 +186,63 @@ def _pair_qpos(q0: np.ndarray, q1: np.ndarray, n: int) -> np.ndarray:
     return np.concatenate([q0, q1], axis=-1)
 
 
-def _pair_center_xyz(data: dict, ex: dict, kp_names: List[str], T: int) -> np.ndarray:
-    """Per-frame midpoint of the two flies' Scutellum, in the same world
-    frame as `kp_xyz_per_frame` — feeds `panel_video_strip_with_kp`'s
-    `center_xyz`/`crop_wh` auto-centred crop instead of a fixed `roi` copied
-    from a different recording (Finding 2: the notebook's SESSION0 crop is
-    the wrong window for a SESSION1 recording; a static crop is wrong for
-    every new session). Pure; split out so the midpoint logic is
-    unit-testable without video/DLT. Clamps to the shorter of the two bouts
-    (and `T`), same as `_pair_qpos`."""
-    scut_i = kp_names.index("Scutellum")
-    kp0 = np.asarray(data[ex["key0"]]["kp_data"]).reshape(-1, len(kp_names), 3)
-    kp1 = np.asarray(data[ex["key1"]]["kp_data"]).reshape(-1, len(kp_names), 3)
+def _pair_center_xyz(kp0: np.ndarray, kp1: np.ndarray, scut_idx: int, T: int) -> np.ndarray:
+    """Per-frame midpoint of the two flies' Scutellum, given two already-
+    loaded ``(T, n_kp, 3)`` kp3d arrays in the TRUE DLT world frame — feeds
+    `panel_video_strip_with_kp`'s `center_xyz`/`crop_wh` auto-centred crop
+    instead of a fixed `roi` copied from a different recording (Finding 2:
+    the notebook's SESSION0 crop is the wrong window for a SESSION1
+    recording; a static crop is wrong for every new session).
+
+    Round 6: this used to reach into the combined h5's `kp_data`, which is
+    body-model-RESCALED and RE-CENTERED and is NOT in the DLT world frame
+    (measured: its Scutellum midpoint projects to uv (13.6, 426.6), the
+    frame's bottom-left corner) — feeding it here centred every crop on
+    empty chamber. Callers must now load `kp3d.npz` from the processed pose
+    tree (`pose/bouts/<bout>/fly{0,1}/kp3d.npz`, key `"kp3d"`) and pass
+    those arrays in; this function stays pure and only does the midpoint
+    arithmetic, unit-testable without video/DLT. Clamps to the shorter of
+    the two arrays (and `T`), same as `_pair_qpos`.
+    """
+    kp0 = np.asarray(kp0, dtype=float)
+    kp1 = np.asarray(kp1, dtype=float)
     n = min(len(kp0), len(kp1), T)
-    return 0.5 * (kp0[:n, scut_i, :] + kp1[:n, scut_i, :])
+    return 0.5 * (kp0[:n, scut_idx, :] + kp1[:n, scut_idx, :])
+
+
+def _load_kp3d(npz_path) -> np.ndarray:
+    """Load the ``(T, 50, 3)`` ``kp3d`` array (TRUE DLT world frame) from a
+    processed-pose-tree bout npz (``pose/bouts/<bout>/fly{0,1}/kp3d.npz``).
+    Raises a clear error naming the path and the keys actually present when
+    ``kp3d`` is missing, rather than letting a bare KeyError propagate."""
+    with np.load(npz_path) as z:
+        if "kp3d" not in z.files:
+            raise KeyError(f"{npz_path} has no 'kp3d' key (found: {z.files})")
+        return np.asarray(z["kp3d"])
 
 
 def _resolve_session_bout(session_dir, sam3_root, recording: str, clip_len: int,
                           tol: int = 1) -> tuple:
     """Map a combined-h5 exemplar onto its session bout: `start_frame` from
-    the recording's ``courtship_bouts_unified_summary.csv``, but the SAM3
+    the recording's ``courtship_bout_summary.csv``, but the SAM3
     directory name by SCANNING ``sam3_root`` for the one whose own mask
     frame count matches — never by deriving it from the CSV's ``bout_idx``.
 
     Returns ``(bout_dir_name, start_frame)``.
 
-    SAM3 bout directory numbering is a PERMUTATION of the CSV's `bout_idx`,
-    not an offset or any other positional rule — verified on the real
-    session: CSV bout_idx 5 (n=778, the exemplar) lives in `bout_00004`,
-    while `bout_00005` holds CSV bout_idx 6 (n=569). Almost certainly
-    parallel SAM3 shards writing their outputs in completion order. The
-    first three CSV rows happen to line up with a "+1" rule and would tempt
-    exactly that "simplification" — do NOT reintroduce it; row 4 breaks it.
-    (Round-5 finding: round 4's `f"bout_{bout_idx:05d}"` derivation resolved
-    `bout_00005` — a real directory holding a DIFFERENT, wrong bout — which
-    is how the video strip died with `IndexError: index 776 is out of
-    bounds for axis 2 with size 569`.)
+    SAM3 bout directory numbering is NOT guaranteed to match the CSV's
+    `bout_idx` — verified on the ``Video_recordings`` SAM3 tree (round 5):
+    CSV bout_idx 5 (n=778, the exemplar) lived in `bout_00004`, while
+    `bout_00005` held CSV bout_idx 6 (n=569); almost certainly parallel
+    SAM3 shards writing their outputs in completion order. The processed
+    tree this function is now pointed at (round 6:
+    `<processed_root>/<recording>/{courtship_bout_summary.csv,sam3_masks}`)
+    verifiably does NOT have this permutation (dir `bout_0000N` <-> CSV
+    `bout_idx N` exactly, for every row) — but matching by mask frame count
+    is kept regardless, since it is correct whether or not the numbering
+    happens to line up, and the first three rows of the round-5 permutation
+    also lined up before row 4 broke it. Do NOT "simplify" this back to a
+    `bout_idx`-derived directory name.
 
     ``recording`` (e.g. from ``recording_of(ex)``, which reads
     ``info/fly_ids``) carries a trailing ``_flyN`` suffix that the CSV's
@@ -229,7 +260,7 @@ def _resolve_session_bout(session_dir, sam3_root, recording: str, clip_len: int,
     """
     import pandas as pd
 
-    csv_path = Path(session_dir) / "courtship_bouts_unified_summary.csv"
+    csv_path = Path(session_dir) / "courtship_bout_summary.csv"
     df = pd.read_csv(csv_path)
     base = str(recording).rsplit("_fly", 1)[0]
     rows = df[df["fly_id"].astype(str) == base]
@@ -345,6 +376,11 @@ def main(argv=None) -> int:
     ap.add_argument("--free-run-h5", default=DEFAULT_FREE_RUN_H5)
     ap.add_argument("--session", default=DEFAULT_SESSION)
     ap.add_argument("--sam3-root", default=DEFAULT_SAM3_ROOT)
+    ap.add_argument("--processed-root", default=DEFAULT_PROCESSED_ROOT,
+                    help="root of the processed pose/sam3 tree "
+                         "(<processed-root>/<recording>/{courtship_bout_summary.csv,"
+                         "sam3_masks,pose/bouts}); kp_data in the combined h5 is "
+                         "re-centred and must never be projected")
     ap.add_argument("--sam3-bout", default=None,
                     help="explicit SAM3 bout dir (e.g. bout_00006); OVERRIDES "
                          "the automatic session-CSV mapping when given")
@@ -424,17 +460,24 @@ def main(argv=None) -> int:
     T = int(ex["T"])
 
     # --- resolve the exemplar's SAM3 bout + frame offset (round-3 finding) -
-    # Ordinal position in the combined h5 does NOT match the session's own
-    # bout_idx (verified: the exemplar is the 4th surviving pair of its
-    # recording but session bout_idx 5; bout_idx 4 has n=2019), so the prior
-    # hardcoded --sam3-bout="bout_00006" + video_frame_offset=0 silently
-    # overlaid an UNRELATED bout's masks starting at the wrong video frame —
-    # a scientific-correctness defect (panel A didn't show its own traces'
-    # bout; panel I's target_pitch triangulated a different bout's female).
-    # `--sam3-bout` stays an explicit override for a user who wants to force
-    # a specific bout; otherwise this is resolved from the session's own
-    # `courtship_bouts_unified_summary.csv`, which refuses to guess on an
-    # ambiguous match rather than silently picking one.
+    # Ordinal position in the combined h5 does NOT match a bout_idx (round 5:
+    # verified as an outright PERMUTATION on the Video_recordings SAM3 tree),
+    # so the prior hardcoded --sam3-bout="bout_00006" + video_frame_offset=0
+    # silently overlaid an UNRELATED bout's masks starting at the wrong video
+    # frame — a scientific-correctness defect (panel A didn't show its own
+    # traces' bout; panel I's target_pitch triangulated a different bout's
+    # female). `--sam3-bout` stays an explicit override for a user who wants
+    # to force a specific bout; otherwise this is resolved against the
+    # PROCESSED tree (round 6: `kp_data`/masks under `--session`/`--sam3-root`
+    # cannot be used at all -- see `DEFAULT_PROCESSED_ROOT`), whose
+    # `courtship_bout_summary.csv` refuses an ambiguous match rather than
+    # silently picking one. `recording_base` strips the `_flyN` suffix
+    # `_resolve_session_bout` would otherwise strip internally, because it is
+    # ALSO needed here to build the processed-tree recording directory path
+    # (which, unlike the CSV's `fly_id` column, is not itself suffixed).
+    recording_base = str(recording_of(ex)).rsplit("_fly", 1)[0]
+    processed_recording_dir = Path(args.processed_root) / recording_base
+    processed_sam3_root = processed_recording_dir / "sam3_masks"
     if args.sam3_bout is not None:
         sam3_bout, video_frame_offset = args.sam3_bout, 0
         print(f"sam3 bout mapping OVERRIDDEN by --sam3-bout={sam3_bout!r} "
@@ -443,7 +486,8 @@ def main(argv=None) -> int:
         sam3_bout = video_frame_offset = None
         try:
             sam3_bout, video_frame_offset = _resolve_session_bout(
-                args.session, args.sam3_root, recording_of(ex), T)
+                processed_recording_dir, processed_sam3_root,
+                recording_of(ex), T)
             print(f"exemplar -> {sam3_bout} @ start_frame {video_frame_offset}")
         except Exception as e:                   # noqa: BLE001 - report, don't die
             skipped.append(
@@ -514,6 +558,14 @@ def main(argv=None) -> int:
     # image panel by design, so baking pre-drawn frames (keypoints + SAM3 mask
     # overlay included) reuses verified code rather than reimplementing DLT
     # projection here.
+    #
+    # Round 6: keypoints and the crop centre come from the PROCESSED tree's
+    # `kp3d.npz` (true DLT world frame), never the combined h5's `kp_data`
+    # (body-model-rescaled/re-centred; measured Scutellum uv (13.6, 426.6) --
+    # the frame's bottom-left corner, which is why the centred crop showed
+    # empty chamber). The raw mp4 + camera calibration still come from
+    # `--session` (the processed tree has neither).
+    kp3d_source = ""
     video_frames = []
     try:
         if sam3_bout is None:
@@ -525,14 +577,17 @@ def main(argv=None) -> int:
         calib_dir = Path(args.session) / "calibration"
         dlt_csv = calib_dir / f"{args.cam}_dlt.csv"
         mp4 = Path(args.session) / f"{args.cam}.mp4"
-        sam3_npz = Path(args.sam3_root) / sam3_bout / "sam3_masks.npz"
+        sam3_npz = processed_sam3_root / sam3_bout / "sam3_masks.npz"
+        pose_bout_dir = processed_recording_dir / "pose" / "bouts" / sam3_bout
+        male_kp3d = _load_kp3d(pose_bout_dir / "fly0" / "kp3d.npz")
+        female_kp3d = _load_kp3d(pose_bout_dir / "fly1" / "kp3d.npz")
+        kp3d_source = str(pose_bout_dir)
         dlt = cfp._dlt_load(dlt_csv)
         cam_idx = sam3_camera_index(calib_dir, dlt_csv.name)
         vidx = np.linspace(0, T - 1, args.n_video, dtype=int)
         masks = unpack_sam3_masks_for_frames(
             sam3_npz, cam_idx, fly_indices=[1, 0],
             frame_indices=[int(f) for f in vidx])
-        kp_xyz = np.asarray(data[ex["key0"]]["kp_data"]).reshape(T, -1, 3)
         figv, axv = plt.subplots(1, args.n_video, figsize=(args.n_video * 2, 2), dpi=200)
         axv = np.atleast_1d(axv)
         # A fixed roi is a crop copied from whatever recording it was tuned
@@ -542,12 +597,14 @@ def main(argv=None) -> int:
         if args.roi is not None:
             roi_kwargs = {"roi": tuple(args.roi)}
         else:
-            center_xyz = _pair_center_xyz(data, ex, kp_names, T)
+            center_xyz = _pair_center_xyz(
+                male_kp3d, female_kp3d, kp_names.index("Scutellum"), T)
             roi_kwargs = {"center_xyz": center_xyz, "crop_wh": tuple(args.crop_wh)}
         cfp.panel_video_strip_with_kp(
-            list(axv), mp4, vidx, kp_xyz_per_frame=kp_xyz, kp_names=kp_names,
+            list(axv), mp4, vidx, kp_xyz_per_frame=male_kp3d, kp_names=kp_names,
             dlt_coeffs=dlt, fs=fs, kp_scale=args.kp_scale,
             video_frame_offset=video_frame_offset, masks_per_fly=masks,
+            kp_xyz_fly1_per_frame=female_kp3d,
             mask_colors=["#e74c3c", "#3a7bff"], mask_alpha=0.35,
             **roi_kwargs)
         figv.canvas.draw()
@@ -568,6 +625,13 @@ def main(argv=None) -> int:
     # violin, and vice versa — `male_pitch`/`target_pitch` are assigned
     # incrementally in this block, so if THIS block's own exception fires
     # they simply keep whatever partial value they had, same as before.
+    #
+    # Round 6: `scut` (the male's Scutellum, used against the SAM3-
+    # triangulated `female` COM below, which IS in world frame) must come
+    # from the processed tree's `kp3d.npz`, not the combined h5's `kp_data`
+    # — same re-centering defect as the video block above, and for the same
+    # reason: mixing a re-centred position against a world-frame one puts
+    # `target_pitch` in no coherent frame at all.
     male_pitch = target_pitch = np.zeros(0)
     try:
         if sam3_bout is None:
@@ -576,14 +640,15 @@ def main(argv=None) -> int:
         from utils.sam3_female_com import triangulate_sam3_female_com
 
         female = triangulate_sam3_female_com(
-            str(Path(args.sam3_root) / sam3_bout / "sam3_masks.npz"),
+            str(processed_sam3_root / sam3_bout / "sam3_masks.npz"),
             str(Path(args.session) / "calibration"),
             fly_idx=0, min_cams=2, verbose=False) / args.kp_scale
         qm = np.asarray(data[ex["key0"]]["qpos"])
-        n = min(T, qm.shape[0], female.shape[0])
+        scut_all = _load_kp3d(
+            processed_recording_dir / "pose" / "bouts" / sam3_bout / "fly0" / "kp3d.npz")
+        n = min(T, qm.shape[0], female.shape[0], len(scut_all))
         male_pitch = cfp.body_pitch_deg_from_quat(qm[:n, 3:7])
-        scut = np.asarray(data[ex["key0"]]["kp_data"]).reshape(-1, len(kp_names), 3)
-        scut = scut[:n, kp_names.index("Scutellum"), :]
+        scut = scut_all[:n, kp_names.index("Scutellum"), :]
         vec = female[:n] - scut
         nrm = np.linalg.norm(vec, axis=-1)
         target_pitch = np.degrees(np.arcsin(np.divide(
@@ -654,6 +719,7 @@ def main(argv=None) -> int:
                        "align_sessions": align_sessions_str,
                        "sam3_bout": sam3_bout or "",
                        "video_frame_offset": int(video_frame_offset or 0),
+                       "kp3d_source": kp3d_source,
                        "skipped": "; ".join(skipped)},
                  panels=panels)
     print(f"wrote {args.out}: {len(panels)} panels from {len(results)} pairs")
