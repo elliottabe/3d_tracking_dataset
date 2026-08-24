@@ -2766,7 +2766,8 @@ sys.exit(main())
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `python -m pytest tests/test_figbuilder_export.py -v`
-Expected: 7 passed
+Expected: 8 passed (7 export tests + the Ruling 10 hashsalt test; the PNG/PDF
+test skips only if `rsvg-convert` is missing, and it is present here)
 
 - [ ] **Step 5: Commit**
 
@@ -3106,6 +3107,8 @@ def main(argv=None) -> int:
     work on the Hyak login node.
     """
     import argparse
+
+    import h5py
     from scipy.signal import hilbert
 
     from utils.courtship_loader import load_courtship_h5, pair_bouts, analyze_all_pairs
@@ -3140,13 +3143,37 @@ def main(argv=None) -> int:
 
     data, info, kp_names, bout_keys = load_courtship_h5(args.h5)
     pairs = pair_bouts(bout_keys, info)
+
+    # info/fly_ids is an h5 GROUP keyed by STRING INTEGERS ("0", "1", "10"...),
+    # not by bout name. Iterating it yields LEXICOGRAPHIC order, so entry 3 is
+    # "100", not 3 — reading it that way silently attributes bouts to the wrong
+    # recording. Index it numerically. This is the same defect class as commit
+    # bd085f7 ("bout keys past 999 sorted out of order against info arrays").
+    # Verified: lexicographic gives 2026_04_02_15_25_51 at index 3 where
+    # numeric correctly gives 2026_04_02_11_52_43. Ruling 16.
+    with h5py.File(args.h5, "r") as _f:
+        _g = _f["info"]["fly_ids"]
+        fly_ids = [_g[str(i)][()].decode() for i in range(len(_g))]
+
+    def recording_of(res) -> str:
+        """Recording id for a pair result, via its bout's numeric index."""
+        return fly_ids[bout_keys.index(res["key0"])]
     song = SongAnalysisConfig(); song.pipeline = "both"
     results = analyze_all_pairs(
         data, pairs, kp_names, song_cfg=song, sex_cfg=SexIdConfig(),
         loc_cfg=LocomotionConfig(), pair_cfg=PairValidityConfig())
     if not results:
         raise SystemExit("no pairs survived filtering; nothing to bundle")
-    ex = results[min(args.exemplar, len(results) - 1)]
+    # Prefer an exemplar from the recording that ALSO has video + SAM3, so the
+    # traces and the video frames describe the same flies.
+    cands = [r for r in results if args.recording in recording_of(r)]
+    if not cands:
+        skipped.append(f"exemplar from {args.recording!r} (no surviving pair); "
+                       f"falling back to the longest available bout")
+        cands = results
+    ex = max(cands, key=lambda r: int(r["T"]))
+    print(f"exemplar {ex['key0']}/{ex['key1']} from {recording_of(ex)} "
+          f"(T={int(ex['T'])}, {len(cands)} candidates)")
     fs = float(song.fs)
     T = int(ex["T"])
 
