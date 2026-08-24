@@ -86,3 +86,6 @@ ipympl
 
 # Editable local packages
 -e ./stac-mjx
+
+# figbuilder editor backend
+fastapi
