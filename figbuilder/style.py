@@ -33,6 +33,12 @@ DEFAULT_RCPARAMS: Dict[str, Any] = {
     "xtick.major.width": 0.6,
     "ytick.major.width": 0.6,
     "legend.frameon": False,
+    # The analysis code in utils/ despines its own figures; figbuilder
+    # renders each panel as an independent tile and so never picked that
+    # up, boxing every panel. Default to the same house style, still
+    # overridable per-figure via `style` and per-panel via `spines`.
+    "axes.spines.top": False,
+    "axes.spines.right": False,
 }
 
 

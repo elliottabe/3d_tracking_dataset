@@ -11,6 +11,8 @@ from typing import Any, Dict, List, Optional, Type
 
 import matplotlib.pyplot as plt
 
+from figbuilder.cosmetics import SHARED_SCHEMA
+
 
 class PanelType:
     """Base class for all panel types."""
@@ -47,7 +49,19 @@ def get_panel_type(type_id: str) -> PanelType:
         raise KeyError(f"unknown panel type {type_id!r}; known types: {known}") from None
 
 
+def full_schema(ptype: PanelType) -> Dict[str, Any]:
+    """A panel type's own schema plus the shared cosmetic options.
+
+    Kept separate from `PanelType.schema` so a panel type still declares only
+    what is genuinely its own; the shared block is merged in at the one place
+    the UI reads.
+    """
+    schema = dict(ptype.schema)
+    schema["properties"] = {**SHARED_SCHEMA, **schema.get("properties", {})}
+    return schema
+
+
 def list_panel_types() -> List[Dict[str, Any]]:
     return [{"id": p.id, "label": p.label, "needs": list(p.needs),
-             "schema": p.schema, "projection": p.projection}
+             "schema": full_schema(p), "projection": p.projection}
             for p in sorted(_REGISTRY.values(), key=lambda p: p.id)]

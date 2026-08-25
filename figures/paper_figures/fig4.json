@@ -17,9 +17,9 @@
       "id": "wing",
       "type": "courtship.wing_z",
       "rect": [
-        0.07,
+        0.088,
         0.6808939661816038,
-        0.8999999999999999,
+        0.882,
         0.07298608277800456
       ],
       "data": {
@@ -42,7 +42,19 @@
       "spec": {
         "fs": 800.0,
         "time_unit": "s",
-        "min_segment_ms": 10.0
+        "min_segment_ms": 10.0,
+        "hide_xticklabels": true,
+        "spines": {
+          "bottom": false
+        },
+        "legend_kwargs": {
+          "ncols": 4,
+          "loc": "lower left",
+          "bbox_to_anchor": [
+            0.0,
+            1.02
+          ]
+        }
       },
       "group": null,
       "z": 0
@@ -51,9 +63,9 @@
       "id": "scut",
       "type": "courtship.scutellum_z",
       "rect": [
-        0.07,
+        0.088,
         0.6187515299877602,
-        0.8999999999999999,
+        0.882,
         0.05213291627000305
       ],
       "data": {
@@ -211,7 +223,7 @@
       "type": "courtship.male_pitch",
       "rect": [
         0.600210970464135,
-        0.05091799265605873,
+        0.0669179927,
         0.20569620253164556,
         0.1253365973072215
       ],

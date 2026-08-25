@@ -38,6 +38,26 @@ def _frame_range(spec: Dict[str, Any]) -> Optional[tuple]:
     return None if fr is None else (int(fr[0]), int(fr[1]))
 
 
+#: Panels whose utils/ function forwards **legend_kwargs into ax.legend can
+#: expose it. Post-draw repositioning (figbuilder.cosmetics) can move a legend
+#: but cannot RESHAPE it — `ncols` in particular has to be set at draw time,
+#: because changing it means rebuilding the legend, which would discard the
+#: colour-matched text styling utils/ applies.
+_LEGEND_KWARGS_SCHEMA = {
+    "legend_kwargs": {
+        "type": "object",
+        "title": "Legend (draw-time)",
+        "description": "Forwarded to ax.legend; use for ncols. Position-only "
+                       "changes can also be made with the shared `legend` option.",
+    },
+}
+
+
+def _legend_kwargs(spec: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    lk = spec.get("legend_kwargs")
+    return lk if isinstance(lk, dict) and lk else None
+
+
 _TIME_SCHEMA = {
     "fs": {"type": "number", "default": 800.0, "title": "Sample rate (Hz)"},
     "frame_range": {"type": "array", "items": {"type": "integer"},
@@ -53,6 +73,7 @@ class WingZPanel(PanelType):
     needs = ["t_ms", "wingL_z", "wingR_z", "seg_L", "seg_R"]
     schema = {"type": "object", "properties": {
         **_TIME_SCHEMA,
+        **_LEGEND_KWARGS_SCHEMA,
         "min_segment_ms": {"type": "number", "default": 0.0},
     }}
 
@@ -65,6 +86,7 @@ class WingZPanel(PanelType):
             frame_range=_frame_range(spec),
             min_segment_ms=float(spec.get("min_segment_ms", 0.0)),
             time_unit=spec.get("time_unit", "s"),
+            legend_kwargs=_legend_kwargs(spec),
         )
 
 

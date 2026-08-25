@@ -23,6 +23,7 @@ import numpy as np
 from figbuilder.bundle import Bundle
 from figbuilder.figure import FigureSpec, PanelSpec
 from figbuilder.panels.base import get_panel_type
+from figbuilder.cosmetics import apply_cosmetics
 from figbuilder.style import apply_style
 
 Rect = Tuple[float, float, float, float]
@@ -137,6 +138,9 @@ def render_tile(fig_spec: FigureSpec, panel: PanelSpec,
         ax = fig.add_axes(list(panel.rect), projection=ptype.projection)
         ax.set_gid(panel.id)
         ptype.draw(ax, data, panel.spec)
+        # Before _ink_box: cosmetics can shrink the measured ink (hiding tick
+        # labels is exactly how a panel stops overflowing onto its neighbour).
+        apply_cosmetics(ax, panel.spec)
         ink = _ink_box(fig, ax)
         buf = io.BytesIO()
         fig.savefig(buf, format="svg", transparent=True)
