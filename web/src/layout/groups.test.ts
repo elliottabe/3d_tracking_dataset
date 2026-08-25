@@ -53,6 +53,26 @@ describe('solveGroup', () => {
     const out = solveGroup(G({ gutterMm: 90 }), kids, 100, 100);
     out.forEach((r) => expect(r.w).toBeGreaterThanOrEqual(0));
   });
+
+  it('keeps children within the group rect when gutter far exceeds the group (x-axis)', () => {
+    const kids = [R(0,0,0.1,0.1), R(0,0,0.1,0.1), R(0,0,0.1,0.1)];
+    const g = G({ gutterMm: 90 }); // group is 0.1..0.9, gutter 90mm = 0.9 frac, far exceeds 0.8 span
+    const out = solveGroup(g, kids, 100, 100);
+    out.forEach((r) => {
+      expect(r.x).toBeGreaterThanOrEqual(g.rect.x);
+      expect(r.x + r.w).toBeLessThanOrEqual(g.rect.x + g.rect.w);
+    });
+  });
+
+  it('keeps children within the group rect when gutter far exceeds the group (y-axis)', () => {
+    const kids = [R(0,0,0.1,0.1), R(0,0,0.1,0.1), R(0,0,0.1,0.1)];
+    const g = G({ axis: 'y', gutterMm: 90 }); // group is 0.5..0.7, gutter 90mm = 0.9 frac, far exceeds 0.2 span
+    const out = solveGroup(g, kids, 100, 100);
+    out.forEach((r) => {
+      expect(r.y).toBeGreaterThanOrEqual(g.rect.y);
+      expect(r.y + r.h).toBeLessThanOrEqual(g.rect.y + g.rect.h);
+    });
+  });
 });
 
 describe('groupBounds', () => {

@@ -28,9 +28,14 @@ export function solveGroup(
 
   const along = g.axis === 'x' ? ('w' as const) : ('h' as const);
   const extentMm = g.axis === 'x' ? figWmm : figHmm;
-  const gutter = Math.max(0, g.gutterMm / extentMm);
 
   const span = g.axis === 'x' ? g.rect.w : g.rect.h;
+  // A gutter larger than the group cannot be honoured: clamp it to the span
+  // so children stay INSIDE the group rect (zero-width, but positioned
+  // sensibly) rather than marching off-canvas at the requested spacing.
+  const maxGutter = n > 1 ? span / (n - 1) : 0;
+  const gutter = Math.min(Math.max(0, g.gutterMm / extentMm), maxGutter);
+
   const totalGutter = gutter * (n - 1);
   const usable = Math.max(0, span - totalGutter);
 
