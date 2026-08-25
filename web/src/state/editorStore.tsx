@@ -108,7 +108,11 @@ function commitGroupChange(
   state: EditorState, panels: PanelState[], groups: Group[],
 ): EditorState {
   const history = commit(state.history, snapshotOf(panels, groups));
-  return { ...state, panels, groups, history, dirty: true };
+  // Derive `dirty` exactly as withGeometry does. Hardcoding `true` here left a group edit
+  // round-tripped back to its saved value (setGutter(x) -> setGutter(original)) reporting
+  // unsaved changes forever. Now that Snapshot carries groups + membership, the comparison
+  // against savedSnapshot is meaningful for group edits too.
+  return { ...state, panels, groups, history, dirty: !sameLayout(history.present, state.savedSnapshot) };
 }
 
 /** Map a transform over the selected panels only. */

@@ -283,6 +283,27 @@ describe('group state is part of undo/redo, not just rect geometry', () => {
     expect(s.history.past.length).toBe(pastLen); // truly identical: no new entry pushed
   });
 
+  it('derives dirty for group edits rather than hardcoding it', () => {
+    // Regression: commitGroupChange hardcoded `dirty: true`, so a group action that changed
+    // NOTHING still reported unsaved changes. Re-applying the gutter a group already has is
+    // the bit-exact case: solveGroup is deterministic, so the same inputs give the same rects.
+    // (A 999 -> original round-trip does NOT clear dirty, because the intermediate solve
+    // perturbs the rects by ~1e-16 and sameLayout compares with strict ===. That is a real
+    // limitation of comparing floats exactly, not something this test should paper over.)
+    let s = loaded();
+    s = reducer(s, { type: 'select', ids: ['a', 'c'] });
+    s = reducer(s, { type: 'groupSelection', axis: 'x' });
+    s = reducer(s, { type: 'saved' });
+    expect(s.dirty).toBe(false);
+
+    const g = s.groups[0];
+    s = reducer(s, { type: 'setGutter', id: g.id, gutterMm: g.gutterMm });
+    expect(s.dirty).toBe(false);                     // nothing changed -> still clean
+
+    s = reducer(s, { type: 'setGutter', id: g.id, gutterMm: g.gutterMm + 5 });
+    expect(s.dirty).toBe(true);                      // a real change -> dirty
+  });
+
   it('dirty is false after undoing back to the last-saved point when the only change was a grouping change', () => {
     let s = loaded();
     s = reducer(s, { type: 'select', ids: ['a', 'c'] });
