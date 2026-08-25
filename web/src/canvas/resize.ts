@@ -24,12 +24,23 @@ export function resizeRect(
 
   let out = normalizeRect({ x, y, w, h });
 
-  if (opts.aspect && r.h !== 0) {
+  if (opts.aspect && r.h !== 0 && r.w !== 0) {
     const ratio = r.w / r.h;
-    // Drive height from width so a horizontal drag feels authoritative.
-    const newH = out.w / ratio;
-    if (handle.includes('s')) out = { ...out, y: out.y + (out.h - newH) };
-    out = { ...out, h: newH };
+    if (handle === 'n' || handle === 's') {
+      // Pure vertical handles never touch w, so height must be the driver
+      // here (deriving it from w, as below, would just recompute the
+      // original height and discard the drag). Neither handle carries a
+      // horizontal component, so anchor by keeping the rect's horizontal
+      // centre fixed rather than either edge.
+      const newW = out.h * ratio;
+      const cx = out.x + out.w / 2;
+      out = { ...out, x: cx - newW / 2, w: newW };
+    } else {
+      // Corner and pure-horizontal handles: width is the driver.
+      const newH = out.w / ratio;
+      if (handle.includes('s')) out = { ...out, y: out.y + (out.h - newH) };
+      out = { ...out, h: newH };
+    }
   }
 
   if (out.w < minW) {

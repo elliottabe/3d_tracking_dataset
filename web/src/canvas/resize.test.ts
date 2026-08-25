@@ -38,10 +38,30 @@ describe('resizeRect', () => {
     expect(out.y).toBeCloseTo(0.2);
   });
 
+  // Hand-derived: 'e' step gives w = 0.4 - 0.6 = -0.2 (x, y, h untouched by
+  // the 'e' step). normalizeRect then flips: since w < 0, x = 0.2 + (-0.2)
+  // = 0.0 and w = abs(-0.2) = 0.2 — the right edge lands where the left
+  // edge used to be, height untouched. A "clamp instead of flip" bug
+  // (w = max(0, r.w+dx), x untouched) would instead produce {x:0.2, w:0}
+  // and must FAIL these exact assertions.
   it('normalizes a rect dragged inside-out rather than emitting negative w', () => {
     const out = resizeRect(R, 'e', -0.6, 0);
-    expect(out.w).toBeGreaterThanOrEqual(0);
-    expect(out.x).toBeLessThanOrEqual(0.2);
+    expect(out.x).toBeCloseTo(0.0);
+    expect(out.y).toBeCloseTo(0.2);
+    expect(out.w).toBeCloseTo(0.2);
+    expect(out.h).toBeCloseTo(0.4);
+  });
+
+  // Mirrored vertical case. 's' step: y += dy = 0.2+0.6 = 0.8, h -= dy =
+  // 0.4-0.6 = -0.2 (top edge y+h = 0.6 stays fixed by the step itself).
+  // normalizeRect flips on h < 0: y = 0.8 + (-0.2) = 0.6, h = abs(-0.2) =
+  // 0.2 — the south edge lands where the north edge used to be (0.6).
+  it('normalizes a rect dragged inside-out vertically (s overshoot)', () => {
+    const out = resizeRect(R, 's', 0, 0.6);
+    expect(out.x).toBeCloseTo(0.2);
+    expect(out.y).toBeCloseTo(0.6);
+    expect(out.w).toBeCloseTo(0.4);
+    expect(out.h).toBeCloseTo(0.2);
   });
 
   it('honours a minimum size so a panel cannot collapse to nothing', () => {
@@ -51,6 +71,30 @@ describe('resizeRect', () => {
 
   it('preserves aspect when asked', () => {
     const out = resizeRect(R, 'se', 0.2, 0, { aspect: true });
+    expect(out.w / out.h).toBeCloseTo(R.w / R.h, 6);
+  });
+
+  // 's' step: y=0.3, h=0.3. Height is the driver for a pure-vertical
+  // handle: newW = out.h * ratio = 0.3*1 = 0.3, centred on cx = 0.2+0.2 =
+  // 0.4, so x = 0.4 - 0.15 = 0.25. Before the fix this recomputed the
+  // ORIGINAL h from out.w and was a bit-identical no-op.
+  it('shift+drag on s changes the rect and preserves aspect ratio', () => {
+    const out = resizeRect(R, 's', 0, 0.1, { aspect: true });
+    expect(out.x).toBeCloseTo(0.25);
+    expect(out.y).toBeCloseTo(0.3);
+    expect(out.w).toBeCloseTo(0.3);
+    expect(out.h).toBeCloseTo(0.3);
+    expect(out.w / out.h).toBeCloseTo(R.w / R.h, 6);
+  });
+
+  // 'n' step: h=0.5, x/y untouched. newW = out.h*ratio = 0.5*1 = 0.5,
+  // centred on cx = 0.2+0.2 = 0.4, so x = 0.4 - 0.25 = 0.15.
+  it('shift+drag on n changes the rect and preserves aspect ratio', () => {
+    const out = resizeRect(R, 'n', 0, 0.1, { aspect: true });
+    expect(out.x).toBeCloseTo(0.15);
+    expect(out.y).toBeCloseTo(0.2);
+    expect(out.w).toBeCloseTo(0.5);
+    expect(out.h).toBeCloseTo(0.5);
     expect(out.w / out.h).toBeCloseTo(R.w / R.h, 6);
   });
 });

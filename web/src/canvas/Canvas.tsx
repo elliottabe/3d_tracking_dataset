@@ -310,6 +310,17 @@ export function Canvas() {
   /** Arrow keys nudge the selection in mm (bigger step with shift);
    *  ctrl/cmd+z undoes, ctrl/cmd+shift+z redoes; escape clears selection. */
   const onKeyDown = (e: React.KeyboardEvent) => {
+    // Guard against hijacking text entry. Today Toolbar/Properties are
+    // SIBLINGS of Canvas in App.tsx, so their inputs never bubble a
+    // keydown here — this guard is currently redundant. It stays in place
+    // so that if an in-canvas text field (e.g. an inline panel-rename box)
+    // is ever added, arrow keys and other shortcuts here don't silently
+    // steal its caret/typing.
+    const target = e.target as HTMLElement | null;
+    const tag = target?.tagName;
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || target?.isContentEditable) {
+      return;
+    }
     if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'z') {
       e.preventDefault();
       dispatch({ type: e.shiftKey ? 'redo' : 'undo' });
@@ -338,7 +349,12 @@ export function Canvas() {
     <div
       tabIndex={0}
       style={{
-        overflow: 'hidden', width: '100%', height: '100vh',
+        // Fills the remaining viewport height beneath the Toolbar: the app
+        // shell (App.tsx) is a flex column with this component's flex
+        // container ancestor set to `flex: 1, minHeight: 0`, so `100%`
+        // here resolves to "whatever is left", not a full 100vh on top of
+        // the toolbar's own height. Do not hardcode a viewport unit here.
+        overflow: 'hidden', width: '100%', height: '100%',
         background: '#f4f4f5', cursor: panning ? 'grabbing' : 'grab',
         outline: 'none',
       }}

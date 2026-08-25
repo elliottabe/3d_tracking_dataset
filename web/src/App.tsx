@@ -19,7 +19,7 @@ function EditorShell() {
     <div style={{ display: 'flex', flexDirection: 'column', height: '100vh' }}>
       <Toolbar onSave={() => dispatch({ type: 'saved' })} />
       <div style={{ display: 'flex', flex: 1, minHeight: 0 }}>
-        <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ flex: 1, minWidth: 0, height: '100%' }}>
           <Canvas />
         </div>
         <Properties />
