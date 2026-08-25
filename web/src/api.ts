@@ -35,3 +35,12 @@ export async function renderPanel(panel: PanelSpecDTO): Promise<TileDTO> {
   if (!r.ok) throw new Error(`/api/panel: ${r.status}`);
   return (await r.json()) as TileDTO;
 }
+
+export async function saveFigure(doc: unknown): Promise<void> {
+  const r = await fetch(`${BASE}/api/figure`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(doc),
+  });
+  if (!r.ok) throw new Error(`save failed: ${r.status} ${await r.text()}`);
+}

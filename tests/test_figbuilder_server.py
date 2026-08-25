@@ -80,3 +80,32 @@ def test_export_route_writes_a_file_and_returns_warnings(client, tmp_path):
     body = client.post("/api/export", json={"formats": ["svg"]}).json()
     assert body["paths"]["svg"].endswith(".svg")
     assert isinstance(body["warnings"], list)
+
+
+def test_put_figure_persists_panel_rects(client, tmp_path):
+    """The browser owns the document; PUT is how it writes back."""
+    doc = client.get("/api/figure").json()
+    doc["panels"][0]["rect"] = [0.25, 0.25, 0.5, 0.5]
+    r = client.put("/api/figure", json=doc)
+    assert r.status_code == 200
+    assert client.get("/api/figure").json()["panels"][0]["rect"] == [0.25, 0.25, 0.5, 0.5]
+
+
+def test_put_figure_rejects_a_malformed_document(client):
+    r = client.put("/api/figure", json={"panels": [{"id": "a"}]})
+    assert r.status_code == 400
+    assert "rect" in r.json()["detail"].lower() or "type" in r.json()["detail"].lower()
+
+
+def test_put_figure_does_not_corrupt_the_file_when_invalid(client):
+    before = client.get("/api/figure").json()
+    client.put("/api/figure", json={"nonsense": True})
+    assert client.get("/api/figure").json() == before
+
+
+def test_root_explains_where_the_ui_is_when_it_is_not_built(client):
+    """A bare 404 at / cost a real debugging round trip. Say something useful."""
+    r = client.get("/")
+    assert r.status_code in (200, 503)
+    body = r.text.lower()
+    assert "5173" in body or "npm run dev" in body or "<!doctype html" in body

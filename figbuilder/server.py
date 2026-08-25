@@ -6,12 +6,15 @@ and the tile cache.
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import numpy as np
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse
+from fastapi.staticfiles import StaticFiles
 
 import figbuilder.panels  # noqa: F401  (registers types)
 from figbuilder.bundle import read_bundle
@@ -54,6 +57,39 @@ def create_app(figure_path: str | Path,
     def get_figure() -> Dict[str, Any]:
         import json
         return json.loads(figure_path.read_text())
+
+    @app.put("/api/figure")
+    def put_figure(body: Dict[str, Any]) -> Dict[str, Any]:
+        """Persist the browser's document.
+
+        Validated BEFORE writing: a malformed post must not corrupt the file
+        the researcher's figure is regenerated from. Writes `figure.json`
+        only — never `bundle.h5`, which is pipeline-regenerated data.
+        """
+        import json as _json
+        import tempfile
+
+        from figbuilder.figure import load_figure as _load
+
+        # `_load` defaults every missing top-level key (a bare {} parses to
+        # a valid, empty FigureSpec), so it alone would silently accept a
+        # document that isn't a figure at all and clobber the real one.
+        # Require the one field every real document has and a stray blob
+        # would not: a `panels` list.
+        if not isinstance(body, dict) or not isinstance(body.get("panels"), list):
+            raise HTTPException(
+                status_code=400,
+                detail="figure document must include a 'panels' list") from None
+
+        tmp = Path(tempfile.mkstemp(suffix=".json", dir=str(figure_path.parent))[1])
+        try:
+            tmp.write_text(_json.dumps(body, indent=2) + "\n")
+            _load(tmp)                      # raises on a malformed document
+        except Exception as e:              # noqa: BLE001 - surfaced to the client
+            tmp.unlink(missing_ok=True)
+            raise HTTPException(status_code=400, detail=str(e)) from None
+        os.replace(tmp, figure_path)        # atomic; never a torn file
+        return {"ok": True, "path": str(figure_path)}
 
     @app.get("/api/panel-types")
     def get_panel_types() -> List[Dict[str, Any]]:
@@ -107,5 +143,25 @@ def create_app(figure_path: str | Path,
                             cache_dir=cache_dir)
         return {"paths": {k: str(v) for k, v in res.paths.items()},
                 "warnings": res.warnings}
+
+    # Mount the built UI LAST, so it can never shadow an /api/* route: a
+    # StaticFiles(html=True) mount at "/" only takes over once no earlier
+    # route (all registered above) has matched.
+    _DIST = Path(__file__).resolve().parent.parent / "web" / "dist"
+    if (_DIST / "index.html").exists():
+        app.mount("/", StaticFiles(directory=str(_DIST), html=True), name="ui")
+    else:
+        @app.get("/", response_class=HTMLResponse)
+        def _ui_hint() -> str:
+            # Do NOT return a bare 404 here. It cost a real debugging round trip.
+            return (
+                "<h1>figbuilder API</h1>"
+                "<p>This port serves <code>/api/*</code> only.</p>"
+                "<p>The editor UI is not built. Either run "
+                "<code>cd web && npm run dev</code> and open "
+                "<a href='http://localhost:5173'>http://localhost:5173</a>, "
+                "or run <code>cd web && npm run build</code> to have this "
+                "server host it here.</p>"
+            )
 
     return app
