@@ -11,6 +11,14 @@ import type { Group } from '../layout/groups';
 /** Screen-pixel radius within which a dragged edge/centre snaps to a target. */
 const SNAP_TOL_PX = 6;
 
+/**
+ * Screen-pixel movement budget below which a background pointer-down/up is
+ * treated as a CLICK (clears selection) rather than a PAN (leaves it alone).
+ * Real pointers jitter even when the user means to click, so this must be a
+ * few px, not zero.
+ */
+const CLICK_TOL_PX = 4;
+
 type PointerMode = 'pan' | 'drag' | 'marquee' | null;
 
 type DragState = {
@@ -39,6 +47,14 @@ export function Canvas() {
   const panRef = useRef<{ x: number; y: number } | null>(null);
   const dragRef = useRef<DragState | null>(null);
   const marqueeStartRef = useRef<{ x: number; y: number } | null>(null);
+  /** Whether NO selection-affecting modifier was held when the current pan
+   *  gesture began — a pan that started this way and moved negligibly is a
+   *  plain click on empty space, which should clear the selection. */
+  const panNoModifierRef = useRef(false);
+  /** Cumulative screen-px distance travelled since pointer-down, for the
+   *  same click-vs-pan decision (path length, not net displacement, so a
+   *  jittery round-trip still counts as movement). */
+  const panMoveDistRef = useRef(0);
 
   useEffect(() => {
     void getFigure().then((d) => {
@@ -98,6 +114,10 @@ export function Canvas() {
       return;
     }
 
+    // Shift here is a PAN-ESCAPE gesture modifier: plain background drag
+    // pans the canvas, so shift is what tells us the user wants to marquee
+    // instead. It is NOT the additive-selection modifier (that's meta/ctrl,
+    // checked at release below) — do not "fix" this by making shift additive.
     if (e.shiftKey) {
       modeRef.current = 'marquee';
       marqueeStartRef.current = pt;
@@ -107,18 +127,33 @@ export function Canvas() {
 
     modeRef.current = 'pan';
     panRef.current = { x: e.clientX, y: e.clientY };
+    panNoModifierRef.current = !e.shiftKey && !e.metaKey && !e.ctrlKey;
+    panMoveDistRef.current = 0;
     setPanning(true);
   };
 
-  const endGesture = () => {
+  const endGesture = (e: React.PointerEvent) => {
     if (modeRef.current === 'marquee' && marquee) {
       const hittables: Hittable[] = state.panels.map((p) => ({ id: p.id, rect: p.rect }));
-      dispatch({ type: 'select', ids: marqueeHits(hittables, marquee) });
+      // Marquee normally REPLACES the selection. Only when meta/ctrl is ALSO
+      // held at release does it extend the existing selection instead.
+      dispatch({
+        type: 'select',
+        ids: marqueeHits(hittables, marquee),
+        additive: e.metaKey || e.ctrlKey,
+      });
+    } else if (modeRef.current === 'pan' && panNoModifierRef.current
+      && panMoveDistRef.current <= CLICK_TOL_PX) {
+      // Pointer went down and up on empty space, unmodified, with
+      // negligible movement: a click, not a pan — clear the selection.
+      dispatch({ type: 'select', ids: [] });
     }
     modeRef.current = null;
     panRef.current = null;
     dragRef.current = null;
     marqueeStartRef.current = null;
+    panNoModifierRef.current = false;
+    panMoveDistRef.current = 0;
     setPanning(false);
     setMarquee(null);
     setGuides([]);
@@ -130,6 +165,7 @@ export function Canvas() {
       const dx = e.clientX - panRef.current.x;
       const dy = e.clientY - panRef.current.y;
       panRef.current = { x: e.clientX, y: e.clientY };
+      panMoveDistRef.current += Math.hypot(dx, dy);
       setView((v) => ({ ...v, tx: v.tx + dx, ty: v.ty + dy }));
       return;
     }

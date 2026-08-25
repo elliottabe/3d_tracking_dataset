@@ -24,7 +24,7 @@ export function initHistory(present: Snapshot): History {
   return { past: [], present, future: [] };
 }
 
-function sameLayout(a: Snapshot, b: Snapshot): boolean {
+export function sameLayout(a: Snapshot, b: Snapshot): boolean {
   const ka = Object.keys(a);
   const kb = Object.keys(b);
   if (ka.length !== kb.length) return false;

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { canRedo, canUndo, commit, initHistory, redo, undo } from './history';
+import { canRedo, canUndo, commit, initHistory, redo, sameLayout, undo } from './history';
 import type { Rect } from './rect';
 
 const S = (x: number): Record<string, Rect> => ({ p: { x, y: 0, w: 0.1, h: 0.1 } });
@@ -63,5 +63,21 @@ describe('history', () => {
     let h = initHistory(S(0));
     h = commit(h, S(0));
     expect(canUndo(h)).toBe(false);
+  });
+});
+
+describe('sameLayout', () => {
+  it('is exported and treats equal snapshots as equal', () => {
+    expect(sameLayout(S(1), S(1))).toBe(true);
+  });
+
+  it('detects a differing rect on a shared key', () => {
+    expect(sameLayout(S(1), S(2))).toBe(false);
+  });
+
+  it('detects a differing key count', () => {
+    const a = S(1);
+    const b = { ...S(1), q: { x: 0, y: 0, w: 0.2, h: 0.2 } };
+    expect(sameLayout(a, b)).toBe(false);
   });
 });

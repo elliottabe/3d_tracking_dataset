@@ -7,7 +7,7 @@
  */
 import { createContext, useContext, useMemo, useReducer, type ReactNode } from 'react';
 import { alignRects, distributeRects, matchSize, type AlignOp, type RefMode } from '../layout/align';
-import { canRedo, canUndo, commit, initHistory, redo, undo, type History, type Snapshot } from '../layout/history';
+import { canRedo, canUndo, commit, initHistory, redo, sameLayout, undo, type History, type Snapshot } from '../layout/history';
 import type { Group } from '../layout/groups';
 import type { BoxMode, SnapTarget } from '../layout/snap';
 import type { Rect } from '../layout/rect';
@@ -66,30 +66,13 @@ const snapshotOf = (panels: PanelState[]): Snapshot =>
 const applySnapshot = (panels: PanelState[], snap: Snapshot): PanelState[] =>
   panels.map((p) => (snap[p.id] ? { ...p, rect: snap[p.id] } : p));
 
-/**
- * Shallow per-panel rect comparison, mirroring `history.ts`'s internal
- * `sameLayout` (not exported, so duplicated here rather than widening that
- * module's public surface). Used to derive `dirty` from the current layout
- * vs. the last saved/loaded snapshot, instead of flipping a boolean by hand.
- */
-function snapshotsEqual(a: Snapshot, b: Snapshot): boolean {
-  const ka = Object.keys(a);
-  const kb = Object.keys(b);
-  if (ka.length !== kb.length) return false;
-  return ka.every((k) => {
-    const p = a[k];
-    const q = b[k];
-    return q !== undefined && p.x === q.x && p.y === q.y && p.w === q.w && p.h === q.h;
-  });
-}
-
 /** Commit a new set of panels through history, re-deriving `dirty`. */
 function withGeometry(
   state: EditorState, panels: PanelState[], coalesceKey?: string,
 ): EditorState {
   const history = commit(state.history, snapshotOf(panels), { coalesceKey });
   if (history === state.history) return state;   // nothing actually moved
-  return { ...state, panels, history, dirty: !snapshotsEqual(history.present, state.savedSnapshot) };
+  return { ...state, panels, history, dirty: !sameLayout(history.present, state.savedSnapshot) };
 }
 
 /** Map a transform over the selected panels only. */
@@ -179,7 +162,7 @@ export function reducer(state: EditorState, action: Action): EditorState {
         ...state,
         history,
         panels: applySnapshot(state.panels, history.present),
-        dirty: !snapshotsEqual(history.present, state.savedSnapshot),
+        dirty: !sameLayout(history.present, state.savedSnapshot),
       };
     }
 
@@ -190,7 +173,7 @@ export function reducer(state: EditorState, action: Action): EditorState {
         ...state,
         history,
         panels: applySnapshot(state.panels, history.present),
-        dirty: !snapshotsEqual(history.present, state.savedSnapshot),
+        dirty: !sameLayout(history.present, state.savedSnapshot),
       };
     }
 
