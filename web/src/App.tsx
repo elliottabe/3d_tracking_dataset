@@ -1,7 +1,12 @@
 import { Canvas } from './canvas/Canvas';
+import { EditorProvider } from './state/editorStore';
 
 function App() {
-  return <Canvas />;
+  return (
+    <EditorProvider>
+      <Canvas />
+    </EditorProvider>
+  );
 }
 
 export default App;
