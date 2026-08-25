@@ -208,6 +208,95 @@ describe('groups', () => {
   });
 });
 
+// Undo/redo must cover the WHOLE document, not just rect geometry: groups
+// and group membership are undoable state too, or a group can survive an
+// undo as a "ghost" (rects revert, but state.groups/panel.group do not).
+describe('group state is part of undo/redo, not just rect geometry', () => {
+  it('undo after groupSelection clears BOTH state.groups and every panel.group (no ghost group)', () => {
+    let s = loaded();
+    s = reducer(s, { type: 'select', ids: ['a', 'c'] });
+    s = reducer(s, { type: 'groupSelection', axis: 'x' });
+    expect(s.groups).toHaveLength(1);
+    s = reducer(s, { type: 'undo' });
+    expect(s.groups).toHaveLength(0);
+    expect(s.panels.find((p) => p.id === 'a')!.group).toBeFalsy();
+    expect(s.panels.find((p) => p.id === 'c')!.group).toBeFalsy();
+  });
+
+  it('undo after ungroup restores state.groups AND membership (ungroup previously pushed no history entry)', () => {
+    let s = loaded();
+    s = reducer(s, { type: 'select', ids: ['a', 'c'] });
+    s = reducer(s, { type: 'groupSelection', axis: 'x' });
+    const groupId = s.groups[0].id;
+    s = reducer(s, { type: 'ungroup', id: groupId });
+    expect(s.groups).toHaveLength(0);
+    s = reducer(s, { type: 'undo' });
+    expect(s.groups).toHaveLength(1);
+    expect(s.groups[0].id).toBe(groupId);
+    expect(s.panels.find((p) => p.id === 'a')!.group).toBe(groupId);
+    expect(s.panels.find((p) => p.id === 'c')!.group).toBe(groupId);
+  });
+
+  it("undo after setGutter restores the group's gutterMm metadata, not just child rects", () => {
+    let s = loaded();
+    s = reducer(s, { type: 'select', ids: ['a', 'c'] });
+    s = reducer(s, { type: 'groupSelection', axis: 'x' });
+    const originalGutter = s.groups[0].gutterMm;
+    s = reducer(s, { type: 'setGutter', id: s.groups[0].id, gutterMm: 20 });
+    expect(s.groups[0].gutterMm).toBe(20);
+    s = reducer(s, { type: 'undo' });
+    expect(s.groups[0].gutterMm).toBeCloseTo(originalGutter, 9);
+  });
+
+  it('undo after setGroupEqual restores the previous equal flag', () => {
+    let s = loaded();
+    s = reducer(s, { type: 'select', ids: ['a', 'b', 'c'] });
+    s = reducer(s, { type: 'groupSelection', axis: 'x' });
+    expect(s.groups[0].equal).toBe(false);
+    s = reducer(s, { type: 'setGroupEqual', id: s.groups[0].id, equal: true });
+    expect(s.groups[0].equal).toBe(true);
+    s = reducer(s, { type: 'undo' });
+    expect(s.groups[0].equal).toBe(false);
+  });
+
+  it('redo re-applies group membership, not just geometry', () => {
+    let s = loaded();
+    s = reducer(s, { type: 'select', ids: ['a', 'c'] });
+    s = reducer(s, { type: 'groupSelection', axis: 'x' });
+    const groupId = s.groups[0].id;
+    s = reducer(s, { type: 'undo' });
+    expect(s.groups).toHaveLength(0);
+    s = reducer(s, { type: 'redo' });
+    expect(s.groups).toHaveLength(1);
+    expect(s.groups[0].id).toBe(groupId);
+    expect(s.panels.find((p) => p.id === 'a')!.group).toBe(groupId);
+    expect(s.panels.find((p) => p.id === 'c')!.group).toBe(groupId);
+  });
+
+  it('a pure geometry no-op is still suppressed even when groups are present (no-op guard not lost)', () => {
+    let s = loaded();
+    s = reducer(s, { type: 'select', ids: ['a', 'c'] });
+    s = reducer(s, { type: 'groupSelection', axis: 'x' });
+    const pastLen = s.history.past.length;
+    const aRect = s.panels.find((p) => p.id === 'a')!.rect;
+    s = reducer(s, { type: 'setRect', id: 'a', rect: { ...aRect } });
+    expect(s.history.past.length).toBe(pastLen); // truly identical: no new entry pushed
+  });
+
+  it('dirty is false after undoing back to the last-saved point when the only change was a grouping change', () => {
+    let s = loaded();
+    s = reducer(s, { type: 'select', ids: ['a', 'c'] });
+    s = reducer(s, { type: 'groupSelection', axis: 'x' });
+    s = reducer(s, { type: 'saved' });
+    expect(s.dirty).toBe(false);
+    s = reducer(s, { type: 'setGutter', id: s.groups[0].id, gutterMm: 20 });
+    expect(s.dirty).toBe(true);
+    s = reducer(s, { type: 'undo' });
+    expect(s.dirty).toBe(false);
+    expect(s.groups[0].gutterMm).not.toBe(20);
+  });
+});
+
 // Controller ruling M2-13 (dispatch addendum): the GROUP is the unit of
 // manipulation. A free child drag would be silently provisional (the next
 // setGutter/setGroupEqual re-solve yanks it back with no visible cause), so

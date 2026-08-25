@@ -58,41 +58,56 @@ export type Action =
   | { type: 'redo' }
   | { type: 'saved' };
 
+const EMPTY_SNAPSHOT: Snapshot = { rects: {}, groups: [], membership: {} };
+
 export const initialState: EditorState = {
   figWmm: 183, figHmm: 140,
   panels: [], groups: [], selection: [],
   boxMode: 'axes', gridMm: 1, guides: [],
-  history: initHistory({}), dirty: false, savedSnapshot: {},
+  history: initHistory(EMPTY_SNAPSHOT), dirty: false, savedSnapshot: EMPTY_SNAPSHOT,
 };
 
-const snapshotOf = (panels: PanelState[]): Snapshot =>
-  Object.fromEntries(panels.map((p) => [p.id, p.rect]));
+/**
+ * The whole undoable document: rect geometry, group metadata, and each
+ * panel's group membership. All three round-trip through undo/redo and
+ * through the no-op guard in `commit` (via `sameLayout`) — geometry alone
+ * left grouping/ungrouping invisible to both.
+ */
+const snapshotOf = (panels: PanelState[], groups: Group[]): Snapshot => ({
+  rects: Object.fromEntries(panels.map((p) => [p.id, p.rect])),
+  groups,
+  membership: Object.fromEntries(panels.map((p) => [p.id, p.group ?? null])),
+});
 
 const applySnapshot = (panels: PanelState[], snap: Snapshot): PanelState[] =>
-  panels.map((p) => (snap[p.id] ? { ...p, rect: snap[p.id] } : p));
+  panels.map((p) => ({
+    ...p,
+    rect: snap.rects[p.id] ?? p.rect,
+    group: snap.membership[p.id] ?? null,
+  }));
 
-/** Commit a new set of panels through history, re-deriving `dirty`. */
+/** Commit a new set of panels (and possibly-translated groups) through
+ *  history, re-deriving `dirty`. */
 function withGeometry(
   state: EditorState, panels: PanelState[], coalesceKey?: string,
 ): EditorState {
-  const history = commit(state.history, snapshotOf(panels), { coalesceKey });
+  const history = commit(state.history, snapshotOf(panels, state.groups), { coalesceKey });
   if (history === state.history) return state;   // nothing actually moved
   return { ...state, panels, history, dirty: !sameLayout(history.present, state.savedSnapshot) };
 }
 
 /**
- * Commit a group create/edit/ungroup: always applies `panels` (which may
- * carry a `group` tag change with NO rect change, e.g. forming a group whose
- * solver output happens to reproduce the original spacing exactly) and
- * always marks the document dirty, since the persisted `groups` array
- * changed even when no rect moved. Unlike `withGeometry`, this never
- * discards `panels` on a no-geometry-change no-op — doing so would drop the
- * tag/group-membership change along with it.
+ * Commit a group create/edit/ungroup. `groups`/`membership` (carried inside
+ * `panels[].group`) are part of the snapshot now, so a group create/edit/
+ * ungroup is a genuine snapshot change even when no rect moves (e.g.
+ * ungroup, or a solver re-run that reproduces the original spacing exactly)
+ * — `commit`'s no-op guard no longer discards it, and it always marks the
+ * document dirty since the persisted `groups` array changed.
  */
 function commitGroupChange(
   state: EditorState, panels: PanelState[], groups: Group[],
 ): EditorState {
-  const history = commit(state.history, snapshotOf(panels));
+  const history = commit(state.history, snapshotOf(panels, groups));
   return { ...state, panels, groups, history, dirty: true };
 }
 
@@ -175,13 +190,14 @@ export function reducer(state: EditorState, action: Action): EditorState {
   switch (action.type) {
     case 'load': {
       const panels = action.panels;
-      const snapshot = snapshotOf(panels);
+      const groups = action.groups;
+      const snapshot = snapshotOf(panels, groups);
       return {
         ...state,
         figWmm: action.figWmm,
         figHmm: action.figHmm,
         panels,
-        groups: action.groups,
+        groups,
         selection: [],
         history: initHistory(snapshot),
         dirty: false,
@@ -288,6 +304,7 @@ export function reducer(state: EditorState, action: Action): EditorState {
         ...state,
         history,
         panels: applySnapshot(state.panels, history.present),
+        groups: history.present.groups,
         dirty: !sameLayout(history.present, state.savedSnapshot),
       };
     }
@@ -299,6 +316,7 @@ export function reducer(state: EditorState, action: Action): EditorState {
         ...state,
         history,
         panels: applySnapshot(state.panels, history.present),
+        groups: history.present.groups,
         dirty: !sameLayout(history.present, state.savedSnapshot),
       };
     }
