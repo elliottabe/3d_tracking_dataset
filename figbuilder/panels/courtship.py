@@ -117,6 +117,7 @@ class MalePitchPanel(PanelType):
     label = "Male body pitch vs target pitch"
     needs = ["t_ms", "male_pitch", "target_pitch"]
     schema = {"type": "object", "properties": {
+        **_LEGEND_KWARGS_SCHEMA,
         **_TIME_SCHEMA,
         "male_color": {"type": "string", "format": "color", "default": "#d62728"},
         "target_color": {"type": "string", "format": "color", "default": "#1f77b4"},
@@ -131,6 +132,7 @@ class MalePitchPanel(PanelType):
             male_color=spec.get("male_color", "#d62728"),
             target_color=spec.get("target_color", "#1f77b4"),
             time_unit=spec.get("time_unit", "s"),
+            legend_kwargs=_legend_kwargs(spec),
         )
 
 
@@ -187,6 +189,7 @@ class AngleDensityPanel(PanelType):
     label = "Wing angle density: pulse vs sine"
     needs = ["ext_pulse", "ext_sine"]
     schema = {"type": "object", "properties": {
+        **_LEGEND_KWARGS_SCHEMA,
         "range_deg": {"type": "array", "items": {"type": "number"},
                       "default": [0.0, 90.0]},
         "title": {"type": "string", "default": ""},
@@ -198,6 +201,7 @@ class AngleDensityPanel(PanelType):
             ax, np.asarray(data["ext_pulse"]), np.asarray(data["ext_sine"]),
             range_deg=(float(rd[0]), float(rd[1])),
             title=spec.get("title", ""),
+            legend_kwargs=_legend_kwargs(spec),
         )
 
 
@@ -227,7 +231,8 @@ class SineInPhasePanel(PanelType):
     label = "Sine song: extended vs folded wing in phase"
     needs = ["t_ms", "ext_z", "fold_z"]
     schema = {"type": "object", "properties": {
-        **_TIME_SCHEMA, "title": {"type": "string", "default": ""}}}
+        **_TIME_SCHEMA, **_LEGEND_KWARGS_SCHEMA,
+        "title": {"type": "string", "default": ""}}}
 
     def draw(self, ax, data, spec):
         cfp.panel_sine_wing_inphase(
@@ -236,6 +241,7 @@ class SineInPhasePanel(PanelType):
             frame_range=_frame_range(spec),
             sine_segments=_segs_arg(data.get("sine_segments")),
             title=spec.get("title", ""),
+            legend_kwargs=_legend_kwargs(spec),
         )
 
 
@@ -263,6 +269,7 @@ class PulseClassPanel(PanelType):
     label = "Pslow / Pfast typed centroids"
     needs = ["centroid_Pslow", "centroid_Pfast"]
     schema = {"type": "object", "properties": {
+        **_LEGEND_KWARGS_SCHEMA,
         "show_std": {"type": "boolean", "default": True},
         "fs": {"type": "number", "default": 800.0},
         "count_Pslow": {"type": "integer", "default": 0},
@@ -288,4 +295,5 @@ class PulseClassPanel(PanelType):
         cfp.panel_pulse_classification(
             ax, results, show_std=bool(spec.get("show_std", True)),
             title=spec.get("title", ""),
+            legend_kwargs=_legend_kwargs(spec),
         )

@@ -111,7 +111,15 @@
       },
       "spec": {
         "fs": 800.0,
-        "time_unit": "s"
+        "time_unit": "s",
+        "legend_kwargs": {
+          "ncols": 2,
+          "loc": "lower left",
+          "bbox_to_anchor": [
+            0.0,
+            1.02
+          ]
+        }
       },
       "group": null,
       "z": 0
