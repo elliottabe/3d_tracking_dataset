@@ -18,7 +18,7 @@ floor-alignment target, which would bury the abdomen.
 Usage:
     python scripts/viz/compare_stac_fits.py \
         --fit baseline=/path/a/stac_ik.h5 --fit fixed=/path/b/stac_ik.h5 \
-        --xml models/fruitfly_v2_3_ik/fruitfly_v2_3_ik.xml \
+        --xml ../fruitfly_body_models/fruitfly_v2_3_ik/fruitfly_v2_3_ik.xml \
         --anatomy configs/anatomy/v2_3.yaml \
         --out /path/compare.png --frame 400
 """

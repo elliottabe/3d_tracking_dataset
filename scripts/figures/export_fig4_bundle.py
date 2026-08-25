@@ -128,7 +128,10 @@ def build_fig4_panels(results: List[dict], ex: dict,
 #: describe different flies.
 DEFAULT_H5 = ("/gscratch/portia/eabe/data/Johnson_lab/courtship/Data_analysis/"
               "analysis/v1/ik_output_combined_v1_courtship_both.h5")
-DEFAULT_MODEL = "models/fruitfly_v1/fruitfly_v1_free.xml"
+#: Body models live in the sibling Brunton-Lab/fruitfly_body_models checkout
+#: (== paths.body_model_dir), not under models/ in this repo.
+_BODY_MODELS = _PROJECT_ROOT.parent / "fruitfly_body_models"
+DEFAULT_MODEL = str(_BODY_MODELS / "fruitfly_v1" / "fruitfly_v1_free.xml")
 DEFAULT_SESSION = ("/gscratch/portia/eabe/data/Johnson_lab/Video_recordings/"
                    "courtship/Session1/2026_04_02_16_21_32")
 DEFAULT_SAM3_ROOT = DEFAULT_SESSION + "/Predictions_3D_34662592"
@@ -164,7 +167,7 @@ DEFAULT_PROCESSED_ROOT = "/gscratch/portia/eabe/data/Johnson_lab/processed/court
 #: Two-fly courtship-pair render (requirement change, 2026-08-24): the panel
 #: is about courtship — two interacting flies — so the render strip must show
 #: the styled PAIR (red fly0 / teal fly1), not one vanilla fly.
-DEFAULT_FLOOR = "models/fruitfly_v1/floor.xml"
+DEFAULT_FLOOR = str(_BODY_MODELS / "fruitfly_v1" / "floor.xml")
 VIZ_SETTINGS = ("Earthy_V1_courtship_fly0", "Earthy_V1_courtship_fly1")
 VIZ_CAMERA = "track1_fly0"
 

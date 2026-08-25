@@ -9,7 +9,7 @@ Needs an EGL/GPU context (set MUJOCO_GL=egl, which this module does on import).
 Usage:
     python scripts/viz/render_reference_clips.py \
         --h5 /path/Fruitfly_v2_3_walk_1000hz_interp_padded.h5 \
-        --xml models/fruitfly_v2_3_ik/fruitfly_v2_3_ik.xml \
+        --xml ../fruitfly_body_models/fruitfly_v2_3_ik/fruitfly_v2_3_ik.xml \
         --clips longest,shortest,median --out-dir /path/renders
 
 ``--clips`` accepts integer indices and/or the keywords longest / shortest /

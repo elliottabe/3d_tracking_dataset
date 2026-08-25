@@ -9,9 +9,14 @@ with adhesion. See fruitfly_body_models commit 072a293.
 
 The plain (non-warp) MJX path used by STAC/postprocess in *this* repo cannot
 load ``mjTRN_BODY`` (adhesion) actuators. Rather than re-editing the shared
-repo (which this project must never write to), this script derives a
-kinematically-identical copy with the adhesion actuators stripped, living
-entirely inside this repo at ``models/fruitfly_v2_3_ik/``.
+model in place, this script derives a kinematically-identical copy with the
+adhesion actuators stripped, written to ``fruitfly_v2_3_ik/`` *beside* its
+source in the shared repo and gitignored there -- so it sits next to the model
+it tracks without ever displacing it. The shared source XML is only ever read.
+
+Because it is gitignored rather than committed, a fresh ``fruitfly_body_models``
+checkout has no ``fruitfly_v2_3_ik/`` and every ``anatomy=v2_3`` run fails at
+``ParseXML`` about two minutes in. Run this script once per checkout.
 
 The two models are kinematically identical except for ``nu`` (272 vs 264):
 same nq/nv/nbody/njnt/nsite/ngeom, identical joint/body/site name order,
@@ -41,10 +46,8 @@ pre-existing tracking[...] sites, reinserts them, and recompiles to verify
 the expected shape. Never writes to the source tree.
 
 Usage:
-    python scripts/models/build_v2_3_ik_model.py \
-        --source models/fruitfly_v2.3/fruitfly_muscles_warp.xml \
-        --out-dir models/fruitfly_v2_3_ik \
-        --anatomy configs/anatomy/v2_3.yaml
+    # defaults already point at the sibling fruitfly_body_models checkout:
+    python scripts/models/build_v2_3_ik_model.py
 """
 from __future__ import annotations
 
@@ -59,8 +62,11 @@ from omegaconf import OmegaConf
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
-DEFAULT_SOURCE = REPO_ROOT / 'models' / 'fruitfly_v2.3' / 'fruitfly_muscles_warp.xml'
-DEFAULT_OUT_DIR = REPO_ROOT / 'models' / 'fruitfly_v2_3_ik'
+# Sibling checkout of Brunton-Lab/fruitfly_body_models, i.e. paths.body_model_dir
+# (${paths.project_dir}/fruitfly_body_models/) for every paths config.
+SHARED_BODY_MODELS = REPO_ROOT.parent / 'fruitfly_body_models'
+DEFAULT_SOURCE = SHARED_BODY_MODELS / 'fruitfly_v2.3' / 'fruitfly_muscles_warp.xml'
+DEFAULT_OUT_DIR = SHARED_BODY_MODELS / 'fruitfly_v2_3_ik'
 DEFAULT_ANATOMY = REPO_ROOT / 'configs' / 'anatomy' / 'v2_3.yaml'
 OUT_XML_NAME = 'fruitfly_v2_3_ik.xml'
 
@@ -176,7 +182,11 @@ def main() -> int:
     args = ap.parse_args()
 
     source = args.source.resolve()
-    out_dir = args.out_dir
+    # Resolve both sides before relpath: on Hyak /gscratch is a symlink to
+    # /mmfs1/gscratch, so resolving only `source` yields symlink targets that
+    # climb out to / and back down a second, unresolved prefix -- broken links
+    # that only surface later as "Error opening file 'assets/include/...'".
+    out_dir = args.out_dir.resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
 
     source_dir = source.parent

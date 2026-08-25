@@ -11,7 +11,8 @@ import numpy as np
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-MODEL_XML = REPO_ROOT / "models" / "fruitfly_v1" / "fruitfly_v1_free.xml"
+# Sibling Brunton-Lab/fruitfly_body_models checkout == paths.body_model_dir.
+MODEL_XML = REPO_ROOT.parent / "fruitfly_body_models" / "fruitfly_v1" / "fruitfly_v1_free.xml"
 
 
 def _require_model():

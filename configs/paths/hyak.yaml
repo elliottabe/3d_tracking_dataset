@@ -22,4 +22,9 @@ data_dir_johnson:  ${paths.base_dir}                                 # == base_d
 # code / model trees (separate root from the data)
 cwd_dir:        /gscratch/portia/${paths.user}/Research/MyRepos/3d_tracking_dataset/
 project_dir:    /gscratch/portia/${paths.user}/Research/MyRepos/
-body_model_dir: ${paths.cwd_dir}/models/
+# Body models come from the shared Brunton-Lab/fruitfly_body_models checkout
+# (matches desktop/workstation/mbook/hyak_scrubbed), not a duplicate under
+# models/. anatomy=v2_3 resolves fruitfly_v2_3_ik/ there too: it is a derived,
+# adhesion-free copy built on demand by scripts/models/build_v2_3_ik_model.py
+# and gitignored in that repo, so run that script once per fresh checkout.
+body_model_dir: ${paths.project_dir}/fruitfly_body_models/

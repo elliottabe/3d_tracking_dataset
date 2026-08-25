@@ -240,7 +240,7 @@ def _anatomy_facts() -> dict:
     trunk_kps = model.get("TRUNK_OPTIMIZATION_KEYPOINTS")
     return {
         "config": "configs/anatomy/v1.yaml",
-        "mjcf": "models/fruitfly_v1/fruitfly_v1_free.xml",
+        "mjcf": "fruitfly_body_models/fruitfly_v1/fruitfly_v1_free.xml",
         "root_optimization_keypoint": model.get("ROOT_OPTIMIZATION_KEYPOINT"),
         "trunk_optimization_keypoints": trunk_kps,
         "note": (
@@ -434,7 +434,7 @@ re-deriving the story from the original plan wording alone would get it wrong:
   {residual_line}
 - `shared_scale` = {shared_scale:.6f}
 - Detector checkpoint: `{ckpt}`
-- Anatomy: `configs/anatomy/v1.yaml` -> `models/fruitfly_v1/fruitfly_v1_free.xml`
+- Anatomy: `configs/anatomy/v1.yaml` -> `fruitfly_body_models/fruitfly_v1/fruitfly_v1_free.xml`
 - SAM3: `{hf_repo}`, text prompt `"{text_prompt}"`, run under `{sam3_env}`
 - Keypoint colours: JARVIS per-limb-chain scheme -- `scripts/viz/ik_explainer/
   kp_colors.py` calls `third_party/JARVIS-HybridNet`'s own `get_skeleton`
