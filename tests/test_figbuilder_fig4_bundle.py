@@ -15,7 +15,7 @@ from figbuilder.panels.base import get_panel_type
 from scripts.figures.export_fig4_bundle import (
     build_fig4_panels, _pair_qpos, _pair_center_xyz, _resolve_session_bout,
     _load_kp3d, _processed_fly_dir, _free_running_com_z,
-    _resolve_sam3_camera_index, _resolve_male_female_slots)
+    _resolve_sam3_camera_index, _resolve_male_female_slots, _slot_to_raw_frame)
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -551,9 +551,15 @@ def test_resolve_sam3_camera_index_falls_back_to_glob_order(tmp_path):
 
 
 def test_resolve_male_female_slots_from_real_sex_meta_json():
-    """Round 10 finding: sex_meta says male_slot=1 while pose/bouts/*/
-    sex.json says male_fly=0 for the same bout -- INVERTED. Slots must be
-    derived from sex_meta, not assumed."""
+    """Round 10 finding: slots must be derived from sex_meta (a mask-area
+    VOTE), not assumed as a hardcoded [1, 0]. (Correction, round 11 finding
+    C: an earlier draft of this docstring wrongly claimed pose/bouts/*/
+    sex.json said male_fly=0 for this same bout -- it does not; the real
+    file says male_fly=1, AGREEING with sex_meta's male_slot=1. That was a
+    false comment about a real file, corrected here -- see also
+    test_resolve_male_female_slots_agrees_with_human_confirmed_sex_json
+    below for the two-source cross-check this bout's REAL data exercises.)
+    """
     sex_meta = ('{"male_slot": 1, "status": "kept", "method": "mask_area_vote", '
                '"male_detected_slot": 1, "agreement": 0.429, "margin": 0.038, '
                '"n_cameras": 7, "pct": 75}')
@@ -567,3 +573,118 @@ def test_resolve_male_female_slots_when_male_slot_is_zero():
 
 def test_resolve_male_female_slots_falls_back_to_default_when_absent():
     assert _resolve_male_female_slots(None) == (1, 0)
+
+
+def _sync_plan_with_gap(cam_name="Cam2012630", gaps=None, status="reindex"):
+    """Build a `jarvis_jax.predict.frame_sync.SyncPlan` the same way the
+    vendored `third_party/jarvis_jax/tests/test_synced_reader.py` does, so
+    this exercises the SAME canonical mapping that module is tested
+    against, not a reimplementation."""
+    from jarvis_jax.predict import frame_sync as fs
+    gaps = gaps or []
+    total_lost = sum(g["lost"] for g in gaps)
+    d = dict(delta_ns=1250000, canonical_len=1000, predict_start=0, predict_len=1000,
+             status=status, first_drop_slot=(gaps[0]["slot"] if gaps else None),
+             cameras={cam_name: dict(start_slot=0, decoded_len=1000 - total_lost,
+                                     true_span=1000, frame_id_mode="hole", gaps=gaps)})
+    return fs.SyncPlan(d)
+
+
+def test_slot_to_raw_frame_before_any_gap_is_identity():
+    """Round 11 finding A: a slot before any gap needs no correction."""
+    plan = _sync_plan_with_gap(gaps=[{"slot": 21, "lost": 26}])
+    raw, corrected = _slot_to_raw_frame(plan, "Cam2012630", 10)
+    assert raw == 10
+    assert corrected is True   # the PLAN applies (status=reindex); this slot just has 0 lost-before
+
+
+def test_slot_to_raw_frame_past_a_gap_subtracts_frames_lost():
+    """Round 11 finding A regression: this is the REAL recording's own gap
+    (Cam2012630: gaps=[{"slot": 21, "lost": 26}]). Reusing the repo's own
+    canonical mapping (`jarvis_jax.predict.frame_sync.SyncCam.pos`, the same
+    engine `third_party/jarvis_jax/tests/test_synced_reader.py::
+    test_slot_positions_maps_around_gap` already asserts `pos = slot - lost`
+    against) gives slot 100 -> raw position 74, NOT 126 -- confirmed against
+    the REAL sync_plan.json in this session's sanity check (canonical slot
+    380781 -> raw position 380755, a SUBTRACTION of 26, matching this exact
+    arithmetic direction)."""
+    plan = _sync_plan_with_gap(gaps=[{"slot": 21, "lost": 26}])
+    raw, corrected = _slot_to_raw_frame(plan, "Cam2012630", 100)
+    assert raw == 74
+    assert corrected is True
+
+
+def test_slot_to_raw_frame_multiple_gaps_accumulate():
+    plan = _sync_plan_with_gap(gaps=[{"slot": 21, "lost": 26}, {"slot": 500, "lost": 5}])
+    raw, corrected = _slot_to_raw_frame(plan, "Cam2012630", 700)
+    assert raw == 700 - 26 - 5
+    assert corrected is True
+
+
+def test_slot_to_raw_frame_absent_plan_is_identity():
+    raw, corrected = _slot_to_raw_frame(None, "Cam2012630", 380781)
+    assert raw == 380781
+    assert corrected is False
+
+
+def test_slot_to_raw_frame_non_reindex_status_is_identity():
+    """A plan whose status is NOT 'reindex' (e.g. 'clean'/'trim') must fall
+    through positionally even if it happens to carry gaps."""
+    plan = _sync_plan_with_gap(gaps=[{"slot": 21, "lost": 26}], status="clean")
+    raw, corrected = _slot_to_raw_frame(plan, "Cam2012630", 100)
+    assert raw == 100
+    assert corrected is False
+
+
+def test_resolve_male_female_slots_agrees_with_human_confirmed_sex_json():
+    """Round 11 finding B: this IS the real exemplar's data -- sex.json
+    (human-confirmed) and sex_meta (mask-area vote) AGREE (both male=1);
+    no skip should fire (no exception)."""
+    sex_meta = '{"male_slot": 1, "status": "kept", "method": "mask_area_vote"}'
+    sex_json = {"male_fly": 1, "original_male_fly": 1, "applied_swap": False,
+               "confidence": "user", "method": "manual-gui",
+               "note": "fly_id_review ... status=confirmed"}
+    assert _resolve_male_female_slots(sex_meta, sex_json) == (1, 0)
+
+
+def test_resolve_male_female_slots_disagreement_raises_naming_both():
+    """A human-confirmed sex.json disagreeing with sex_meta must not be
+    silently resolved either way -- target_pitch could be a degenerate
+    male->male vector."""
+    sex_meta = '{"male_slot": 0, "status": "kept", "method": "mask_area_vote"}'
+    sex_json = {"male_fly": 1, "confidence": "user", "method": "manual-gui"}
+    with pytest.raises(ValueError) as excinfo:
+        _resolve_male_female_slots(sex_meta, sex_json)
+    msg = str(excinfo.value)
+    assert "1" in msg and "0" in msg
+
+
+def test_resolve_male_female_slots_ignores_non_human_sex_json():
+    """A sex.json present but NOT human-confirmed (confidence != 'user',
+    method not manual) is not authoritative -- falls back to sex_meta
+    alone, so a "disagreement" with it must NOT raise."""
+    sex_meta = '{"male_slot": 0, "status": "kept", "method": "mask_area_vote"}'
+    sex_json = {"male_fly": 1, "confidence": "auto", "method": "heuristic"}
+    assert _resolve_male_female_slots(sex_meta, sex_json) == (0, 1)
+
+
+def test_resolve_male_female_slots_uses_human_sex_json_alone():
+    """sex.json alone (no sex_meta) still resolves via the human value."""
+    sex_json = {"male_fly": 1, "confidence": "user", "method": "manual-gui"}
+    assert _resolve_male_female_slots(None, sex_json) == (1, 0)
+
+
+def test_load_kp3d_asserts_expected_keypoint_count(tmp_path):
+    """Round 11 finding D: an unreordered/wrong-count kp3d array must be
+    caught, not silently substitute a nearby keypoint."""
+    npz_path = tmp_path / "kp3d.npz"
+    np.savez(npz_path, kp3d=np.zeros((10, 40, 3)), conf3d=np.zeros((10, 40)))
+    with pytest.raises(AssertionError, match="40"):
+        _load_kp3d(npz_path, expected_n_kp=50)
+
+
+def test_load_kp3d_passes_with_matching_keypoint_count(tmp_path):
+    npz_path = tmp_path / "kp3d.npz"
+    np.savez(npz_path, kp3d=np.zeros((10, 50, 3)), conf3d=np.zeros((10, 50)))
+    out = _load_kp3d(npz_path, expected_n_kp=50)
+    assert out.shape == (10, 50, 3)

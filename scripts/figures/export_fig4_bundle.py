@@ -260,15 +260,39 @@ def _pair_center_xyz(kp0: np.ndarray, kp1: np.ndarray, scut_idx: int, T: int) ->
     return 0.5 * (kp0[:n, scut_idx, :] + kp1[:n, scut_idx, :])
 
 
-def _load_kp3d(npz_path) -> np.ndarray:
+def _load_kp3d(npz_path, expected_n_kp=None) -> np.ndarray:
     """Load the ``(T, 50, 3)`` ``kp3d`` array (TRUE DLT world frame) from a
     processed-pose-tree bout npz (``pose/bouts/<bout>/fly{0,1}/kp3d.npz``).
     Raises a clear error naming the path and the keys actually present when
-    ``kp3d`` is missing, rather than letting a bare KeyError propagate."""
+    ``kp3d`` is missing, rather than letting a bare KeyError propagate.
+
+    Round 11 finding D: every caller indexes this array by
+    ``kp_names.index(<name>)`` from the COMBINED h5's keypoint order,
+    assuming `kp3d`'s own second axis shares that order. `kp3d.npz` carries
+    no keypoint-name list of its own to check against (verified: its only
+    keys are `kp3d`/`conf3d`) — the order match was instead verified
+    empirically (round 6): projecting `kp3d[:, 0, :]` (`Scutellum`, index 0
+    in both the combined h5's `info/kp_names` and `configs/anatomy/
+    v1.yaml`'s `model.KP_NAMES` MODEL order) through the Cam2012630 DLT
+    landed at uv (1123.6, 118.6), matching `kp2d` ground truth to within
+    3.3 px. `configs/detector/vitpose_v3.yaml`'s DETECTOR order is
+    DIFFERENT (Scutellum at index 3) — an unreordered array would silently
+    substitute a nearby keypoint (~1 mm off) and still look plausible. When
+    `expected_n_kp` is given, assert the array's keypoint axis matches it,
+    since that is the one cheap check available without a real per-file
+    name list.
+    """
     with np.load(npz_path) as z:
         if "kp3d" not in z.files:
             raise KeyError(f"{npz_path} has no 'kp3d' key (found: {z.files})")
-        return np.asarray(z["kp3d"])
+        arr = np.asarray(z["kp3d"])
+    if expected_n_kp is not None:
+        assert arr.shape[1] == expected_n_kp, (
+            f"{npz_path}: kp3d has {arr.shape[1]} keypoints, expected "
+            f"{expected_n_kp} (len(kp_names)) — ORDER between this array "
+            f"and kp_names is ASSUMED, not verified per-file; a keypoint-"
+            f"count mismatch means it cannot be trusted at all")
+    return arr
 
 
 def _processed_fly_dir(fly_id: str) -> str:
@@ -319,38 +343,115 @@ def _resolve_sam3_camera_index(cameras, calib_dir, cam: str) -> tuple:
     return sam3_camera_index(calib_dir, f"{cam}_dlt.csv"), "glob fallback"
 
 
+def _slot_to_raw_frame(sync_plan, camera: str, slot: int) -> tuple:
+    """Convert a CANONICAL slot number to a raw mp4 frame position for
+    `camera`. Returns ``(raw_frame, corrected)``; `corrected` is False (and
+    `raw_frame == slot`, the pre-fix positional behaviour) when `sync_plan`
+    is falsy/`None` or its `status` is not `"reindex"`.
+
+    Round 11 finding A: this recording's own `sync_plan.json` has
+    `status="reindex"` with one interior drop
+    (`Cam2012630: gaps=[{"slot": 21, "lost": 26}]`), long before this
+    exemplar's bout (canonical slot ~380781). Reading raw mp4 position ==
+    canonical slot directly (the pre-fix behaviour, `utils/
+    courtship_figure_panels.py`'s `_read_frame(cap, fidx + video_frame_
+    offset, ...)` does exactly this) silently reads a DIFFERENT real
+    instant than the one the masks/kp3d describe.
+
+    Reuses the repo's OWN canonical slot<->position mapping —
+    `jarvis_jax.predict.frame_sync.SyncCam.pos()`/`.has()` (vendored from
+    JohnsonLabJanelia/cluster_pose's `check_sync.py`; also the engine
+    behind `viz/core/io.py`'s `sync_positions`/`read_frames_synced`) —
+    rather than re-deriving the gap-accumulation arithmetic here, per
+    `SyncCam`'s own docstring: "pos(t) = mp4 frame position that delivers
+    slot t (= count of present frames before t)" — i.e. `pos(t) = t -
+    (frames lost before t)`, confirmed against the pre-existing repo test
+    `third_party/jarvis_jax/tests/test_synced_reader.py::
+    test_slot_positions_maps_around_gap` (gap at slot 41 losing 3: slot 44
+    -> pos 41, `# pos = slot-3`). `SyncCam.has(t)` reports `False` — the
+    camera dropped that exact slot entirely — for a slot inside a gap; this
+    raises `ValueError` rather than silently reading an adjacent frame.
+    """
+    if not sync_plan or getattr(sync_plan, "status", None) != "reindex":
+        return int(slot), False
+    from jarvis_jax.predict.synced_reader import slot_positions
+    positions, present = slot_positions(sync_plan, camera, int(slot), 1)
+    if not present[0] or positions[0] is None:
+        raise ValueError(
+            f"camera {camera!r} dropped canonical slot {slot} entirely "
+            f"(no raw mp4 frame delivers it)")
+    return int(positions[0]), True
+
+
 #: Historically-hardcoded fly_indices=[1, 0] / fly_idx=0 convention, used
 #: only when an npz has no `sex_meta` to derive the real slots from.
 _DEFAULT_MALE_SLOT = 1
 _DEFAULT_FEMALE_SLOT = 0
 
 
-def _resolve_male_female_slots(sex_meta) -> tuple:
-    """Return ``(male_slot, female_slot)`` derived from a SAM3 mask npz's own
-    ``sex_meta`` (its raw JSON string, or an already-parsed dict; `None`/
-    falsy when absent).
+def _resolve_male_female_slots(sex_meta, sex_json=None) -> tuple:
+    """Return ``(male_slot, female_slot)``.
 
     Round 10 finding: the mask SLOT is a FOURTH id scheme — distinct from
     the combined h5's key0/key1 pairing (round 7) and the processed tree's
     fly0/fly1 DIRECTORY naming — and was hardcoded (`fly_indices=[1, 0]`,
-    `fly_idx=0`). Verified on the exemplar: `sex_meta` says `male_slot=1`
-    while `pose/bouts/*/sex.json` says `male_fly=0` — INVERTED; the hardcode
-    was only correct here because `male_slot` happens to be 1. On any bout
-    where `male_slot == 0` the hardcode would triangulate the MALE as the
-    "female" COM (a degenerate male→male vector) and swap the panel-A mask
-    colours. This is exactly the dir-index/mask-slot decoupling the repo's
-    own sexing-canonicalization memory warns about.
+    `fly_idx=0`).
 
-    Falls back to the documented default (`_DEFAULT_MALE_SLOT`,
-    `_DEFAULT_FEMALE_SLOT`) — matching the historical hardcode — only when
-    `sex_meta` is absent; the caller should print when this fallback fires.
+    Two independent sexers can disagree on which mask slot is male:
+    ``sex_meta`` (the SAM3 npz's own JSON string / dict, a mask-area VOTE —
+    on the real exemplar a weak one, agreement 0.429) and ``sex_json``
+    (``pose/bouts/<bout>/sex.json``, a dict — sometimes a HUMAN-CONFIRMED
+    review). Verified on the real exemplar: `sex_meta` says `male_slot=1`
+    and `sex_json` says `male_fly=1` (`confidence="user"`,
+    `method="manual-gui"`) — they AGREE here (an earlier draft of this
+    docstring wrongly claimed `sex_json` said `male_fly=0`/"INVERTED"; that
+    was a false comment, corrected — always re-read the real file rather
+    than trust a stale claim in code). Round 10's hardcode trusted only the
+    weaker `sex_meta` vote; on any bout where the two sexers disagree, that
+    could triangulate the MALE as the "female" COM (a degenerate male→male
+    vector) and swap the panel-A mask colours — exactly the dir-index/
+    mask-slot decoupling the repo's own sexing-canonicalization memory
+    warns about (round 11 finding B).
+
+    ``sex_json``'s `male_fly` is treated as authoritative ONLY when its
+    `confidence` is `"user"` or its `method` mentions "manual" (a human
+    review), never for a lower-confidence/automated `sex_json`. When BOTH a
+    human-confirmed `sex_json` and a `sex_meta` vote are present, they must
+    AGREE — a disagreement means neither can be trusted silently, so this
+    raises `ValueError` naming both values rather than picking one (the
+    figure would be meaningless with a degenerate male→male vector). When
+    only one source is present, that source's value is used. Falls back to
+    the documented default (`_DEFAULT_MALE_SLOT`, `_DEFAULT_FEMALE_SLOT`) —
+    matching the historical hardcode — only when NEITHER is present; the
+    caller should print when this fallback fires.
     """
-    if not sex_meta:
+    human_slot = None
+    if sex_json:
+        confidence = str(sex_json.get("confidence", "")).lower()
+        method = str(sex_json.get("method", "")).lower()
+        if confidence == "user" or "manual" in method:
+            human_slot = int(sex_json["male_fly"])
+
+    auto_slot = None
+    if sex_meta:
+        meta = json.loads(sex_meta) if isinstance(sex_meta, (str, bytes)) else dict(sex_meta)
+        auto_slot = int(meta["male_slot"])
+
+    if human_slot is not None and auto_slot is not None:
+        if human_slot != auto_slot:
+            raise ValueError(
+                f"sexing sources disagree on the male mask slot: "
+                f"sex.json male_fly={human_slot} (human-confirmed) vs sam3 "
+                f"sex_meta male_slot={auto_slot} (mask-area vote) — "
+                f"refusing to guess")
+        male_slot = human_slot
+    elif human_slot is not None:
+        male_slot = human_slot
+    elif auto_slot is not None:
+        male_slot = auto_slot
+    else:
         return _DEFAULT_MALE_SLOT, _DEFAULT_FEMALE_SLOT
-    meta = json.loads(sex_meta) if isinstance(sex_meta, (str, bytes)) else dict(sex_meta)
-    male_slot = int(meta["male_slot"])
-    female_slot = 1 - male_slot
-    return male_slot, female_slot
+    return male_slot, 1 - male_slot
 
 
 def _resolve_session_bout(session_dir, sam3_root, recording: str, clip_len: int,
@@ -637,14 +738,16 @@ def main(argv=None) -> int:
                 f"({type(e).__name__}: {e}) -- video strip and "
                 f"male-pitch/target_pitch will also be skipped")
 
-    # --- resolve SAM3 camera axis + male/female mask slots (round 10) ------
+    # --- resolve SAM3 camera axis + male/female mask slots (rounds 10-11) --
     # Both the video overlay and the female-COM triangulation read the SAME
-    # sam3_masks.npz's own `cameras`/`sex_meta` arrays, so this is resolved
+    # sam3_masks.npz's own `cameras`/`sex_meta` arrays (plus this bout's
+    # human-reviewed `pose/bouts/<bout>/sex.json`), so this is resolved
     # ONCE and shared; a failure here is its own declared skip, and both
     # consuming blocks guard on the sentinel the same way they already guard
     # on `sam3_bout is None`.
     cam_idx = cam_idx_source = None
     male_slot = female_slot = None
+    sex_slot_source = None
     npz_cameras = None
     if sam3_bout is not None:
         try:
@@ -657,11 +760,27 @@ def main(argv=None) -> int:
             cam_idx, cam_idx_source = _resolve_sam3_camera_index(
                 npz_cameras, calib_dir_for_cam, args.cam)
             print(f"sam3 camera index: {cam_idx} (source: {cam_idx_source})")
-            if npz_sex_meta is None:
-                print("sam3 sex_meta absent from npz; using default "
-                      "male/female mask slots (1, 0)")
-            male_slot, female_slot = _resolve_male_female_slots(npz_sex_meta)
-            print(f"sam3 mask slots -> male={male_slot} female={female_slot}")
+
+            # Round 11 finding B: prefer the HUMAN-CONFIRMED sex.json over
+            # the sam3 npz's own sex_meta (a mask-area VOTE -- weak on this
+            # exemplar, agreement 0.429), and cross-check rather than
+            # silently trust either.
+            _sex_json_path = (processed_recording_dir / "pose" / "bouts"
+                              / sam3_bout / "sex.json")
+            npz_sex_json = (json.loads(_sex_json_path.read_text())
+                            if _sex_json_path.exists() else None)
+            if npz_sex_meta is None and npz_sex_json is None:
+                print("sam3 sex_meta and sex.json both absent; using "
+                      "default male/female mask slots (1, 0)")
+            male_slot, female_slot = _resolve_male_female_slots(
+                npz_sex_meta, npz_sex_json)
+            sex_slot_source = ("sex.json (human-confirmed)"
+                               if (npz_sex_json
+                                   and str(npz_sex_json.get("confidence", "")).lower() == "user")
+                               else ("sex_meta (mask-area vote)" if npz_sex_meta
+                                    else "default"))
+            print(f"sam3 mask slots -> male={male_slot} female={female_slot} "
+                  f"(source: {sex_slot_source})")
         except Exception as e:                   # noqa: BLE001 - report, don't die
             skipped.append(
                 f"sam3 camera/slot resolution ({type(e).__name__}: {e}) -- "
@@ -743,6 +862,8 @@ def main(argv=None) -> int:
     # empty chamber). The raw mp4 + camera calibration still come from
     # `--session` (the processed tree has neither).
     kp3d_source = ""
+    video_frame_offset_raw = video_frame_offset
+    video_sync_correction = 0
     video_frames = []
     try:
         if sam3_bout is None:
@@ -762,13 +883,39 @@ def main(argv=None) -> int:
         pose_bout_dir = processed_recording_dir / "pose" / "bouts" / sam3_bout
         # key0/key1 -> fly0/fly1 is per-exemplar, resolved above (round 7);
         # never hardcode fly0=male here.
-        male_kp3d = _load_kp3d(pose_bout_dir / key0_dir / "kp3d.npz")
-        female_kp3d = _load_kp3d(pose_bout_dir / key1_dir / "kp3d.npz")
+        male_kp3d = _load_kp3d(pose_bout_dir / key0_dir / "kp3d.npz",
+                               expected_n_kp=len(kp_names))
+        female_kp3d = _load_kp3d(pose_bout_dir / key1_dir / "kp3d.npz",
+                                 expected_n_kp=len(kp_names))
         kp3d_source = str(pose_bout_dir)
         dlt = cfp._dlt_load(dlt_csv)
         # cam_idx / male_slot / female_slot resolved once, shared with the
         # pitch block below (round 10) -- never re-derive via glob order or
         # a hardcoded [1, 0] here.
+        #
+        # Round 11 finding A: `panel_video_strip_with_kp` reads the mp4 at
+        # RAW POSITION `fidx + video_frame_offset` -- using the CANONICAL
+        # slot directly as a raw position assumes no camera ever dropped a
+        # frame before this bout. Convert once: masks/kp3d are indexed by
+        # canonical slot (`video_frame_offset` = this bout's first slot);
+        # the raw mp4 position that actually delivers that slot can differ
+        # when `sync_plan.json` reports interior drops. A single scalar
+        # offset is only valid because this recording's one drop sits at
+        # slot 21, long before any bout in it -- so the correction is
+        # constant across this bout's whole frame range; see
+        # `_slot_to_raw_frame`.
+        from jarvis_jax.predict.synced_reader import load_plan
+        sync_plan = load_plan(args.session)
+        video_frame_offset_raw, video_sync_correction_applied = _slot_to_raw_frame(
+            sync_plan, args.cam, video_frame_offset)
+        video_sync_correction = video_frame_offset - video_frame_offset_raw
+        if video_sync_correction_applied:
+            print(f"video sync: canonical slot {video_frame_offset} -> raw "
+                  f"mp4 position {video_frame_offset_raw} for {args.cam} "
+                  f"({video_sync_correction} frame(s) corrected)")
+        else:
+            print(f"video sync: no reindexing applied for {args.cam} "
+                  f"(sync_plan.json absent or status != 'reindex')")
         vidx = np.linspace(0, T - 1, args.n_video, dtype=int)
         masks = unpack_sam3_masks_for_frames(
             sam3_npz, cam_idx, fly_indices=[male_slot, female_slot],
@@ -788,7 +935,7 @@ def main(argv=None) -> int:
         cfp.panel_video_strip_with_kp(
             list(axv), mp4, vidx, kp_xyz_per_frame=male_kp3d, kp_names=kp_names,
             dlt_coeffs=dlt, fs=fs, kp_scale=args.kp_scale,
-            video_frame_offset=video_frame_offset, masks_per_fly=masks,
+            video_frame_offset=video_frame_offset_raw, masks_per_fly=masks,
             kp_xyz_fly1_per_frame=female_kp3d,
             mask_colors=["#e74c3c", "#3a7bff"], mask_alpha=0.35,
             **roi_kwargs)
@@ -843,7 +990,8 @@ def main(argv=None) -> int:
         # key0's processed directory, resolved above (round 7) -- never
         # hardcode fly0=male here either.
         scut_all = _load_kp3d(
-            processed_recording_dir / "pose" / "bouts" / sam3_bout / key0_dir / "kp3d.npz")
+            processed_recording_dir / "pose" / "bouts" / sam3_bout / key0_dir / "kp3d.npz",
+            expected_n_kp=len(kp_names))
         n = min(T, qm.shape[0], female.shape[0], len(scut_all))
         male_pitch = cfp.body_pitch_deg_from_quat(qm[:n, 3:7])
         scut = scut_all[:n, kp_names.index("Scutellum"), :]
@@ -924,6 +1072,9 @@ def main(argv=None) -> int:
                        "sam3_camera_index_source": cam_idx_source or "",
                        "sam3_mask_slots": (f"male={male_slot};female={female_slot}"
                                           if male_slot is not None else ""),
+                       "sex_slot_source": sex_slot_source or "",
+                       "video_frame_offset_raw": int(video_frame_offset_raw or 0),
+                       "video_sync_correction": int(video_sync_correction or 0),
                        "skipped": "; ".join(skipped)},
                  panels=panels)
     print(f"wrote {args.out}: {len(panels)} panels from {len(results)} pairs")
