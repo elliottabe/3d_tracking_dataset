@@ -43,7 +43,7 @@ export function distributeRects(
   const size = axis === 'x' ? ('w' as const) : ('h' as const);
 
   // Work in POSITION order, then scatter back to the caller's ordering.
-  const order = rects.map((r, i) => i).sort((a, b) => rects[a][axis] - rects[b][axis]);
+  const order = rects.map((_, i) => i).sort((a, b) => rects[a][axis] - rects[b][axis]);
   const sorted = order.map((i) => rects[i]);
   const out = sorted.map((r) => ({ ...r }));
   const first = sorted[0];
