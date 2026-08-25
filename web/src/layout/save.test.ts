@@ -109,4 +109,29 @@ describe('buildSavePayload (F2)', () => {
     const b = payload.panels.find((p) => p.id === 'b')!;
     expect(b.rect).toEqual([0.55, 0.48, 0.2, 0.2]);
   });
+
+  // Task 13: `spec` is now editable, so it must cross the save boundary
+  // exactly like rect/group already do (buildSavePayload's own docstring —
+  // the F2 fix this file exists for — was the earlier instance of this same
+  // defect class for group/membership).
+  it('includes an edited spec, in on-disk shape, preserving unknown fields and untouched panels', () => {
+    const original = baseDoc();
+    let s = loadedFrom(original);
+    s = reducer(s, {
+      type: 'setSpec',
+      id: 'a',
+      spec: { spines: { top: true, right: false }, legend: { hide: true, bbox_to_anchor: [0, 1] } },
+    });
+
+    const payload = buildSavePayload(original, s);
+    const a = payload.panels.find((p) => p.id === 'a')!;
+    expect(a.spec).toEqual({ spines: { top: true, right: false }, legend: { hide: true, bbox_to_anchor: [0, 1] } });
+
+    // untouched panels keep their on-disk spec unchanged.
+    const b = payload.panels.find((p) => p.id === 'b')!;
+    expect(b.spec).toEqual(original.panels.find((p) => p.id === 'b')!.spec);
+
+    // fields the editor doesn't manage still survive untouched.
+    expect(payload.annotations).toEqual(original.annotations);
+  });
 });

@@ -25,6 +25,12 @@ export type Snapshot = {
   groups: Group[];
   /** Panel id -> the group id it belongs to, or null if ungrouped. */
   membership: Record<string, string | null>;
+  /** Panel id -> its whole `spec` (panel options: spines, legend, colours,
+   *  …). Part of the undoable/dirty-tracked document for the same reason
+   *  `groups`/`membership` are: a spec edit that skipped this snapshot would
+   *  be invisible to undo AND to the no-op guard in `commit`, the same
+   *  defect class the groups-widening review already found once. */
+  specs: Record<string, Record<string, unknown>>;
 };
 
 export type History = {
@@ -77,10 +83,45 @@ function sameMembership(
   return ka.every((k) => k in b && a[k] === b[k]);
 }
 
+/** Structural equality for arbitrary JSON values. Panel `spec` objects can
+ *  nest booleans, numbers, strings, arrays and objects to any depth (e.g.
+ *  `{legend: {loc: "best", bbox_to_anchor: [0, 1]}}`), so a per-key `===`
+ *  (as `sameRects`/`sameMembership` use, safe there because rects/ids are
+ *  flat) is NOT enough — two structurally-identical-but-freshly-built spec
+ *  objects must compare equal, or the no-op guard in `commit` would push a
+ *  history entry for a spec that a control redundantly "changed" back to
+ *  its own value. */
+function jsonEqual(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (Array.isArray(a) || Array.isArray(b)) {
+    if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
+    return a.every((v, i) => jsonEqual(v, b[i]));
+  }
+  if (typeof a === 'object' && a !== null && typeof b === 'object' && b !== null) {
+    const ao = a as Record<string, unknown>;
+    const bo = b as Record<string, unknown>;
+    const ak = Object.keys(ao);
+    const bk = Object.keys(bo);
+    if (ak.length !== bk.length) return false;
+    return ak.every((k) => k in bo && jsonEqual(ao[k], bo[k]));
+  }
+  return false;   // a !== b already checked above, and both are primitives here
+}
+
+function sameSpecs(
+  a: Record<string, Record<string, unknown>>, b: Record<string, Record<string, unknown>>,
+): boolean {
+  const ka = Object.keys(a);
+  const kb = Object.keys(b);
+  if (ka.length !== kb.length) return false;
+  return ka.every((k) => k in b && jsonEqual(a[k], b[k]));
+}
+
 export function sameLayout(a: Snapshot, b: Snapshot): boolean {
   return sameRects(a.rects, b.rects)
     && sameGroups(a.groups, b.groups)
-    && sameMembership(a.membership, b.membership);
+    && sameMembership(a.membership, b.membership)
+    && sameSpecs(a.specs, b.specs);
 }
 
 export function commit(

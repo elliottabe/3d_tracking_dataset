@@ -619,3 +619,91 @@ describe('groupSelection ids never collide within the same millisecond (F5)', ()
     }
   });
 });
+
+// Task 13 (schema-driven properties form): `spec` (panel options — spines,
+// legend, colours, sample rate, …) becomes editable via `setSpec`. Per the
+// boundary rule, it must cross history/dirty/save/load exactly like rect and
+// group membership already do — these tests are the reducer/history half of
+// that (buildSavePayload's half is in `layout/save.test.ts`).
+describe('setSpec (Task 13)', () => {
+  it('updates the panel, marks dirty, and is undoable in one step', () => {
+    let s = loaded();
+    s = reducer(s, { type: 'setSpec', id: 'a', spec: { spines: { top: true } } });
+    expect(s.panels.find((p) => p.id === 'a')!.spec).toEqual({ spines: { top: true } });
+    expect(s.dirty).toBe(true);
+
+    s = reducer(s, { type: 'undo' });
+    expect(s.panels.find((p) => p.id === 'a')!.spec).toEqual({});
+    expect(s.dirty).toBe(false);
+  });
+
+  it('a deep-equal spec is a no-op: same state ref, no history entry', () => {
+    let s = loaded();
+    s = reducer(s, { type: 'setSpec', id: 'a', spec: { legend: { loc: 'best' } } });
+    const pastLen = s.history.past.length;
+    const next = reducer(s, { type: 'setSpec', id: 'a', spec: { legend: { loc: 'best' } } });
+    expect(next).toBe(s);                              // same reference, not just equal
+    expect(next.history.past.length).toBe(pastLen);
+  });
+
+  it('an unknown panel id is a no-op', () => {
+    const s = loaded();
+    const next = reducer(s, { type: 'setSpec', id: 'does-not-exist', spec: { x: 1 } });
+    expect(next).toBe(s);
+  });
+
+  // THE BOUNDARY RULE regression this whole task is built to avoid: a
+  // widened Snapshot/sameLayout with an un-widened `applySnapshot` would
+  // commit and dirty a spec edit correctly but silently fail to restore it
+  // on undo — passing every "dirty"/"no-op" test above while still losing
+  // the edit the moment the user hits undo.
+  it('undo after a spec edit restores the previous spec', () => {
+    let s = loaded();
+    const before = s.panels.find((p) => p.id === 'b')!.spec;
+    s = reducer(s, { type: 'setSpec', id: 'b', spec: { hide_xticklabels: true } });
+    expect(s.panels.find((p) => p.id === 'b')!.spec).toEqual({ hide_xticklabels: true });
+    s = reducer(s, { type: 'undo' });
+    expect(s.panels.find((p) => p.id === 'b')!.spec).toEqual(before);
+  });
+
+  it('redo re-applies a spec edit', () => {
+    // Two DIFFERENT specs, not edit-then-undo-back-to-original: if `undo`
+    // silently failed to touch `spec` at all (the exact boundary-rule bug),
+    // a single edit + undo + redo would still land on the right value by
+    // accident (spec was never removed in the first place), passing for the
+    // wrong reason. Requiring undo to move from edit #2's spec BACK to edit
+    // #1's spec, then redo to move it FORWARD again, is not satisfiable
+    // without `applySnapshot` actually restoring `spec`.
+    let s = loaded();
+    s = reducer(s, { type: 'setSpec', id: 'b', spec: { hide_xticklabels: true } });
+    s = reducer(s, { type: 'setSpec', id: 'b', spec: { hide_xticklabels: false } });
+    s = reducer(s, { type: 'undo' });
+    expect(s.panels.find((p) => p.id === 'b')!.spec).toEqual({ hide_xticklabels: true });
+    s = reducer(s, { type: 'redo' });
+    expect(s.panels.find((p) => p.id === 'b')!.spec).toEqual({ hide_xticklabels: false });
+  });
+
+  it('dirty is false after undoing a spec edit back to the last-saved point', () => {
+    let s = loaded();
+    s = reducer(s, { type: 'saved' });
+    expect(s.dirty).toBe(false);
+    s = reducer(s, { type: 'setSpec', id: 'a', spec: { spines: { top: true } } });
+    expect(s.dirty).toBe(true);
+    s = reducer(s, { type: 'undo' });
+    expect(s.dirty).toBe(false);
+  });
+
+  // No-op suppression surviving the Snapshot widening (critical regression
+  // risk called out explicitly): an identical full-document commit must
+  // still push zero history entries even now that `specs` is compared.
+  it('no-op suppression survives the specs widening: an identical full-document commit pushes no entry', () => {
+    let s = loaded();
+    s = reducer(s, { type: 'setSpec', id: 'a', spec: { spines: { top: true, right: false } } });
+    const pastLen = s.history.past.length;
+    const aSpec = s.panels.find((p) => p.id === 'a')!.spec;
+    // A freshly-built, structurally-identical (but not reference-identical) spec.
+    const same = reducer(s, { type: 'setSpec', id: 'a', spec: JSON.parse(JSON.stringify(aSpec)) });
+    expect(same.history.past.length).toBe(pastLen);
+    expect(same.dirty).toBe(s.dirty);
+  });
+});

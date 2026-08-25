@@ -7,6 +7,7 @@ const S = (x: number): Snapshot => ({
   rects: { p: { x, y: 0, w: 0.1, h: 0.1 } },
   groups: [],
   membership: { p: null },
+  specs: { p: {} },
 });
 
 const G = (id: string, over?: Partial<Group>): Group => ({
@@ -94,34 +95,59 @@ describe('sameLayout', () => {
   });
 
   it('detects a differing groups array (a group appearing/disappearing)', () => {
-    const a: Snapshot = { rects: {}, groups: [], membership: {} };
-    const b: Snapshot = { rects: {}, groups: [G('g1')], membership: {} };
+    const a: Snapshot = { rects: {}, groups: [], membership: {}, specs: {} };
+    const b: Snapshot = { rects: {}, groups: [G('g1')], membership: {}, specs: {} };
     expect(sameLayout(a, b)).toBe(false);
   });
 
   it('detects a differing group field (gutterMm) even with identical rects', () => {
-    const a: Snapshot = { rects: {}, groups: [G('g1', { gutterMm: 5 })], membership: {} };
-    const b: Snapshot = { rects: {}, groups: [G('g1', { gutterMm: 20 })], membership: {} };
+    const a: Snapshot = { rects: {}, groups: [G('g1', { gutterMm: 5 })], membership: {}, specs: {} };
+    const b: Snapshot = { rects: {}, groups: [G('g1', { gutterMm: 20 })], membership: {}, specs: {} };
     expect(sameLayout(a, b)).toBe(false);
   });
 
   it('detects a differing group order (same members, different order)', () => {
-    const a: Snapshot = { rects: {}, groups: [G('g1'), G('g2')], membership: {} };
-    const b: Snapshot = { rects: {}, groups: [G('g2'), G('g1')], membership: {} };
+    const a: Snapshot = { rects: {}, groups: [G('g1'), G('g2')], membership: {}, specs: {} };
+    const b: Snapshot = { rects: {}, groups: [G('g2'), G('g1')], membership: {}, specs: {} };
     expect(sameLayout(a, b)).toBe(false);
   });
 
   it('detects a differing membership entry with identical rects and groups', () => {
     const groups = [G('g1')];
-    const a: Snapshot = { rects: {}, groups, membership: { p: 'g1' } };
-    const b: Snapshot = { rects: {}, groups, membership: { p: null } };
+    const a: Snapshot = { rects: {}, groups, membership: { p: 'g1' }, specs: { p: {} } };
+    const b: Snapshot = { rects: {}, groups, membership: { p: null }, specs: { p: {} } };
     expect(sameLayout(a, b)).toBe(false);
   });
 
   it('treats snapshots with identical rects, groups, and membership as equal', () => {
     const groups = [G('g1')];
-    const a: Snapshot = { rects: { p: { x: 1, y: 0, w: 0.1, h: 0.1 } }, groups, membership: { p: 'g1' } };
-    const b: Snapshot = { rects: { p: { x: 1, y: 0, w: 0.1, h: 0.1 } }, groups, membership: { p: 'g1' } };
+    const a: Snapshot = { rects: { p: { x: 1, y: 0, w: 0.1, h: 0.1 } }, groups, membership: { p: 'g1' }, specs: { p: {} } };
+    const b: Snapshot = { rects: { p: { x: 1, y: 0, w: 0.1, h: 0.1 } }, groups, membership: { p: 'g1' }, specs: { p: {} } };
+    expect(sameLayout(a, b)).toBe(true);
+  });
+
+  // `spec` values are arbitrary JSON (booleans/numbers/strings/arrays/nested
+  // objects), so this comparator needs a real deep-equal, not per-key `===`
+  // (which is all `sameRects`/`sameMembership` need, since rects/ids are
+  // flat) — these three cases are the ones a naive `===` would get wrong.
+  it('a nested spec object differing at depth 2 is NOT equal', () => {
+    const a = { ...S(1), specs: { p: { legend: { loc: 'best' } } } };
+    const b = { ...S(1), specs: { p: { legend: { loc: 'upper right' } } } };
+    expect(sameLayout(a, b)).toBe(false);
+  });
+
+  it('spec arrays of different length or order are NOT equal', () => {
+    const a = { ...S(1), specs: { p: { legend: { bbox_to_anchor: [0, 1] } } } };
+    const b = { ...S(1), specs: { p: { legend: { bbox_to_anchor: [0, 1, 0.2] } } } };
+    const c = { ...S(1), specs: { p: { legend: { bbox_to_anchor: [1, 0] } } } };
+    expect(sameLayout(a, b)).toBe(false);
+    expect(sameLayout(a, c)).toBe(false);
+  });
+
+  it('identical nested spec structures (freshly-built, not shared by reference) ARE equal', () => {
+    const spec = { spines: { top: false, right: false, bottom: true, left: true }, legend: { hide: false, loc: 'best', bbox_to_anchor: [0, 1] } };
+    const a = { ...S(1), specs: { p: JSON.parse(JSON.stringify(spec)) } };
+    const b = { ...S(1), specs: { p: JSON.parse(JSON.stringify(spec)) } };
     expect(sameLayout(a, b)).toBe(true);
   });
 });

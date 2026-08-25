@@ -78,6 +78,15 @@ export function Canvas() {
    *  same click-vs-pan decision (path length, not net displacement, so a
    *  jittery round-trip still counts as movement). */
   const panMoveDistRef = useRef(0);
+  /** Each panel's `spec` object reference as of its last successful render,
+   *  so a later spec change (`setSpec`, or undo/redo restoring a different
+   *  spec) can be told apart from the constant churn of unrelated state
+   *  updates (selection, ink, plain rect edits) that also produce a new
+   *  `state.panels` array every time. `setSpec`/`applySnapshot` only ever
+   *  swap in a genuinely different spec object (never mutate in place, and
+   *  the reducer's no-op guard already suppresses a same-value edit), so
+   *  reference inequality here IS a real spec change. */
+  const renderedSpecRef = useRef<Record<string, Record<string, unknown>>>({});
 
   useEffect(() => {
     void getFigure().then((d) => {
@@ -101,11 +110,56 @@ export function Canvas() {
         if (!alive) return;
         setTiles((prev) => ({ ...prev, [p.id]: t }));
         setRenderedRect((prev) => ({ ...prev, [p.id]: tupleToRect(p.rect) }));
+        renderedSpecRef.current[p.id] = p.spec;
         dispatch({ type: 'setInk', id: p.id, ink: tupleToRect(t.ink_box) });
       }
     })();
     return () => { alive = false; };
   }, [doc, dispatch]);
+
+  /** Re-request the true tile for one panel — after a resize release (a
+   *  CSS/SVG-stretched preview during the drag is fine for geometry, but
+   *  matplotlib tick/label text does not scale with the axes box, so the
+   *  settled size must come back from the server to be trustworthy) or
+   *  after a spec edit (a changed spec changes what the panel draws, e.g. a
+   *  toggled spine or a moved legend). Reads the panel's CURRENT rect and
+   *  spec from `state.panels`, not from the original loaded `doc` — the
+   *  point of this function is to pick up whatever the editor has since
+   *  changed. Everything else on the DTO (`type`, `data`, `group`, `z`)
+   *  still comes from `doc`, matching the server's own on-disk shape.
+   *  Defined ahead of the `if (!doc) return` below (with the other hooks)
+   *  so the `useEffect` right after it — and `endGesture`'s resize branch,
+   *  further down — can both call it unconditionally. */
+  const refreshPanel = (id: string) => {
+    if (!doc) return;
+    const origPanel = doc.panels.find((p) => p.id === id);
+    const panel = state.panels.find((p) => p.id === id);
+    if (!origPanel || !panel) return;
+    const panelDTO: PanelSpecDTO = { ...origPanel, rect: rectToTuple(panel.rect), spec: panel.spec };
+    void renderPanel(panelDTO).then((t) => {
+      setTiles((prev) => ({ ...prev, [id]: t }));
+      setRenderedRect((prev) => ({ ...prev, [id]: panel.rect }));
+      renderedSpecRef.current[id] = panel.spec;
+      dispatch({ type: 'setInk', id, ink: tupleToRect(t.ink_box) });
+    });
+  };
+
+  // Task 13: a spec edit (or an undo/redo that lands on a different spec)
+  // must re-request that ONE panel's tile, exactly as a resize does — the
+  // server's tile cache key already includes `panel.spec`, so this reliably
+  // misses the cache and re-renders. Reference comparison against
+  // `renderedSpecRef` (rather than a deep-equal here) is deliberate: it
+  // fires on a genuine spec change only, never on the unrelated re-renders
+  // (selection, drag preview, ink updates) that also produce a new
+  // `state.panels` array.
+  useEffect(() => {
+    if (!doc) return;
+    for (const p of state.panels) {
+      const prevSpec = renderedSpecRef.current[p.id];
+      if (prevSpec !== undefined && prevSpec !== p.spec) refreshPanel(p.id);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [doc, state.panels]);
 
   if (!doc) return <p>loading…</p>;
   const figWpt = doc.figure.width_mm * PT_PER_MM;
@@ -174,22 +228,6 @@ export function Canvas() {
     };
   };
 
-  /** Re-request the true tile for one panel after a resize release — a
-   *  CSS/SVG-stretched preview during the drag is fine (geometry only), but
-   *  matplotlib tick/label text does not scale with the axes box, so the
-   *  settled size must come back from the server to be trustworthy. */
-  const refreshPanel = (id: string, rect: Rect) => {
-    if (!doc) return;
-    const origPanel = doc.panels.find((p) => p.id === id);
-    if (!origPanel) return;
-    const panelDTO: PanelSpecDTO = { ...origPanel, rect: rectToTuple(rect) };
-    void renderPanel(panelDTO).then((t) => {
-      setTiles((prev) => ({ ...prev, [id]: t }));
-      setRenderedRect((prev) => ({ ...prev, [id]: rect }));
-      dispatch({ type: 'setInk', id, ink: tupleToRect(t.ink_box) });
-    });
-  };
-
   const endGesture = (e: React.PointerEvent) => {
     if (modeRef.current === 'marquee' && marquee) {
       const hittables: Hittable[] = state.panels.map((p) => ({ id: p.id, rect: p.rect }));
@@ -206,9 +244,7 @@ export function Canvas() {
       // negligible movement: a click, not a pan — clear the selection.
       dispatch({ type: 'select', ids: [] });
     } else if (modeRef.current === 'resize' && resizeRef.current) {
-      const { id } = resizeRef.current;
-      const panel = state.panels.find((p) => p.id === id);
-      if (panel) refreshPanel(id, panel.rect);
+      refreshPanel(resizeRef.current.id);
     }
     modeRef.current = null;
     panRef.current = null;

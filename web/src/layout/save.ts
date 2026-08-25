@@ -32,17 +32,21 @@ function groupsToDto(groups: EditorState['groups']): GroupDTO[] {
 
 /**
  * `originalDoc` is the just-refetched on-disk document — everything the
- * editor does not manage (`data`, `spec`, unknown top-level fields,
- * `annotations`) survives untouched. `state` overlays the editor's own
- * geometry (`panels[].rect`), group membership (`panels[].group`) and the
- * groups array itself on top of it.
+ * editor does not manage (`data`, unknown top-level fields, `annotations`)
+ * survives untouched. `state` overlays the editor's own geometry
+ * (`panels[].rect`), group membership (`panels[].group`), the groups array
+ * itself, and each panel's `spec` (options — spines, legend, colours, …) on
+ * top of it. `spec` is now editable in the GUI (Task 13), so it must cross
+ * this boundary exactly like rect/group did, or a spec edit would round-trip
+ * through save+reload as if it had never happened — the same defect class
+ * as the F2 group-save bug this function was already written to fix.
  */
 export function buildSavePayload(originalDoc: FigureDoc, state: EditorState): FigureDoc {
   const byId = new Map(state.panels.map((p) => [p.id, p]));
   const panels: PanelSpecDTO[] = originalDoc.panels.map((p) => {
     const edited = byId.get(p.id);
     if (!edited) return p;
-    return { ...p, rect: rectToTuple(edited.rect), group: edited.group ?? null };
+    return { ...p, rect: rectToTuple(edited.rect), group: edited.group ?? null, spec: edited.spec };
   });
   return { ...originalDoc, panels, groups: groupsToDto(state.groups) };
 }

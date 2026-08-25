@@ -44,6 +44,7 @@ export type Action =
   | { type: 'select'; ids: string[]; additive?: boolean }
   | { type: 'moveSelection'; dx: number; dy: number; coalesceKey?: string }
   | { type: 'setRect'; id: string; rect: Rect; coalesceKey?: string }
+  | { type: 'setSpec'; id: string; spec: Record<string, unknown> }
   | { type: 'align'; op: AlignOp; ref: RefMode }
   | { type: 'distribute'; axis: 'x' | 'y'; mode: 'gaps' | 'centers' }
   | { type: 'matchSize'; dim: 'w' | 'h' }
@@ -58,7 +59,7 @@ export type Action =
   | { type: 'redo' }
   | { type: 'saved' };
 
-const EMPTY_SNAPSHOT: Snapshot = { rects: {}, groups: [], membership: {} };
+const EMPTY_SNAPSHOT: Snapshot = { rects: {}, groups: [], membership: {}, specs: {} };
 
 export const initialState: EditorState = {
   figWmm: 183, figHmm: 140,
@@ -68,15 +69,17 @@ export const initialState: EditorState = {
 };
 
 /**
- * The whole undoable document: rect geometry, group metadata, and each
- * panel's group membership. All three round-trip through undo/redo and
- * through the no-op guard in `commit` (via `sameLayout`) — geometry alone
- * left grouping/ungrouping invisible to both.
+ * The whole undoable document: rect geometry, group metadata, each panel's
+ * group membership, and each panel's `spec` (options). All four round-trip
+ * through undo/redo and through the no-op guard in `commit` (via
+ * `sameLayout`) — geometry alone left grouping/ungrouping (and now spec
+ * edits) invisible to both.
  */
 const snapshotOf = (panels: PanelState[], groups: Group[]): Snapshot => ({
   rects: Object.fromEntries(panels.map((p) => [p.id, p.rect])),
   groups,
   membership: Object.fromEntries(panels.map((p) => [p.id, p.group ?? null])),
+  specs: Object.fromEntries(panels.map((p) => [p.id, p.spec])),
 });
 
 const applySnapshot = (panels: PanelState[], snap: Snapshot): PanelState[] =>
@@ -84,6 +87,7 @@ const applySnapshot = (panels: PanelState[], snap: Snapshot): PanelState[] =>
     ...p,
     rect: snap.rects[p.id] ?? p.rect,
     group: snap.membership[p.id] ?? null,
+    spec: snap.specs[p.id] ?? p.spec,
   }));
 
 /** Commit a new set of panels (and possibly-translated groups) through
@@ -268,6 +272,18 @@ export function reducer(state: EditorState, action: Action): EditorState {
         state.panels.map((p) => (p.id === action.id ? { ...p, rect } : p)),
         action.coalesceKey,
       );
+    }
+
+    // `spec` is panel OPTIONS, not geometry — unlike x/y/w/h it is never
+    // withheld for a grouped panel (the group solver owns rects, not spec).
+    // Routed through `withGeometry` (a slight misnomer here, but it is the
+    // one shared commit path: snapshot + no-op guard + dirty re-derivation)
+    // so a spec edit gets the same undo/dirty treatment as a rect edit,
+    // per the boundary rule — `sameLayout`'s new `specs` comparison is what
+    // makes an unknown id or a deep-equal spec collapse to a true no-op.
+    case 'setSpec': {
+      const panels = state.panels.map((p) => (p.id === action.id ? { ...p, spec: action.spec } : p));
+      return withGeometry(state, panels);
     }
 
     case 'groupSelection': {
