@@ -190,6 +190,35 @@ function clampMinSize(r: Rect, figWmm: number, figHmm: number): Rect {
   return { ...r, w: Math.max(r.w, minW), h: Math.max(r.h, minH) };
 }
 
+/**
+ * True when the current selection includes any panel that belongs to a
+ * group (F3). `align`/`distribute`/`matchSize` write rects directly via
+ * `withGeometry` and never touch `group.rect`, so running them on a grouped
+ * panel leaves the group's stored rect stale; the NEXT group edit (even one
+ * that changes nothing, like retyping the gutter it already has) re-solves
+ * from that stale rect and silently reverts the align/distribute/match-size
+ * with no visible cause. `expandToGroups` already guarantees that selecting
+ * ANY grouped panel selects its whole group, so this is equivalent to "the
+ * selection is a whole group" for the ordinary case, and also catches a
+ * mixed selection (grouped + ungrouped) reached via additive shift-select.
+ *
+ * Chosen fix (option b in the M2 review, F3): disable these three ops for a
+ * grouped selection, consistent with the existing rule that the group
+ * solver — not direct geometry edits — owns a grouped child's rect
+ * (`Properties.tsx` already withholds x/y/w/h fields the same way). Option
+ * (a) — re-deriving `group.rect` from `groupBounds` after these ops — would
+ * let them work on grouped selections too, but for align/distribute in
+ * particular the solver's own axis/gutter model doesn't obviously agree
+ * with "align left" or "distribute equal gaps": recomputing the bounding
+ * rect afterward can still leave the CHILDREN's relative spacing fighting
+ * the group's gutter on the very next re-solve. Disabling is the smaller,
+ * unambiguous behaviour, and matches the "solver owns grouped geometry"
+ * rule already enforced everywhere else.
+ */
+export function selectionTouchesGroup(state: EditorState): boolean {
+  return state.selection.some((id) => !!state.panels.find((p) => p.id === id)?.group);
+}
+
 export function reducer(state: EditorState, action: Action): EditorState {
   switch (action.type) {
     case 'load': {
@@ -244,7 +273,12 @@ export function reducer(state: EditorState, action: Action): EditorState {
     case 'groupSelection': {
       if (state.selection.length < 2) return state;
       const kids = state.panels.filter((p) => state.selection.includes(p.id));
-      const id = `grp_${Date.now().toString(36)}`;
+      // F5: a plain `Date.now()` id collides whenever two groups are
+      // created in the same millisecond — then `ungroup(id)` removes BOTH
+      // and every `groups.find(...)` resolves to the first. Match the
+      // random-suffix convention already used for coalesce keys elsewhere
+      // (Canvas.tsx's drag/resize gesture keys).
+      const id = `grp_${Date.now().toString(36)}_${Math.random().toString(36).slice(2)}`;
       const group: Group = {
         id,
         axis: action.axis,
@@ -253,9 +287,16 @@ export function reducer(state: EditorState, action: Action): EditorState {
         equal: false,
         rect: groupBounds(kids.map((p) => p.rect)),
       };
-      const groups = [...state.groups, group];
       const tagged = state.panels.map((p) =>
         (state.selection.includes(p.id) ? { ...p, group: id } : p));
+      // F4: `select` expands a click/marquee to whole groups, so
+      // marquee-ing an existing group plus a loose panel is the ordinary
+      // way to retag every one of an existing group's members onto the new
+      // group, leaving the old group with zero members. Drop any such
+      // orphan here rather than letting it persist into figure.json.
+      const survivingGroups = state.groups.filter((g) =>
+        tagged.some((p) => p.group === g.id));
+      const groups = [...survivingGroups, group];
       const panels = resolveGroup({ ...state, panels: tagged }, id, groups);
       return commitGroupChange(state, panels, groups);
     }
@@ -282,12 +323,15 @@ export function reducer(state: EditorState, action: Action): EditorState {
     }
 
     case 'align':
+      if (selectionTouchesGroup(state)) return state;
       return withGeometry(state, mapSelected(state, (rs) => alignRects(rs, action.op, action.ref)));
 
     case 'distribute':
+      if (selectionTouchesGroup(state)) return state;
       return withGeometry(state, mapSelected(state, (rs) => distributeRects(rs, action.axis, action.mode)));
 
     case 'matchSize':
+      if (selectionTouchesGroup(state)) return state;
       return withGeometry(state, mapSelected(state, (rs) => matchSize(rs, action.dim)));
 
     case 'setBoxMode':

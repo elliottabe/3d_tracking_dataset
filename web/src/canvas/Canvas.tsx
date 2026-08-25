@@ -8,7 +8,7 @@ import { resizeRect, MIN_SIZE_MM, type HandleId } from './resize';
 import { useEditor } from '../state/editorStore';
 import { normalizeRect, rectToScreen, PT_PER_MM, type Rect } from '../layout/rect';
 import { buildTargets, screenTolToFrac, snapRect, type SnapTarget } from '../layout/snap';
-import type { Group } from '../layout/groups';
+import { groupsFromDoc, panelsFromDoc } from '../layout/load';
 
 /** Screen-pixel radius within which a dragged edge/centre snaps to a target. */
 const SNAP_TOL_PX = 6;
@@ -86,11 +86,8 @@ export function Canvas() {
         type: 'load',
         figWmm: d.figure.width_mm,
         figHmm: d.figure.height_mm,
-        panels: d.panels.map((p) => ({
-          id: p.id, type: p.type, rect: tupleToRect(p.rect),
-          group: p.group ?? null, spec: p.spec, data: p.data,
-        })),
-        groups: d.groups as unknown as Group[],
+        panels: panelsFromDoc(d),
+        groups: groupsFromDoc(d),
       });
     });
   }, [dispatch]);

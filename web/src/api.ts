@@ -8,9 +8,20 @@ export interface PanelSpecDTO {
   data: Record<string, { dataset: string; slice?: string }>;
   spec: Record<string, unknown>; group?: string | null; z?: number;
 }
+/** On-disk group shape (`figbuilder/figure.py` `GroupSpec`/`_unparse`):
+ *  snake_case, rect as a 4-tuple. The editor's `Group` (`layout/groups.ts`)
+ *  is camelCase with an `{x,y,w,h}` rect — `layout/load.ts`/`layout/save.ts`
+ *  are the ONLY places that convert between the two. Giving this its own
+ *  DTO type (rather than `unknown[]`) is what stops a raw
+ *  `as unknown as Group[]` cast from silently type-checking again (F1).
+ */
+export interface GroupDTO {
+  id: string; axis: 'x' | 'y'; gutter_mm: number; equal: boolean;
+  rect: [number, number, number, number];
+}
 export interface FigureDoc {
   figure: { width_mm: number; height_mm: number; dpi: number };
-  panels: PanelSpecDTO[]; groups: unknown[]; annotations: unknown[];
+  panels: PanelSpecDTO[]; groups: GroupDTO[]; annotations: unknown[];
 }
 export interface TileDTO {
   svg: string; ink_box: [number, number, number, number];

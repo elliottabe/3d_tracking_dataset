@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { getFigure, saveFigure } from './api';
 import { Canvas } from './canvas/Canvas';
+import { buildSavePayload } from './layout/save';
 import { Properties } from './panels/Properties';
 import { Toolbar } from './panels/Toolbar';
 import { EditorProvider, useEditor } from './state/editorStore';
@@ -10,10 +11,12 @@ import { EditorProvider, useEditor } from './state/editorStore';
  * middle, and the Properties panel on the right for the current selection.
  *
  * `onSave` re-fetches the current on-disk document (so anything the editor
- * does not manage — `data`, `spec`, `group`, `annotations`, unknown fields —
- * survives untouched), overlays each panel's rect from editor state on top
- * of it, and PUTs the result. Only on success does it dispatch `saved`;
- * a failure is surfaced, never swallowed.
+ * does not manage — `data`, `spec`, `annotations`, unknown fields — survives
+ * untouched), overlays the editor's geometry, group membership, AND the
+ * groups array on top of it via the pure `buildSavePayload` (F2 — overlaying
+ * rects alone silently discarded every group edit), and PUTs the result.
+ * Only on success does it dispatch `saved`; a failure is surfaced, never
+ * swallowed.
  */
 function EditorShell() {
   const { state, dispatch } = useEditor();
@@ -23,14 +26,7 @@ function EditorShell() {
     setSaveError(null);
     try {
       const original = await getFigure();
-      const rectById = new Map(state.panels.map((p) => [p.id, p.rect]));
-      const doc = {
-        ...original,
-        panels: original.panels.map((p) => {
-          const r = rectById.get(p.id);
-          return r ? { ...p, rect: [r.x, r.y, r.w, r.h] } : p;
-        }),
-      };
+      const doc = buildSavePayload(original, state);
       await saveFigure(doc);
       dispatch({ type: 'saved' });
     } catch (e) {

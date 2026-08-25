@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest';
-import { initialState, reducer, type EditorState } from './editorStore';
+import { describe, expect, it, vi } from 'vitest';
+import { initialState, reducer, selectionTouchesGroup, type EditorState } from './editorStore';
 import { solveGroup } from '../layout/groups';
 import { MIN_SIZE_MM } from '../canvas/resize';
 import type { Rect } from '../layout/rect';
@@ -432,5 +432,190 @@ describe('setRect minimum size floor (M2-15)', () => {
     let s = loaded();
     s = reducer(s, { type: 'setRect', id: 'b', rect: R(0.25, 0.25, 0.5, 0.5) });
     expect(s.panels.find((p) => p.id === 'b')!.rect).toEqual(R(0.25, 0.25, 0.5, 0.5));
+  });
+});
+
+// F3: align/distribute/matchSize used to bypass the group solver entirely
+// (straight to withGeometry), leaving group.rect stale. The next group
+// edit — even one that changes nothing, like re-applying the gutter a
+// group already has — then re-solved from that stale rect and silently
+// discarded the align/distribute/matchSize with no visible cause. Chosen
+// fix: disable these three ops outright for a grouped selection (option b:
+// the solver owns grouped geometry, same rule Properties already enforces
+// for x/y/w/h fields), rather than trying to re-derive group.rect after
+// the fact (option a).
+describe('align/distribute/matchSize are no-ops on a grouped selection (F3)', () => {
+  function groupedState(): { s: EditorState; groupId: string } {
+    let s = loaded();
+    s = reducer(s, { type: 'select', ids: ['a', 'c'] });
+    s = reducer(s, { type: 'groupSelection', axis: 'x' });
+    return { s, groupId: s.groups[0].id };
+  }
+
+  it('selectionTouchesGroup is true exactly when a grouped panel is selected', () => {
+    let s = loaded();
+    s = reducer(s, { type: 'select', ids: ['b'] });
+    expect(selectionTouchesGroup(s)).toBe(false);
+    s = reducer(s, { type: 'select', ids: ['a', 'c'] });
+    s = reducer(s, { type: 'groupSelection', axis: 'x' });
+    s = reducer(s, { type: 'select', ids: ['a'] }); // expands to whole group
+    expect(selectionTouchesGroup(s)).toBe(true);
+  });
+
+  it('align leaves grouped panels untouched and does not desync group.rect', () => {
+    const { s: before, groupId } = groupedState();
+    const rectsBefore = before.panels.map((p) => ({ ...p.rect }));
+    const groupRectBefore = { ...before.groups.find((g) => g.id === groupId)!.rect };
+
+    const after = reducer(before, { type: 'align', op: 'top', ref: 'figure' });
+
+    expect(after.panels.map((p) => p.rect)).toEqual(rectsBefore);
+    expect(after.groups.find((g) => g.id === groupId)!.rect).toEqual(groupRectBefore);
+    expect(after.dirty).toBe(before.dirty); // truly a no-op, not just a revert-to-same-rect
+
+    // And critically: a LATER, genuinely-unrelated group edit does not
+    // suddenly "restore" something that was never actually moved — because
+    // nothing was moved, there is nothing to lose.
+    const after2 = reducer(after, { type: 'setGutter', id: groupId, gutterMm: after.groups.find((g) => g.id === groupId)!.gutterMm });
+    expect(after2.panels.map((p) => p.rect)).toEqual(rectsBefore);
+  });
+
+  it('distribute is a no-op on a grouped selection', () => {
+    const { s } = groupedState();
+    const before = s.panels.map((p) => ({ ...p.rect }));
+    const after = reducer(s, { type: 'distribute', axis: 'x', mode: 'gaps' });
+    expect(after.panels.map((p) => p.rect)).toEqual(before);
+  });
+
+  it('matchSize is a no-op on a grouped selection', () => {
+    const { s } = groupedState();
+    const before = s.panels.map((p) => ({ ...p.rect }));
+    const after = reducer(s, { type: 'matchSize', dim: 'w' });
+    expect(after.panels.map((p) => p.rect)).toEqual(before);
+  });
+
+  it('align/distribute/matchSize still work normally on an ungrouped selection (no regression)', () => {
+    let s = loaded();
+    s = reducer(s, { type: 'select', ids: ['a', 'b'] });
+    s = reducer(s, { type: 'align', op: 'left', ref: 'selection' });
+    expect(s.panels.find((p) => p.id === 'a')!.rect.x).toBeCloseTo(0.1);
+    expect(s.panels.find((p) => p.id === 'b')!.rect.x).toBeCloseTo(0.1);
+  });
+});
+
+// F4: groupSelection retagged panels onto a new group but never dropped a
+// pre-existing group left with zero members. `select` expands any click to
+// the whole group, so marquee-ing an existing group plus a loose panel is
+// the ordinary way to strip that group down to nothing — the orphan then
+// persisted into figure.json forever.
+describe('groupSelection drops zero-member groups (F4)', () => {
+  it('regrouping every member of an existing group into a new one removes the orphan', () => {
+    let s = loaded();
+    s = reducer(s, { type: 'select', ids: ['a', 'c'] });
+    s = reducer(s, { type: 'groupSelection', axis: 'x' });
+    const oldGroupId = s.groups[0].id;
+    expect(s.groups).toHaveLength(1);
+
+    // Re-group ALL of {a, c}'s members plus b into a brand-new group —
+    // the old group ends up with zero members.
+    s = reducer(s, { type: 'select', ids: ['a', 'b'] }); // 'a' expands to {a, c}
+    expect(s.selection.sort()).toEqual(['a', 'b', 'c']);
+    s = reducer(s, { type: 'groupSelection', axis: 'y' });
+
+    expect(s.groups).toHaveLength(1); // old group gone, only the new one remains
+    expect(s.groups.some((g) => g.id === oldGroupId)).toBe(false);
+    expect(s.panels.every((p) => p.group !== oldGroupId)).toBe(true);
+  });
+
+  it('a group that still has a surviving member is NOT dropped', () => {
+    let s = loaded();
+    // Group all three panels together first.
+    s = reducer(s, { type: 'select', ids: ['a', 'b', 'c'] });
+    s = reducer(s, { type: 'groupSelection', axis: 'x' });
+    expect(s.groups).toHaveLength(1);
+    const firstGroupId = s.groups[0].id;
+
+    // Now ungroup so we can form a genuinely different second group that
+    // only steals SOME members — but since `select` always expands to the
+    // whole group, forming a strict subset requires ungrouping first.
+    s = reducer(s, { type: 'ungroup', id: firstGroupId });
+    s = reducer(s, { type: 'select', ids: ['a', 'b'] });
+    s = reducer(s, { type: 'groupSelection', axis: 'x' });
+    expect(s.groups).toHaveLength(1); // no leftover from the ungrouped state
+  });
+});
+
+// F5: `grp_${Date.now().toString(36)}` has no random suffix, so two groups
+// created in the same millisecond collide — `ungroup(id)` then removes
+// BOTH and `groups.find(...)` always resolves to the first. The
+// drag/resize coalesce keys elsewhere already add a `Math.random()` suffix;
+// group ids must match that convention.
+describe('groupSelection ids never collide within the same millisecond (F5)', () => {
+  it('two groups created at the identical Date.now() get different ids', () => {
+    const now = 1_700_000_000_000;
+    vi.spyOn(Date, 'now').mockReturnValue(now);
+    try {
+      let s = loaded();
+      s = reducer(s, { type: 'select', ids: ['a', 'b'] });
+      s = reducer(s, { type: 'groupSelection', axis: 'x' });
+      const firstId = s.groups[0].id;
+
+      s = reducer(s, { type: 'select', ids: [] });
+      // 'a'/'b' are already grouped; group the remaining loose panel with...
+      // there's only 'c' left ungrouped, so ungroup first to get two free
+      // panels, then group them into a second group at the SAME Date.now().
+      s = reducer(s, { type: 'ungroup', id: firstId });
+      s = reducer(s, { type: 'select', ids: ['a', 'b'] });
+      s = reducer(s, { type: 'groupSelection', axis: 'x' });
+      const secondId = s.groups[0].id;
+
+      expect(secondId).not.toBe(firstId);
+    } finally {
+      vi.restoreAllMocks();
+    }
+  });
+
+  it('two groups COEXISTING at the same Date.now() can be ungrouped independently (the concrete F5 failure mode)', () => {
+    // Four panels so two disjoint 2-member groups can exist AT THE SAME
+    // TIME — the collision this bug actually causes (`ungroup(id)` removing
+    // BOTH groups, every `groups.find(...)` resolving to the first) only
+    // shows up when both are live simultaneously, not sequentially.
+    let s = reducer(initialState, {
+      type: 'load',
+      figWmm: 100, figHmm: 100,
+      panels: [
+        { id: 'a', type: 'line', rect: R(0.1, 0.1, 0.1, 0.1), spec: {}, data: {} },
+        { id: 'b', type: 'line', rect: R(0.3, 0.1, 0.1, 0.1), spec: {}, data: {} },
+        { id: 'c', type: 'line', rect: R(0.5, 0.1, 0.1, 0.1), spec: {}, data: {} },
+        { id: 'd', type: 'line', rect: R(0.7, 0.1, 0.1, 0.1), spec: {}, data: {} },
+      ],
+      groups: [],
+    });
+
+    const now = 1_700_000_000_000;
+    vi.spyOn(Date, 'now').mockReturnValue(now);
+    try {
+      s = reducer(s, { type: 'select', ids: ['a', 'b'] });
+      s = reducer(s, { type: 'groupSelection', axis: 'x' }); // group 1: {a,b}
+      const groupOneId = s.panels.find((p) => p.id === 'a')!.group!;
+
+      s = reducer(s, { type: 'select', ids: ['c', 'd'] });
+      s = reducer(s, { type: 'groupSelection', axis: 'x' }); // group 2: {c,d}, same Date.now()
+      const groupTwoId = s.panels.find((p) => p.id === 'c')!.group!;
+
+      expect(s.groups).toHaveLength(2); // both coexist
+      expect(groupTwoId).not.toBe(groupOneId);
+
+      // Ungrouping group 2 must leave group 1 (and a/b's membership) intact.
+      s = reducer(s, { type: 'ungroup', id: groupTwoId });
+      expect(s.groups).toHaveLength(1);
+      expect(s.groups[0].id).toBe(groupOneId);
+      expect(s.panels.find((p) => p.id === 'a')!.group).toBe(groupOneId);
+      expect(s.panels.find((p) => p.id === 'b')!.group).toBe(groupOneId);
+      expect(s.panels.find((p) => p.id === 'c')!.group).toBeFalsy();
+      expect(s.panels.find((p) => p.id === 'd')!.group).toBeFalsy();
+    } finally {
+      vi.restoreAllMocks();
+    }
   });
 });

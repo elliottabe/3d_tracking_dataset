@@ -1,6 +1,6 @@
 /** Align / distribute / box-mode / undo / save, plus a live layout-warning count. */
 import { findCollisions, outOfBounds } from '../layout/overlap';
-import { useEditor } from '../state/editorStore';
+import { selectionTouchesGroup, useEditor } from '../state/editorStore';
 import type { AlignOp } from '../layout/align';
 
 const ALIGNS: { op: AlignOp; label: string; title: string }[] = [
@@ -33,6 +33,10 @@ export function Toolbar({ onSave }: { onSave: () => void }) {
   const clipped = outOfBounds(inked);
   const n = state.selection.length;
   const warnCount = collisions.length + clipped.length;
+  // F3: the reducer already no-ops align/distribute/matchSize on a grouped
+  // selection (the solver owns grouped geometry), so disable the buttons
+  // too rather than leaving them clickable-but-inert.
+  const groupLocked = selectionTouchesGroup(state);
 
   return (
     <div
@@ -43,32 +47,32 @@ export function Toolbar({ onSave }: { onSave: () => void }) {
     >
       {ALIGNS.map(({ op, label, title }) => (
         <button
-          key={op} disabled={n < 2} title={title}
+          key={op} disabled={n < 2 || groupLocked} title={title}
           onClick={() => dispatch({ type: 'align', op, ref: 'selection' })}
         >
           {label}
         </button>
       ))}
       <button
-        disabled={n < 3} title="Distribute horizontally (equal gaps)"
+        disabled={n < 3 || groupLocked} title="Distribute horizontally (equal gaps)"
         onClick={() => dispatch({ type: 'distribute', axis: 'x', mode: 'gaps' })}
       >
         ⇔
       </button>
       <button
-        disabled={n < 3} title="Distribute vertically (equal gaps)"
+        disabled={n < 3 || groupLocked} title="Distribute vertically (equal gaps)"
         onClick={() => dispatch({ type: 'distribute', axis: 'y', mode: 'gaps' })}
       >
         ⇕
       </button>
       <button
-        disabled={n < 2} title="Match width"
+        disabled={n < 2 || groupLocked} title="Match width"
         onClick={() => dispatch({ type: 'matchSize', dim: 'w' })}
       >
         =w
       </button>
       <button
-        disabled={n < 2} title="Match height"
+        disabled={n < 2 || groupLocked} title="Match height"
         onClick={() => dispatch({ type: 'matchSize', dim: 'h' })}
       >
         =h

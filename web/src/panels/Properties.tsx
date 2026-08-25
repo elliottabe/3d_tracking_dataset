@@ -26,7 +26,7 @@
  */
 import { fracToMm, mmToFrac } from '../layout/rect';
 import { useEditor } from '../state/editorStore';
-import { formatMm, parseMm } from './format';
+import { formatMm, isValidMmText, parseMm } from './format';
 
 const FIELD_LABEL: Record<'x' | 'y' | 'w' | 'h', string> = {
   x: 'x (left, mm)',
@@ -61,9 +61,19 @@ export function Properties() {
             style={{ width: 70 }}
             defaultValue={formatMm(group.gutterMm)}
             key={`${group.id}-gutter-${formatMm(group.gutterMm)}`}
-            onBlur={(e) => dispatch({
-              type: 'setGutter', id: group.id, gutterMm: parseMm(e.target.value, group.gutterMm),
-            })}
+            onBlur={(e) => {
+              // F6: a rejected parse must not leave the field showing text
+              // that disagrees with state — this input is uncontrolled and
+              // only re-syncs via the `key` above, which does not change
+              // when the dispatched value is a no-op fallback.
+              if (!isValidMmText(e.target.value)) {
+                e.target.value = formatMm(group.gutterMm);
+                return;
+              }
+              dispatch({
+                type: 'setGutter', id: group.id, gutterMm: parseMm(e.target.value, group.gutterMm),
+              });
+            }}
             onKeyDown={(e) => {
               if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
             }}
@@ -91,8 +101,16 @@ export function Properties() {
   const p = sel[0];
   const mm = fracToMm(p.rect, state.figWmm, state.figHmm);
 
-  const commit = (k: 'x' | 'y' | 'w' | 'h') => (text: string) => {
-    const next = { ...mm, [k]: parseMm(text, mm[k]) };
+  // F6: a rejected parse (parseMm falling back) must reset the field's
+  // displayed text to match state, or the uncontrolled input — which only
+  // re-syncs via the `key` below — keeps showing the rejected garbage
+  // ("1,5", "abc", a bare "-") indefinitely.
+  const commit = (k: 'x' | 'y' | 'w' | 'h') => (e: React.FocusEvent<HTMLInputElement>) => {
+    if (!isValidMmText(e.target.value)) {
+      e.target.value = formatMm(mm[k]);
+      return;
+    }
+    const next = { ...mm, [k]: parseMm(e.target.value, mm[k]) };
     dispatch({ type: 'setRect', id: p.id, rect: mmToFrac(next, state.figWmm, state.figHmm) });
   };
 
@@ -110,7 +128,7 @@ export function Properties() {
             // selecting a different panel) so the uncontrolled input's
             // displayed text stays in sync with state.
             key={`${p.id}-${k}-${formatMm(mm[k])}`}
-            onBlur={(e) => commit(k)(e.target.value)}
+            onBlur={commit(k)}
             onKeyDown={(e) => {
               if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
             }}
