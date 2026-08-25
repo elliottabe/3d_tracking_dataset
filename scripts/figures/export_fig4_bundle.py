@@ -16,6 +16,7 @@ notebook should import from here rather than duplicating the logic.
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 from typing import Any, Dict, List
@@ -285,6 +286,71 @@ def _processed_fly_dir(fly_id: str) -> str:
     if not tail.startswith("fly"):
         raise ValueError(f"cannot derive fly dir from fly_id {fly_id!r}")
     return tail
+
+
+def _resolve_sam3_camera_index(cameras, calib_dir, cam: str) -> tuple:
+    """Return ``(cam_idx, source)`` for `cam` (e.g. ``"Cam2012630"``) against
+    a SAM3 mask npz's own camera axis.
+
+    Round 10 finding: SAM3 mask npzs in the PROCESSED tree self-label their
+    camera axis via a ``cameras`` array, in an order that is NOT guaranteed
+    to match ``sorted(glob('Cam*_dlt.csv'))`` — verified on the exemplar's
+    own npz: ``cameras`` puts `Cam2012630` at index 5, while glob-sorted
+    calibration order puts it at index 0. The OLD `Video_recordings` tree's
+    npzs (``['packed','valid','centroids','shape']``, no ``cameras`` array)
+    are the convention `utils/sam3_female_com.py`'s `sam3_camera_index` was
+    written against; the round-6 repoint to the processed tree carried that
+    glob-order assumption forward, silently permuting the camera axis.
+
+    ``cameras`` is the npz's own array (or `None` when absent — the legacy
+    convention, still supported as a fallback). When present, `source` is
+    ``"npz cameras"`` and a `cam` absent from it raises `ValueError` naming
+    what the npz DOES contain (never silently falls back to index 0). When
+    `cameras` is `None`, falls back to `sam3_camera_index` against
+    ``calib_dir``'s glob-sorted order, `source` is ``"glob fallback"`` — the
+    caller should print which path was taken.
+    """
+    if cameras is not None:
+        names = [str(c) for c in cameras]
+        if cam not in names:
+            raise ValueError(f"camera {cam!r} not in npz cameras: {names}")
+        return names.index(cam), "npz cameras"
+    from utils.sam3_female_com import sam3_camera_index
+    return sam3_camera_index(calib_dir, f"{cam}_dlt.csv"), "glob fallback"
+
+
+#: Historically-hardcoded fly_indices=[1, 0] / fly_idx=0 convention, used
+#: only when an npz has no `sex_meta` to derive the real slots from.
+_DEFAULT_MALE_SLOT = 1
+_DEFAULT_FEMALE_SLOT = 0
+
+
+def _resolve_male_female_slots(sex_meta) -> tuple:
+    """Return ``(male_slot, female_slot)`` derived from a SAM3 mask npz's own
+    ``sex_meta`` (its raw JSON string, or an already-parsed dict; `None`/
+    falsy when absent).
+
+    Round 10 finding: the mask SLOT is a FOURTH id scheme — distinct from
+    the combined h5's key0/key1 pairing (round 7) and the processed tree's
+    fly0/fly1 DIRECTORY naming — and was hardcoded (`fly_indices=[1, 0]`,
+    `fly_idx=0`). Verified on the exemplar: `sex_meta` says `male_slot=1`
+    while `pose/bouts/*/sex.json` says `male_fly=0` — INVERTED; the hardcode
+    was only correct here because `male_slot` happens to be 1. On any bout
+    where `male_slot == 0` the hardcode would triangulate the MALE as the
+    "female" COM (a degenerate male→male vector) and swap the panel-A mask
+    colours. This is exactly the dir-index/mask-slot decoupling the repo's
+    own sexing-canonicalization memory warns about.
+
+    Falls back to the documented default (`_DEFAULT_MALE_SLOT`,
+    `_DEFAULT_FEMALE_SLOT`) — matching the historical hardcode — only when
+    `sex_meta` is absent; the caller should print when this fallback fires.
+    """
+    if not sex_meta:
+        return _DEFAULT_MALE_SLOT, _DEFAULT_FEMALE_SLOT
+    meta = json.loads(sex_meta) if isinstance(sex_meta, (str, bytes)) else dict(sex_meta)
+    male_slot = int(meta["male_slot"])
+    female_slot = 1 - male_slot
+    return male_slot, female_slot
 
 
 def _resolve_session_bout(session_dir, sam3_root, recording: str, clip_len: int,
@@ -571,6 +637,36 @@ def main(argv=None) -> int:
                 f"({type(e).__name__}: {e}) -- video strip and "
                 f"male-pitch/target_pitch will also be skipped")
 
+    # --- resolve SAM3 camera axis + male/female mask slots (round 10) ------
+    # Both the video overlay and the female-COM triangulation read the SAME
+    # sam3_masks.npz's own `cameras`/`sex_meta` arrays, so this is resolved
+    # ONCE and shared; a failure here is its own declared skip, and both
+    # consuming blocks guard on the sentinel the same way they already guard
+    # on `sam3_bout is None`.
+    cam_idx = cam_idx_source = None
+    male_slot = female_slot = None
+    npz_cameras = None
+    if sam3_bout is not None:
+        try:
+            _sam3_npz_path = processed_sam3_root / sam3_bout / "sam3_masks.npz"
+            with np.load(_sam3_npz_path, allow_pickle=True) as _z:
+                npz_cameras = _z["cameras"] if "cameras" in _z.files else None
+                npz_sex_meta = (_z["sex_meta"].item()
+                               if "sex_meta" in _z.files else None)
+            calib_dir_for_cam = Path(args.session) / "calibration"
+            cam_idx, cam_idx_source = _resolve_sam3_camera_index(
+                npz_cameras, calib_dir_for_cam, args.cam)
+            print(f"sam3 camera index: {cam_idx} (source: {cam_idx_source})")
+            if npz_sex_meta is None:
+                print("sam3 sex_meta absent from npz; using default "
+                      "male/female mask slots (1, 0)")
+            male_slot, female_slot = _resolve_male_female_slots(npz_sex_meta)
+            print(f"sam3 mask slots -> male={male_slot} female={female_slot}")
+        except Exception as e:                   # noqa: BLE001 - report, don't die
+            skipped.append(
+                f"sam3 camera/slot resolution ({type(e).__name__}: {e}) -- "
+                f"video strip and male-pitch/target_pitch will also be skipped")
+
     # --- pooled aggregates -------------------------------------------------
     phase_diffs = []
     for r in results:
@@ -652,8 +748,12 @@ def main(argv=None) -> int:
         if sam3_bout is None:
             raise RuntimeError(
                 "no resolved sam3 bout (see the sam3 bout mapping skip above)")
+        if cam_idx is None or male_slot is None:
+            raise RuntimeError(
+                "no resolved sam3 camera index / mask slots (see the sam3 "
+                "camera/slot resolution skip above)")
         import matplotlib.pyplot as plt
-        from utils.sam3_female_com import sam3_camera_index, unpack_sam3_masks_for_frames
+        from utils.sam3_female_com import unpack_sam3_masks_for_frames
 
         calib_dir = Path(args.session) / "calibration"
         dlt_csv = calib_dir / f"{args.cam}_dlt.csv"
@@ -666,10 +766,12 @@ def main(argv=None) -> int:
         female_kp3d = _load_kp3d(pose_bout_dir / key1_dir / "kp3d.npz")
         kp3d_source = str(pose_bout_dir)
         dlt = cfp._dlt_load(dlt_csv)
-        cam_idx = sam3_camera_index(calib_dir, dlt_csv.name)
+        # cam_idx / male_slot / female_slot resolved once, shared with the
+        # pitch block below (round 10) -- never re-derive via glob order or
+        # a hardcoded [1, 0] here.
         vidx = np.linspace(0, T - 1, args.n_video, dtype=int)
         masks = unpack_sam3_masks_for_frames(
-            sam3_npz, cam_idx, fly_indices=[1, 0],
+            sam3_npz, cam_idx, fly_indices=[male_slot, female_slot],
             frame_indices=[int(f) for f in vidx])
         figv, axv = plt.subplots(1, args.n_video, figsize=(args.n_video * 2, 2), dpi=200)
         axv = np.atleast_1d(axv)
@@ -720,12 +822,23 @@ def main(argv=None) -> int:
         if sam3_bout is None:
             raise RuntimeError(
                 "no resolved sam3 bout (see the sam3 bout mapping skip above)")
+        if female_slot is None:
+            raise RuntimeError(
+                "no resolved sam3 camera index / mask slots (see the sam3 "
+                "camera/slot resolution skip above)")
         from utils.sam3_female_com import triangulate_sam3_female_com
 
+        # camera_order built from the SAME npz `cameras` array the shared
+        # resolution block above read (round 10) -- an explicit order, not
+        # triangulate_sam3_female_com's own glob-sorted default, since the
+        # npz's camera axis is not guaranteed to match glob order either.
+        camera_order = ([f"{c}_dlt.csv" for c in [str(x) for x in npz_cameras]]
+                        if npz_cameras is not None else None)
         female = triangulate_sam3_female_com(
             str(processed_sam3_root / sam3_bout / "sam3_masks.npz"),
             str(Path(args.session) / "calibration"),
-            fly_idx=0, min_cams=2, verbose=False) / args.kp_scale
+            fly_idx=female_slot, camera_order=camera_order,
+            min_cams=2, verbose=False) / args.kp_scale
         qm = np.asarray(data[ex["key0"]]["qpos"])
         # key0's processed directory, resolved above (round 7) -- never
         # hardcode fly0=male here either.
@@ -807,6 +920,10 @@ def main(argv=None) -> int:
                        "kp3d_source": kp3d_source,
                        "kp3d_fly_dirs": f"key0={key0_dir};key1={key1_dir}",
                        "zheight_free_running": "com_z (floor-corrected)",
+                       "sam3_camera_index": int(cam_idx) if cam_idx is not None else -1,
+                       "sam3_camera_index_source": cam_idx_source or "",
+                       "sam3_mask_slots": (f"male={male_slot};female={female_slot}"
+                                          if male_slot is not None else ""),
                        "skipped": "; ".join(skipped)},
                  panels=panels)
     print(f"wrote {args.out}: {len(panels)} panels from {len(results)} pairs")

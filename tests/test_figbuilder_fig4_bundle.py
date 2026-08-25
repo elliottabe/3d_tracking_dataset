@@ -14,7 +14,8 @@ import figbuilder.panels  # noqa: F401
 from figbuilder.panels.base import get_panel_type
 from scripts.figures.export_fig4_bundle import (
     build_fig4_panels, _pair_qpos, _pair_center_xyz, _resolve_session_bout,
-    _load_kp3d, _processed_fly_dir, _free_running_com_z)
+    _load_kp3d, _processed_fly_dir, _free_running_com_z,
+    _resolve_sam3_camera_index, _resolve_male_female_slots)
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -519,3 +520,50 @@ def test_free_running_com_z_returns_one_entry_per_contributing_bout(tmp_path):
     assert out.ndim == 1
     assert out.shape == (3,)
     np.testing.assert_allclose(sorted(out.tolist()), [0.1, 0.4, 0.7], atol=1e-6)
+
+
+def test_resolve_sam3_camera_index_from_npz_cameras():
+    """Round 10 finding: the exemplar's own npz `cameras` array is NOT
+    glob-sorted order -- Cam2012630 sits at index 5, not the glob-sorted
+    index 0."""
+    cameras = np.array(["Cam2012853", "Cam2012862", "Cam2012855", "Cam2012857",
+                        "Cam2012861", "Cam2012630", "Cam2012631"])
+    idx, source = _resolve_sam3_camera_index(cameras, calib_dir=None, cam="Cam2012630")
+    assert idx == 5
+    assert source == "npz cameras"
+
+
+def test_resolve_sam3_camera_index_raises_for_absent_camera():
+    cameras = np.array(["Cam2012853", "Cam2012862"])
+    with pytest.raises(ValueError, match="Cam9999999"):
+        _resolve_sam3_camera_index(cameras, calib_dir=None, cam="Cam9999999")
+
+
+def test_resolve_sam3_camera_index_falls_back_to_glob_order(tmp_path):
+    """No `cameras` array (older npz convention, e.g. the Video_recordings
+    tree's Predictions_3D_* mask files) -> the legacy
+    sorted(glob('Cam*_dlt.csv')) order."""
+    for name in ["Cam2012630_dlt.csv", "Cam2012631_dlt.csv", "Cam2012853_dlt.csv"]:
+        (tmp_path / name).write_text("")
+    idx, source = _resolve_sam3_camera_index(None, tmp_path, cam="Cam2012630")
+    assert idx == 0   # sorted glob order: 2012630 < 2012631 < 2012853
+    assert source == "glob fallback"
+
+
+def test_resolve_male_female_slots_from_real_sex_meta_json():
+    """Round 10 finding: sex_meta says male_slot=1 while pose/bouts/*/
+    sex.json says male_fly=0 for the same bout -- INVERTED. Slots must be
+    derived from sex_meta, not assumed."""
+    sex_meta = ('{"male_slot": 1, "status": "kept", "method": "mask_area_vote", '
+               '"male_detected_slot": 1, "agreement": 0.429, "margin": 0.038, '
+               '"n_cameras": 7, "pct": 75}')
+    assert _resolve_male_female_slots(sex_meta) == (1, 0)
+
+
+def test_resolve_male_female_slots_when_male_slot_is_zero():
+    sex_meta = '{"male_slot": 0, "status": "kept"}'
+    assert _resolve_male_female_slots(sex_meta) == (0, 1)
+
+
+def test_resolve_male_female_slots_falls_back_to_default_when_absent():
+    assert _resolve_male_female_slots(None) == (1, 0)
