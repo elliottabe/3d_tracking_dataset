@@ -8,6 +8,11 @@ import { normalizeRect, type Rect } from '../layout/rect';
 
 export type HandleId = 'nw' | 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w';
 
+/** Minimum panel extent any commit path may produce, in mm. Shared by the
+ *  drag-resize handles here AND the numeric-entry commit in the editor
+ *  reducer (`setRect`) — one floor, so the two paths cannot drift apart. */
+export const MIN_SIZE_MM = 5;
+
 export type ResizeOpts = { minW?: number; minH?: number; aspect?: boolean };
 
 export function resizeRect(

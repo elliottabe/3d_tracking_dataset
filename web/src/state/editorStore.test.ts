@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { initialState, reducer, type EditorState } from './editorStore';
+import { solveGroup } from '../layout/groups';
+import { MIN_SIZE_MM } from '../canvas/resize';
 import type { Rect } from '../layout/rect';
 
 const R = (x: number, y: number, w: number, h: number): Rect => ({ x, y, w, h });
@@ -147,5 +149,178 @@ describe('reducer', () => {
     s = reducer(s, { type: 'undo' });                          // past the saved point, toward load
     expect(s.panels.find((p) => p.id === 'a')!.rect.x).toBeCloseTo(0.1);
     expect(s.dirty).toBe(true);
+  });
+});
+
+describe('groups', () => {
+  it('groups the selection, recovering the gutter from the existing spacing', () => {
+    let s = loaded();
+    s = reducer(s, { type: 'select', ids: ['a', 'c'] });
+    s = reducer(s, { type: 'groupSelection', axis: 'x' });
+    expect(s.groups).toHaveLength(1);
+    const g = s.groups[0];
+    expect(g.axis).toBe('x');
+    expect(g.gutterMm).toBeGreaterThan(0);
+    expect(s.panels.filter((p) => p.group === g.id).map((p) => p.id).sort()).toEqual(['a', 'c']);
+  });
+
+  it('re-solves children when the gutter changes, and the change is undoable', () => {
+    let s = loaded();
+    s = reducer(s, { type: 'select', ids: ['a', 'c'] });
+    s = reducer(s, { type: 'groupSelection', axis: 'x' });
+    const before = s.panels.find((p) => p.id === 'c')!.rect.x;
+    s = reducer(s, { type: 'setGutter', id: s.groups[0].id, gutterMm: 20 });
+    const after = s.panels.find((p) => p.id === 'c')!.rect.x;
+    expect(after).not.toBeCloseTo(before);
+    s = reducer(s, { type: 'undo' });
+    expect(s.panels.find((p) => p.id === 'c')!.rect.x).toBeCloseTo(before, 9);
+  });
+
+  it('equal:true gives every child the same width', () => {
+    let s = loaded();
+    s = reducer(s, { type: 'select', ids: ['a', 'b', 'c'] });
+    s = reducer(s, { type: 'groupSelection', axis: 'x' });
+    s = reducer(s, { type: 'setGroupEqual', id: s.groups[0].id, equal: true });
+    const ws = s.panels.map((p) => p.rect.w);
+    expect(ws[1]).toBeCloseTo(ws[0], 9);
+    expect(ws[2]).toBeCloseTo(ws[0], 9);
+  });
+
+  it('ungroup leaves children exactly where the solver last put them', () => {
+    let s = loaded();
+    s = reducer(s, { type: 'select', ids: ['a', 'c'] });
+    s = reducer(s, { type: 'groupSelection', axis: 'x' });
+    const solved = s.panels.map((p) => ({ ...p.rect }));
+    s = reducer(s, { type: 'ungroup', id: s.groups[0].id });
+    expect(s.groups).toHaveLength(0);
+    s.panels.forEach((p, i) => {
+      expect(p.rect.x).toBeCloseTo(solved[i].x, 9);
+      expect(p.rect.w).toBeCloseTo(solved[i].w, 9);
+    });
+    expect(s.panels.every((p) => !p.group)).toBe(true);
+  });
+
+  it('refuses to group fewer than two panels', () => {
+    let s = loaded();
+    s = reducer(s, { type: 'select', ids: ['a'] });
+    s = reducer(s, { type: 'groupSelection', axis: 'x' });
+    expect(s.groups).toHaveLength(0);
+  });
+});
+
+// Controller ruling M2-13 (dispatch addendum): the GROUP is the unit of
+// manipulation. A free child drag would be silently provisional (the next
+// setGutter/setGroupEqual re-solve yanks it back with no visible cause), so
+// selecting/dragging one grouped child must act on the whole group instead.
+describe('group selection restrictions (addendum M2-13)', () => {
+  it('clicking one child selects all children of its group', () => {
+    let s = loaded();
+    s = reducer(s, { type: 'select', ids: ['a', 'c'] });
+    s = reducer(s, { type: 'groupSelection', axis: 'x' });
+    s = reducer(s, { type: 'select', ids: [] });
+    s = reducer(s, { type: 'select', ids: ['c'] }); // click just the ONE child
+    expect(s.selection.sort()).toEqual(['a', 'c']);
+  });
+
+  it('dragging a child moves ALL children by the same delta, as one undo entry', () => {
+    let s = loaded();
+    s = reducer(s, { type: 'select', ids: ['a', 'c'] });
+    s = reducer(s, { type: 'groupSelection', axis: 'x' });
+    const aBefore = s.panels.find((p) => p.id === 'a')!.rect;
+    const cBefore = s.panels.find((p) => p.id === 'c')!.rect;
+
+    s = reducer(s, { type: 'select', ids: ['c'] }); // click one child -> whole group selected
+    expect(s.selection.sort()).toEqual(['a', 'c']);
+
+    const key = 'group-drag';
+    s = reducer(s, { type: 'moveSelection', dx: 0.05, dy: 0.02, coalesceKey: key });
+    s = reducer(s, { type: 'moveSelection', dx: 0.01, dy: 0, coalesceKey: key });
+
+    const aAfter = s.panels.find((p) => p.id === 'a')!.rect;
+    const cAfter = s.panels.find((p) => p.id === 'c')!.rect;
+    expect(aAfter.x).toBeCloseTo(aBefore.x + 0.06, 9);
+    expect(aAfter.y).toBeCloseTo(aBefore.y + 0.02, 9);
+    expect(cAfter.x).toBeCloseTo(cBefore.x + 0.06, 9);
+    expect(cAfter.y).toBeCloseTo(cBefore.y + 0.02, 9);
+
+    // Two coalesced pointer-moves must collapse into ONE undo entry.
+    s = reducer(s, { type: 'undo' });
+    expect(s.panels.find((p) => p.id === 'a')!.rect.x).toBeCloseTo(aBefore.x, 9);
+    expect(s.panels.find((p) => p.id === 'c')!.rect.x).toBeCloseTo(cBefore.x, 9);
+  });
+
+  it("a translated group's children still match solveGroup's output for the translated group rect", () => {
+    let s = loaded();
+    s = reducer(s, { type: 'select', ids: ['a', 'c'] });
+    s = reducer(s, { type: 'groupSelection', axis: 'x' });
+    const groupId = s.groups[0].id;
+
+    s = reducer(s, { type: 'select', ids: ['a'] }); // -> whole group
+    s = reducer(s, { type: 'moveSelection', dx: 0.1, dy: -0.03 });
+
+    const gAfter = s.groups.find((g) => g.id === groupId)!;
+    const kids = s.panels
+      .filter((p) => p.group === groupId)
+      .sort((p, q) => p.rect.x - q.rect.x); // axis 'x' order
+    const expected = solveGroup(gAfter, kids.map((p) => p.rect), s.figWmm, s.figHmm);
+
+    kids.forEach((p, i) => {
+      expect(p.rect.x).toBeCloseTo(expected[i].x, 9);
+      expect(p.rect.y).toBeCloseTo(expected[i].y, 9);
+      expect(p.rect.w).toBeCloseTo(expected[i].w, 9);
+      expect(p.rect.h).toBeCloseTo(expected[i].h, 9);
+    });
+  });
+
+  it('ungroup then drag one former child moves ONLY that panel', () => {
+    let s = loaded();
+    s = reducer(s, { type: 'select', ids: ['a', 'c'] });
+    s = reducer(s, { type: 'groupSelection', axis: 'x' });
+    s = reducer(s, { type: 'ungroup', id: s.groups[0].id });
+
+    const cBefore = s.panels.find((p) => p.id === 'c')!.rect.x;
+    s = reducer(s, { type: 'select', ids: ['a'] });
+    expect(s.selection).toEqual(['a']); // restriction lifted: no longer the whole group
+    s = reducer(s, { type: 'moveSelection', dx: 0.1, dy: 0 });
+    expect(s.panels.find((p) => p.id === 'c')!.rect.x).toBeCloseTo(cBefore, 9);
+  });
+});
+
+// Controller ruling M2-15: a typed 0/negative mm in the Properties panel's
+// w/h field must not silently commit a vanishing panel the way it did in
+// Task 10 — the numeric-entry path (setRect) must enforce the same floor
+// the drag-resize handles already do (canvas/resize.ts MIN_SIZE_MM).
+describe('setRect minimum size floor (M2-15)', () => {
+  it('clamps a typed 0 width to the MIN_SIZE_MM floor instead of vanishing the panel', () => {
+    let s = loaded(); // figWmm = 100
+    s = reducer(s, { type: 'setRect', id: 'a', rect: R(0.1, 0.1, 0, 0.2) });
+    const w = s.panels.find((p) => p.id === 'a')!.rect.w;
+    expect(w).toBeGreaterThan(0);
+    expect(w).toBeCloseTo(MIN_SIZE_MM / 100, 9);
+  });
+
+  it('clamps a negative height the same way', () => {
+    let s = loaded();
+    s = reducer(s, { type: 'setRect', id: 'a', rect: R(0.1, 0.1, 0.2, -5) });
+    const h = s.panels.find((p) => p.id === 'a')!.rect.h;
+    expect(h).toBeCloseTo(MIN_SIZE_MM / 100, 9);
+  });
+
+  it('the clamped value is visible in state, not silently reverted to the pre-edit rect', () => {
+    let s = loaded();
+    const before = s.panels.find((p) => p.id === 'a')!.rect;
+    s = reducer(s, { type: 'setRect', id: 'a', rect: R(0.1, 0.1, 0, 0.2) });
+    const after = s.panels.find((p) => p.id === 'a')!.rect;
+    // Not the illegal typed value (0) — the panel must not vanish...
+    expect(after.w).toBeGreaterThan(0);
+    // ...and not silently reverted back to the untouched pre-edit width
+    // either, which would look identical to the input being ignored.
+    expect(after.w).not.toBeCloseTo(before.w, 9);
+  });
+
+  it('does not clamp values already above the floor (no regression)', () => {
+    let s = loaded();
+    s = reducer(s, { type: 'setRect', id: 'b', rect: R(0.25, 0.25, 0.5, 0.5) });
+    expect(s.panels.find((p) => p.id === 'b')!.rect).toEqual(R(0.25, 0.25, 0.5, 0.5));
   });
 });

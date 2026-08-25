@@ -14,6 +14,15 @@
  *
  * A committed edit (blur / Enter) dispatches `setRect`, so it joins the
  * normal undo stack like a drag or an align does.
+ *
+ * Grouped panels (controller ruling M2-13): the reducer's `select` action
+ * expands any grouped-panel selection to the whole group, so a selection
+ * that is entirely one group's children lands here as `sel.length > 1`.
+ * Per the ruling, an individual grouped child's geometry is NOT offered for
+ * numeric editing (the group's solver owns it — a per-child edit would be
+ * silently reverted by the next setGutter/setGroupEqual). Instead this
+ * renders the group's own controls (gutter, equal sizes) with a note
+ * explaining why the x/y/w/h fields aren't here.
  */
 import { fracToMm, mmToFrac } from '../layout/rect';
 import { useEditor } from '../state/editorStore';
@@ -29,6 +38,47 @@ const FIELD_LABEL: Record<'x' | 'y' | 'w' | 'h', string> = {
 export function Properties() {
   const { state, dispatch } = useEditor();
   const sel = state.panels.filter((p) => state.selection.includes(p.id));
+
+  // The reducer's `select` action expands a click/marquee on ANY grouped
+  // panel to that whole group, so "every selected panel shares one
+  // non-null group" here means "the whole group is selected" — never a
+  // partial/mixed selection that happens to share a group id.
+  const groupId = sel.length > 0 ? sel[0].group : null;
+  const isWholeGroup = sel.length > 0 && groupId != null && sel.every((x) => x.group === groupId);
+
+  if (isWholeGroup) {
+    const group = state.groups.find((g) => g.id === groupId)!;
+    return (
+      <aside style={{ padding: 12, width: 220, fontFamily: 'system-ui', fontSize: 13 }}>
+        <h3 style={{ margin: '0 0 8px' }}>Group ({sel.length} panels)</h3>
+        <p style={{ color: '#666', marginBottom: 8 }}>
+          This panel is in a group — the group controls its geometry.
+          Ungroup to edit x/y/w/h individually.
+        </p>
+        <label style={{ display: 'flex', gap: 6, marginBottom: 6, alignItems: 'center' }}>
+          <span style={{ width: 96 }}>gutter (mm)</span>
+          <input
+            style={{ width: 70 }}
+            defaultValue={formatMm(group.gutterMm)}
+            key={`${group.id}-gutter-${formatMm(group.gutterMm)}`}
+            onBlur={(e) => dispatch({
+              type: 'setGutter', id: group.id, gutterMm: parseMm(e.target.value, group.gutterMm),
+            })}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
+            }}
+          />
+        </label>
+        <label style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+          <input
+            type="checkbox" checked={group.equal}
+            onChange={(e) => dispatch({ type: 'setGroupEqual', id: group.id, equal: e.target.checked })}
+          />
+          {' '}equal sizes
+        </label>
+      </aside>
+    );
+  }
 
   if (sel.length !== 1) {
     return (

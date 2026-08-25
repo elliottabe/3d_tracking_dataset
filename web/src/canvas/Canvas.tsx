@@ -4,7 +4,7 @@ import { namespaceIdsAndExtractInner } from './namespaceIds';
 import { hitTestPanels, marqueeHits, screenToFrac, type Hittable } from './hitTest';
 import { Guides } from './Guides';
 import { Handles } from './Handles';
-import { resizeRect, type HandleId } from './resize';
+import { resizeRect, MIN_SIZE_MM, type HandleId } from './resize';
 import { useEditor } from '../state/editorStore';
 import { normalizeRect, rectToScreen, PT_PER_MM, type Rect } from '../layout/rect';
 import { buildTargets, screenTolToFrac, snapRect, type SnapTarget } from '../layout/snap';
@@ -49,9 +49,6 @@ const rectToTuple = (r: Rect): [number, number, number, number] => [r.x, r.y, r.
 /** Nudge step per arrow-key press, in mm; shift multiplies it up. */
 const NUDGE_MM = 0.25;
 const NUDGE_SHIFT_MM = 1;
-/** Minimum panel extent a resize can produce, in figure fractions of the
- *  matching axis — expressed here as an mm floor so it reads in real units. */
-const MIN_SIZE_MM = 5;
 
 export function Canvas() {
   const { state, dispatch } = useEditor();

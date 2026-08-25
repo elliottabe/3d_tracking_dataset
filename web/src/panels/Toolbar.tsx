@@ -16,6 +16,14 @@ export function Toolbar({ onSave }: { onSave: () => void }) {
   const { state, dispatch, canUndo, canRedo } = useEditor();
   const inked = state.panels.filter((p) => p.ink).map((p) => ({ id: p.id, ink: p.ink! }));
 
+  const selPanels = state.panels.filter((p) => state.selection.includes(p.id));
+  // Ungroup is offered only when the selection IS exactly one whole group —
+  // guaranteed by the reducer's group-selection expansion (clicking any
+  // child selects every sibling), so "every selected panel shares one
+  // non-null group" is equivalent to "the whole group is selected".
+  const selGroupIds = new Set(selPanels.map((p) => p.group ?? null));
+  const ungroupId = selPanels.length > 0 && selGroupIds.size === 1 ? [...selGroupIds][0] : null;
+
   // Task 5's carried-forward finding: a zero-area ink box (e.g. a panel that
   // hasn't rendered real content yet) can register as an area-0 "collision"
   // in findCollisions. Only surface pairs with a genuine, positive overlap
@@ -64,6 +72,20 @@ export function Toolbar({ onSave }: { onSave: () => void }) {
         onClick={() => dispatch({ type: 'matchSize', dim: 'h' })}
       >
         =h
+      </button>
+
+      <span style={{ width: 12 }} />
+      <button
+        disabled={n < 2} title="Group the selection into a row/column"
+        onClick={() => dispatch({ type: 'groupSelection', axis: 'x' })}
+      >
+        group ⇥⇤
+      </button>
+      <button
+        disabled={!ungroupId} title="Ungroup — children keep their current geometry"
+        onClick={() => ungroupId && dispatch({ type: 'ungroup', id: ungroupId })}
+      >
+        ungroup
       </button>
 
       <span style={{ width: 12 }} />
