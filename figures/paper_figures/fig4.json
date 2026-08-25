@@ -1,0 +1,603 @@
+{
+  "version": 1,
+  "bundle": "fig4_bundle.h5",
+  "figure": {
+    "width_mm": 183.0,
+    "height_mm": 140.0,
+    "dpi": 300,
+    "transparent": true,
+    "preset": null,
+    "max_width_mm": 215.89999999999998
+  },
+  "style": {
+    "font.size": 6.0
+  },
+  "panels": [
+    {
+      "id": "wing",
+      "type": "courtship.wing_z",
+      "rect": [
+        0.07,
+        0.6808939661816038,
+        0.8999999999999999,
+        0.07298608277800456
+      ],
+      "data": {
+        "seg_L": {
+          "dataset": "/panels/wing/data/seg_L"
+        },
+        "seg_R": {
+          "dataset": "/panels/wing/data/seg_R"
+        },
+        "t_ms": {
+          "dataset": "/panels/wing/data/t_ms"
+        },
+        "wingL_z": {
+          "dataset": "/panels/wing/data/wingL_z"
+        },
+        "wingR_z": {
+          "dataset": "/panels/wing/data/wingR_z"
+        }
+      },
+      "spec": {
+        "fs": 800.0,
+        "time_unit": "s",
+        "min_segment_ms": 10.0
+      },
+      "group": null,
+      "z": 0
+    },
+    {
+      "id": "scut",
+      "type": "courtship.scutellum_z",
+      "rect": [
+        0.07,
+        0.6187515299877602,
+        0.8999999999999999,
+        0.05213291627000305
+      ],
+      "data": {
+        "scutellum_z": {
+          "dataset": "/panels/scut/data/scutellum_z"
+        },
+        "segments": {
+          "dataset": "/panels/scut/data/segments"
+        },
+        "t_ms": {
+          "dataset": "/panels/scut/data/t_ms"
+        }
+      },
+      "spec": {
+        "fs": 800.0,
+        "time_unit": "s"
+      },
+      "group": null,
+      "z": 0
+    },
+    {
+      "id": "sine_phase",
+      "type": "courtship.sine_inphase",
+      "rect": [
+        0.6732673267326733,
+        0.8511627906976744,
+        0.31930693069306926,
+        0.1096695226438188
+      ],
+      "data": {
+        "ext_z": {
+          "dataset": "/panels/sine_phase/data/ext_z"
+        },
+        "fold_z": {
+          "dataset": "/panels/sine_phase/data/fold_z"
+        },
+        "sine_segments": {
+          "dataset": "/panels/sine_phase/data/sine_segments"
+        },
+        "t_ms": {
+          "dataset": "/panels/sine_phase/data/t_ms"
+        }
+      },
+      "spec": {
+        "fs": 800.0,
+        "time_unit": "s"
+      },
+      "group": null,
+      "z": 0
+    },
+    {
+      "id": "wing_phase_polar",
+      "type": "courtship.wing_polar",
+      "rect": [
+        0.05915352008713455,
+        0.2880293757649938,
+        0.14382888215582795,
+        0.1880048959608323
+      ],
+      "data": {
+        "phase_diffs": {
+          "dataset": "/panels/wing_phase_polar/data/phase_diffs"
+        }
+      },
+      "spec": {
+        "center_stat": "median"
+      },
+      "group": null,
+      "z": 0
+    },
+    {
+      "id": "angle_2d",
+      "type": "courtship.angle_density",
+      "rect": [
+        0.31553398058252424,
+        0.2880293757649938,
+        0.16732862606649018,
+        0.21307221542227667
+      ],
+      "data": {
+        "ext_pulse": {
+          "dataset": "/panels/angle_2d/data/ext_pulse"
+        },
+        "ext_sine": {
+          "dataset": "/panels/angle_2d/data/ext_sine"
+        }
+      },
+      "spec": {
+        "range_deg": [
+          0.0,
+          90.0
+        ]
+      },
+      "group": null,
+      "z": 0
+    },
+    {
+      "id": "pulse_class",
+      "type": "courtship.pulse_class",
+      "rect": [
+        0.5631803471609297,
+        0.2880293757649938,
+        0.16732862606649024,
+        0.21307221542227667
+      ],
+      "data": {
+        "centroid_Pfast": {
+          "dataset": "/panels/pulse_class/data/centroid_Pfast"
+        },
+        "centroid_Pslow": {
+          "dataset": "/panels/pulse_class/data/centroid_Pslow"
+        },
+        "pooled_Pfast": {
+          "dataset": "/panels/pulse_class/data/pooled_Pfast"
+        },
+        "pooled_Pslow": {
+          "dataset": "/panels/pulse_class/data/pooled_Pslow"
+        }
+      },
+      "spec": {
+        "fs": 800.0,
+        "show_std": true
+      },
+      "group": null,
+      "z": 0
+    },
+    {
+      "id": "zheight",
+      "type": "courtship.zheight",
+      "rect": [
+        0.8108267137393352,
+        0.2880293757649938,
+        0.1673286260664898,
+        0.21307221542227667
+      ],
+      "data": {
+        "pulse_z": {
+          "dataset": "/panels/zheight/data/pulse_z"
+        },
+        "sine_z": {
+          "dataset": "/panels/zheight/data/sine_z"
+        },
+        "walking_z": {
+          "dataset": "/panels/zheight/data/walking_z"
+        }
+      },
+      "spec": {
+        "kind": "violin"
+      },
+      "group": null,
+      "z": 0
+    },
+    {
+      "id": "pitch",
+      "type": "courtship.male_pitch",
+      "rect": [
+        0.600210970464135,
+        0.05091799265605873,
+        0.20569620253164556,
+        0.1253365973072215
+      ],
+      "data": {
+        "male_pitch": {
+          "dataset": "/panels/pitch/data/male_pitch"
+        },
+        "t_ms": {
+          "dataset": "/panels/pitch/data/t_ms"
+        },
+        "target_pitch": {
+          "dataset": "/panels/pitch/data/target_pitch"
+        }
+      },
+      "spec": {
+        "fs": 800.0,
+        "time_unit": "s"
+      },
+      "group": null,
+      "z": 0
+    },
+    {
+      "id": "align_violin",
+      "type": "courtship.pitch_violin",
+      "rect": [
+        0.8860759493670886,
+        0.05091799265605873,
+        0.10126582278481011,
+        0.1253365973072215
+      ],
+      "data": {
+        "per_bout": {
+          "dataset": "/panels/align_violin/data/per_bout"
+        }
+      },
+      "spec": {},
+      "group": null,
+      "z": 0
+    },
+    {
+      "id": "video_0",
+      "type": "image",
+      "rect": [
+        0.030940594059405937,
+        0.8159118727050183,
+        0.13915865270737598,
+        0.1449204406364749
+      ],
+      "data": {
+        "img": {
+          "dataset": "/panels/video_0/assets/img"
+        }
+      },
+      "spec": {
+        "asset": "img"
+      },
+      "group": "video_strip",
+      "z": 0
+    },
+    {
+      "id": "video_1",
+      "type": "image",
+      "rect": [
+        0.17844876592922448,
+        0.8159118727050183,
+        0.13915865270737598,
+        0.1449204406364749
+      ],
+      "data": {
+        "img": {
+          "dataset": "/panels/video_1/assets/img"
+        }
+      },
+      "spec": {
+        "asset": "img"
+      },
+      "group": "video_strip",
+      "z": 0
+    },
+    {
+      "id": "video_2",
+      "type": "image",
+      "rect": [
+        0.3259569377990431,
+        0.8159118727050183,
+        0.13915865270737593,
+        0.1449204406364749
+      ],
+      "data": {
+        "img": {
+          "dataset": "/panels/video_2/assets/img"
+        }
+      },
+      "spec": {
+        "asset": "img"
+      },
+      "group": "video_strip",
+      "z": 0
+    },
+    {
+      "id": "video_3",
+      "type": "image",
+      "rect": [
+        0.47346510966886163,
+        0.8159118727050183,
+        0.13915865270737598,
+        0.1449204406364749
+      ],
+      "data": {
+        "img": {
+          "dataset": "/panels/video_3/assets/img"
+        }
+      },
+      "spec": {
+        "asset": "img"
+      },
+      "group": "video_strip",
+      "z": 0
+    },
+    {
+      "id": "render_0",
+      "type": "image",
+      "rect": [
+        0.02637130801687764,
+        0.011750305997552026,
+        0.1173460117497426,
+        0.17233782129742953
+      ],
+      "data": {
+        "img": {
+          "dataset": "/panels/render_0/assets/img"
+        }
+      },
+      "spec": {
+        "asset": "img"
+      },
+      "group": "render_strip",
+      "z": 0
+    },
+    {
+      "id": "render_1",
+      "type": "image",
+      "rect": [
+        0.1507580804716048,
+        0.011750305997552026,
+        0.1173460117497426,
+        0.17233782129742953
+      ],
+      "data": {
+        "img": {
+          "dataset": "/panels/render_1/assets/img"
+        }
+      },
+      "spec": {
+        "asset": "img"
+      },
+      "group": "render_strip",
+      "z": 0
+    },
+    {
+      "id": "render_2",
+      "type": "image",
+      "rect": [
+        0.275144852926332,
+        0.011750305997552026,
+        0.11734601174974257,
+        0.17233782129742953
+      ],
+      "data": {
+        "img": {
+          "dataset": "/panels/render_2/assets/img"
+        }
+      },
+      "spec": {
+        "asset": "img"
+      },
+      "group": "render_strip",
+      "z": 0
+    },
+    {
+      "id": "render_3",
+      "type": "image",
+      "rect": [
+        0.39953162538105913,
+        0.011750305997552026,
+        0.11734601174974257,
+        0.17233782129742953
+      ],
+      "data": {
+        "img": {
+          "dataset": "/panels/render_3/assets/img"
+        }
+      },
+      "spec": {
+        "asset": "img"
+      },
+      "group": "render_strip",
+      "z": 0
+    }
+  ],
+  "groups": [
+    {
+      "id": "video_strip",
+      "axis": "x",
+      "gutter_mm": 1.52796200672699,
+      "equal": true,
+      "rect": [
+        0.030940594059405937,
+        0.8159118727050183,
+        0.5816831683168316,
+        0.1449204406364749
+      ]
+    },
+    {
+      "id": "render_strip",
+      "axis": "x",
+      "gutter_mm": 1.288459209012176,
+      "equal": true,
+      "rect": [
+        0.02637130801687764,
+        0.011750305997552026,
+        0.49050632911392406,
+        0.17233782129742953
+      ]
+    }
+  ],
+  "annotations": [
+    {
+      "id": "letter_video_0",
+      "kind": "text",
+      "managed": "panel_letter",
+      "parent": "video_0",
+      "pos_mm": [
+        -4.0,
+        21.288861689106486
+      ],
+      "text": "A",
+      "style": {
+        "font_size_pt": 8,
+        "weight": "bold",
+        "font": "Arial, Helvetica, sans-serif"
+      }
+    },
+    {
+      "id": "letter_sine_phase",
+      "kind": "text",
+      "managed": "panel_letter",
+      "parent": "sine_phase",
+      "pos_mm": [
+        -4.0,
+        16.353733170134632
+      ],
+      "text": "B",
+      "style": {
+        "font_size_pt": 8,
+        "weight": "bold",
+        "font": "Arial, Helvetica, sans-serif"
+      }
+    },
+    {
+      "id": "letter_wing",
+      "kind": "text",
+      "managed": "panel_letter",
+      "parent": "wing",
+      "pos_mm": [
+        -4.0,
+        11.218051588920638
+      ],
+      "text": "C",
+      "style": {
+        "font_size_pt": 8,
+        "weight": "bold",
+        "font": "Arial, Helvetica, sans-serif"
+      }
+    },
+    {
+      "id": "letter_wing_phase_polar",
+      "kind": "text",
+      "managed": "panel_letter",
+      "parent": "wing_phase_polar",
+      "pos_mm": [
+        -4.0,
+        27.320685434516523
+      ],
+      "text": "D",
+      "style": {
+        "font_size_pt": 8,
+        "weight": "bold",
+        "font": "Arial, Helvetica, sans-serif"
+      }
+    },
+    {
+      "id": "letter_angle_2d",
+      "kind": "text",
+      "managed": "panel_letter",
+      "parent": "angle_2d",
+      "pos_mm": [
+        -4.0,
+        30.830110159118732
+      ],
+      "text": "E",
+      "style": {
+        "font_size_pt": 8,
+        "weight": "bold",
+        "font": "Arial, Helvetica, sans-serif"
+      }
+    },
+    {
+      "id": "letter_pulse_class",
+      "kind": "text",
+      "managed": "panel_letter",
+      "parent": "pulse_class",
+      "pos_mm": [
+        -4.0,
+        30.830110159118732
+      ],
+      "text": "F",
+      "style": {
+        "font_size_pt": 8,
+        "weight": "bold",
+        "font": "Arial, Helvetica, sans-serif"
+      }
+    },
+    {
+      "id": "letter_zheight",
+      "kind": "text",
+      "managed": "panel_letter",
+      "parent": "zheight",
+      "pos_mm": [
+        -4.0,
+        30.830110159118732
+      ],
+      "text": "G",
+      "style": {
+        "font_size_pt": 8,
+        "weight": "bold",
+        "font": "Arial, Helvetica, sans-serif"
+      }
+    },
+    {
+      "id": "letter_render_0",
+      "kind": "text",
+      "managed": "panel_letter",
+      "parent": "render_0",
+      "pos_mm": [
+        -4.0,
+        25.127294981640134
+      ],
+      "text": "H",
+      "style": {
+        "font_size_pt": 8,
+        "weight": "bold",
+        "font": "Arial, Helvetica, sans-serif"
+      }
+    },
+    {
+      "id": "letter_pitch",
+      "kind": "text",
+      "managed": "panel_letter",
+      "parent": "pitch",
+      "pos_mm": [
+        -4.0,
+        18.547123623011007
+      ],
+      "text": "I",
+      "style": {
+        "font_size_pt": 8,
+        "weight": "bold",
+        "font": "Arial, Helvetica, sans-serif"
+      }
+    },
+    {
+      "id": "letter_align_violin",
+      "kind": "text",
+      "managed": "panel_letter",
+      "parent": "align_violin",
+      "pos_mm": [
+        -4.0,
+        18.547123623011007
+      ],
+      "text": "J",
+      "style": {
+        "font_size_pt": 8,
+        "weight": "bold",
+        "font": "Arial, Helvetica, sans-serif"
+      }
+    }
+  ]
+}

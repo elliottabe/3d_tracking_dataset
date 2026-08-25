@@ -215,7 +215,13 @@ __marimo__/
 *.h5
 
 Archive/
-/figures/
+# Renders, videos and bundles are regenerated; only the small figure.json
+# DESIGN specs under paper_figures/ are durable and belong in git.
+# (Re-including a path requires un-ignoring each parent directory first.)
+/figures/*
+!/figures/paper_figures/
+/figures/paper_figures/*
+!/figures/paper_figures/*.json
 OutFiles/
 docs/superpowers/
 # Large reprojection parity fixture (93MB) — regenerate via jarvis_jax.convert.export_reproject_fixture (torch env)
