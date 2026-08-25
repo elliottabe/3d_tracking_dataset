@@ -34,6 +34,8 @@ export type EditorState = {
   guides: SnapTarget[];
   history: History;
   dirty: boolean;
+  /** Layout snapshot as of the last `load`/`saved`; `dirty` is derived against it. */
+  savedSnapshot: Snapshot;
 };
 
 export type Action =
@@ -55,7 +57,7 @@ export const initialState: EditorState = {
   figWmm: 183, figHmm: 140,
   panels: [], groups: [], selection: [],
   boxMode: 'axes', gridMm: 1, guides: [],
-  history: initHistory({}), dirty: false,
+  history: initHistory({}), dirty: false, savedSnapshot: {},
 };
 
 const snapshotOf = (panels: PanelState[]): Snapshot =>
@@ -64,13 +66,30 @@ const snapshotOf = (panels: PanelState[]): Snapshot =>
 const applySnapshot = (panels: PanelState[], snap: Snapshot): PanelState[] =>
   panels.map((p) => (snap[p.id] ? { ...p, rect: snap[p.id] } : p));
 
-/** Commit a new set of panels through history, marking the document dirty. */
+/**
+ * Shallow per-panel rect comparison, mirroring `history.ts`'s internal
+ * `sameLayout` (not exported, so duplicated here rather than widening that
+ * module's public surface). Used to derive `dirty` from the current layout
+ * vs. the last saved/loaded snapshot, instead of flipping a boolean by hand.
+ */
+function snapshotsEqual(a: Snapshot, b: Snapshot): boolean {
+  const ka = Object.keys(a);
+  const kb = Object.keys(b);
+  if (ka.length !== kb.length) return false;
+  return ka.every((k) => {
+    const p = a[k];
+    const q = b[k];
+    return q !== undefined && p.x === q.x && p.y === q.y && p.w === q.w && p.h === q.h;
+  });
+}
+
+/** Commit a new set of panels through history, re-deriving `dirty`. */
 function withGeometry(
   state: EditorState, panels: PanelState[], coalesceKey?: string,
 ): EditorState {
   const history = commit(state.history, snapshotOf(panels), { coalesceKey });
   if (history === state.history) return state;   // nothing actually moved
-  return { ...state, panels, history, dirty: true };
+  return { ...state, panels, history, dirty: !snapshotsEqual(history.present, state.savedSnapshot) };
 }
 
 /** Map a transform over the selected panels only. */
@@ -88,6 +107,7 @@ export function reducer(state: EditorState, action: Action): EditorState {
   switch (action.type) {
     case 'load': {
       const panels = action.panels;
+      const snapshot = snapshotOf(panels);
       return {
         ...state,
         figWmm: action.figWmm,
@@ -95,8 +115,9 @@ export function reducer(state: EditorState, action: Action): EditorState {
         panels,
         groups: action.groups,
         selection: [],
-        history: initHistory(snapshotOf(panels)),
+        history: initHistory(snapshot),
         dirty: false,
+        savedSnapshot: snapshot,
       };
     }
 
@@ -154,17 +175,27 @@ export function reducer(state: EditorState, action: Action): EditorState {
     case 'undo': {
       const history = undo(state.history);
       if (history === state.history) return state;
-      return { ...state, history, panels: applySnapshot(state.panels, history.present), dirty: true };
+      return {
+        ...state,
+        history,
+        panels: applySnapshot(state.panels, history.present),
+        dirty: !snapshotsEqual(history.present, state.savedSnapshot),
+      };
     }
 
     case 'redo': {
       const history = redo(state.history);
       if (history === state.history) return state;
-      return { ...state, history, panels: applySnapshot(state.panels, history.present), dirty: true };
+      return {
+        ...state,
+        history,
+        panels: applySnapshot(state.panels, history.present),
+        dirty: !snapshotsEqual(history.present, state.savedSnapshot),
+      };
     }
 
     case 'saved':
-      return { ...state, dirty: false };
+      return { ...state, dirty: false, savedSnapshot: state.history.present };
 
     default:
       return state;

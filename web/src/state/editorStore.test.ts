@@ -109,4 +109,43 @@ describe('reducer', () => {
     s = reducer(s, { type: 'saved' });
     expect(s.dirty).toBe(false);
   });
+
+  it('undo back to the loaded baseline leaves dirty === false', () => {
+    let s = loaded();
+    s = reducer(s, { type: 'select', ids: ['a'] });
+    s = reducer(s, { type: 'moveSelection', dx: 0.1, dy: 0 });
+    expect(s.dirty).toBe(true);
+    s = reducer(s, { type: 'undo' });
+    // Rects are back to exactly what `load` produced...
+    expect(s.panels.find((p) => p.id === 'a')!.rect).toEqual(R(0.1, 0.1, 0.2, 0.2));
+    // ...so the document is clean again, not still flagged dirty.
+    expect(s.dirty).toBe(false);
+  });
+
+  it('redo forward to a modified state sets dirty === true', () => {
+    let s = loaded();
+    s = reducer(s, { type: 'select', ids: ['a'] });
+    s = reducer(s, { type: 'moveSelection', dx: 0.1, dy: 0 });
+    s = reducer(s, { type: 'undo' });
+    expect(s.dirty).toBe(false);
+    s = reducer(s, { type: 'redo' });
+    expect(s.panels.find((p) => p.id === 'a')!.rect.x).toBeCloseTo(0.2);
+    expect(s.dirty).toBe(true);
+  });
+
+  it('saved mid-history moves the clean point; undoing away from it dirties again', () => {
+    let s = loaded();
+    s = reducer(s, { type: 'select', ids: ['a'] });
+    s = reducer(s, { type: 'moveSelection', dx: 0.1, dy: 0 }); // edit 1
+    s = reducer(s, { type: 'saved' });                          // save point != load point
+    expect(s.dirty).toBe(false);
+    s = reducer(s, { type: 'moveSelection', dx: 0.1, dy: 0 }); // edit 2
+    expect(s.dirty).toBe(true);
+    s = reducer(s, { type: 'undo' });                          // back to the saved point
+    expect(s.panels.find((p) => p.id === 'a')!.rect.x).toBeCloseTo(0.2);
+    expect(s.dirty).toBe(false);
+    s = reducer(s, { type: 'undo' });                          // past the saved point, toward load
+    expect(s.panels.find((p) => p.id === 'a')!.rect.x).toBeCloseTo(0.1);
+    expect(s.dirty).toBe(true);
+  });
 });
