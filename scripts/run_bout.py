@@ -38,6 +38,8 @@ import glob
 import json
 import re
 
+from pathlib import Path
+
 import numpy as np
 import hydra
 from omegaconf import DictConfig, OmegaConf
@@ -689,14 +691,79 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
                 from estimate_recording_scale import (
                     per_bout_segment_scale, warn_if_estimator_ignored)
             warn_if_estimator_ignored(str(cfg.scaling.estimator), caller="run_bout.py")
-            _pair_scales = per_bout_segment_scale(kp3d, kp_names, cfg.silhouette.xml)
-            _scale = float(np.median(_pair_scales))
-            atomic_save_json(scale_path, {
-                "scale": float(_scale),
+            # Pool across EVERY bout of this recording that is already
+            # triangulated, rather than fitting from whichever bout reached
+            # this line first. scale.json is a RECORDING-level artifact but
+            # was being written by the first process to arrive, so one
+            # arbitrary bout-fly defined the whole recording: measured on
+            # Session0/2025_10_20_13_20_04 the shipped 0.009914 is
+            # bout_00004/fly0's value EXACTLY -- the 8th percentile of that
+            # recording's 59 bout-flies, and 15.5% below the pooled estimate
+            # (0.011738). Body size is constant per individual across a
+            # recording, so that spread is estimator noise.
+            #
+            # `estimate_run_root` also returns `scale_by_fly` when the
+            # recording's fly0/fly1 identity is stable (sex-canonicalized);
+            # run_bout.py already PREFERS that below, but nothing ever wrote
+            # it. Same call fixes both.
+            try:
+                from scripts.estimate_recording_scale import (
+                    bout_kp3d_paths, estimate_run_root)
+            except ModuleNotFoundError:
+                from estimate_recording_scale import (
+                    bout_kp3d_paths, estimate_run_root)
+            _rec = OmegaConf.create({
+                "model": {"KP_NAMES": list(kp_names)},
+                "mjcf_path": str(cfg.silhouette.xml)})
+            _est = None
+            try:
+                _est = estimate_run_root(
+                    Path(run_root), _rec, scale_keypoints="rigid_segment")
+            except Exception as _e:              # noqa: BLE001 - fall back below
+                print(f"[scale] recording-level estimate failed ({type(_e).__name__}: "
+                      f"{_e}); falling back to this bout only", flush=True)
+            # `estimate_run_root` does not report how many bout-flies it
+            # pooled, so count the inputs it would have seen. Without this the
+            # count is always 0 and the pooled branch can never be taken.
+            _n_pooled = sum(len(bout_kp3d_paths(Path(run_root), _f))
+                            for _f in (0, 1))
+            if _est and _est.get("scale") and _n_pooled >= 2:
+                _payload = {
+                    "scale": float(_est["scale"]),
+                    "scale_by_fly": _est.get("scale_by_fly"),
+                    "n_bout_flies": _n_pooled,
+                    "identity": _est.get("identity"),
+                    "identity_reason": _est.get("identity_reason"),
+                    "source": "estimate_run_root (pooled over the recording)",
+                }
+                print(f"[scale] pooled over {_n_pooled} bout-flies -> "
+                      f"{_est['scale']:.6f}  identity={_est.get('identity')} "
+                      f"scale_by_fly={_est.get('scale_by_fly')}", flush=True)
+            else:
+                # Too early in the run to pool (this may be the first bout
+                # triangulated). Record HOW MANY bouts backed the number so a
+                # later run can tell this apart from a real pooled estimate.
+                _pair_scales = per_bout_segment_scale(
+                    kp3d, kp_names, cfg.silhouette.xml)
+                _payload = {
+                    "scale": float(np.median(_pair_scales)),
+                    "scale_by_fly": None,
+                    "n_bout_flies": max(_n_pooled, 1),
+                    "identity": (_est or {}).get("identity"),
+                    "identity_reason": (_est or {}).get("identity_reason"),
+                    "source": "this bout only (too few bouts triangulated to pool)",
+                }
+                print(f"[scale] WARNING: only {_payload['n_bout_flies']} bout-fly "
+                      f"available; scale.json is a SINGLE-BOUT estimate "
+                      f"({_payload['scale']:.6f}). Re-run "
+                      f"scripts/estimate_recording_scale.py once the recording "
+                      f"is fully triangulated.", flush=True)
+            _payload.update({
                 "scale_keypoints": _scale_keypoints_mode,
                 "trunk_keypoints": list(scale_names),
                 "estimator": "ignored (rigid_segment)",
                 "method": "rigid_segment"})
+            atomic_save_json(scale_path, _payload)
         else:
             _scale = compute_trunk_scale(
                 kp3d, kp_names, cfg.silhouette.xml,

@@ -887,7 +887,17 @@ def _load_anatomy_cfg(anatomy_path: str):
     # so the yaml's OTHER self-referential interpolations (e.g.
     # model.MJCF_PATH: ${anatomy.mjcf_path}, unused here) don't need to
     # resolve too.
-    container = OmegaConf.create({"paths": {"body_model_dir": str(repo_root / "models")}})
+    # Body models were moved OUT of this repo: `models/` is now empty and the
+    # real tree is the sibling Brunton-Lab/fruitfly_body_models checkout, which
+    # is what `configs/paths/*.yaml` sets `body_model_dir` to. Hardcoding
+    # repo_root/"models" here made every bout's segment-scale fit fail (the
+    # MJCF does not exist), surfacing as the misleading
+    # "no usable bout-fly kp3d ... after excluding duplicate-slot bouts []".
+    # Prefer the sibling checkout; fall back to repo models/ for setups that
+    # still keep them in-tree.
+    _sibling = repo_root.parent / "fruitfly_body_models"
+    _body_dir = _sibling if _sibling.is_dir() else (repo_root / "models")
+    container = OmegaConf.create({"paths": {"body_model_dir": str(_body_dir)}})
     return OmegaConf.merge(container, raw)
 
 
