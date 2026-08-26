@@ -58,6 +58,7 @@ def build_script(
     nodelist_line: str,
     exclude_line: str,
     requeue_line: str,
+    constraint_line: str = "",
     gpus: int,
     cpus: int,
     mem: int,
@@ -90,6 +91,7 @@ def build_script(
 {nodelist_line}
 {exclude_line}
 {requeue_line}
+{constraint_line}
 set -x
 source ~/.bashrc
 micromamba activate {conda_env}
@@ -149,7 +151,7 @@ def main():
                    help='Output root. Default: ${paths.processed_root}/<dataset>/SessionN/<rec>. '
                         'Masks go in <out>/sam3_masks; predictions in <out>/predictions (resume-safe).')
     p.add_argument('--paths', default='hyak', help='Hydra paths config group (default: hyak)')
-    p.add_argument('--slurm', default='ckpt_g2', help='Hydra slurm config group (default: ckpt_g2)')
+    p.add_argument('--slurm', default='ckpt_all', help='Hydra slurm config group (default: ckpt_g2)')
     p.add_argument('--dry-run', action='store_true', help='Print the script without submitting')
     args, passthrough = p.parse_known_args()
 
@@ -169,6 +171,12 @@ def main():
     log_dir = out_root
 
     requeue_line = "#SBATCH --requeue" if sl.requeue else ""
+    # Restrict to GPUs big enough for this model. ckpt-all otherwise includes
+    # rtx6k 24GB / 2080ti 11GB / p100 16GB and CPU-only nodes, which OOM or
+    # cannot run at all. Empty on profiles that set no constraint (ckpt_g2,
+    # gpu_l40s), so those are unchanged.
+    constraint_line = (f"#SBATCH --constraint={sl.constraint}"
+                       if sl.get("constraint", "") else "")
     nodelist_line = (f"#SBATCH --nodelist={sl.nodelist}"
                      if getattr(sl, 'nodelist', None) else "")
     exclude_line = (f"#SBATCH --exclude={sl.exclude}"
@@ -184,6 +192,7 @@ def main():
         job_name=job_name,
         partition=sl.partition, account=sl.account,
         nodelist_line=nodelist_line, exclude_line=exclude_line, requeue_line=requeue_line,
+        constraint_line=constraint_line,
         gpus=sl.gpus, cpus=sl.cpus, mem=sl.mem, time_limit=sl.time,
         conda_env=sl.conda_env, mail_user=sl.mail_user,
         pkg_dir=PKG_DIR, log_dir=log_dir,

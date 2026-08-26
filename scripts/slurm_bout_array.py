@@ -395,7 +395,7 @@ def main():
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument('--config-name', default='pipeline',
                    help='Hydra config name under configs/ (default: pipeline)')
-    p.add_argument('--slurm', default='ckpt_g2',
+    p.add_argument('--slurm', default='ckpt_all',
                    help='Hydra slurm config group (default: ckpt_g2)')
     p.add_argument('--dry-run', action='store_true',
                    help='Print the scripts + dependency chain without submitting')

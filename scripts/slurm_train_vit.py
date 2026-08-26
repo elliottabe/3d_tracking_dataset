@@ -73,6 +73,7 @@ def build_script(
     account: str,
     nodelist_line: str,
     requeue_line: str,
+    constraint_line: str = "",
     gpus: int,
     cpus: int,
     mem: int,
@@ -103,6 +104,7 @@ def build_script(
 {nodelist_line}
 {exclude_line}
 {requeue_line}
+{constraint_line}
 set -x
 source ~/.bashrc
 micromamba activate {conda_env}
@@ -150,6 +152,12 @@ def main():
     run_dir = str(Path(pt.runs_root) / run_name)
 
     requeue_line = "#SBATCH --requeue" if sl.requeue else ""
+    # Restrict to GPUs big enough for this model. ckpt-all otherwise includes
+    # rtx6k 24GB / 2080ti 11GB / p100 16GB and CPU-only nodes, which OOM or
+    # cannot run at all. Empty on profiles that set no constraint (ckpt_g2,
+    # gpu_l40s), so those are unchanged.
+    constraint_line = (f"#SBATCH --constraint={sl.constraint}"
+                       if sl.get("constraint", "") else "")
     nodelist_line = (f"#SBATCH --nodelist={sl.nodelist}"
                      if getattr(sl, 'nodelist', None) else "")
     exclude_line = (f"#SBATCH --exclude={sl.exclude}"
@@ -167,6 +175,7 @@ def main():
         account=sl.account,
         nodelist_line=nodelist_line,
         requeue_line=requeue_line,
+        constraint_line=constraint_line,
         gpus=sl.gpus,
         cpus=sl.cpus,
         mem=sl.mem,

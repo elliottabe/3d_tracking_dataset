@@ -22,6 +22,55 @@ The two assays differ only in:
 
 ---
 
+## Which partition the jobs go to
+
+Every launcher defaults to `--slurm ckpt_all` (`configs/slurm/ckpt_all.yaml`).
+That is `ckpt-all` plus a GPU constraint:
+
+```
+#SBATCH --partition=ckpt-all
+#SBATCH --constraint=h200|a100|l40s|l40|a40
+#SBATCH --requeue
+```
+
+**Why ckpt-all rather than ckpt-g2.** `ckpt-g2` only reaches l40/l40s/h200.
+`ckpt-all` adds the a40 (32 nodes) and a100 (8) pools, roughly doubling the
+eligible nodes. That matters when the QUEUE is the bottleneck, not the GPU:
+measured 2026-08-26, both partitions had the same *idle* nodes, but the
+ckpt-g2 chain sat `PENDING (Priority)` with a start estimate 34 min out while
+the same chain on `ckpt-all` started immediately on an a40.
+
+**Why the constraint is not optional.** Bare `ckpt-all` also matches GPUs too
+small for this model — rtx6k 24GB, 2080ti 11GB, p100 16GB — and the CPU-only
+`n[...]` nodes. Those OOM or cannot run at all. The constraint admits only
+cards that fit, ordered biggest-first for readability (slurm treats an OR
+constraint as a set, not a preference), so a job may land on the slowest
+usable card (a40, ~0.70 TB/s vs h200 ~4.8 TB/s). Waiting for a faster card is
+usually the worse trade for per-bout work.
+
+Use `--slurm ckpt_g2` for the old behaviour (no constraint, l40/l40s/h200
+only) or `--slurm gpu_l40s` for the non-preemptible partition. Training
+(`slurm_train_vit.py`) still defaults to `ckpt_g2`; pass `--slurm ckpt_all`
+if you want the wider pool there too.
+
+### Preemption
+
+`ckpt*` partitions are preemptible. Jobs are submitted with `--requeue`, each
+array task writes to a fixed per-task directory, and
+`jarvis_jax.tracking.resume` skips stages whose artifact already exists
+(`kp2d.npz`, `kp3d.npz`, `kp3d_filt.npz`, `scale.json`, `offsets.h5`,
+`stac_ik.h5`, `outputs.h5`, plus a `DONE` marker per bout). So a
+preempt+requeue resumes at the last completed stage rather than restarting.
+There is no mid-stage checkpoint, so an interrupted stage restarts from its
+own beginning — minutes, for per-bout IK.
+
+Note the flip side: those same markers mean a re-run **skips completed work**.
+To genuinely refit (e.g. after a `scale.json` change) the downstream
+artifacts must be removed first — `DONE`, `stac_ik.h5`, `outputs.h5`,
+`qpos_refined.npz`, `qc*.{json,npz}`, and the recording-level `offsets.h5`,
+which is scale-dependent. Keep `kp2d/kp3d/kp3d_filt.npz` (triangulation does
+not depend on scale).
+
 ## Prerequisites (per recording)
 
 Each recording dir under `.../Video_recordings/<assay>/<Session>/<timestamp>/`
