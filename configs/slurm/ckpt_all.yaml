@@ -1,0 +1,22 @@
+# @package slurm
+# ckpt-all widens the eligible pool beyond ckpt-g2 (l40/l40s/h200) by adding
+# the a40 (32 nodes) and a100 (8) pools -- roughly double the nodes, which
+# matters most when the queue is the bottleneck rather than the GPU.
+#
+# The constraint EXCLUDES GPUs too small for this model, which ckpt-all
+# otherwise includes: rtx6k 24GB, 2080ti 11GB, p100 16GB, plus the CPU-only
+# n[...] nodes. Ordered biggest/fastest first for readability; slurm treats
+# an OR constraint as a set, not a preference.
+#   h200  141GB HBM3e ~4.8TB/s   a100 40/80GB HBM2e ~1.5-2TB/s
+#   l40s  48GB GDDR6  ~0.86TB/s  l40  48GB GDDR6 ~0.86TB/s
+#   a40   48GB GDDR6  ~0.70TB/s  (slowest usable)
+partition: ckpt-all
+constraint: 'h200|a100|l40s|l40|a40'
+account: portia
+gpus_per_task: 1
+cpus: 8
+mem: 48
+time: '12:00:00'
+requeue: true
+conda_env: 3d_tracking
+mail_user: ${oc.env:USER,eabe}@uw.edu

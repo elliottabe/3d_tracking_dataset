@@ -105,6 +105,7 @@ def build_sam3_array_script(
     gpus: int,
     time_limit: str,
     requeue: bool,
+    constraint: str = "",
     conda_env: str,
     idxs: list[int],
     session_dir: str,
@@ -129,6 +130,11 @@ def build_sam3_array_script(
     with masks from the wrong frame ranges).
     """
     requeue_line = "#SBATCH --requeue" if requeue else ""
+    # Restrict to GPUs big enough for this model. ckpt-all otherwise
+    # includes rtx6k/2080ti/p100 (24/11/16 GB) and CPU-only nodes, which
+    # either OOM or cannot run the job at all.
+    constraint_line = (f"#SBATCH --constraint={constraint}"
+                       if constraint else "")
     dependency_line = f"#SBATCH --dependency={dependency}" if dependency else ""
     bouts_csv_arg = f" sam3.bouts_csv={bouts_csv}" if bouts_csv else ""
     return f"""#!/bin/bash
@@ -146,6 +152,7 @@ def build_sam3_array_script(
 #SBATCH -o {masks_out}/slurm-sam3-%A_%a.out
 {dependency_line}
 {requeue_line}
+{constraint_line}
 set -x
 source ~/.bashrc
 micromamba activate {conda_env}
@@ -172,6 +179,7 @@ def build_precompute_script(
     gpus: int,
     time_limit: str,
     requeue: bool,
+    constraint: str = "",
     conda_env: str,
     bout_id: int,
     run_dir: str,
@@ -190,6 +198,11 @@ def build_precompute_script(
     instantly.
     """
     requeue_line = "#SBATCH --requeue" if requeue else ""
+    # Restrict to GPUs big enough for this model. ckpt-all otherwise
+    # includes rtx6k/2080ti/p100 (24/11/16 GB) and CPU-only nodes, which
+    # either OOM or cannot run the job at all.
+    constraint_line = (f"#SBATCH --constraint={constraint}"
+                       if constraint else "")
     dependency_line = f"#SBATCH --dependency={dependency}" if dependency else ""
     return f"""#!/bin/bash
 #SBATCH --job-name={job_name}
@@ -205,6 +218,7 @@ def build_precompute_script(
 #SBATCH -o {run_dir}/slurm-precompute-%j.out
 {dependency_line}
 {requeue_line}
+{constraint_line}
 set -x
 source ~/.bashrc
 micromamba activate {conda_env}
@@ -231,6 +245,7 @@ def build_jax_array_script(
     gpus: int,
     time_limit: str,
     requeue: bool,
+    constraint: str = "",
     conda_env: str,
     idxs: list[int],
     run_dir: str,
@@ -246,6 +261,11 @@ def build_jax_array_script(
     checkpointed, so --requeue on a preemptible partition resumes cleanly.
     """
     requeue_line = "#SBATCH --requeue" if requeue else ""
+    # Restrict to GPUs big enough for this model. ckpt-all otherwise
+    # includes rtx6k/2080ti/p100 (24/11/16 GB) and CPU-only nodes, which
+    # either OOM or cannot run the job at all.
+    constraint_line = (f"#SBATCH --constraint={constraint}"
+                       if constraint else "")
     dependency_line = f"#SBATCH --dependency={dependency}" if dependency else ""
     return f"""#!/bin/bash
 #SBATCH --job-name={job_name}
@@ -262,6 +282,7 @@ def build_jax_array_script(
 #SBATCH -o {run_dir}/slurm-jax-%A_%a.out
 {dependency_line}
 {requeue_line}
+{constraint_line}
 set -x
 source ~/.bashrc
 micromamba activate {conda_env}
@@ -454,6 +475,7 @@ def main():
         sam3_script = build_sam3_array_script(
             job_name=sam3_job, partition=sl.partition, account=sl.account,
             cpus=sl.cpus, mem=sl.mem, gpus=gpus, time_limit=sl.time,
+        constraint=str(sl.get("constraint", "") or ""),
             requeue=requeue, conda_env=sl.conda_env,
             idxs=idxs, session_dir=session_dir, masks_out=predictions_dir,
             num_animals=int(cfg.recording.num_animals),
@@ -468,6 +490,7 @@ def main():
     precompute_script = build_precompute_script(
         job_name=precompute_job, partition=sl.partition, account=sl.account,
         cpus=sl.cpus, mem=sl.mem, gpus=gpus, time_limit=sl.time,
+        constraint=str(sl.get("constraint", "") or ""),
         requeue=requeue, conda_env=sl.conda_env, bout_id=idxs[0], run_dir=run_root,
         config_name=args.config_name, overrides=overrides_str,
         dependency=sam3_dep or "")
@@ -479,6 +502,7 @@ def main():
     jax_script = build_jax_array_script(
         job_name=jax_job, partition=sl.partition, account=sl.account,
         cpus=sl.cpus, mem=sl.mem, gpus=gpus, time_limit=sl.time,
+        constraint=str(sl.get("constraint", "") or ""),
         requeue=requeue, conda_env=sl.conda_env, idxs=idxs,
         run_dir=run_root, config_name=args.config_name, overrides=overrides_str,
         dependency=jax_dep)
