@@ -817,10 +817,185 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
         os.replace(os.path.join(run_root, "offsets.h5.tmp"),
                   os.path.join(run_root, "offsets.h5"))
 
-    # -- Stage C: STAC ik_only ----------------------------------------------------
+    
+# ---------------------------------------------------------------------------
+# NaN-robust STAC solve (frozen-joint bug).
+#
+# The pose optimisation is ONE batched jaxls problem over all frames, with
+# ~T smoothness costs chaining consecutive frames. A NaN in any frame
+# therefore propagates NaN gradients along that chain to EVERY frame, the
+# optimiser applies no update at all, and all 86 joint DOFs stay at their
+# initialisation while only the separately-solved root moves.
+#
+# Measured on Session0/2025_10_20_13_20_04 (60 bout-flies): the correlation is
+# perfect and has no overlap --
+#     frozen  (9): 40..1393 NaN kp3d frames (mean 452)
+#     healthy(51):  0..12   NaN kp3d frames (mean 0.3)
+# Nothing errors: STAC reports "Pose Optimization finished", a finite mean
+# error, and the bout is marked DONE. It is invisible to reprojection (NaN),
+# to LOO (unaffected -- triangulation is fine) and to IoU.
+# ---------------------------------------------------------------------------
+NAN_SOLVE_MAX_GAP = 10      # frames; gaps this short are interpolated
+NAN_SOLVE_MIN_SEG = 30      # frames; shorter finite runs are not worth solving
+
+
+def finite_frame_mask(kp3d) -> np.ndarray:
+    """(T,) bool: frames whose keypoints are entirely finite."""
+    a = np.asarray(kp3d)
+    return np.isfinite(a).all(axis=tuple(range(1, a.ndim)))
+
+
+def fill_short_gaps(kp3d, max_gap=NAN_SOLVE_MAX_GAP):
+    """Linearly interpolate NaN runs of <= `max_gap` frames.
+
+    Short dropouts are the common case and interpolating them keeps the
+    smoothness chain intact, which is what stops one bad frame freezing the
+    whole solve. Long runs are LEFT as NaN for the segmenter -- interpolating
+    across (e.g.) bout_00022's 1393 missing frames would invent a trajectory.
+    Returns (filled, filled_mask) where filled_mask marks interpolated frames.
+    """
+    a = np.array(kp3d, dtype=float, copy=True)
+    ok = finite_frame_mask(a)
+    filled = np.zeros(len(a), bool)
+    if ok.all() or not ok.any():
+        return a, filled
+    idx = np.flatnonzero(ok)
+    # every maximal run of bad frames strictly between two good ones
+    for lo, hi in zip(idx[:-1], idx[1:]):
+        n = hi - lo - 1
+        if n <= 0 or n > max_gap:
+            continue
+        w = (np.arange(1, n + 1) / (n + 1.0)).reshape((-1,) + (1,) * (a.ndim - 1))
+        a[lo + 1:hi] = a[lo] * (1.0 - w) + a[hi] * w
+        filled[lo + 1:hi] = True
+    return a, filled
+
+
+def contiguous_segments(ok, min_len=NAN_SOLVE_MIN_SEG):
+    """[(start, stop)) runs of True in `ok` with length >= min_len."""
+    ok = np.asarray(ok, bool)
+    out, start = [], None
+    for i, v in enumerate(ok):
+        if v and start is None:
+            start = i
+        elif not v and start is not None:
+            if i - start >= min_len:
+                out.append((start, i))
+            start = None
+    if start is not None and len(ok) - start >= min_len:
+        out.append((start, len(ok)))
+    return out
+
+
+def _solve_segments_into(cfg, kp_solve, kp_names, segs, *, offsets_path,
+                         out_h5, bout_dir, scale, n_frames, bout_idx, fly):
+    """Solve each finite segment independently and stitch into ONE h5.
+
+    Per-frame arrays (first axis == segment length) are written back into a
+    full-length array at the segment's own offset; frames in no segment stay
+    NaN. Non-per-frame entries (config, kp_names, offsets, names_*) are taken
+    from the first segment, which owns them identically.
+    """
+    import stac_mjx.io_dict_to_hdf5 as ioh5
+    total = sum(b - a for a, b in segs)
+    print(f"[stac] bout {bout_idx} fly{fly}: {len(segs)} finite segment(s) "
+          f"covering {total}/{n_frames} frames "
+          f"({[f'{a}:{b}' for a, b in segs]}) -- solving separately so a NaN "
+          f"gap cannot freeze the whole batch", flush=True)
+    merged, meta = None, None
+    for si, (a, b) in enumerate(segs):
+        tmp = f"stac_seg{si}.tmp.h5"
+        ik_only_bout(cfg, kp_solve[a:b], kp_names, offsets_path=offsets_path,
+                     out_h5=tmp, save_path=bout_dir, scale=scale)
+        d = ioh5.load(os.path.join(bout_dir, tmp))
+        if merged is None:
+            merged, meta = {}, {}
+            for k, v in d.items():
+                arr = np.asarray(v)
+                if arr.ndim >= 1 and arr.shape[0] == (b - a):
+                    full = np.full((n_frames,) + arr.shape[1:], np.nan,
+                                   dtype=float if arr.dtype.kind == "f" else arr.dtype)
+                    merged[k] = full
+                else:
+                    meta[k] = v
+        for k in merged:
+            merged[k][a:b] = np.asarray(d[k])
+        os.remove(os.path.join(bout_dir, tmp))
+    out = dict(meta)
+    out.update(merged)
+    ioh5.save(os.path.join(bout_dir, out_h5), out)
+
+
+def _restore_unsolved_nan(h5_path, ok_original, segs):
+    """Re-NaN frames whose INPUT keypoints were NaN.
+
+    Short gaps are interpolated purely so the solve does not break; the poses
+    that come back for them are not measurements, so they must not be written
+    out as if they were.
+    """
+    import stac_mjx.io_dict_to_hdf5 as ioh5
+    d = ioh5.load(h5_path)
+    q = np.asarray(d.get("qpos"))
+    if q is None or q.ndim != 2 or len(ok_original) != q.shape[0]:
+        return
+    bad = ~np.asarray(ok_original, bool)
+    if not bad.any():
+        return
+    n = 0
+    for k, v in list(d.items()):
+        arr = np.asarray(v)
+        if arr.ndim >= 1 and arr.shape[0] == q.shape[0] and arr.dtype.kind == "f":
+            arr = arr.astype(float, copy=True)
+            arr[bad] = np.nan
+            d[k] = arr
+            n += 1
+    ioh5.save(h5_path, d)
+    print(f"[stac] re-NaN'd {int(bad.sum())} unmeasured frame(s) across "
+          f"{n} per-frame array(s)", flush=True)
+
+
+def joints_frozen(qpos, tol=1e-6) -> bool:
+    """True when EVERY non-root DOF is constant across time -- the signature of
+    a solve that never updated (see the module note above). qpos[:, :7] is the
+    free-joint root, solved in a separate earlier stage that succeeds anyway."""
+    q = np.asarray(qpos, dtype=float)
+    if q.ndim != 2 or q.shape[0] < 2 or q.shape[1] <= 7:
+        return False
+    joint = q[:, 7:]
+    if not np.isfinite(joint).any():
+        return False
+    return bool(np.all(np.nanstd(joint, axis=0) < tol))
+
+
+# -- Stage C: STAC ik_only ----------------------------------------------------
     if not stage_done(stac_h5_path):
-        ik_only_bout(cfg, kp3d, kp_names, offsets_path=offsets_path,
-                    out_h5="stac_ik.tmp.h5", save_path=bout_dir, scale=scale)
+        # NaN-robust solve (see the frozen-joint note above). Short dropouts
+        # are interpolated so the smoothness chain survives; long ones split
+        # the bout into independently-solved segments so a gap cannot
+        # propagate NaN gradients across it. A fully-finite bout takes the
+        # original single-solve path unchanged.
+        _kp_solve, _filled = fill_short_gaps(kp3d)
+        _ok = finite_frame_mask(_kp_solve)
+        _segs = contiguous_segments(_ok)
+        if _ok.all():
+            if _filled.any():
+                print(f"[stac] interpolated {_filled.sum()} short-gap frame(s) "
+                      f"before the solve", flush=True)
+            ik_only_bout(cfg, _kp_solve, kp_names, offsets_path=offsets_path,
+                        out_h5="stac_ik.tmp.h5", save_path=bout_dir, scale=scale)
+        elif not _segs:
+            raise RuntimeError(
+                f"bout {bout_idx} fly{fly}: no finite run of >= "
+                f"{NAN_SOLVE_MIN_SEG} frames to solve "
+                f"({int((~_ok).sum())}/{len(_ok)} frames have NaN keypoints)")
+        else:
+            _solve_segments_into(
+                cfg, _kp_solve, kp_names, _segs, offsets_path=offsets_path,
+                out_h5="stac_ik.tmp.h5", bout_dir=bout_dir, scale=scale,
+                n_frames=len(_kp_solve), bout_idx=bout_idx, fly=fly)
+        # Frames we never measured must not masquerade as solved.
+        _restore_unsolved_nan(os.path.join(bout_dir, "stac_ik.tmp.h5"),
+                              finite_frame_mask(kp3d), _segs if not _ok.all() else None)
         os.replace(os.path.join(bout_dir, "stac_ik.tmp.h5"),
                   os.path.join(bout_dir, "stac_ik.h5"))
 
@@ -830,6 +1005,16 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
     # masks_dict -- fail loudly instead of polishing garbage.
     import stac_mjx.io_dict_to_hdf5 as ioh5
     q = np.asarray(ioh5.load(stac_h5_path)["qpos"])
+    if joints_frozen(q):
+        raise RuntimeError(
+            f"bout {bout_idx} fly{fly}: STAC returned a FROZEN pose -- every "
+            f"non-root DOF is constant across {q.shape[0]} frames, i.e. the "
+            f"pose optimisation never updated (only the separately-solved "
+            f"root moves). This writes a plausible-looking stac_ik.h5 with a "
+            f"finite mean error and is invisible to reprojection/LOO/IoU, so "
+            f"it is failed here rather than marked DONE. "
+            f"({int((~finite_frame_mask(kp3d)).sum())}/{len(kp3d)} input "
+            f"frames have NaN keypoints; see {stac_h5_path})")
     if q.shape[0] != T:
         raise RuntimeError(
             f"bout {bout_idx} fly{fly}: stac_ik.h5 qpos T={q.shape[0]} != "
