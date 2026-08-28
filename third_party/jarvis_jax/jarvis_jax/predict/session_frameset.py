@@ -1,4 +1,5 @@
 """D3 numpy frameset builder: SAM3 masks + frames -> V3-format crops4 + centerHM."""
+import cv2
 import numpy as np
 
 from jarvis_jax.data.transforms import crop_origin
@@ -7,8 +8,16 @@ from jarvis_jax.geometry.center3d import triangulate_dlt_batched, project_center
 CROP = 448
 
 
+def _dilate(mask, radius):
+    """Binary dilation by an elliptical structuring element of `radius` px."""
+    if radius <= 0:
+        return np.asarray(mask, bool)
+    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * radius + 1, 2 * radius + 1))
+    return cv2.dilate(np.asarray(mask, np.uint8), k).astype(bool)
+
+
 def build_frameset(frame_imgs, masks, centroids, valid, cameraMatrices, *,
-                   distractor_masks=None, crop=CROP):
+                   distractor_masks=None, crop=CROP, distractor_dilate=0):
     """Build a V3-format frameset for one fly at one frame.
 
     frame_imgs (nc,H,W,3) uint8 RGB; masks (nc,H,W) bool; centroids (nc,2) full-px;
@@ -52,7 +61,25 @@ def build_frameset(frame_imgs, masks, centroids, valid, cameraMatrices, *,
         # crop *before* filling, as in JARVIS.
         if distractor_masks is not None:
             d = distractor_masks[c, y0:y0 + crop, x0:x0 + crop].astype(bool)
-            d = d[:hh, :ww] & ~m[:hh, :ww].astype(bool)
+            d = d[:hh, :ww]
+            t = m[:hh, :ww].astype(bool)
+            # A SAM3 mask is the fly's BODY silhouette: the legs, wings and
+            # antennae fall OUTSIDE it and survive the fill, so the crop still
+            # contains a limbed, fly-shaped object. Measured on
+            # Session0/2025_10_20_13_20_04 bout_00028 while the female is
+            # edge-on against the wall (her mask drops to 2-5% of its area on
+            # five cameras): the detector labels that leftover male as the
+            # target on 87-100% of frames, on cameras where HER mask is 100%
+            # valid, which drags her 3D track onto his (Scutellum separation
+            # 25.7 -> 0.85 units, against a 23.8-unit body span).
+            # Dilating closes the limbs into the filled blob. The TARGET is
+            # dilated by the same radius and excluded, so the target's own
+            # limbs are never greyed out -- without that the fix is symmetric
+            # and would damage the fly we are trying to label.
+            if distractor_dilate > 0:
+                d = _dilate(d, distractor_dilate) & ~_dilate(t, distractor_dilate)
+            else:
+                d = d & ~t
             if d.any():
                 region = crops4[c, :hh, :ww, :3]
                 mean_color = region.reshape(-1, 3).mean(axis=0)

@@ -82,13 +82,19 @@ def _forward(vit, crops4_u8, *, decode_sharpen=1.0):
 
 def predict_bout_2d(vitpose, frames_iter, masks, centroids, valid, cam_mats,
                     *, crop: int = 448, batch: int = 64, decode_sharpen: float = 1.0,
-                    distractor_masks=None):
+                    distractor_masks=None, distractor_dilate=0):
     """Per (frame,cam): crop -> ViTPose -> full-frame 2-D kp + conf.
 
     frames_iter: iterable of length T, each -> (C,H,W,3) uint8 RGB (all cameras
     for that frame). masks (T,C,H,W) bool, centroids (T,C,2), valid (T,C),
     cam_mats (C,4,3). Returns kp2d (T,C,K,2) full-frame, conf (T,C,K) (0 where
     the frame had <2 valid views or the crop was empty).
+
+    distractor_dilate: px to dilate the distractor mask (and, symmetrically, the
+    target mask that is excluded from it) before filling. A SAM3 mask covers the
+    BODY only, so limbs survive the fill and the crop keeps a fly-shaped object
+    the detector prefers when the real target is small or edge-on. 0 = previous
+    behaviour.
 
     distractor_masks (T,C,H,W) bool | None: the OTHER animal(s)' masks. Passed
     through to build_frameset, which replaces those pixels with the crop mean
@@ -109,7 +115,8 @@ def predict_bout_2d(vitpose, frames_iter, masks, centroids, valid, cam_mats,
             np.asarray(frame_imgs), masks[t], centroids[t], valid[t], cam_mats,
             crop=crop,
             distractor_masks=(None if distractor_masks is None
-                              else distractor_masks[t]))
+                              else distractor_masks[t]),
+            distractor_dilate=distractor_dilate)
         if c4 is None:
             per_frame.append((t, None, None))
             continue

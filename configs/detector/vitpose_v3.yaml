@@ -116,3 +116,14 @@ kp2d_filter:
   beta: 0.5               # higher -> less smoothing (less lag) when moving fast
   d_cutoff: 1.0
   preserve_raw_patterns: [Wing]
+
+# Dilate the distractor-fly mask (px) before gray-filling it out of the crop,
+# and dilate the target mask by the same amount when excluding it so the
+# target's own limbs are never filled. A SAM3 mask is the BODY silhouette: the
+# legs/wings/antennae fall outside it and survived the fill, leaving a
+# fly-shaped object the detector prefers whenever the real target is small or
+# edge-on. Measured on Session0/2025_10_20_13_20_04 bout_00028: with 0, the
+# female's keypoints land on the male in 87-100% of frames during the stretch
+# where she is against the wall, on cameras where her own mask is 100% valid.
+# 15 px closes the limbs into the blob without bloating it (swept 0/9/15/25/40).
+distractor_dilate: 15

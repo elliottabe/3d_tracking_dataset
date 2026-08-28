@@ -742,7 +742,8 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
             vit, _frames_iter(), masks_dict["masks"], centroids, masks_dict["valid"], cam_mats,
             crop=int(cfg.detector.crop), batch=int(cfg.detector.get("batch", 64)),
             decode_sharpen=float(cfg.detector.get("decode_sharpen", 1.0)),
-            distractor_masks=_distractor)
+            distractor_masks=_distractor,
+            distractor_dilate=int(cfg.detector.get("distractor_dilate", 0)))
         _distractor = None          # free the (T,C,H,W) mask array promptly
         # The detector emits channels in its training (tracking/COCO) order, which
         # is NOT the XML/model order the rest of the pipeline (triangulation, STAC,
