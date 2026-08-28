@@ -55,6 +55,54 @@ def bout_start_end(csv, session_dir, bout_idx, _cache={}):
     return _cache[key].get(int(bout_idx), (-1, -1))
 
 
+def _quat_to_R(q):
+    """(T,4) wxyz unit quaternions -> (T,3,3) body->world rotation matrices."""
+    w, x, y, z = np.asarray(q, float).T
+    return np.stack([
+        np.stack([1 - 2 * (y * y + z * z), 2 * (x * y - w * z), 2 * (x * z + w * y)], -1),
+        np.stack([2 * (x * y + w * z), 1 - 2 * (x * x + z * z), 2 * (y * z - w * x)], -1),
+        np.stack([2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)], -1),
+    ], -2)
+
+
+def egocentric_sites(site_xpos, root_se3, kp_names, origin="Scutellum"):
+    """Site positions in the fly's own body frame, in mm.
+
+    The analysis (`utils.song_analysis`) only computes the wing extension /
+    horizontal angles that Figure 4 panel E needs when a bout carries
+    `xpos_egocentric`; without it `horiz_angle_L/R` stay None and the panel
+    renders empty. The legacy `Data_analysis/analysis/v1` h5 had this array;
+    the per-bout pipeline never writes it (neither stac_ik.h5 nor outputs.h5
+    contains it), so it is derived here from data that IS written.
+
+    Definition matches the legacy one -- FK with the root pose removed, i.e.
+    the thorax frame -- as `R_root^T (p_world - p_origin)`. The origin is a
+    KEYPOINT rather than `root_se3`'s translation because `site_xpos` is in mm
+    while `root_se3`'s translation is in model units; subtracting those
+    directly would mix units. Since the frame differs from the legacy one only
+    by that rigid offset, and both consumers build their own frame from
+    normalised differences, the resulting angles are identical (verified: a
+    random rotation+scale+translation moves them by ~2e-11 deg).
+
+    Returns None when `root_se3` or the origin keypoint is unavailable, so a
+    bout without them is left without the key rather than given a silently
+    non-egocentric array.
+    """
+    if root_se3 is None or site_xpos is None:
+        return None
+    names = [n.decode() if isinstance(n, bytes) else str(n) for n in kp_names]
+    if origin not in names:
+        return None
+    se3 = np.asarray(root_se3, float)
+    p = np.asarray(site_xpos, float)
+    if se3.ndim != 2 or se3.shape[1] < 7 or se3.shape[0] != p.shape[0]:
+        return None
+    R = _quat_to_R(se3[:, 3:7])                       # (T,3,3) body->world
+    rel = p - p[:, names.index(origin), :][:, None, :]
+    # R^T @ rel: world -> body
+    return np.einsum("tji,tkj->tki", R, rel).astype(np.float32)
+
+
 def main(argv=None):
     import h5py
     import stac_mjx.io_dict_to_hdf5 as ioh5
@@ -228,6 +276,13 @@ def main(argv=None):
                             for k in ("root_se3", "scale"):
                                 if k in f:
                                     d[k] = np.asarray(f[k])
+                            # Panel E's wing angles need a body-frame array;
+                            # see egocentric_sites for why it is derived here.
+                            _ego = egocentric_sites(
+                                d.get("site_xpos"), d.get("root_se3"),
+                                shared.get("kp_names", []))
+                            if _ego is not None:
+                                d["xpos_egocentric"] = _ego
                     if "qpos" not in d:
                         continue
                     out[f"bout_{n:03d}"] = d
