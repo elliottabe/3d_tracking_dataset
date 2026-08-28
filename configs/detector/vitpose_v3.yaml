@@ -127,3 +127,12 @@ kp2d_filter:
 # where she is against the wall, on cameras where her own mask is 100% valid.
 # 15 px closes the limbs into the blob without bloating it (swept 0/9/15/25/40).
 distractor_dilate: 15
+
+# Radius (px) protecting the TARGET from the distractor fill. Must exceed
+# distractor_dilate: the target's wings also lie outside its mask, and an
+# extended wing reaches far past the body -- straight at the other fly. With a
+# symmetric 15/15 the target's own wing tip was erased in 24.2% of views on
+# bout_00028 (12.1% undilated), and wing L/R identity flipped on 5.71% of
+# adjacent frames vs 3.33% before. 60 brings that to 7.4% -- better than the
+# undilated original -- while the fill still covers 1.65x the undilated area.
+target_protect: 60

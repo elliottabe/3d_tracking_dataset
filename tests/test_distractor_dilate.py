@@ -100,8 +100,7 @@ def test_the_targets_own_limb_is_never_filled(monkeypatch):
         c4, _, _ = sf.build_frameset(frame, target, centroids, valid, cams,
                                      distractor_masks=dist, distractor_dilate=radius)
         rgb = c4[0, :, :, :3]
-        tgt = target[0]
-        assert (rgb[tgt][:, 0] == 10).all(), f"target pixels filled at r={radius}"
+        assert (rgb[target[0]][:, 0] == 10).all(), f"target BODY filled at r={radius}"
 
 
 def test_target_mask_channel_is_untouched_by_dilation(monkeypatch):
@@ -116,3 +115,57 @@ def test_target_mask_channel_is_untouched_by_dilation(monkeypatch):
     b, _, _ = sf.build_frameset(frame, target, centroids, valid, cams,
                                 distractor_masks=dist, distractor_dilate=15)
     assert np.array_equal(a[..., 3], b[..., 3]), "channel 3 must stay the raw target mask"
+
+
+def test_the_targets_own_wing_is_protected_by_a_larger_radius(monkeypatch):
+    """The regression this caught: a symmetric radius protects only `r` px past
+    the target BODY, but its wings reach much further -- often straight at the
+    other fly -- so the fill erased the wing we are trying to label. Measured on
+    bout_00028: fly0's wing tip inside the fill 12.1% of views undilated, 24.2%
+    at a symmetric 15, 7.4% at 15/60.
+    """
+    import jarvis_jax.predict.session_frameset as sf
+    frame, target, dist, centroids, valid, cams = _frameset(0, gap=140)
+    monkeypatch.setattr(sf, "triangulate_dlt_batched",
+                        lambda *a, **k: np.zeros((1, 3), np.float32))
+    monkeypatch.setattr(sf, "project_center_to_cameras",
+                        lambda *a, **k: np.tile(np.array([[224.0, 224.0]], np.float32), (2, 1)))
+    cx = 448 // 2
+    # a long target "wing" reaching toward the distractor, OUTSIDE the mask
+    wing = np.zeros_like(target[0])
+    wing[222:226, cx + 24:cx + 110] = True
+    frame[:, wing] = 10
+
+    def wing_erased(protect):
+        c4, _, _ = sf.build_frameset(frame, target, centroids, valid, cams,
+                                     distractor_masks=dist, distractor_dilate=15,
+                                     target_protect=protect)
+        rgb = c4[0, :, :, :3]
+        return float((rgb[wing][:, 0] != 10).mean())
+
+    # The wing here runs 86 px past the body edge, so protection is geometric:
+    # a radius P shields the first P px of it. Assert that relationship rather
+    # than a number tuned to one wing length (on the real data, where wing tips
+    # sit closer to the body, 15/60 took the erased share 24.2% -> 7.4%).
+    fracs = [wing_erased(P) for P in (15, 40, 70, 100)]
+    assert all(b <= a for a, b in zip(fracs, fracs[1:])), \
+        f"a larger protect radius must never erase MORE wing: {fracs}"
+    assert fracs[0] > 0.0, "a symmetric radius should erase some of the wing (the bug)"
+    assert fracs[-1] == 0.0, \
+        f"a radius past the wing length must protect it entirely: {fracs[-1]:.3f}"
+
+
+def test_target_protect_defaults_to_the_distractor_radius(monkeypatch):
+    """None keeps the previous symmetric behaviour, so the parameter is additive."""
+    import jarvis_jax.predict.session_frameset as sf
+    frame, target, dist, centroids, valid, cams = _frameset(0)
+    monkeypatch.setattr(sf, "triangulate_dlt_batched",
+                        lambda *a, **k: np.zeros((1, 3), np.float32))
+    monkeypatch.setattr(sf, "project_center_to_cameras",
+                        lambda *a, **k: np.tile(np.array([[224.0, 224.0]], np.float32), (2, 1)))
+    a, _, _ = sf.build_frameset(frame, target, centroids, valid, cams,
+                                distractor_masks=dist, distractor_dilate=15)
+    b, _, _ = sf.build_frameset(frame, target, centroids, valid, cams,
+                                distractor_masks=dist, distractor_dilate=15,
+                                target_protect=15)
+    assert np.array_equal(a, b)

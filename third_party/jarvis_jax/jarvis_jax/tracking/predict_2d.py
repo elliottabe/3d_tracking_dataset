@@ -82,7 +82,8 @@ def _forward(vit, crops4_u8, *, decode_sharpen=1.0):
 
 def predict_bout_2d(vitpose, frames_iter, masks, centroids, valid, cam_mats,
                     *, crop: int = 448, batch: int = 64, decode_sharpen: float = 1.0,
-                    distractor_masks=None, distractor_dilate=0):
+                    distractor_masks=None, distractor_dilate=0,
+                    target_protect=None):
     """Per (frame,cam): crop -> ViTPose -> full-frame 2-D kp + conf.
 
     frames_iter: iterable of length T, each -> (C,H,W,3) uint8 RGB (all cameras
@@ -116,7 +117,8 @@ def predict_bout_2d(vitpose, frames_iter, masks, centroids, valid, cam_mats,
             crop=crop,
             distractor_masks=(None if distractor_masks is None
                               else distractor_masks[t]),
-            distractor_dilate=distractor_dilate)
+            distractor_dilate=distractor_dilate,
+            target_protect=target_protect)
         if c4 is None:
             per_frame.append((t, None, None))
             continue

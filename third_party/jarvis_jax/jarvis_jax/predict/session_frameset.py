@@ -17,7 +17,8 @@ def _dilate(mask, radius):
 
 
 def build_frameset(frame_imgs, masks, centroids, valid, cameraMatrices, *,
-                   distractor_masks=None, crop=CROP, distractor_dilate=0):
+                   distractor_masks=None, crop=CROP, distractor_dilate=0,
+                   target_protect=None):
     """Build a V3-format frameset for one fly at one frame.
 
     frame_imgs (nc,H,W,3) uint8 RGB; masks (nc,H,W) bool; centroids (nc,2) full-px;
@@ -77,7 +78,21 @@ def build_frameset(frame_imgs, masks, centroids, valid, cameraMatrices, *,
             # limbs are never greyed out -- without that the fix is symmetric
             # and would damage the fly we are trying to label.
             if distractor_dilate > 0:
-                d = _dilate(d, distractor_dilate) & ~_dilate(t, distractor_dilate)
+                # The TARGET's wings are outside its mask too, and an extended
+                # wing reaches far past the body -- often straight at the other
+                # fly. Protecting only `distractor_dilate` px around the target
+                # body therefore ERASED the target's own wing tip: measured on
+                # bout_00028, fly0's wing tip fell inside the fill in 12.1% of
+                # views with no dilation and 24.2% at a symmetric 15px, and the
+                # re-detected bouts came back with wing L/R identity flipping
+                # 3.33% -> 5.71% of adjacent frames. Protect the target with a
+                # LARGER radius than the distractor is grown by: at 15/60 the
+                # target wing is erased in 7.4% of views -- better than the
+                # undilated original -- while the grey still covers 1.65x the
+                # undilated area, keeping the limb closure.
+                protect = (distractor_dilate if target_protect is None
+                           else int(target_protect))
+                d = _dilate(d, distractor_dilate) & ~_dilate(t, protect)
             else:
                 d = d & ~t
             if d.any():
