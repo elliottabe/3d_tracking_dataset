@@ -24,6 +24,7 @@ def _reproj_video(args):from viz.views import reproj_video; return reproj_video.
 def _clip(args):        from viz.views import clip;         return clip.run(args)
 def _sidebyside(args):  from viz.views import sidebyside;   return sidebyside.run(args)
 def _maskvid(args):     from viz.views import maskvid;      return maskvid.run(args)
+def _rigcam(args):      from viz.views import rigcam;       return rigcam.run(args)
 
 def build_parser():
     p = argparse.ArgumentParser(prog="viz", description="Centralized 3d_tracking visualizations")
@@ -69,6 +70,22 @@ def build_parser():
     c.add_argument("--cameras", nargs="*", default=None); c.add_argument("--bout-dir")
     c.add_argument("--out", default=None); c.add_argument("--fps", type=int, default=None)
     c.set_defaults(func="_clip")
+
+    rc = sub.add_parser("rigcam",
+                        help="render the fit through MuJoCo cameras built from the REAL "
+                             "rig calibration, beside the video from the same camera")
+    rc.add_argument("--run", help="run root (…/pose)")
+    rc.add_argument("--bout", type=int, required=True)
+    rc.add_argument("--fly", type=int, default=0)
+    rc.add_argument("--frame", type=int, default=0, help="frame offset within the bout")
+    rc.add_argument("--cams", nargs="*", default=None, help="cameras (default: all)")
+    rc.add_argument("--pad", type=int, default=170, help="crop half-size in px")
+    rc.add_argument("--model-xml", dest="model_xml", required=True)
+    rc.add_argument("--session-dir", dest="session_dir", default=None)
+    rc.add_argument("--predictions-dir", dest="predictions_dir", default=None)
+    rc.add_argument("--calib-dir", dest="calib_dir", default=None)
+    rc.add_argument("--out", default=None)
+    rc.set_defaults(func="_rigcam")
 
     s = sub.add_parser("sidebyside", help="side-by-side (bout,fly) QC: raw video+SAM+2D | MuJoCo IK render")
     s.add_argument("--run", help="run root (…/Session0_bouts_<date>)")
