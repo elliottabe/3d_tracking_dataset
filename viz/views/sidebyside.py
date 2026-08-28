@@ -1,7 +1,19 @@
 """sidebyside view: a side-by-side QC video for one (bout, fly).
 
 LEFT : raw camera video + SAM mask overlay + ViTPose 2D keypoint SKELETON.
-RIGHT: MuJoCo render of the STAC/IK pose + fitted 3D keypoint sites.
+RIGHT: the fitted body, in the SAME camera as the left panel (`--right reproj`,
+       the default) -- the mesh from outputs.h5 reprojected through that
+       camera's DLT matrix, so mask and mesh are the same pixels and their
+       orientations can be compared directly.
+
+`--right mujoco` restores the old panel: a MuJoCo render from `track1`, a
+model-space camera (`<camera name="track1" ... mode="trackcom">` in the body
+XML) whose extrinsics have NOTHING to do with the left camera. Those two views
+are unrelated, so a fly can appear rotated or mirrored between them for purely
+geometric reasons -- which read as the IK "facing the wrong way" when the fit
+was in fact correct (measured on Session1/2026_04_02_14_54_28 bout_00018 fly0:
+fitted vs observed body axis 1.3 deg, wings 0.8-2.4 deg, 0% anti-aligned, and
+2.8-13.4 deg wing agreement reprojected into all 7 real cameras).
 
 Same frames on both panels, concatenated into one mp4 (plus a representative
 still PNG) so the 2D evidence (left) and the IK fit (right) can be compared
@@ -41,6 +53,7 @@ from viz.core import colors as vcolors
 from viz.core import io as vio
 from viz.core import layout
 from viz.core import overlays
+from viz.core import reproject
 from viz.config import courtship_recording, _CFG_DIR
 
 # BGR per-group keypoint colours (matches the reference script's palette;
@@ -53,6 +66,9 @@ _GROUP_COLORS = {
 }
 _SKELETON_COLOR = (200, 200, 200)  # grey chain lines
 _MASK_FILL = (180, 120, 60)        # BGR fill for the SAM mask overlay
+# Repo visual language (viz/core/colors.py): grey = mesh, green = fit.
+_MESH_COLOR = (170, 170, 170)      # BGR: reprojected fitted mesh cloud
+_FIT_COLOR = (90, 220, 90)         # BGR: fitted 3D sites + their chains
 
 
 def _compose_cfg():
@@ -169,25 +185,50 @@ def run(args):
         from scripts.run_bout import bout_start_frame  # lazy: pulls in jax/mujoco/egl
         start_abs = bout_start_frame(_compose_cfg(), bout)
 
-    # --- RIGHT panel: MuJoCo render of the IK pose ---
-    from stac_mjx.stac import Stac  # heavy (jax + mujoco); lazy on purpose
-    xml_path = cfg.model.MJCF_PATH
-    stac = Stac(str(xml_path), cfg, kp_names)
+    # --- RIGHT panel ---
+    right_mode = getattr(args, "right", None) or "reproj"
     out_path = args.out or f"sidebyside_bout{bout}_fly{fly}.mp4"
     out_dir = os.path.dirname(out_path)
     if out_dir:
         os.makedirs(out_dir, exist_ok=True)
-    print("[sidebyside] rendering MuJoCo IK ...", flush=True)
+
+    mesh_mm = fitted_mm = None
+    mj_render_path = None
+    rframes = None
+    if right_mode == "reproj":
+        # View-matched: the fitted mesh through the LEFT camera's own DLT
+        # matrix. Same pixels as the left panel, so mask-vs-mesh orientation is
+        # a real comparison rather than two unrelated viewpoints.
+        outs_path = os.path.join(vio.fly_dir(args.run, bout, fly), "outputs.h5")
+        if not os.path.exists(outs_path):
+            raise FileNotFoundError(
+                f"--right reproj needs outputs.h5 (the fitted mesh) for bout={bout} "
+                f"fly={fly}: {outs_path}. Use --right mujoco to render from the "
+                f"model-space camera instead (not view-matched).")
+        _outs = vio.load_outputs(args.run, bout, fly)
+        mesh_mm, fitted_mm = _outs["mesh_mm"], _outs["kp3d_mm"]
+        _cam_mats, _cam_names = reproject.camera_matrices(rec["calib_dir"])
+        if left_cam not in list(_cam_names):
+            raise ValueError(f"left camera {left_cam} not in calibration {list(_cam_names)}")
+        left_cam_mat = _cam_mats[list(_cam_names).index(left_cam)]
+        print(f"[sidebyside] right panel: fitted mesh reprojected into {left_cam} "
+              f"(view-matched)", flush=True)
+    else:
+        from stac_mjx.stac import Stac  # heavy (jax + mujoco); lazy on purpose
+        xml_path = cfg.model.MJCF_PATH
+        stac = Stac(str(xml_path), cfg, kp_names)
+        print("[sidebyside] rendering MuJoCo IK (NOT view-matched) ...", flush=True)
     # stac.render REQUIRES a save_path (imageio sniffs the .mp4 extension), but
     # we only consume the returned frames (`rframes`) for compositing -- so this
     # is a throwaway intermediate; keep a clean name (no double .mp4) and delete
     # it after the final side-by-side is written.
-    mj_render_path = (out_path[:-4] if out_path.endswith(".mp4") else out_path) + ".mjrender.mp4"
-    rframes = list(stac.render(
-        qpos, kp_data, offsets, n_frames=N,
-        save_path=mj_render_path,
-        start_frame=T0, camera=render_cam,
-        height=panel_h, width=int(panel_h * 1.33), show_marker_error=False))
+    if right_mode == "mujoco":
+        mj_render_path = (out_path[:-4] if out_path.endswith(".mp4") else out_path) + ".mjrender.mp4"
+        rframes = list(stac.render(
+            qpos, kp_data, offsets, n_frames=N,
+            save_path=mj_render_path,
+            start_frame=T0, camera=render_cam,
+            height=panel_h, width=int(panel_h * 1.33), show_marker_error=False))
 
     # --- FIXED crop window over the whole segment (constant left-panel size) ---
     bx0, by0, bx1, by1 = W, H, 0, 0
@@ -223,9 +264,28 @@ def run(args):
         crop = bgr[cy0:cy1, cx0:cx1]
         return cv2.resize(crop, (left_w, panel_h))
 
+    def _draw_right_reproj(bgr, t):
+        """Fitted mesh + fitted sites in the LEFT camera, same crop as _draw_left."""
+        if t < len(mesh_mm) and np.isfinite(mesh_mm[t]).all():
+            overlays.draw_cloud(bgr, reproject.project(left_cam_mat, mesh_mm[t]),
+                                _MESH_COLOR)
+        if t < len(fitted_mm):
+            fm = np.asarray(fitted_mm[t], float)
+            if np.isfinite(fm).any():
+                uv = reproject.project(left_cam_mat, np.nan_to_num(fm))
+                uv[~np.isfinite(fm).all(axis=1)] = np.nan
+                for a, b in edges:
+                    if np.isfinite(uv[a]).all() and np.isfinite(uv[b]).all():
+                        overlays.draw_chain(bgr, [uv[a], uv[b]], _FIT_COLOR)
+                overlays.draw_points(bgr, uv, _FIT_COLOR, radius=2)
+        crop = bgr[cy0:cy1, cx0:cx1]
+        return cv2.resize(crop, (left_w, panel_h))
+
     # --- composite left+right per frame, collect BGR frames, write mp4 + still ---
     left_title = f"{left_cam} video + SAM mask + ViTPose 2D skeleton"
-    right_title = f"MuJoCo IK render ({render_cam}) + 3D sites"
+    right_title = (f"fitted mesh + sites reprojected into {left_cam} (same view)"
+                   if right_mode == "reproj"
+                   else f"MuJoCo IK render ({render_cam}) -- NOT view-matched")
     frames_out = []
     # Sync-aware, like maskvid: cameras drop frames independently, so a
     # positional read shows the mask/keypoint overlay on the WRONG frame for
@@ -240,11 +300,14 @@ def run(args):
         rgb = imgs[0]
         bgr = (cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR) if rgb is not None
                else np.zeros((H, W, 3), np.uint8))
-        L = _draw_left(bgr, T0 + k)
-        R = cv2.cvtColor(np.asarray(rframes[k]), cv2.COLOR_RGB2BGR)
-        if R.shape[0] != panel_h:
-            s = panel_h / R.shape[0]
-            R = cv2.resize(R, (int(R.shape[1] * s), panel_h))
+        L = _draw_left(bgr.copy(), T0 + k)
+        if right_mode == "reproj":
+            R = _draw_right_reproj(bgr.copy(), T0 + k)
+        else:
+            R = cv2.cvtColor(np.asarray(rframes[k]), cv2.COLOR_RGB2BGR)
+            if R.shape[0] != panel_h:
+                _s = panel_h / R.shape[0]
+                R = cv2.resize(R, (int(R.shape[1] * _s), panel_h))
         Lh = np.vstack([_band(L.shape[1], left_title), L])
         Rh = np.vstack([_band(R.shape[1], right_title), R])
         h = max(Lh.shape[0], Rh.shape[0])
@@ -261,10 +324,11 @@ def run(args):
         raise RuntimeError(f"no frames rendered for bout {bout} fly {fly} (left cam {left_cam})")
 
     vio.write_video(out_path, frames_out, fps=int(getattr(args, "fps", 30) or 30))
-    try:
-        os.remove(mj_render_path)   # throwaway MuJoCo intermediate (frames already composited)
-    except OSError:
-        pass
+    if mj_render_path:
+        try:
+            os.remove(mj_render_path)   # throwaway MuJoCo intermediate
+        except OSError:
+            pass
     still_path = os.path.splitext(out_path)[0] + "_still.png"
     cv2.imwrite(still_path, frames_out[len(frames_out) // 2])
     print(f"[sidebyside] wrote {out_path} ({len(frames_out)} frames) + {still_path}")

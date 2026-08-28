@@ -1339,7 +1339,14 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
             # and renders the wrong video/masks/frames.
             cmd = [sys.executable, "-m", "viz", "sidebyside",
                    "--run", run_root, "--bout", str(bout_idx), "--fly", str(fly),
-                   "--n", str(n_sbs), "--camera", "track1",
+                   "--n", str(n_sbs),
+                   # View-matched right panel: the fitted mesh reprojected into
+                   # the SAME camera as the left one. The old default rendered
+                   # MuJoCo's model-space `track1`, whose extrinsics are
+                   # unrelated to the left camera -- so the fly appeared rotated
+                   # between the panes and a correct fit read as "facing the
+                   # wrong way". Pass `--right mujoco` for the old behaviour.
+                   "--right", "reproj",
                    "--conf", str(float(cfg.detector.conf_thresh)),
                    "--session-dir", str(cfg.recording.session_dir),
                    "--predictions-dir", str(cfg.recording.predictions_dir),
