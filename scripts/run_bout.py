@@ -1145,10 +1145,31 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
             ik_only_bout(cfg, _kp_solve, kp_names, offsets_path=offsets_path,
                         out_h5="stac_ik.tmp.h5", save_path=bout_dir, scale=scale)
         elif not _segs:
-            raise RuntimeError(
-                f"bout {bout_idx} fly{fly}: no finite run of >= "
-                f"{NAN_SOLVE_MIN_SEG} frames to solve "
-                f"({int((~_ok).sum())}/{len(_ok)} frames have NaN keypoints)")
+            # Nothing to solve: after gating, this fly has no run of measured
+            # frames long enough to fit. That is a real, recorded outcome --
+            # the female is edge-on or out of frame for essentially the whole
+            # bout -- not a crash. Raising here killed the whole SLURM array
+            # task, taking the OTHER fly and the dependent aggregate job with
+            # it (measured: Session0 bouts 8/19/26). Record why, write NO
+            # DONE and NO stac_ik.h5 so nothing downstream mistakes this for a
+            # processed fly, and let the run continue.
+            _reason = {
+                "status": "unsolvable",
+                "reason": "no_finite_segment",
+                "min_segment_frames": int(NAN_SOLVE_MIN_SEG),
+                "n_frames": int(len(_ok)),
+                "n_nan_frames": int((~_ok).sum()),
+                "note": ("no run of measured frames long enough to fit; the "
+                         "keypoints for this fly were gated away (see "
+                         "kp-mask-agree / mask-coverage above)"),
+            }
+            atomic_save_json(os.path.join(bout_dir, "unsolvable.json"), _reason)
+            print(f"[stac] bout {bout_idx} fly{fly}: UNSOLVABLE -- no finite run "
+                  f"of >= {NAN_SOLVE_MIN_SEG} frames "
+                  f"({_reason['n_nan_frames']}/{_reason['n_frames']} frames have "
+                  f"NaN keypoints). Wrote unsolvable.json; leaving this fly "
+                  f"without a pose and continuing.", flush=True)
+            return
         else:
             _solve_segments_into(
                 cfg, _kp_solve, kp_names, _segs, offsets_path=offsets_path,

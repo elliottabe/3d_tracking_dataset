@@ -47,6 +47,7 @@ import argparse
 import glob
 import os
 import re
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -397,6 +398,13 @@ def main():
                    help='Hydra config name under configs/ (default: pipeline)')
     p.add_argument('--slurm', default='ckpt_all',
                    help='Hydra slurm config group (default: ckpt_g2)')
+    p.add_argument('--bouts', default=None,
+                   help="comma-separated bout indices to submit (default: every "
+                        "bout_* dir under recording.predictions_dir). Use when "
+                        "re-running a SUBSET, e.g. the bouts a QC pass flagged, "
+                        "so the array does not queue a task per already-good "
+                        "bout. Indices not present under predictions_dir are an "
+                        "error rather than a silent no-op.")
     p.add_argument('--dry-run', action='store_true',
                    help='Print the scripts + dependency chain without submitting')
     args, passthrough = p.parse_known_args()
@@ -427,6 +435,16 @@ def main():
     # still demos the scripts even if that path is unreachable/empty.
     try:
         idxs = bout_indices(predictions_dir)
+        if args.bouts is not None:
+            want = [int(x) for x in str(args.bouts).split(',') if x.strip() != '']
+            unknown = sorted(set(want) - set(idxs))
+            if unknown and not args.dry_run:
+                print(f"Error: bout(s) {unknown} not found under {predictions_dir}",
+                      file=sys.stderr)
+                sys.exit(1)
+            idxs = [i for i in idxs if i in set(want)]
+            print(f"[subset] {name}: submitting {len(idxs)} of "
+                  f"{len(bout_indices(predictions_dir))} bouts: {idxs}")
         n_bouts = len(idxs)
         missing = missing_sam3_masks(predictions_dir, idxs)
     except OSError as e:
@@ -443,7 +461,14 @@ def main():
             print(f"Error: no bout_* dirs found under {predictions_dir}", file=sys.stderr)
             sys.exit(1)
 
-    overrides_str = (" " + " ".join(passthrough)) if passthrough else ""
+    # shlex.quote each override: they are pasted verbatim into a bash script,
+    # and an unquoted Hydra value can change meaning there. Measured: a
+    # `recording.timestamp="2026_04_02_17_28_34"` that was correctly quoted on
+    # the submit command line arrived in the sbatch script bare, so Hydra read
+    # it as an INT (underscores are digit separators) and every job looked for
+    # .../Session1/20260402172834/calibration and died with FileNotFoundError.
+    overrides_str = ((" " + " ".join(shlex.quote(p) for p in passthrough))
+                     if passthrough else "")
     gpus = int(sl.gpus_per_task)
     requeue = bool(sl.requeue)
 

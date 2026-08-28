@@ -148,3 +148,43 @@ def test_missing_or_all_nan_input_is_unknown_not_a_false_ok(tmp_path):
     k = np.full((100, 4, 3), np.nan)
     np.savez(os.path.join(d, "fly0", "kp3d.npz"), kp3d=k)
     assert check_track_merge(d)["status"] == "unknown"
+
+
+# ------------------------------------------------- unsolvable-fly handling
+
+def test_an_unsolvable_fly_is_recorded_not_raised():
+    """A fly whose keypoints were all gated away has no pose to fit. That is a
+    recorded outcome, not a crash: raising took out the SLURM array task, the
+    OTHER fly, and the dependent aggregate job (Session0 bouts 8/19/26).
+
+    The contract that matters downstream: NO DONE marker and NO stac_ik.h5, so
+    combine_ik_outputs skips the fly rather than treating it as processed.
+    """
+    import ast
+    from pathlib import Path
+    src = Path(__file__).resolve().parents[1] / "scripts" / "run_bout.py"
+    tree = ast.parse(src.read_text())
+    fn = [n for n in tree.body
+          if isinstance(n, ast.FunctionDef) and n.name == "process_bout_fly"][0]
+    body = ast.get_source_segment(src.read_text(), fn)
+    i = body.index("elif not _segs:")
+    block = body[i:i + 1600]
+    assert "unsolvable.json" in block, "the reason must be persisted"
+    assert "return" in block, "must return rather than raise"
+    assert "raise RuntimeError" not in block.split("return")[0], \
+        "the no-segment path must not raise"
+
+
+def test_the_frozen_pose_guard_still_raises():
+    """Recording an unsolvable fly must NOT have softened the frozen-pose gate:
+    a solve that returned a rigid pose is a different failure and still fails."""
+    import ast
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[1] / "scripts" / "run_bout.py").read_text()
+    tree = ast.parse(src)
+    fn = [n for n in tree.body
+          if isinstance(n, ast.FunctionDef) and n.name == "process_bout_fly"][0]
+    body = ast.get_source_segment(src, fn)
+    assert "joints_frozen(q)" in body
+    after = body[body.index("joints_frozen(q)"):]
+    assert "raise RuntimeError" in after[:400], "the frozen-pose gate must still raise"
