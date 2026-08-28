@@ -101,6 +101,16 @@ scaling:
 # bout-flies -- don't oversell it).
 masks:
   min_views: 4
+  # Per-view mask-agreement gate: a (frame, camera) view only enters the DLT,
+  # and only counts toward min_views, if its predicted keypoints landed on the
+  # mask SAM3 found for THIS fly on THIS camera. Distance is measured in the
+  # fly's own size (sqrt mask area) so one threshold transfers across cameras
+  # and rigs. Measured on Session0/2025_10_20_13_20_04 bout_00028: 0.60
+  # fly-lengths through the healthy stretch vs 4.51 while the female's track
+  # was dragged onto the male; 3.0 gates 1.3% of healthy frames against 100%
+  # of the bad window, and gates the well-tracked male 0.0% of the time.
+  # null = off (strict no-op).
+  kp_mask_agree_fly_lengths: 3.0
 
 sexing:
   ratio_thr: 1.5      # min CV ratio (max/min) to trust the pose signal

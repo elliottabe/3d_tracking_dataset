@@ -40,6 +40,8 @@ import re
 
 from pathlib import Path
 
+import warnings
+
 import numpy as np
 import hydra
 from omegaconf import DictConfig, OmegaConf
@@ -200,6 +202,117 @@ def high_confidence_sample(kp3d, max_frames=None):
     if max_frames:
         idx = idx[:max_frames]
     return idx
+
+
+def check_track_merge(bout_dir, *, min_separation_body_lengths=0.5,
+                      max_merged_frac=0.02, kp_index=0):
+    """Did the two flies' tracks collapse onto the same animal?
+
+    Non-fatal QC, in the spirit of check_bout_camera_order: it reports, it does
+    not mutate or fail the bout. Two flies cannot occupy the same point, so a
+    separation far below one body length means one track has been captured by
+    the other animal -- the failure that produced the Figure 4 exemplar's
+    apparent male/female identity switching.
+
+    Scale-free: separation is scored against each fly's OWN body length,
+    measured as the median distance from `kp_index` (Scutellum) to its furthest
+    keypoint, so no absolute units are assumed. Measured on
+    Session0/2025_10_20_13_20_04 bout_00028 before the gray-fill fix: 310
+    frames under 0.25 body lengths, bottoming at 0.03, against a 1.08 median --
+    and afterwards, zero.
+
+    Returns a dict; `status` is "ok", "merged", or "unknown" (a fly's kp3d is
+    missing or has no finite frame).
+    """
+    out = {"status": "unknown", "n_merged": 0, "frac_merged": 0.0,
+           "min_separation": None, "median_separation": None,
+           "body_length": None, "threshold": None}
+    try:
+        a = np.load(os.path.join(bout_dir, "fly0", "kp3d.npz"))["kp3d"]
+        b = np.load(os.path.join(bout_dir, "fly1", "kp3d.npz"))["kp3d"]
+    except Exception:                                    # noqa: BLE001
+        return out
+    if a.shape != b.shape or a.ndim != 3 or a.shape[0] == 0:
+        return out
+    sep = np.linalg.norm(a[:, kp_index, :] - b[:, kp_index, :], axis=1)
+    ok = np.isfinite(sep)
+    if not ok.any():
+        return out
+    # body length = median over frames of each fly's own max keypoint spread
+    spans = []
+    for k in (a, b):
+        d = np.linalg.norm(k - k[:, kp_index:kp_index + 1, :], axis=2)
+        with warnings.catch_warnings():
+            # All-NaN frames are ordinary here (gated/unmeasured); they must
+            # drop out of the median, not warn.
+            warnings.simplefilter("ignore", RuntimeWarning)
+            spans.append(np.nanmedian(np.nanmax(d, axis=1)))
+    body = float(np.nanmean(spans))
+    if not np.isfinite(body) or body <= 0:
+        return out
+    thr = float(min_separation_body_lengths) * body
+    merged = ok & (sep < thr)
+    n = int(merged.sum())
+    frac = n / float(ok.sum())
+    out.update(status="merged" if frac > float(max_merged_frac) else "ok",
+               n_merged=n, frac_merged=frac,
+               min_separation=float(np.nanmin(sep[ok])),
+               median_separation=float(np.nanmedian(sep[ok])),
+               body_length=body, threshold=thr)
+    return out
+
+
+def mask_areas_per_view(masks):
+    """(T,C) float: pixel area of each (frame, camera) mask.
+
+    Looped over cameras rather than a single `masks.sum(axis=(2,3))` because
+    the mask array is (T,C,H,W) and materialising the reduction over the whole
+    thing at once is needlessly heavy on a full bout.
+    """
+    masks = np.asarray(masks)
+    T, C = masks.shape[0], masks.shape[1]
+    out = np.zeros((T, C), np.float64)
+    for c in range(C):
+        out[:, c] = masks[:, c].reshape(T, -1).sum(axis=1)
+    return out
+
+
+def view_mask_agreement(kp2d, centroids, valid, mask_areas, *, max_fly_lengths):
+    """(T,C) bool: did this view's 2-D prediction land on THIS camera's own mask?
+
+    The detector emits a full set of keypoints for whatever crop it is handed,
+    including a crop whose target is tiny, edge-on, or absent, and reports high
+    confidence while doing it. `view_conf_thresh` cannot see that: measured on
+    Session0/2025_10_20_13_20_04 bout_00028, views where the female had NO mask
+    at all still scored a median confidence of 0.856 -- above the 0.6 gate --
+    and entered the DLT. Comparing the prediction against the mask that SAM3
+    actually found is an independent signal that does see it.
+
+    Distance is scored in units of the fly's own size, `sqrt(mask area)`, so a
+    single threshold transfers across cameras, resolutions and body sizes
+    rather than being a pixel count tuned to one rig. Measured on that bout:
+    0.60 fly-lengths through the healthy stretch against 4.51 while the
+    female's track was being dragged onto the male.
+
+    A view with no valid mask can never agree: nothing says where the animal
+    is, so its keypoints are not evidence.
+
+    `max_fly_lengths=None` is a strict no-op (every valid view agrees), so a
+    config without the key behaves exactly as before this feature.
+    """
+    valid = np.asarray(valid, bool)
+    if max_fly_lengths is None:
+        return valid.copy()
+    with warnings.catch_warnings():
+        # A view whose keypoints are entirely NaN is an ordinary outcome here
+        # (no fly in the crop); it must resolve to "does not agree", not noise.
+        warnings.simplefilter("ignore", RuntimeWarning)
+        centre = np.nanmedian(np.asarray(kp2d, float), axis=2)      # (T,C,2)
+    d = np.linalg.norm(centre - np.asarray(centroids, float), axis=-1)   # (T,C)
+    scale = np.sqrt(np.maximum(np.asarray(mask_areas, float), 1.0))
+    with np.errstate(invalid="ignore"):
+        ok = np.isfinite(d) & (d <= float(max_fly_lengths) * scale)
+    return ok & valid
 
 
 def gate_low_coverage_frames(kp3d, views_per_frame, min_views):
@@ -791,6 +904,27 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
         # view_conf_thresh. See triangulate_keypoints.
         _resid_px = cfg.detector.get("reproj_resid_px", None)
         _resid_px = None if _resid_px is None else float(_resid_px)
+        # Per-view MASK-AGREEMENT gate: a view only counts if its prediction
+        # landed on the mask SAM3 found for this fly on this camera. This is
+        # independent of confidence -- see view_mask_agreement -- and it also
+        # feeds the frame-level min_views gate below, which until now counted
+        # views by mask VALIDITY and so never fired on the failure it was meant
+        # to catch (bout_00028: a median of 5 valid views throughout, 0 frames
+        # gated, while the keypoints were on the other fly).
+        _agree_len = masks_cfg.get("kp_mask_agree_fly_lengths", None)
+        _agree_len = None if _agree_len is None else float(_agree_len)
+        if _agree_len is not None:
+            _areas = mask_areas_per_view(masks_dict["masks"])
+            _agree = view_mask_agreement(
+                kp2d, centroids, masks_dict["valid"], _areas,
+                max_fly_lengths=_agree_len)
+            _n_drop = int((~_agree & np.asarray(masks_dict["valid"], bool)).sum())
+            conf = np.where(_agree[..., None], conf, 0.0)
+            views_per_frame = _agree.sum(axis=1)
+            print(f"[kp-mask-agree] bout {bout_idx} fly{fly}: dropped {_n_drop} "
+                  f"(frame,camera) views whose keypoints missed their own mask by "
+                  f">{_agree_len} fly-lengths; agreeing views/frame median "
+                  f"{int(np.median(views_per_frame))}")
         kp3d, conf3d = triangulate_keypoints(
             kp2d, conf, cam_mats, conf_thresh=float(cfg.detector.conf_thresh),
             view_conf_thresh=_view_thresh, reproj_resid_px=_resid_px)
@@ -1270,6 +1404,31 @@ def main_from_cfg(cfg: DictConfig):
     for bout_idx in bout_ids:
         for fly in range(n_anim):
             process_bout_fly(cfg, bout_idx, fly)
+        # Two flies cannot be in the same place: a collapsed separation means
+        # one track was captured by the other animal. Reported, never fatal --
+        # it is a QC signal about the INPUT, and the bout's artifacts are still
+        # what they are. Written beside coverage.json so it is inspectable
+        # without re-deriving it. Skipped for single-animal assays.
+        if n_anim == 2:
+            _bd = os.path.join(str(cfg.outputs.out), "bouts", f"bout_{bout_idx:05d}")
+            _tm = check_track_merge(
+                _bd, min_separation_body_lengths=float(
+                    (cfg.get("masks") or {}).get("merge_body_lengths", 0.5)))
+            if _tm["status"] == "merged":
+                print(f"[track-merge] bout {bout_idx}: WARNING the two flies' tracks "
+                      f"collapse on {_tm['n_merged']} frame(s) "
+                      f"({100 * _tm['frac_merged']:.1f}%): min separation "
+                      f"{_tm['min_separation']:.2f} vs body length "
+                      f"{_tm['body_length']:.2f}. One track is probably following "
+                      f"the other fly.")
+            else:
+                print(f"[track-merge] bout {bout_idx}: {_tm['status']} "
+                      f"(min separation {_tm['min_separation']}, "
+                      f"body length {_tm['body_length']})")
+            try:
+                atomic_save_json(os.path.join(_bd, "track_qc.json"), _tm)
+            except Exception as _e:                       # noqa: BLE001
+                print(f"[track-merge] bout {bout_idx}: could not write track_qc.json ({_e})")
         # Fly sexing is now done authoritatively at SAM3 step-0 (mask-area vote in
         # jarvis_jax.predict.sam3_driver.canonicalize_male_fly), which packs masks
         # in canonical order so pose fly0/fly1 already has male=fly1. The old
