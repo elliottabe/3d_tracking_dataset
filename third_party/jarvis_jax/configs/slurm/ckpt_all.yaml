@@ -1,0 +1,23 @@
+# @package slurm
+# Training on ckpt-all, restricted to GPU types big enough for an 8-GPU
+# single-host ViTPose run. ckpt-g2 reaches only l40/l40s/h200; ckpt-all adds
+# the a40 (32 nodes) and a100 (8) pools, roughly doubling the eligible nodes.
+#
+# `constraint` replaces ckpt_g2's hand-maintained nodelist/exclude: naming GPU
+# TYPES survives nodes being added/removed, where a literal node range does
+# not. It admits only cards that fit -- ckpt-all also contains rtx6k 24GB,
+# 2080ti 11GB, p100 16GB and CPU-only n[...] nodes.
+#
+# All listed types have 8 GPUs/node, which the single-host job requires.
+partition: ckpt-all
+constraint: 'h200|a100|l40s|l40|a40'
+account: portia
+gpus: 8
+cpus: 32
+mem: 128
+time: '3-00:00:00'
+requeue: true
+nodelist: ''
+exclude: ''
+conda_env: 3d_tracking
+mail_user: eabe@uw.edu
