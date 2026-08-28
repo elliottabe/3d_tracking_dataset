@@ -13,10 +13,17 @@ EXPECTATION IF THE PRIOR IS CORRECT (read the figure against this):
            spend less time flat against the +85.9 / -57.3 deg stops.
   Panel B  yaw(t) and pitch(t): damped traces overlay baseline almost exactly.
            If they change SHAPE, the prior is stealing real wing motion.
-  Panel C  PSD of yaw/pitch: the ~193 Hz song peak keeps its power (band-power
-           ratio near 1.0). A dropped peak means the prior has damped the song
-           and the multiplier is too high -- that is the failure we most care
-           about, since the whole point of this pipeline is to recover song.
+  Panel C  pulse-song transients in yaw/pitch survive: hp_rms, kurtosis, pulse
+           count and pulse amplitude all near their baseline values. Pulse song
+           is a sparse train of brief wing transients, so narrowband power at a
+           carrier frequency does NOT measure it -- a smoothness prior can smear
+           every pulse while leaving band power almost unchanged. Falling
+           kurtosis or a falling pulse count means the prior is erasing song,
+           which is the failure we most care about.
+
+RUN THIS ON THE SINGING MALE. In bout_00003 that is fly1, confirmed by
+unilateral wing extension (|yawL-yawR| median 24 deg, 25% of frames >30 deg,
+against 5.4 deg for fly0). Running it on the non-singing fly measures nothing.
   Panel D  per-keypoint marker residual, wing keypoints highlighted: flat or
            slightly better. A rise means roll was absorbing real fit error.
 
@@ -41,11 +48,42 @@ def band_power(x, fs, lo, hi):
     x = np.asarray(x, float)
     x = x[np.isfinite(x)]
     if x.size < 64:
-        return np.nan, None, None
+        return np.nan
     nper = min(512, x.size)
     f, P = welch(x, fs=fs, nperseg=nper, detrend="linear")
     m = (f >= lo) & (f <= hi)
-    return float(np.trapezoid(P[m], f[m])) if m.any() else np.nan, f, P
+    return float(np.trapezoid(P[m], f[m])) if m.any() else np.nan
+
+
+def pulse_stats(x, fs, hp_hz=40.0, min_ipi_s=0.02):
+    """Transient statistics of a wing-angle trace, for PULSE song.
+
+    Pulse song is a sparse train of brief wing transients, not a sustained
+    tone, so narrowband power at a sine-song carrier does not measure it. A
+    smoothness prior smears transients while barely moving band power, so the
+    quantities that matter are impulsiveness and the pulse events themselves:
+
+      hp_rms    RMS of the >hp_hz component -- how much fast motion survives
+      kurtosis  impulsiveness; a sparse pulse train is strongly leptokurtic,
+                and smoothing drives this toward the Gaussian value of 0
+      n_peaks   transients above 4x MAD, separated by at least min_ipi_s
+      peak_amp  median height of those transients (deg)
+    """
+    from scipy.signal import butter, filtfilt, find_peaks
+    from scipy.stats import kurtosis
+    x = np.asarray(x, float)
+    x = x[np.isfinite(x)]
+    if x.size < 64:
+        return dict(hp_rms=np.nan, kurtosis=np.nan, n_peaks=0, peak_amp=np.nan)
+    b, a = butter(4, hp_hz / (fs / 2.0), btype="high")
+    hp = filtfilt(b, a, x)
+    mad = float(np.median(np.abs(hp - np.median(hp)))) or 1e-12
+    pk, props = find_peaks(np.abs(hp), height=4.0 * mad,
+                           distance=max(1, int(min_ipi_s * fs)))
+    return dict(hp_rms=float(np.std(hp)),
+                kurtosis=float(kurtosis(hp, fisher=True)),
+                n_peaks=int(pk.size),
+                peak_amp=float(np.median(props["peak_heights"])) if pk.size else np.nan)
 
 
 def main():
@@ -132,23 +170,27 @@ def main():
     base = out[1.0]
     wing_kp = [i for i, n in enumerate(kp_used) if "wing" in n.lower()]
     print(f"\nwing keypoints: {[kp_used[i] for i in wing_kp]}")
-    print(f"\n{'DOF':>18}{'mult':>6}{'med|dq| deg':>13}{'sat %':>8}{'song BP':>11}{'BP ratio':>10}")
+    print(f"\n{'DOF':>18}{'mult':>6}{'med|dq| deg':>13}{'sat %':>8}"
+          f"{'hp RMS deg':>12}{'kurtosis':>10}{'n pulses':>10}{'pulse amp':>11}"
+          f"{'sineBP':>10}{'pulseBP':>10}")
     for n in WING_DOFS:
         a, (lo, hi) = dof[n]
         rep["dofs"][n] = {}
-        bp0 = None
         for mv in mults:
             x = np.degrees(out[mv]["q"][:, a])
             dq = float(np.nanmedian(np.abs(np.diff(x))))
             tol = 0.01 * np.degrees(hi - lo)
             sat = float(np.mean((x <= np.degrees(lo) + tol) | (x >= np.degrees(hi) - tol)) * 100)
-            bp, _, _ = band_power(np.radians(x), args.fs, 180.0, 210.0)
-            if mv == 1.0:
-                bp0 = bp
-            ratio = bp / bp0 if (bp0 and np.isfinite(bp0) and bp0 > 0) else np.nan
+            ps = pulse_stats(x, args.fs)
+            # sine song ~150-200 Hz; pulse-song carrier ~200-350 Hz
+            sine_bp = band_power(np.radians(x), args.fs, 150.0, 200.0)
+            pulse_bp = band_power(np.radians(x), args.fs, 200.0, 350.0)
             rep["dofs"][n][str(mv)] = dict(med_abs_dq_deg=dq, saturation_pct=sat,
-                                           song_bandpower=bp, bp_ratio=float(ratio))
-            print(f"{n:>18}{mv:6.0f}{dq:13.4f}{sat:8.2f}{bp:11.3e}{ratio:10.3f}")
+                                           sine_bandpower=sine_bp, pulse_bandpower=pulse_bp, **ps)
+            print(f"{n:>18}{mv:6.0f}{dq:13.4f}{sat:8.2f}{ps['hp_rms']:12.4f}"
+                  f"{ps['kurtosis']:10.2f}{ps['n_peaks']:10d}"
+                  f"{ps['peak_amp'] if np.isfinite(ps['peak_amp']) else float('nan'):11.4f}"
+                  f"{sine_bp:10.2e}{pulse_bp:10.2e}")
 
     print(f"\n{'mult':>6}{'resid all':>12}{'resid wing':>12}{'vs base all':>13}{'vs base wing':>14}")
     b_all = float(np.nanmedian(base["R"]))

@@ -1,0 +1,225 @@
+{
+  "dir": "/gscratch/portia/eabe/data/Johnson_lab/processed/courtship/Session0/2025_10_20_13_20_04/pose/bouts/bout_00003/fly1",
+  "t0": 0,
+  "nt": 1024,
+  "fs": 800.0,
+  "mults": [
+    1.0,
+    5.0,
+    20.0
+  ],
+  "dofs": {
+    "wing_yaw_left": {
+      "1.0": {
+        "med_abs_dq_deg": 0.16284942626953125,
+        "saturation_pct": 0.0,
+        "sine_bandpower": 4.881034913358329e-07,
+        "pulse_bandpower": 3.672048820163445e-07,
+        "hp_rms": 0.55253459110722,
+        "kurtosis": 12.057248369115317,
+        "n_peaks": 9,
+        "peak_amp": 1.0609369916127422
+      },
+      "5.0": {
+        "med_abs_dq_deg": 0.46800994873046875,
+        "saturation_pct": 0.0,
+        "sine_bandpower": 2.3350687129139527e-06,
+        "pulse_bandpower": 9.425811505222138e-07,
+        "hp_rms": 0.8548897237335457,
+        "kurtosis": 3.049863819388154,
+        "n_peaks": 5,
+        "peak_amp": 3.6271703361382333
+      },
+      "20.0": {
+        "med_abs_dq_deg": 0.529052734375,
+        "saturation_pct": 0.0,
+        "sine_bandpower": 2.7108589396380665e-06,
+        "pulse_bandpower": 1.0359474544405364e-06,
+        "hp_rms": 0.9514317919292814,
+        "kurtosis": 2.3679298200348704,
+        "n_peaks": 4,
+        "peak_amp": 4.062927674166366
+      }
+    },
+    "wing_roll_left": {
+      "1.0": {
+        "med_abs_dq_deg": 0.2221527099609375,
+        "saturation_pct": 0.0,
+        "sine_bandpower": 5.980614220456069e-07,
+        "pulse_bandpower": 7.979831673902732e-07,
+        "hp_rms": 0.4942535047266489,
+        "kurtosis": 3.3602745173442816,
+        "n_peaks": 7,
+        "peak_amp": 2.147057801445422
+      },
+      "5.0": {
+        "med_abs_dq_deg": 0.0433807373046875,
+        "saturation_pct": 0.0,
+        "sine_bandpower": 1.2685388836586164e-08,
+        "pulse_bandpower": 1.4207072819702176e-08,
+        "hp_rms": 0.0778728931898136,
+        "kurtosis": 3.622290125009177,
+        "n_peaks": 10,
+        "peak_amp": 0.2594970693040841
+      },
+      "20.0": {
+        "med_abs_dq_deg": 0.01912689208984375,
+        "saturation_pct": 0.0,
+        "sine_bandpower": 9.265923089940803e-11,
+        "pulse_bandpower": 7.065638780266129e-11,
+        "hp_rms": 0.010433562508530232,
+        "kurtosis": 3.0201299651153084,
+        "n_peaks": 15,
+        "peak_amp": 0.03160417384199795
+      }
+    },
+    "wing_pitch_left": {
+      "1.0": {
+        "med_abs_dq_deg": 0.047298431396484375,
+        "saturation_pct": 0.0,
+        "sine_bandpower": 2.0945887481731862e-08,
+        "pulse_bandpower": 3.594929886757746e-08,
+        "hp_rms": 0.1763240155400405,
+        "kurtosis": 11.227925091887881,
+        "n_peaks": 9,
+        "peak_amp": 0.4941287046353967
+      },
+      "5.0": {
+        "med_abs_dq_deg": 0.15050315856933594,
+        "saturation_pct": 0.0,
+        "sine_bandpower": 6.391237985037801e-07,
+        "pulse_bandpower": 4.678898564821112e-07,
+        "hp_rms": 0.384646421403412,
+        "kurtosis": 6.518162437894411,
+        "n_peaks": 11,
+        "peak_amp": 1.1166597871697055
+      },
+      "20.0": {
+        "med_abs_dq_deg": 0.25333118438720703,
+        "saturation_pct": 0.0,
+        "sine_bandpower": 1.1028070494746088e-06,
+        "pulse_bandpower": 6.060131631215555e-07,
+        "hp_rms": 0.6412689636275034,
+        "kurtosis": 3.246010726925064,
+        "n_peaks": 10,
+        "peak_amp": 2.2310665187627206
+      }
+    },
+    "wing_yaw_right": {
+      "1.0": {
+        "med_abs_dq_deg": 0.9545860290527344,
+        "saturation_pct": 0.0,
+        "sine_bandpower": 1.0665055285989754e-05,
+        "pulse_bandpower": 8.147760873296702e-06,
+        "hp_rms": 1.5641577318547315,
+        "kurtosis": -0.05836319106016763,
+        "n_peaks": 2,
+        "peak_amp": 6.957690125028428
+      },
+      "5.0": {
+        "med_abs_dq_deg": 0.745513916015625,
+        "saturation_pct": 0.0,
+        "sine_bandpower": 7.295973772523611e-06,
+        "pulse_bandpower": 6.451472433349005e-06,
+        "hp_rms": 1.3142225681416801,
+        "kurtosis": 0.004571341293269526,
+        "n_peaks": 3,
+        "peak_amp": 4.952022520027665
+      },
+      "20.0": {
+        "med_abs_dq_deg": 0.7071495056152344,
+        "saturation_pct": 0.0,
+        "sine_bandpower": 6.826140788002113e-06,
+        "pulse_bandpower": 6.248543292048894e-06,
+        "hp_rms": 1.2852172512271012,
+        "kurtosis": 0.05601951539547878,
+        "n_peaks": 5,
+        "peak_amp": 4.151818839914032
+      }
+    },
+    "wing_roll_right": {
+      "1.0": {
+        "med_abs_dq_deg": 1.0694465637207031,
+        "saturation_pct": 0.0,
+        "sine_bandpower": 2.534912499533385e-05,
+        "pulse_bandpower": 1.5666723523816863e-05,
+        "hp_rms": 1.9048513458944754,
+        "kurtosis": 1.6970146633014664,
+        "n_peaks": 7,
+        "peak_amp": 6.6751864925165725
+      },
+      "5.0": {
+        "med_abs_dq_deg": 0.286773681640625,
+        "saturation_pct": 0.0,
+        "sine_bandpower": 6.359204091272916e-07,
+        "pulse_bandpower": 2.3630433279575178e-07,
+        "hp_rms": 0.49674554671516047,
+        "kurtosis": 1.599897021189408,
+        "n_peaks": 9,
+        "peak_amp": 1.7189985109407417
+      },
+      "20.0": {
+        "med_abs_dq_deg": 0.07045936584472656,
+        "saturation_pct": 0.0,
+        "sine_bandpower": 3.228577718833812e-09,
+        "pulse_bandpower": 1.1003019295347404e-09,
+        "hp_rms": 0.047316164224070346,
+        "kurtosis": 2.5054374684630174,
+        "n_peaks": 8,
+        "peak_amp": 0.16478426917152855
+      }
+    },
+    "wing_pitch_right": {
+      "1.0": {
+        "med_abs_dq_deg": 0.29564857482910156,
+        "saturation_pct": 0.0,
+        "sine_bandpower": 1.0411061874783404e-06,
+        "pulse_bandpower": 7.495070496301303e-07,
+        "hp_rms": 0.45493583396073145,
+        "kurtosis": 2.1507499440851428,
+        "n_peaks": 4,
+        "peak_amp": 1.9394693986792793
+      },
+      "5.0": {
+        "med_abs_dq_deg": 0.7744786739349365,
+        "saturation_pct": 0.0,
+        "sine_bandpower": 6.664937464385074e-06,
+        "pulse_bandpower": 2.9255530904661268e-06,
+        "hp_rms": 1.2650915281320274,
+        "kurtosis": 0.9809174008331931,
+        "n_peaks": 3,
+        "peak_amp": 6.072187640028854
+      },
+      "20.0": {
+        "med_abs_dq_deg": 0.9276275634765625,
+        "saturation_pct": 0.0,
+        "sine_bandpower": 8.144160609025306e-06,
+        "pulse_bandpower": 3.471153500896361e-06,
+        "hp_rms": 1.5884329234336423,
+        "kurtosis": 1.0525235891339912,
+        "n_peaks": 5,
+        "peak_amp": 5.321551140422215
+      }
+    }
+  },
+  "resid": {
+    "1.0": {
+      "all": 0.009478945325430612,
+      "wing": 0.016978671360085962,
+      "d_all_pct": 0.0,
+      "d_wing_pct": 0.0
+    },
+    "5.0": {
+      "all": 0.00949523640732917,
+      "wing": 0.017460371889377033,
+      "d_all_pct": 0.17186597600527018,
+      "d_wing_pct": 2.837092014299004
+    },
+    "20.0": {
+      "all": 0.00950239617373611,
+      "wing": 0.017423510918932253,
+      "d_all_pct": 0.24739934138646322,
+      "d_wing_pct": 2.6199903950790584
+    }
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "summary": {
+    "n_bout_flies": 316,
+    "roll_ac_mean": 0.8359892015403738,
+    "yawpitch_ac_mean": 0.8071100533166378,
+    "pct_bouts_roll_less_autocorrelated_than_yawpitch": 29.807692307692307,
+    "d_roll_median_deg": 0.42937707901000977,
+    "d_yawpitch_median_deg": 0.36729568243026733,
+    "wing_excursion_median_deg": 54.27085494995117,
+    "wing_excursion_p90_deg": 126.49935913085938,
+    "wing_excursion_max_deg": 171.95993041992188,
+    "male_extension_reference_deg": 90.0,
+    "saturation_median_pct": {
+      "wing_yaw_left": 6.205143540669857,
+      "wing_roll_left": 0.0,
+      "wing_pitch_left": 0.0,
+      "wing_yaw_right": 17.241353062964315,
+      "wing_roll_right": 0.0,
+      "wing_pitch_right": 0.0
+    }
+  },
+  "note": "per-bout rows live in figures/2026-08-28-wingroll/roll_noise_survey.json"
+}
