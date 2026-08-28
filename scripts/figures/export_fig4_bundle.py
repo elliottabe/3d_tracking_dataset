@@ -19,7 +19,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 
@@ -33,16 +33,174 @@ if str(_PROJECT_ROOT) not in sys.path:
 from figbuilder.bundle import PanelData, segments_to_array, write_bundle
 
 
-def _mean_z_by_label(results: List[dict], label: str) -> np.ndarray:
+_ENVELOPE_CACHE: Dict[str, tuple] = {}
+
+
+def _arena_envelope(recording_dir) -> tuple:
+    """(y_lo, y_hi, z_hi) Scutellum bounds pooled over a recording's bouts.
+
+    The chamber is long and narrow, so a reconstruction that fails near a wall
+    leaves the arena in y and/or z while staying plausible in x. Pooling every
+    bout-fly in the SAME recording gives a per-recording envelope without
+    assuming absolute coordinates (they differ between recordings).
+    """
+    key = str(recording_dir)
+    if key in _ENVELOPE_CACHE:
+        return _ENVELOPE_CACHE[key]
+    import glob as _glob
+    arrs = []
+    for f in sorted(_glob.glob(str(Path(recording_dir) / "pose" / "bouts"
+                                   / "bout_*" / "fly*" / "kp3d.npz"))):
+        try:
+            arrs.append(np.load(f)["kp3d"][:, 0, :])
+        except Exception:                        # noqa: BLE001
+            continue
+    if not arrs:
+        env = (None, None, None)
+    else:
+        S = np.concatenate(arrs)
+        ylo, yhi = np.nanpercentile(S[:, 1], [1, 99])
+        zhi = float(np.nanpercentile(S[:, 2], 99))
+        env = (float(ylo), float(yhi), zhi)
+    _ENVELOPE_CACHE[key] = env
+    return env
+
+
+def _outside_arena(recording_dir, bout_name: str, fly_dir: str, n: int):
+    """Boolean mask (len n) of frames whose Scutellum leaves the arena envelope.
+
+    Diagnosed on Session1/2026_04_02_16_56_37 bout_00003/fly0, panel G's 0.345
+    outlier: 16% of frames sit beyond the chamber in y AND above the
+    recording's z p99, with conf3d dropping 0.731 -> 0.639 there -- a
+    triangulation failure near a wall, not a real climb. The next-highest
+    bout (0.219) is 0% outside at conf 0.971, so this gate keeps it: it
+    removes the artifact WITHOUT trimming the tail generally.
+    """
+    ylo, yhi, zhi = _arena_envelope(recording_dir)
+    if ylo is None:
+        return np.zeros(n, bool)
+    kp_path = (Path(recording_dir) / "pose" / "bouts" / bout_name / fly_dir
+               / "kp3d.npz")
+    if not kp_path.exists():
+        return np.zeros(n, bool)
+    try:
+        scut = np.load(kp_path)["kp3d"][:, 0, :]
+    except Exception:                            # noqa: BLE001
+        return np.zeros(n, bool)
+    m = ((scut[:, 1] > yhi) | (scut[:, 1] < ylo) | (scut[:, 2] > zhi))
+    m = np.asarray(m, bool)
+    out = np.zeros(n, bool)
+    k = min(n, m.size)
+    out[:k] = m[:k]
+    return out
+
+
+def _mean_z_by_label(results: List[dict], label: str,
+                     bad_masks: Optional[Dict[str, np.ndarray]] = None
+                     ) -> np.ndarray:
     out: List[float] = []
     for r in results:
         v = np.asarray(r["male_valid"], dtype=bool)
         lab = np.asarray(r["male_labels"])
         z = np.asarray(r["com_z"], dtype=float)
         m = v & np.isfinite(z) & (lab == label)
+        if bad_masks is not None:
+            bad = bad_masks.get(r.get("key0"))
+            if bad is not None:
+                k = min(m.size, bad.size)
+                m[:k] &= ~bad[:k]
         if m.any():
             out.append(float(np.mean(z[m])))
     return np.asarray(out, dtype=float)
+
+
+def analyze_unpaired_males(data, bout_keys, info, pairs, kp_names, *,
+                           song_cfg=None, loc_cfg=None, despike=True):
+    """Single-fly analysis for males whose partner has no reconstruction.
+
+    `pair_bouts` only pairs an adjacent (fly0, fly1), so a bout where one fly
+    could not be solved contributes NOTHING -- and every Figure 4 panel derives
+    from `analyze_all_pairs` results, including the ones that need a single fly
+    (wing-angle density, pulse classification, wing phase, z-height). On the
+    2026-08-28 re-run three Session0 bouts came back male-only, because the
+    mask-agreement gate found the female's keypoints unusable for essentially
+    the whole bout (see run_bout.view_mask_agreement / unsolvable.json).
+    Dropping a perfectly good male fit for that reason is a waste.
+
+    This reproduces the SINGLE-FLY half of `utils.courtship_loader.analyze_pair`
+    by calling the same `utils` functions -- utils is consumed unmodified -- and
+    returns dicts with the keys those pooled panels read: `song0`,
+    `male_labels`, `male_valid`, `com_z`, `by_song`, `kin`.
+
+    Only a slot the h5 marks as the MALE (`info['male_fly']`, and only where
+    `sex_verified`) is analysed: the panels are about male song, and guessing
+    the sex of a lone fly is exactly the mistake the wing-song CV metric made.
+
+    Pair-only fields (`song1`, `sex`, `colocated`, `valid_fly1`) are set to
+    None, and `single_fly=True` is set, so a pair-only consumer that is handed
+    one of these breaks loudly instead of silently reading a male as a pair.
+    """
+    from utils.courtship_loader import get_fields
+    from utils.song_analysis import analyze_fly_song, SongAnalysisConfig
+    from utils.locomotion import (LocomotionConfig, compute_centroid_velocity,
+                                  compute_com_height, classify_walking_state,
+                                  summarize_by_song)
+    song_cfg = song_cfg or SongAnalysisConfig()
+    loc_cfg = loc_cfg or LocomotionConfig()
+
+    paired = {k for pr in pairs for k in pr}
+    src = list(info.get("source_flies", []))
+    male_fly = list(info.get("male_fly", []))
+    verified = list(info.get("sex_verified", []))
+
+    out = []
+    for i, key in enumerate(bout_keys):
+        if key in paired or key not in data:
+            continue
+        if i >= len(src) or i >= len(male_fly):
+            continue
+        slot = int(str(src[i]).replace("fly", "") or -1)
+        if int(male_fly[i]) != slot:            # this lone fly is the female
+            continue
+        if verified and i < len(verified) and not bool(verified[i]):
+            continue
+        try:
+            kp, xp, q = get_fields(data[key], despike=despike)
+            kp = np.asarray(kp, float)
+            # No partner, so no pair-validity mask: a frame counts when this
+            # fly's own keypoints are finite. compute_pair_validity's other
+            # gates (colocation, occlusion by the other fly) are meaningless
+            # for a lone animal and must not be faked.
+            valid = np.isfinite(kp).all(axis=tuple(range(1, kp.ndim)))
+            song = analyze_fly_song(kp, xp, q, kp_names, cfg=song_cfg,
+                                    valid_mask=valid)
+            kin = compute_centroid_velocity(kp, kp_names, loc_cfg,
+                                            body_length=None)
+            com_z, floor_z = compute_com_height(kp, kp_names, loc_cfg)
+            speed_bl = kin.get("speed_bl", kin["speed"])
+            dw = str(song.get("dominant_wing", "L")).upper()
+            side = "L" if dw.startswith("L") else "R"
+            labels = np.asarray(song["sides"][side]["frame_labels"])
+            metrics = {
+                "forward_speed_bl": np.asarray(
+                    kin.get("forward_speed_bl", kin["forward_speed"])),
+                "speed_bl": np.asarray(speed_bl),
+                "turn_rate": np.asarray(kin["turn_rate"]),
+                "com_z": np.asarray(com_z),
+            }
+            out.append({
+                "key0": key, "key1": None, "T": int(len(kp)),
+                "single_fly": True,
+                "song0": song, "song1": None, "sex": None,
+                "valid_fly0": valid, "valid_fly1": None, "colocated": None,
+                "male_labels": labels, "male_valid": valid,
+                "kin": kin, "com_z": com_z, "floor_z": floor_z,
+                "walking_state": classify_walking_state(np.asarray(speed_bl), loc_cfg),
+                "by_song": summarize_by_song(labels, metrics, valid_mask=valid),
+            })
+        except Exception as e:                   # noqa: BLE001 - report, don't die
+            print(f"[single-fly] {key}: skipped ({type(e).__name__}: {e})")
+    return out
 
 
 def build_fig4_panels(results: List[dict], ex: dict,
@@ -96,9 +254,16 @@ def build_fig4_panels(results: List[dict], ex: dict,
                    for t in ("Pslow", "Pfast")},
             },
             attrs={"fs": fs}),
+        # Body height is a SINGLE-FLY quantity (the male's own com_z), so it
+        # pools the unpaired males too -- `extras["pooled"]` is results +
+        # single-fly males. Taken explicitly rather than by widening `results`,
+        # so a pair-only quantity added to this function later cannot silently
+        # inherit them. Falls back to `results` when absent.
         "zheight": PanelData(type="courtship.zheight", data={
-            "pulse_z": _mean_z_by_label(results, "pulse"),
-            "sine_z": _mean_z_by_label(results, "sine"),
+            "pulse_z": _mean_z_by_label(extras.get("pooled") or results, "pulse",
+                                        extras.get("arena_bad_masks")),
+            "sine_z": _mean_z_by_label(extras.get("pooled") or results, "sine",
+                                       extras.get("arena_bad_masks")),
             "walking_z": np.asarray(extras["walking_z"], float)}),
         "pitch": PanelData(type="courtship.male_pitch", data={
             "t_ms": np.asarray(extras.get("t_ms_full", t_ms), float),
@@ -126,20 +291,44 @@ def build_fig4_panels(results: List[dict], ex: dict,
 #: SAM3 masks all come from 2026_04_02_16_21_32. Pointing any one of them at a
 #: different recording silently produces a figure whose traces and video frames
 #: describe different flies.
+#: The figure-4 sources, matching the notebook's H5_SESSION0 + H5_MAIN merge.
+#: Session0 supplies the EXEMPLAR (panels A/C/I); Session1 supplies the bulk of
+#: the population panels. The Session0 file MUST be the `_full_exemplar`
+#: variant: the plain one truncates bout_030/031 to 812 frames, while the
+#: notebook logged T=2006. Verified: `_full_exemplar` has clip_len 2006 for
+#: that pair and is otherwise identical.
+#: The 2026-08 combined dataset. Unlike Data_analysis/analysis/v1 (Session1
+#: only, and MISSING start_frames/end_frames) this one carries both sessions
+#: AND the metadata needed to pin the published exemplar:
+#:   fly_ids       'Session0/2025_10_20_13_20_04/bout00028/fly0'  (bout in the id)
+#:   start_frames  446306      bout_indices 28    recordings Session0/...
+#:   male_fly 1    sex_verified True
+#: The exemplar is bout_044/bout_045 there, T=2007 (the Old_preds
+#: `_full_exemplar` file had T=2006 -- one frame shorter).
 DEFAULT_H5 = ("/gscratch/portia/eabe/data/Johnson_lab/courtship/Data_analysis/"
-              "analysis/v1/ik_output_combined_v1_courtship_both.h5")
+              "analysis/v1_2026-08/ik_output_combined_v1_courtship_both.h5",)
 #: Body models live in the sibling Brunton-Lab/fruitfly_body_models checkout
 #: (== paths.body_model_dir), not under models/ in this repo.
 _BODY_MODELS = _PROJECT_ROOT.parent / "fruitfly_body_models"
 DEFAULT_MODEL = str(_BODY_MODELS / "fruitfly_v1" / "fruitfly_v1_free.xml")
 DEFAULT_SESSION = ("/gscratch/portia/eabe/data/Johnson_lab/Video_recordings/"
-                   "courtship/Session1/2026_04_02_16_21_32")
-DEFAULT_SAM3_ROOT = DEFAULT_SESSION + "/Predictions_3D_34662592"
+                   "courtship/Session0/2025_10_20_13_20_04")
+#: == the notebook's BOUTS_ROOT; holds bout_00028/{fly0.csv,fly1.csv,sam3_masks.npz}.
+DEFAULT_SAM3_ROOT = DEFAULT_SESSION + "/Predictions_3D_34662304"
 DEFAULT_CAM = "Cam2012630"
 DEFAULT_FREE_RUN_H5 = ("/gscratch/portia/eabe/data/Johnson_lab/processed/"
                        "free_running/NewBouts/v1/ik_output_combined_v1_free_running.h5")
 #: The exemplar recording; bouts are matched by this substring of info/fly_ids.
-DEFAULT_EXEMPLAR_RECORDING = "2026_04_02_16_21_32"
+DEFAULT_EXEMPLAR_RECORDING = "2025_10_20_13_20_04"
+#: The published figure's exemplar, pinned exactly as the notebook pins it:
+#:     _TARGET_FLY_ID_PREFIX = 'Session0/2025_10_20_13_20_04'
+#:     _TARGET_START_FRAME   = 446306
+#: This replaces the old `song_balance` heuristic, which had no way to know
+#: WHICH bout the paper used and picked a different one (Session1 @ 380781).
+#: Resolves to merged bout_030/bout_031 == pair_idx 15, T=2006 -- every one of
+#: which matches the notebook's own recorded output.
+DEFAULT_EXEMPLAR_FLY_PREFIX = "Session0/2025_10_20_13_20_04"
+DEFAULT_EXEMPLAR_START_FRAME = 446306
 #: Root globbed by `find_courtship_sessions` for `**/sam3_aligned.h5` (the
 #: pooled alignment violin's population). Independent of `--session`/
 #: `--sam3-root`: those point at the raw video + calibration for the ONE
@@ -298,6 +487,23 @@ def _load_kp3d(npz_path, expected_n_kp=None) -> np.ndarray:
     return arr
 
 
+def _recording_base(fly_id: str) -> str:
+    """Strip a fly_id down to the RECORDING id the processed tree uses.
+
+        'Session1/2026_04_02_16_21_32_fly1'            -> 'Session1/2026_04_02_16_21_32'
+        'Session0/2025_10_20_13_20_04/bout00028/fly0'  -> 'Session0/2025_10_20_13_20_04'
+
+    The second (2026-08) form also names the bout, so trailing `flyN` and
+    `boutNNNNN` path segments are dropped before the older `_flyN` suffix
+    strip. `courtship_bout_summary.csv`'s `fly_id` column carries neither.
+    """
+    parts = str(fly_id).rstrip("/").split("/")
+    while len(parts) > 1 and (parts[-1].startswith("fly")
+                              or parts[-1].startswith("bout")):
+        parts.pop()
+    return "/".join(parts).rsplit("_fly", 1)[0]
+
+
 def _processed_fly_dir(fly_id: str) -> str:
     """``'Session1/2026_04_02_16_21_32_fly1'`` -> ``'fly1'``.
 
@@ -309,7 +515,14 @@ def _processed_fly_dir(fly_id: str) -> str:
     (key0), not to this fly_id suffix. Always derive the directory from the
     fly_id suffix; never assume key0 -> `fly0` / key1 -> `fly1`.
     """
-    tail = fly_id.rsplit("_", 1)[-1]
+    # Two fly_id shapes are in the wild:
+    #   Old_preds / analysis-v1 : 'Session1/2026_04_02_16_21_32_fly1'  (_flyN suffix)
+    #   analysis v1_2026-08     : 'Session0/2025_10_20_13_20_04/bout00028/fly0'
+    #                             (path-style, and it names the bout too)
+    # Take the last path segment first, then fall back to the '_' split.
+    tail = fly_id.rstrip("/").rsplit("/", 1)[-1]
+    if not tail.startswith("fly"):
+        tail = tail.rsplit("_", 1)[-1]
     if not tail.startswith("fly"):
         raise ValueError(f"cannot derive fly dir from fly_id {fly_id!r}")
     return tail
@@ -392,7 +605,75 @@ _DEFAULT_MALE_SLOT = 1
 _DEFAULT_FEMALE_SLOT = 0
 
 
-def _resolve_male_female_slots(sex_meta, sex_json=None) -> tuple:
+def _male_csv_per_bout(bouts_root, bout_names, processed_recording_dir):
+    """Which of ``fly0.csv``/``fly1.csv`` holds the MALE, decided per bout.
+
+    `utils.compute_per_bout_pitch_alignment` takes a single `male_csv` for
+    every bout. That is wrong here for two compounding reasons, both
+    measured on Session0/2025_10_20_13_20_04:
+
+    1. `sex.json`'s `male_fly` (a processed-tree DIRECTORY index) varies by
+       bout -- bout_00028 says 0, bout_00024 says 1.
+    2. The CSV fly index is NOT the directory index, and whether it is
+       swapped ALSO varies by bout. Correlating each CSV against each
+       directory's `kp3d` gives, for bout_00024, `fly0.csv <-> dir fly1`
+       (r=+0.9995) and `fly1.csv <-> dir fly0` (r=+0.859) -- swapped -- while
+       bout_00028 is not swapped (r=+0.971 / +0.9998).
+
+    Reading a fixed `fly1.csv` therefore measured the FEMALE's pitch against
+    the male->female target vector on bout_00024, giving a fixed ~-82 deg
+    offset (0% sign variation, IQR ~14 deg) that showed up as the violin's
+    81.75 deg outlier. Choosing the CSV that actually maps to the male
+    directory drops it to 20.15 deg, the population median.
+
+    Returns ``{bout_name: 'fly0.csv' | 'fly1.csv'}``; bouts whose evidence is
+    missing or ambiguous are omitted, and the caller keeps the default.
+    """
+    import json as _json
+    import pandas as _pd
+
+    def _spread(a):
+        a = np.asarray(a, float)
+        return np.nanstd(a.reshape(len(a), -1), axis=1)
+
+    def _csv_xyz(path):
+        d = _pd.read_csv(path, header=[0, 1], index_col=0)
+        kp = sorted({c[0] for c in d.columns})
+        return np.stack([np.stack([d[(k, ax)].to_numpy() for k in kp], 1)
+                         for ax in ("x", "y", "z")], -1)
+
+    out = {}
+    for name in bout_names:
+        bdir = Path(bouts_root) / name
+        pose = Path(processed_recording_dir) / "pose" / "bouts" / name
+        sex_path = pose / "sex.json"
+        if not sex_path.exists():
+            continue
+        try:
+            male_dir = int(_json.loads(sex_path.read_text())["male_fly"])
+            dir_kp = {f: np.load(pose / f / "kp3d.npz")["kp3d"]
+                      for f in ("fly0", "fly1")}
+            best = {}
+            for csv_name in ("fly0.csv", "fly1.csv"):
+                a = _spread(_csv_xyz(bdir / csv_name))
+                scores = {}
+                for f, arr in dir_kp.items():
+                    b = _spread(arr)
+                    n = min(len(a), len(b))
+                    m = np.isfinite(a[:n]) & np.isfinite(b[:n])
+                    scores[f] = (float(np.corrcoef(a[:n][m], b[:n][m])[0, 1])
+                                 if m.sum() > 50 else -np.inf)
+                best[csv_name] = max(scores, key=scores.get)
+            # Require a clean one-to-one mapping; anything else is ambiguous.
+            if set(best.values()) == {"fly0", "fly1"}:
+                want = f"fly{male_dir}"
+                out[name] = next(c for c, d in best.items() if d == want)
+        except Exception:                        # noqa: BLE001 - skip this bout
+            continue
+    return out
+
+
+def _resolve_male_female_slots(sex_meta, sex_json=None, override=None) -> tuple:
     """Return ``(male_slot, female_slot)``.
 
     Round 10 finding: the mask SLOT is a FOURTH id scheme — distinct from
@@ -428,6 +709,14 @@ def _resolve_male_female_slots(sex_meta, sex_json=None) -> tuple:
     matching the historical hardcode — only when NEITHER is present; the
     caller should print when this fallback fires.
     """
+    # An explicit operator decision wins outright. The guard below refuses to
+    # GUESS between disagreeing sexers; it should not block a human who has
+    # looked at the evidence and decided. Provenance is returned so the bundle
+    # meta records that this was an override, not an inference.
+    if override is not None:
+        m = int(override)
+        return m, 1 - m
+
     human_slot = None
     if sex_json:
         confidence = str(sex_json.get("confidence", "")).lower()
@@ -498,7 +787,7 @@ def _resolve_session_bout(session_dir, sam3_root, recording: str, clip_len: int,
 
     csv_path = Path(session_dir) / "courtship_bout_summary.csv"
     df = pd.read_csv(csv_path)
-    base = str(recording).rsplit("_fly", 1)[0]
+    base = _recording_base(recording)
     rows = df[df["fly_id"].astype(str) == base]
     n = rows["end_frame"] - rows["start_frame"] + 1
     matches = rows[(n - int(clip_len)).abs() <= tol]
@@ -596,7 +885,9 @@ def main(argv=None) -> int:
     import h5py
     from scipy.signal import hilbert
 
-    from utils.courtship_loader import load_courtship_h5, pair_bouts, analyze_all_pairs
+    from utils.courtship_loader import (load_courtship_h5,
+                                        load_and_merge_courtship_h5, pair_bouts,
+                                        analyze_all_pairs)
     from utils.song_analysis import SongAnalysisConfig
     from utils.sex_id import SexIdConfig
     from utils.locomotion import LocomotionConfig
@@ -605,7 +896,19 @@ def main(argv=None) -> int:
     from utils import courtship_figure_panels as cfp
 
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--h5", default=DEFAULT_H5)
+    ap.add_argument("--h5", nargs="+", default=list(DEFAULT_H5),
+                    help="one or more combined h5 files, merged in order "
+                         "(Session0 first, so the exemplar keeps its index)")
+    ap.add_argument("--exemplar-fly-prefix", default=DEFAULT_EXEMPLAR_FLY_PREFIX,
+                    help="select the exemplar by this info/fly_ids prefix")
+    ap.add_argument("--male-slot", type=int, default=None, choices=(0, 1),
+                    help="override the male MASK SLOT when the sexers "
+                         "disagree and a human has adjudicated. Slot indices "
+                         "equal processed fly-dir indices only when measured "
+                         "so -- verify before using.")
+    ap.add_argument("--exemplar-start-frame", type=int,
+                    default=DEFAULT_EXEMPLAR_START_FRAME,
+                    help="...together with this start_frame (the notebook's pin)")
     ap.add_argument("--model-xml", default=DEFAULT_MODEL)
     ap.add_argument("--floor-xml", default=DEFAULT_FLOOR)
     ap.add_argument("--viz-camera", default=VIZ_CAMERA)
@@ -642,8 +945,40 @@ def main(argv=None) -> int:
 
     skipped: List[str] = []
 
-    data, info, kp_names, bout_keys = load_courtship_h5(args.h5)
-    pairs = pair_bouts(bout_keys, info)
+    # `load_and_merge_courtship_h5` only carries a FIXED list of info keys
+    # (utils._PER_BOUT_INFO_KEYS / _GLOBAL_INFO_KEYS) across the merge, so it
+    # silently DROPS the 2026-08 dataset's new metadata -- `recordings`,
+    # `bout_indices`, `male_fly`, `sex_verified`, `fly_slots`,
+    # `reconstructable`. Losing those disables the verified-sexing path and
+    # the arena gate. A single file needs no merge, so load it directly and
+    # keep its whole `info` intact.
+    if len(args.h5) == 1:
+        data, info, kp_names, bout_keys = load_courtship_h5(args.h5[0])
+    else:
+        data, info, kp_names, bout_keys = load_and_merge_courtship_h5(args.h5)
+        _dropped = [k for k in ("recordings", "bout_indices", "male_fly",
+                                "sex_verified")
+                    if k not in info]
+        if _dropped:
+            print(f"note: merging drops info keys {_dropped}; verified sexing "
+                  f"and the arena gate fall back to per-bout files")
+    # `pair_bouts` pairs consecutive fly0/fly1 but ALSO demands
+    # `bucket[i] == 'both'`. In the 2026-08 dataset `bucket` no longer means
+    # that -- it holds the SESSION ('Session0'/'Session1') -- so the check
+    # never matches and every pair is dropped ("no pairs survived filtering").
+    # `source_flies` is still a clean alternating fly0/fly1, so pair on that
+    # alone when no entry says 'both'.
+    _info_pair = dict(info)
+    _bkt = [(v.decode() if isinstance(v, bytes) else str(v))
+            for v in info.get("bucket", [])]
+    if _bkt and not any(b == "both" for b in _bkt):
+        print(f"pairing: `bucket` holds {sorted(set(_bkt))[:3]} not 'both'; "
+              f"pairing on source_flies alone")
+        _info_pair["bucket"] = []
+    pairs = pair_bouts(bout_keys, _info_pair)
+    print(f"bouts: {len(bout_keys)}  pairs: {len(pairs)}")
+    for _p in args.h5:
+        print(f"h5 source: {_p}")
 
     # info/fly_ids is an h5 GROUP keyed by STRING INTEGERS ("0", "1", "10"...),
     # not by bout name. Iterating it yields LEXICOGRAPHIC order, so entry 3 is
@@ -652,46 +987,88 @@ def main(argv=None) -> int:
     # bd085f7 ("bout keys past 999 sorted out of order against info arrays").
     # Verified: lexicographic gives 2026_04_02_15_25_51 at index 3 where
     # numeric correctly gives 2026_04_02_11_52_43. Ruling 16.
-    with h5py.File(args.h5, "r") as _f:
-        _g = _f["info"]["fly_ids"]
-        fly_ids = [_g[str(i)][()].decode() for i in range(len(_g))]
+    # `load_and_merge_courtship_h5` already coerces every per-bout info array
+    # to a plain list in numeric order (utils._info_to_list), so the
+    # lexicographic hazard the direct h5py read guarded against cannot arise
+    # here -- and reading one file directly would be wrong now that several
+    # are merged.
+    def _as_str(v) -> str:
+        return v.decode() if isinstance(v, bytes) else str(v)
 
+    fly_ids = [_as_str(v) for v in info.get("fly_ids", [])]
+    start_frames = [int(v) for v in info.get("start_frames", [])]
+    # Optional per-bout sexing carried by the 2026-08 dataset; absent in older
+    # files, in which case the sex.json / sex_meta path below still applies.
+    _male_fly_all = [_as_str(v) for v in info.get("male_fly", [])]
+    _sex_ver_all = [_as_str(v) for v in info.get("sex_verified", [])]
+    if len(fly_ids) != len(bout_keys):
+        raise SystemExit(f"info/fly_ids has {len(fly_ids)} entries for "
+                         f"{len(bout_keys)} bouts")
+    if len(start_frames) != len(bout_keys):
+        raise SystemExit(
+            f"info/start_frames has {len(start_frames)} entries for "
+            f"{len(bout_keys)} bouts. Newer combined h5 files DROP "
+            f"start_frames/end_frames; the exemplar cannot be pinned without "
+            f"them. Use the Old_preds files (see DEFAULT_H5).")
+
+    # Pin the exemplar exactly as the notebook pins it -- by (fly_id prefix,
+    # start_frame) -- rather than ranking bouts by a song-content heuristic.
+    # The heuristic had no way to know WHICH bout the paper used: it selected
+    # Session1/2026_04_02_16_21_32 @ 380781, a different bout in a different
+    # session from the published figure's Session0 @ 446306.
     def recording_of(res) -> str:
         """Recording id for a pair result, via its bout's numeric index."""
         return fly_ids[bout_keys.index(res["key0"])]
+
     song = SongAnalysisConfig(); song.pipeline = "both"
     results = analyze_all_pairs(
         data, pairs, kp_names, song_cfg=song, sex_cfg=SexIdConfig(),
         loc_cfg=LocomotionConfig(), pair_cfg=PairValidityConfig())
     if not results:
         raise SystemExit("no pairs survived filtering; nothing to bundle")
-    # Prefer an exemplar from the recording that ALSO has video + SAM3, so the
-    # traces and the video frames describe the same flies.
-    cands = [r for r in results if args.recording in recording_of(r)]
-    if not cands:
-        skipped.append(f"exemplar from {args.recording!r} (no surviving pair); "
-                       f"falling back to all recordings")
-        cands = results
 
-    def song_balance(r) -> float:
-        """min(frac_pulse, frac_sine) over valid male frames.
+    # Bouts where only one fly could be reconstructed contribute nothing to
+    # `pairs`, and every pooled panel derives from pair results -- so a good
+    # male fit was being discarded because its partner was unsolvable. Analyse
+    # those males alone and pool them into the SINGLE-FLY panels only (wing
+    # phase, wing-angle density, pulse class, z-height). `results` is left
+    # untouched: the exemplar, the pitch traces and the pitch-alignment violin
+    # are PAIR quantities and must never see these.
+    singles = analyze_unpaired_males(data, bout_keys, _info_pair, pairs, kp_names,
+                                     song_cfg=song)
+    if singles:
+        print(f"single-fly: pooling {len(singles)} unpaired male bout(s) into the "
+              f"wing/pulse/z-height panels: {[r['key0'] for r in singles]}")
+    pooled = list(results) + list(singles)
 
-        The figure's point is that wing kinematics distinguish song TYPES, so
-        the exemplar must contain BOTH in usable proportion. Ranking by
-        duration instead (Ruling 17) picked a 3.06 s bout that was 63% sine and
-        23% pulse: one long sine region, nothing like the published figure.
-        Maximising the WEAKER fraction selects genuinely mixed song.
-        """
-        lab = np.asarray(r["male_labels"])
-        v = np.asarray(r["male_valid"], bool)
-        if not v.any():
-            return -1.0
-        sel = lab[v]
-        return min(float((sel == "pulse").mean()), float((sel == "sine").mean()))
+    want_prefix = args.exemplar_fly_prefix
+    want_start = int(args.exemplar_start_frame)
+    ex = None
+    for _r in results:
+        _j = bout_keys.index(_r["key0"])
+        if want_prefix in fly_ids[_j] and start_frames[_j] == want_start:
+            ex = _r
+            break
+    if ex is None:
+        # Fail loudly. A silent fallback to "some other bout" is how the wrong
+        # exemplar shipped in the first place.
+        _avail = sorted({_recording_base(fly_ids[bout_keys.index(r["key0"])])
+                         for r in results})
+        raise SystemExit(
+            f"exemplar not found: {want_prefix!r} @ start_frame {want_start}.\n"
+            f"  {len(results)} surviving pairs across recordings: {_avail}\n"
+            f"  (the Session0 exemplar needs the Old_preds Session0 h5 in --h5)")
 
-    ex = max(cands, key=song_balance)
-    print(f"exemplar {ex['key0']}/{ex['key1']} from {recording_of(ex)} "
-          f"(T={int(ex['T'])}, {len(cands)} candidates)")
+    _j = bout_keys.index(ex["key0"])
+    info_male_fly = (int(_male_fly_all[_j]) if _j < len(_male_fly_all) else None)
+    info_sex_verified = (str(_sex_ver_all[_j]).lower() == "true"
+                         if _j < len(_sex_ver_all) else False)
+    if info_male_fly is not None:
+        print(f"dataset sexing: male_fly={info_male_fly} "
+              f"sex_verified={info_sex_verified}")
+    print(f"exemplar {ex['key0']}/{ex['key1']} from {fly_ids[_j]} "
+          f"@ start_frame {start_frames[_j]} (T={int(ex['T'])}, "
+          f"pair_idx={ex['pair_idx']}, {len(results)} pairs)")
     fs = float(song.fs)
     T = int(ex["T"])
 
@@ -711,7 +1088,7 @@ def main(argv=None) -> int:
     # `_resolve_session_bout` would otherwise strip internally, because it is
     # ALSO needed here to build the processed-tree recording directory path
     # (which, unlike the CSV's `fly_id` column, is not itself suffixed).
-    recording_base = str(recording_of(ex)).rsplit("_fly", 1)[0]
+    recording_base = _recording_base(recording_of(ex))
     processed_recording_dir = Path(args.processed_root) / recording_base
     processed_sam3_root = processed_recording_dir / "sam3_masks"
     # Round 7: key0/key1's processed fly0/fly1 directory is NOT positionally
@@ -775,13 +1152,28 @@ def main(argv=None) -> int:
             if npz_sex_meta is None and npz_sex_json is None:
                 print("sam3 sex_meta and sex.json both absent; using "
                       "default male/female mask slots (1, 0)")
+            # The 2026-08 dataset carries VERIFIED sexing per bout
+            # (`info/male_fly` + `info/sex_verified`). Prefer it over both
+            # sex.json and the mask-area vote: for the exemplar it says
+            # male_fly=1 / verified, while the stale sex.json says 0 -- and
+            # processed/courtship/id_review.json flags that sex.json entry
+            # "needs re-review: agreement 0.54 < 0.9", applied=False.
+            _slot_override = args.male_slot
+            _sex_src = "explicit --male-slot (operator override)"
+            if _slot_override is None and info_male_fly is not None:
+                _slot_override = info_male_fly
+                _sex_src = ("info/male_fly (dataset, sex_verified)"
+                            if info_sex_verified else "info/male_fly (dataset)")
             male_slot, female_slot = _resolve_male_female_slots(
-                npz_sex_meta, npz_sex_json)
-            sex_slot_source = ("sex.json (human-confirmed)"
-                               if (npz_sex_json
-                                   and str(npz_sex_json.get("confidence", "")).lower() == "user")
-                               else ("sex_meta (mask-area vote)" if npz_sex_meta
-                                    else "default"))
+                npz_sex_meta, npz_sex_json, override=_slot_override)
+            if _slot_override is not None:
+                sex_slot_source = _sex_src
+            else:
+                sex_slot_source = ("sex.json (human-confirmed)"
+                                   if (npz_sex_json
+                                       and str(npz_sex_json.get("confidence", "")).lower() == "user")
+                                   else ("sex_meta (mask-area vote)" if npz_sex_meta
+                                        else "default"))
             print(f"sam3 mask slots -> male={male_slot} female={female_slot} "
                   f"(source: {sex_slot_source})")
         except Exception as e:                   # noqa: BLE001 - report, don't die
@@ -791,7 +1183,7 @@ def main(argv=None) -> int:
 
     # --- pooled aggregates -------------------------------------------------
     phase_diffs = []
-    for r in results:
+    for r in pooled:
         wd = r["song0"]["wing_data"]
         zL = np.asarray(wd["WingL_V13"]["z"], float)
         zR = np.asarray(wd["WingR_V13"]["z"], float)
@@ -810,7 +1202,7 @@ def main(argv=None) -> int:
                 phase_diffs.append(np.angle(R))
 
     ext_pulse, ext_sine = [], []
-    for r in results:
+    for r in pooled:
         hL, hR = r["song0"].get("horiz_angle_L"), r["song0"].get("horiz_angle_R")
         if hL is None or hR is None:
             continue
@@ -823,7 +1215,7 @@ def main(argv=None) -> int:
         if (base & (lab == "sine")).any():
             ext_sine.append(ext[base & (lab == "sine")])
 
-    ptr = get_pulse_type_labels(results, fs=fs)
+    ptr = get_pulse_type_labels(pooled, fs=fs)
 
     # Floor-corrected (round 9 finding): the courtship arms (pulse_z/sine_z,
     # via r["com_z"]) already subtract each bout's own floor
@@ -844,7 +1236,18 @@ def main(argv=None) -> int:
         q1 = np.asarray(data[ex["key1"]]["qpos"])
         n = min(len(q0), len(q1), T)
         qpos_pair = _pair_qpos(q0, q1, n)
-        idx = np.linspace(0, n - 1, args.n_render, dtype=int)
+        # A NaN qpos row renders as a BLACK frame. bout_045's qpos is finite
+        # only to row 1938/2007, and linspace's last index (n-1) landed in the
+        # NaN tail -> render_3 came back mean=0.0, std=0.0. Sample across the
+        # frames that are actually renderable instead.
+        _ok = np.isfinite(qpos_pair[:n]).all(axis=tuple(range(1, qpos_pair.ndim)))
+        _ok_idx = np.flatnonzero(_ok)
+        if _ok_idx.size == 0:
+            raise RuntimeError("no finite qpos frames to render")
+        if _ok_idx.size < n:
+            print(f"render strip: {n - _ok_idx.size}/{n} frames have NaN qpos; "
+                  f"sampling the {_ok_idx.size} renderable ones")
+        idx = _ok_idx[np.linspace(0, _ok_idx.size - 1, args.n_render, dtype=int)]
         render_frames = _render_frames(
             args.model_xml, args.floor_xml, qpos_pair, idx,
             camera=args.viz_camera)
@@ -883,12 +1286,31 @@ def main(argv=None) -> int:
         dlt_csv = calib_dir / f"{args.cam}_dlt.csv"
         mp4 = Path(args.session) / f"{args.cam}.mp4"
         sam3_npz = processed_sam3_root / sam3_bout / "sam3_masks.npz"
+        # Full camera frame size (H, W) -- the crop is clamped to it below so
+        # a fly at the arena wall yields a shifted full-size window, never a
+        # truncated sliver. Taken from the mask npz rather than by decoding a
+        # frame: the masks are stored at full frame resolution.
+        with np.load(sam3_npz, allow_pickle=True) as _z:
+            sam3_shape = np.asarray(_z["shape"]).ravel()[:2]
         pose_bout_dir = processed_recording_dir / "pose" / "bouts" / sam3_bout
         # key0/key1 -> fly0/fly1 is per-exemplar, resolved above (round 7);
         # never hardcode fly0=male here.
-        male_kp3d = _load_kp3d(pose_bout_dir / key0_dir / "kp3d.npz",
+        # The MASK slot comes from the dataset's verified `male_fly`, so the
+        # KEYPOINT arrays must use the same source or panel A ends up with the
+        # male's mask on one fly and the male's keypoints on the other (seen:
+        # yellow male keypoints on the blue female mask). Pair order (key0) is
+        # NOT the male: for this exemplar key0=fly0 while male_fly=1.
+        if info_male_fly is not None:
+            _male_dir, _female_dir = f"fly{info_male_fly}", f"fly{1 - info_male_fly}"
+            if (_male_dir, _female_dir) != (key0_dir, key1_dir):
+                print(f"kp dirs -> male={_male_dir} female={_female_dir} "
+                      f"(from info/male_fly; pair order was "
+                      f"key0={key0_dir}/key1={key1_dir})")
+        else:
+            _male_dir, _female_dir = key0_dir, key1_dir
+        male_kp3d = _load_kp3d(pose_bout_dir / _male_dir / "kp3d.npz",
                                expected_n_kp=len(kp_names))
-        female_kp3d = _load_kp3d(pose_bout_dir / key1_dir / "kp3d.npz",
+        female_kp3d = _load_kp3d(pose_bout_dir / _female_dir / "kp3d.npz",
                                  expected_n_kp=len(kp_names))
         kp3d_source = str(pose_bout_dir)
         dlt = cfp._dlt_load(dlt_csv)
@@ -929,19 +1351,66 @@ def main(argv=None) -> int:
         # on; a per-frame crop centred on the pair's Scutellum midpoint is
         # correct for ANY recording. --roi, when explicitly given, overrides
         # this and forces the fixed window instead (Finding 2).
+        common = dict(kp_xyz_per_frame=male_kp3d, kp_names=kp_names,
+                      dlt_coeffs=dlt, fs=fs, kp_scale=args.kp_scale,
+                      video_frame_offset=video_frame_offset_raw,
+                      kp_xyz_fly1_per_frame=female_kp3d,
+                      mask_colors=["#e74c3c", "#3a7bff"], mask_alpha=0.35)
         if args.roi is not None:
-            roi_kwargs = {"roi": tuple(args.roi)}
+            cfp.panel_video_strip_with_kp(
+                list(axv), mp4, vidx, masks_per_fly=masks,
+                roi=tuple(args.roi), **common)
         else:
+            # A per-frame crop CENTRED on the pair, but CLAMPED to the frame.
+            # `center_xyz` + `crop_wh` alone truncates whenever the window
+            # runs off the image: this camera is 448x1936, so a 400-tall crop
+            # barely fits at all -- measured, every frame came back 269 rows
+            # and the last one 63 (the flies end the bout at the arena wall),
+            # rendering as a sliver. Clamping SHIFTS the window inward
+            # instead, so every frame is the same, full requested size.
+            # Done one axis at a time because the panel API takes a single
+            # `roi` for the whole strip.
+            from utils.courtship_figure_panels import _dlt_project
             center_xyz = _pair_center_xyz(
                 male_kp3d, female_kp3d, kp_names.index("Scutellum"), T)
-            roi_kwargs = {"center_xyz": center_xyz, "crop_wh": tuple(args.crop_wh)}
-        cfp.panel_video_strip_with_kp(
-            list(axv), mp4, vidx, kp_xyz_per_frame=male_kp3d, kp_names=kp_names,
-            dlt_coeffs=dlt, fs=fs, kp_scale=args.kp_scale,
-            video_frame_offset=video_frame_offset_raw, masks_per_fly=masks,
-            kp_xyz_fly1_per_frame=female_kp3d,
-            mask_colors=["#e74c3c", "#3a7bff"], mask_alpha=0.35,
-            **roi_kwargs)
+            # `_dlt_project` expects DLT units; kp3d is in KP units, and
+            # `kp_scale` is the conversion (the panel applies it internally).
+            # Verified against kp2d ground truth: scaled -> 27 px median
+            # error; unscaled -> 15202 px, i.e. far off-frame, which silently
+            # parked the crop in an empty corner.
+            uv = np.asarray(_dlt_project(
+                dlt, np.asarray(center_xyz, float) * float(args.kp_scale)))
+            # The pair centre is NaN wherever either fly is untracked -- it is
+            # NaN on this bout's LAST frame, which is exactly one of the
+            # sampled ones. Carry the nearest finite centre forward/back so a
+            # dropout re-uses a real window instead of collapsing to (0, 0).
+            _good = np.isfinite(uv).all(axis=1)
+            if _good.any():
+                _idx = np.where(_good, np.arange(len(uv)), -1)
+                _idx = np.maximum.accumulate(_idx)
+                _first = int(np.argmax(_good))
+                _idx[_idx < 0] = _first
+                uv = uv[_idx]
+            else:
+                raise RuntimeError("pair centre is NaN for the whole bout; "
+                                   "cannot centre the video crop")
+            H, W = (int(v) for v in np.asarray(sam3_shape).ravel()[:2])
+            cw = int(min(args.crop_wh[0], W))
+            ch = int(min(args.crop_wh[1], H))
+            if (cw, ch) != tuple(args.crop_wh):
+                print(f"video crop: requested {tuple(args.crop_wh)} exceeds the "
+                      f"{W}x{H} frame; using {(cw, ch)}")
+            for i, ax in enumerate(np.atleast_1d(axv)):
+                fi = int(vidx[i])
+                u, v = (uv[fi] if fi < len(uv) else uv[-1])
+                x0 = int(round(u - cw / 2.0))
+                y0 = int(round(v - ch / 2.0))
+                x0 = max(0, min(x0, W - cw))
+                y0 = max(0, min(y0, H - ch))
+                cfp.panel_video_strip_with_kp(
+                    [ax], mp4, [fi],
+                    masks_per_fly=[m[i:i + 1] for m in masks],
+                    roi=(x0, y0, cw, ch), **common)
         figv.canvas.draw()
         for a in axv:
             a.set_position(a.get_position())      # freeze before extraction
@@ -1027,14 +1496,88 @@ def main(argv=None) -> int:
                 f"align_violin (no sam3_aligned.h5 found under "
                 f"{args.courtship_video_root})")
         else:
+            # Compute BOTH male-CSV choices, then take each bout's value
+            # from whichever CSV actually holds that bout's male. A single
+            # fixed `male_csv` is wrong per-bout (see `_male_csv_per_bout`);
+            # on Session0 it produced the violin's 81.75 deg outlier by
+            # measuring the FEMALE's pitch on bout_00024.
             al = compute_pitch_alignment_all_sessions(
-                align_sessions, kp_scale=args.kp_scale)
+                align_sessions, kp_scale=args.kp_scale, male_csv="fly1.csv")
             per_bout_align = np.asarray(al["median_abs_alignment_deg"], float)
+            try:
+                al0 = compute_pitch_alignment_all_sessions(
+                    align_sessions, kp_scale=args.kp_scale,
+                    male_csv="fly0.csv")
+                alt = np.asarray(al0["median_abs_alignment_deg"], float)
+                # `session_of_bout` is a numpy ARRAY, so `x or []` would
+                # call bool() on it -> "truth value ... is ambiguous".
+                _n = al.get("bout_names_global")
+                if _n is None:
+                    _n = al.get("bout_names")
+                names = list(_n) if _n is not None else []
+                _s = al.get("session_of_bout")
+                sob = np.asarray(_s).tolist() if _s is not None else []
+                fixed = 0
+                for si, sess in enumerate(align_sessions):
+                    bouts_root = sess[1] if isinstance(sess, (tuple, list)) else sess
+                    sess_names = [names[i] for i in range(len(names))
+                                  if not sob or sob[i] == si]
+                    choice = _male_csv_per_bout(
+                        bouts_root, sess_names, processed_recording_dir)
+                    for i, nm in enumerate(names):
+                        if sob and sob[i] != si:
+                            continue
+                        if choice.get(nm) == "fly0.csv" and i < alt.size:
+                            if not np.isclose(per_bout_align[i], alt[i]):
+                                fixed += 1
+                            per_bout_align[i] = alt[i]
+                if fixed:
+                    print(f"align_violin: male CSV re-resolved per bout; "
+                          f"{fixed}/{len(names)} bouts took fly0.csv "
+                          f"(max {np.nanmax(per_bout_align):.1f} deg)")
+            except Exception as e:               # noqa: BLE001
+                skipped.append(
+                    f"align_violin per-bout male CSV ({type(e).__name__}: {e}) "
+                    f"-- falling back to a single fixed male_csv")
     except Exception as e:                       # noqa: BLE001 - report, don't die
         skipped.append(f"align_violin ({type(e).__name__}: {e})")
 
+    # --- arena-envelope gate for the z-height panel ------------------------
+    # Only possible when the dataset names each bout's recording + index
+    # (the 2026-08 file does; older ones do not, and the gate is then skipped).
+    arena_bad_masks: Dict[str, np.ndarray] = {}
+    try:
+        _recs = [_as_str(v) for v in info.get("recordings", [])]
+        _bidx = [int(v) for v in info.get("bout_indices", [])]
+        _mfly = [int(v) for v in info.get("male_fly", [])]
+        if _recs and _bidx and _mfly:
+            n_gated = 0
+            for r in results:
+                j = bout_keys.index(r["key0"])
+                if j >= len(_recs):
+                    continue
+                rec_dir = Path(args.processed_root) / _recs[j]
+                bad = _outside_arena(rec_dir, f"bout_{_bidx[j]:05d}",
+                                     f"fly{_mfly[j]}",
+                                     int(np.asarray(r["com_z"]).size))
+                if bad.any():
+                    arena_bad_masks[r["key0"]] = bad
+                    n_gated += 1
+            if n_gated:
+                print(f"arena gate: {n_gated}/{len(results)} bouts have frames "
+                      f"outside their recording's Scutellum envelope")
+        else:
+            skipped.append("arena gate (dataset lacks recordings/bout_indices/"
+                           "male_fly; z-height panel ungated)")
+    except Exception as e:                       # noqa: BLE001
+        skipped.append(f"arena gate ({type(e).__name__}: {e})")
+
     extras = {
+        # results + unpaired males; see analyze_unpaired_males. Only the
+        # single-fly panels read this.
+        "pooled": pooled,
         "fs": fs, "start_frame": 0, "end_frame": T,
+        "arena_bad_masks": arena_bad_masks,
         "walking_z": walking_z,
         "phase_diffs": np.asarray(phase_diffs, float),
         "ext_pulse": np.concatenate(ext_pulse) if ext_pulse else np.zeros(0),
