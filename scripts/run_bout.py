@@ -1350,6 +1350,9 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
                    "--conf", str(float(cfg.detector.conf_thresh)),
                    "--session-dir", str(cfg.recording.session_dir),
                    "--predictions-dir", str(cfg.recording.predictions_dir),
+                   # The right panel is rendered from THESE camera poses, so it
+                   # must be this recording's calibration, not the default one.
+                   "--calib-dir", str(cfg.recording.calib_dir),
                    "--start-frame", str(int(bout_start_frame(cfg, bout_idx))),
                    "--fps", str(int(cfg.outputs.overlay_fps)), "--out", sbs_path]
             # The parent process still holds ~90% of the GPU (jax preallocated),

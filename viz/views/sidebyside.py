@@ -126,6 +126,17 @@ def run(args):
     # (Session0) -> wrong videos/masks/frames for any other recording.
     session_dir = getattr(args, "session_dir", None) or rec["session_dir"]
     predictions_dir = getattr(args, "predictions_dir", None) or rec["predictions_dir"]
+    # The calibration MUST follow the session override too. Taking it from
+    # `rec` (the DEFAULT recording) silently rendered the right panel from
+    # Session0's camera poses for a Session1 bout -- the panels then showed the
+    # fly from two different viewpoints again, which is the whole failure this
+    # view exists to remove. Default to the overridden session's own dir.
+    calib_dir = getattr(args, "calib_dir", None)
+    if calib_dir is None:
+        calib_dir = (os.path.join(session_dir, "calibration")
+                     if getattr(args, "session_dir", None) else rec["calib_dir"])
+    if not os.path.isdir(calib_dir):
+        raise FileNotFoundError(f"calibration dir not found: {calib_dir}")
     bout, fly = int(args.bout), int(args.fly)
     T0 = int(args.start)
     conf_thr = float(getattr(args, "conf", 0.3) or 0.3)
@@ -214,7 +225,7 @@ def run(args):
             _outs = vio.load_outputs(args.run, bout, fly)
             rig_world = np.asarray(_outs["kp3d_mm"], float)
             rig_qpos = np.asarray(np.load(qref_path)["qpos"], float)
-            _cam_mats, _cam_names = reproject.camera_matrices(rec["calib_dir"])
+            _cam_mats, _cam_names = reproject.camera_matrices(calib_dir)
             _cam_names = list(_cam_names)
             if left_cam not in _cam_names:
                 raise ValueError(f"left camera {left_cam} not in calibration {_cam_names}")
@@ -255,7 +266,7 @@ def run(args):
                 f"model-space camera instead (not view-matched).")
         _outs = vio.load_outputs(args.run, bout, fly)
         mesh_mm, fitted_mm = _outs["mesh_mm"], _outs["kp3d_mm"]
-        _cam_mats, _cam_names = reproject.camera_matrices(rec["calib_dir"])
+        _cam_mats, _cam_names = reproject.camera_matrices(calib_dir)
         if left_cam not in list(_cam_names):
             raise ValueError(f"left camera {left_cam} not in calibration {list(_cam_names)}")
         left_cam_mat = _cam_mats[list(_cam_names).index(left_cam)]

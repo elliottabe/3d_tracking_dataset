@@ -103,6 +103,10 @@ def build_parser():
                         "'reproj' draws the fitted mesh/sites reprojected as points (no "
                         "MuJoCo); 'mujoco' renders the model-space track1 camera, which is "
                         "NOT view-matched and cannot be used to judge orientation")
+    s.add_argument("--calib-dir", dest="calib_dir", default=None,
+                   help="camera calibration dir (default: <session-dir>/calibration). "
+                        "MUST match the session being rendered: the right panel is built "
+                        "from these camera poses.")
     s.add_argument("--conf", type=float, default=0.3, help="2D keypoint confidence threshold")
     s.add_argument("--panel-h", dest="panel_h", type=int, default=480)
     s.add_argument("--fps", type=int, default=30); s.add_argument("--out", default=None)
