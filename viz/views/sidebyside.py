@@ -1,10 +1,14 @@
 """sidebyside view: a side-by-side QC video for one (bout, fly).
 
 LEFT : raw camera video + SAM mask overlay + ViTPose 2D keypoint SKELETON.
-RIGHT: the fitted body, in the SAME camera as the left panel (`--right reproj`,
-       the default) -- the mesh from outputs.h5 reprojected through that
-       camera's DLT matrix, so mask and mesh are the same pixels and their
-       orientations can be compared directly.
+RIGHT: the fitted body rendered in MuJoCo through a camera built from the LEFT
+       camera's own calibration (`--right rigcam`, the default), so the two
+       panels show the fly from the same viewpoint at the same pixels. The rig
+       uses TELECENTRIC lenses, hence an affine calibration and an orthographic
+       MuJoCo camera -- see viz.core.mjcam.
+
+`--right reproj` draws the fitted mesh/sites reprojected as points instead of
+rendering them (no MuJoCo needed, useful when outputs.h5 is absent).
 
 `--right mujoco` restores the old panel: a MuJoCo render from `track1`, a
 model-space camera (`<camera name="track1" ... mode="trackcom">` in the body
@@ -54,7 +58,7 @@ from viz.core import io as vio
 from viz.core import layout
 from viz.core import overlays
 from viz.core import reproject
-from viz.config import courtship_recording, _CFG_DIR
+from viz.config import courtship_recording, resolve_body_model_xml, _CFG_DIR
 
 # BGR per-group keypoint colours (matches the reference script's palette;
 # distinct enough that legs/head/abdomen/thorax stay legible on the raw frame).
@@ -186,7 +190,7 @@ def run(args):
         start_abs = bout_start_frame(_compose_cfg(), bout)
 
     # --- RIGHT panel ---
-    right_mode = getattr(args, "right", None) or "reproj"
+    right_mode = getattr(args, "right", None) or "rigcam"
     out_path = args.out or f"sidebyside_bout{bout}_fly{fly}.mp4"
     out_dir = os.path.dirname(out_path)
     if out_dir:
@@ -195,6 +199,50 @@ def run(args):
     mesh_mm = fitted_mm = None
     mj_render_path = None
     rframes = None
+    rig = None
+    if right_mode == "rigcam":
+        outs_path = os.path.join(vio.fly_dir(args.run, bout, fly), "outputs.h5")
+        qref_path = os.path.join(vio.fly_dir(args.run, bout, fly), "qpos_refined.npz")
+        if not (os.path.exists(outs_path) and os.path.exists(qref_path)):
+            print(f"[sidebyside] --right rigcam needs outputs.h5 + qpos_refined.npz; "
+                  f"falling back to --right reproj")
+            right_mode = "reproj"
+        else:
+            import mujoco
+            from viz.core.mjcam import (mujoco_camera_from_affine,
+                                        similarity_from_points)
+            _outs = vio.load_outputs(args.run, bout, fly)
+            rig_world = np.asarray(_outs["kp3d_mm"], float)
+            rig_qpos = np.asarray(np.load(qref_path)["qpos"], float)
+            _cam_mats, _cam_names = reproject.camera_matrices(rec["calib_dir"])
+            _cam_names = list(_cam_names)
+            if left_cam not in _cam_names:
+                raise ValueError(f"left camera {left_cam} not in calibration {_cam_names}")
+            _spec = mujoco.MjSpec.from_file(resolve_body_model_xml(cfg.model.MJCF_PATH))
+            _spec.visual.global_.offwidth = int(W)
+            _spec.visual.global_.offheight = int(H)
+            _c = _spec.worldbody.add_camera()
+            _c.name = "rigcam"
+            _c.proj = mujoco.mjtProjection.mjPROJ_ORTHOGRAPHIC
+            _c.fovy = 1.0
+            _c.pos = [0.0, 0.0, 1.0]
+            _mj = _spec.compile()
+            _dat = mujoco.MjData(_mj)
+            _sn = [mujoco.mj_id2name(_mj, mujoco.mjtObj.mjOBJ_SITE, i)
+                   for i in range(_mj.nsite)]
+            _pairs = [(_sn.index(f"tracking[{n}]"), i) for i, n in enumerate(kp_names)
+                      if f"tracking[{n}]" in _sn]
+            rig = dict(
+                mj=_mj, dat=_dat, mujoco=mujoco,
+                cid=mujoco.mj_name2id(_mj, mujoco.mjtObj.mjOBJ_CAMERA, "rigcam"),
+                sidx=[a for a, _ in _pairs], kidx=[b for _, b in _pairs],
+                cam_mat=_cam_mats[_cam_names.index(left_cam)],
+                qpos=rig_qpos, world=rig_world,
+                renderer=mujoco.Renderer(_mj, height=int(H), width=int(W)),
+                cam_from_affine=mujoco_camera_from_affine,
+                similarity=similarity_from_points)
+            print(f"[sidebyside] right panel: MuJoCo through a camera built from "
+                  f"{left_cam}'s calibration (orthographic / telecentric)", flush=True)
     if right_mode == "reproj":
         # View-matched: the fitted mesh through the LEFT camera's own DLT
         # matrix. Same pixels as the left panel, so mask-vs-mesh orientation is
@@ -213,9 +261,9 @@ def run(args):
         left_cam_mat = _cam_mats[list(_cam_names).index(left_cam)]
         print(f"[sidebyside] right panel: fitted mesh reprojected into {left_cam} "
               f"(view-matched)", flush=True)
-    else:
+    elif right_mode == "mujoco":
         from stac_mjx.stac import Stac  # heavy (jax + mujoco); lazy on purpose
-        xml_path = cfg.model.MJCF_PATH
+        xml_path = resolve_body_model_xml(cfg.model.MJCF_PATH)
         stac = Stac(str(xml_path), cfg, kp_names)
         print("[sidebyside] rendering MuJoCo IK (NOT view-matched) ...", flush=True)
     # stac.render REQUIRES a save_path (imageio sniffs the .mp4 extension), but
@@ -264,6 +312,36 @@ def run(args):
         crop = bgr[cy0:cy1, cx0:cx1]
         return cv2.resize(crop, (left_w, panel_h))
 
+    def _draw_right_rigcam(t):
+        """MuJoCo rendered through the LEFT camera's own calibration, cropped
+        identically to the left panel so the two are the same pixels."""
+        mj, dat, mj_mod = rig["mj"], rig["dat"], rig["mujoco"]
+        q = rig["qpos"]
+        if t >= len(q) or not np.isfinite(q[t]).all():
+            return np.zeros((panel_h, left_w, 3), np.uint8)
+        dat.qpos[:] = q[t]
+        mj_mod.mj_forward(mj, dat)
+        Xm = dat.site_xpos[rig["sidx"]]
+        Xw = rig["world"][t][rig["kidx"]]
+        ok = np.isfinite(Xw).all(axis=1)
+        if ok.sum() < 4:
+            return np.zeros((panel_h, left_w, 3), np.uint8)
+        sc, R, tr = rig["similarity"](Xm[ok], Xw[ok])
+        pos, quat, fovy = rig["cam_from_affine"](
+            rig["cam_mat"], (W, H), sc, R, tr, Xm[ok].mean(0), back_off=2.0)
+        mj.cam_pos[rig["cid"]] = pos
+        mj.cam_quat[rig["cid"]] = quat
+        mj.cam_fovy[rig["cid"]] = fovy
+        # cam_xpos/cam_xmat are derived in mj_forward: re-run kinematics AFTER
+        # editing the camera or the scene keeps the previous pose.
+        mj_mod.mj_forward(mj, dat)
+        rig["renderer"].update_scene(dat, camera="rigcam")
+        bgr = cv2.cvtColor(rig["renderer"].render(), cv2.COLOR_RGB2BGR)
+        if mk is not None and mv[t, lc]:
+            overlays.draw_mask(bgr, mk[t, lc], _MASK_FILL, alpha=0.0)
+        crop = bgr[cy0:cy1, cx0:cx1]
+        return cv2.resize(crop, (left_w, panel_h))
+
     def _draw_right_reproj(bgr, t):
         """Fitted mesh + fitted sites in the LEFT camera, same crop as _draw_left."""
         if t < len(mesh_mm) and np.isfinite(mesh_mm[t]).all():
@@ -283,9 +361,10 @@ def run(args):
 
     # --- composite left+right per frame, collect BGR frames, write mp4 + still ---
     left_title = f"{left_cam} video + SAM mask + ViTPose 2D skeleton"
-    right_title = (f"fitted mesh + sites reprojected into {left_cam} (same view)"
-                   if right_mode == "reproj"
-                   else f"MuJoCo IK render ({render_cam}) -- NOT view-matched")
+    right_title = {
+        "rigcam": f"MuJoCo IK @ {left_cam} rig camera (same view) + SAM outline",
+        "reproj": f"fitted mesh + sites reprojected into {left_cam} (same view)",
+    }.get(right_mode, f"MuJoCo IK render ({render_cam}) -- NOT view-matched")
     frames_out = []
     # Sync-aware, like maskvid: cameras drop frames independently, so a
     # positional read shows the mask/keypoint overlay on the WRONG frame for
@@ -301,7 +380,9 @@ def run(args):
         bgr = (cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR) if rgb is not None
                else np.zeros((H, W, 3), np.uint8))
         L = _draw_left(bgr.copy(), T0 + k)
-        if right_mode == "reproj":
+        if right_mode == "rigcam":
+            R = _draw_right_rigcam(T0 + k)
+        elif right_mode == "reproj":
             R = _draw_right_reproj(bgr.copy(), T0 + k)
         else:
             R = cv2.cvtColor(np.asarray(rframes[k]), cv2.COLOR_RGB2BGR)

@@ -96,11 +96,13 @@ def build_parser():
                    help="restrict LEFT-camera auto-pick to these cameras")
     s.add_argument("--camera", default=None, help="MuJoCo render camera (default: track1); "
                    "only used when --right mujoco")
-    s.add_argument("--right", choices=("reproj", "mujoco"), default="reproj",
-                   help="RIGHT panel: 'reproj' (default) reprojects the fitted MESH into the "
-                        "SAME real camera as the left panel, so the two are directly "
-                        "comparable; 'mujoco' renders from a model-space camera (track1), "
-                        "which is NOT view-matched and cannot be used to judge orientation")
+    s.add_argument("--right", choices=("rigcam", "reproj", "mujoco"), default="rigcam",
+                   help="RIGHT panel: 'rigcam' (default) renders MuJoCo through a camera "
+                        "built from the LEFT camera's own calibration -- the rig is "
+                        "telecentric, so an orthographic camera matches it exactly; "
+                        "'reproj' draws the fitted mesh/sites reprojected as points (no "
+                        "MuJoCo); 'mujoco' renders the model-space track1 camera, which is "
+                        "NOT view-matched and cannot be used to judge orientation")
     s.add_argument("--conf", type=float, default=0.3, help="2D keypoint confidence threshold")
     s.add_argument("--panel-h", dest="panel_h", type=int, default=480)
     s.add_argument("--fps", type=int, default=30); s.add_argument("--out", default=None)
