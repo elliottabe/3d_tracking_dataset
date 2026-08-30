@@ -186,6 +186,16 @@ filtering:
 # was discarding outright. This does NOT reach zero loss: where coverage
 # genuinely bottoms out at 2-3 cameras, full-body DLT is ill-conditioned and
 # those frames stay unsolvable regardless of this setting.
+#
+# Fix round 1: min_keypoints alone only protects the solver's per-marker
+# RESIDUAL (already NaN-safe -- see above). It does NOT protect
+# stac_mjx/compute_stac.py's per-frame IK warm-start, which reads the root
+# keypoint and the four trunk-orientation keypoints (ROOT_OPTIMIZATION_KEYPOINT
+# / JAXLS_ORIENTATION_KEYPOINTS in the anatomy config) straight out of the
+# array with NO finite check. So run_bout.py's required_keypoint_indices()
+# additionally requires those specific keypoints be finite before a partial
+# frame is accepted, on top of clearing min_keypoints -- resolved from the
+# SAME anatomy-config keys the solver itself uses, not hardcoded here.
 # null = off (strict no-op, current behaviour).
 nan_solve:
   min_keypoints: null

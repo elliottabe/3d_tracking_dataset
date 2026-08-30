@@ -565,24 +565,107 @@ NAN_SOLVE_MIN_SEG = 30      # frames; shorter finite runs are not worth solving
 NAN_SOLVE_MIN_KEYPOINTS = None  # None = all-or-nothing (unchanged); see cfg.nan_solve.min_keypoints
 
 
-def finite_frame_mask(kp3d, *, min_keypoints: int | None = None) -> np.ndarray:
+def finite_frame_mask(kp3d, *, min_keypoints: int | None = None,
+                       required_indices=None) -> np.ndarray:
     """(T,) bool: frames usable for the IK solve.
 
     min_keypoints=None (default): every keypoint must be finite -- today's
     all-or-nothing behaviour, byte-identical to before this parameter existed.
+    `required_indices` is IGNORED in this branch (see the safety-rail test
+    `test_min_keypoints_none_ignores_required_indices`): when every keypoint
+    is already required, an additional required-subset check can only ever
+    agree with it.
     min_keypoints=N: a frame is usable if at least N of its K keypoints are
     themselves entirely finite (all coordinates present), even if others are
     NaN. This is safe to relax because the IK residual already ignores a NaN
     marker per-frame, per-keypoint (stac_core_jaxls.py's marker_cost: `finite
     = jnp.isfinite(kp)`, zeroing that marker's contribution and gradient) --
     see marker_validity_mask below for the matching per-marker mask.
+
+    required_indices (fix round 1, Task 20): an extra AND condition -- these
+    specific keypoints (if given) must ALSO be finite, regardless of the
+    min_keypoints count being cleared. This exists because relaxing the frame
+    gate alone is not enough: stac_mjx/compute_stac.py's per-frame IK
+    warm-start reads the ROOT keypoint
+    (`kp_root_xyz = kp_flat[:, root_kp_idx*3:root_kp_idx*3+3]`, line ~468) and
+    the four trunk ORIENTATION keypoints
+    (`_estimate_orientation_from_keypoints`) directly out of the keypoint
+    array with NO finite check -- unlike the residual, which is NaN-safe. A
+    partial frame missing exactly one of those hands the solver a NaN initial
+    guess, which can reproduce the very frozen-joint failure mode this task
+    is trying to avoid. Pass `required_keypoint_indices(cfg, kp_names)` here
+    so that set always matches what the solver actually warm-starts from.
     """
     a = np.asarray(kp3d)
     # Per-keypoint finiteness (all coordinates present), i.e. marker_validity_mask.
     per_kp = np.isfinite(a).all(axis=tuple(range(2, a.ndim)))
     if min_keypoints is None:
         return per_kp.all(axis=1)
-    return per_kp.sum(axis=1) >= int(min_keypoints)
+    ok = per_kp.sum(axis=1) >= int(min_keypoints)
+    if required_indices:
+        ok &= per_kp[:, list(required_indices)].all(axis=1)
+    return ok
+
+
+def required_keypoint_indices(cfg, kp_names) -> list[int]:
+    """Keypoint indices (into `kp_names`) a partial frame must still have
+    finite, so `finite_frame_mask`'s `required_indices` gate can never accept
+    a frame the solver's own per-frame warm-start would silently mishandle.
+
+    Mirrors -- deliberately, verbatim in structure -- how
+    `stac_mjx.stac.Stac.__init__` resolves the SAME two indices for its
+    per-frame warm-start (`stac-mjx/stac_mjx/stac.py:208-213` for the root,
+    `:298-309` for orientation), reading them from the SAME two anatomy-config
+    keys (`cfg.model.ROOT_OPTIMIZATION_KEYPOINT`,
+    `cfg.model.JAXLS_ORIENTATION_KEYPOINTS`) and the SAME ordered `kp_names`
+    list already threaded through this file -- rather than hardcoding
+    keypoint names here. If the anatomy config is ever changed to pick a
+    different root or orientation keypoint, this function picks it up too;
+    a hardcoded name would silently diverge from the solver instead.
+
+    Why not import/reuse stac.py's own resolution code directly: building a
+    `Stac` instance is the only place that logic lives, and doing so loads
+    the MJCF and constructs a full mujoco/mjx model -- expensive, and not
+    available at the point in `run_bout.py`'s Stage C where the frame-gating
+    decision must be made (before `ik_only_bout`/`fit_offsets_once` run).
+    Re-deriving the same ~15 lines from the same two config keys is the least
+    fragile alternative to that: a name (not an index) is the single source
+    of truth in both places, so the only way to diverge is for stac.py's own
+    resolution algorithm to change shape -- the same risk every other
+    Stage-C caller of `cfg.model.KP_NAMES` already carries.
+
+    Tolerant by construction, matching stac.py's own fallbacks: a missing
+    config key, or a configured name absent from `kp_names` (e.g. after
+    keypoint pruning for amputated/missing markers), contributes no
+    requirement rather than raising -- exactly mirroring stac.py's own
+    `_root_kp_idx = -1` / `_orientation_kp_indices = None` "warm-start simply
+    skipped" behaviour, never a hard failure.
+    """
+    names = list(kp_names)
+    required: set[int] = set()
+    model_cfg = cfg.model
+
+    # Root warm-start -- stac.py:208-213 gates on key PRESENCE, not truthiness.
+    if "ROOT_OPTIMIZATION_KEYPOINT" in model_cfg:
+        try:
+            required.add(names.index(model_cfg.ROOT_OPTIMIZATION_KEYPOINT))
+        except ValueError:
+            pass  # stac.py would raise here too (name not in kp_names); not our call to fix
+
+    # Orientation warm-start -- stac.py:298-309: rear/left/right required,
+    # front only if given; if ANY name fails to resolve, stac.py disables the
+    # WHOLE orientation warm-start (sets _orientation_kp_indices = None), so
+    # none of the four become required in that case either -- mirrored here
+    # as one all-or-nothing try, not four independent ones.
+    orient_cfg = model_cfg.get("JAXLS_ORIENTATION_KEYPOINTS", {})
+    if orient_cfg and len(orient_cfg) >= 3:
+        keys = ["rear", "left", "right"] + (["front"] if "front" in orient_cfg else [])
+        try:
+            required.update(names.index(orient_cfg[k]) for k in keys)
+        except (KeyError, ValueError):
+            pass  # matches stac.py's except -> _orientation_kp_indices = None
+
+    return sorted(required)
 
 
 def marker_validity_mask(kp3d) -> np.ndarray:
@@ -1172,10 +1255,23 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
         # per-frame/per-keypoint (see finite_frame_mask's docstring), so it
         # costs nothing to let the solver see it. Absent/null reproduces
         # today's all-or-nothing behaviour exactly.
+        #
+        # required_indices (fix round 1): min_keypoints alone protects only
+        # the solver's residual, which is already NaN-safe per marker. It does
+        # NOT protect stac_mjx/compute_stac.py's per-frame warm-start, which
+        # reads the root keypoint and the four trunk-orientation keypoints
+        # straight out of the array with no finite check -- so a partial
+        # frame missing exactly one of those would warm-start the solver from
+        # NaN. required_keypoint_indices derives which keypoints those are
+        # from the SAME anatomy-config keys the solver itself resolves them
+        # from (see its docstring), not a hardcoded name, so this can't
+        # silently diverge from the solver if the anatomy config changes.
         _nan_cfg = cfg.get("nan_solve") or {}
         _min_kp_cfg = _nan_cfg.get("min_keypoints", None)
+        _required_idx = required_keypoint_indices(cfg, kp_names)
         _kp_solve, _filled = fill_short_gaps(kp3d)
-        _ok = finite_frame_mask(_kp_solve, min_keypoints=_min_kp_cfg)
+        _ok = finite_frame_mask(_kp_solve, min_keypoints=_min_kp_cfg,
+                                required_indices=_required_idx)
         _segs = contiguous_segments(_ok)
         if _min_kp_cfg is not None:
             _strict_ok = finite_frame_mask(_kp_solve)
@@ -1227,11 +1323,17 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
                 out_h5="stac_ik.tmp.h5", bout_dir=bout_dir, scale=scale,
                 n_frames=len(_kp_solve), bout_idx=bout_idx, fly=fly)
         # Frames we never measured must not masquerade as solved. Same gate as
-        # above: a partial-but-accepted frame (raw kp3d, not gap-filled) is a
-        # real measurement and must survive; a frame only "ok" in _kp_solve
-        # because fill_short_gaps interpolated it is not, and stays re-NaN'd.
+        # above -- including required_indices -- as above: a partial-but-accepted
+        # frame (raw kp3d, not gap-filled) is a real measurement and must
+        # survive; a frame only "ok" in _kp_solve because fill_short_gaps
+        # interpolated it is not, and stays re-NaN'd. Using a DIFFERENT
+        # (weaker) gate here than for `_ok`/`_segs` above would let a frame
+        # the segment-builder correctly excluded (missing root/orientation)
+        # survive as "ok" here anyway, since it was never part of any solved
+        # segment to begin with.
         _restore_unsolved_nan(os.path.join(bout_dir, "stac_ik.tmp.h5"),
-                              finite_frame_mask(kp3d, min_keypoints=_min_kp_cfg),
+                              finite_frame_mask(kp3d, min_keypoints=_min_kp_cfg,
+                                                required_indices=_required_idx),
                               _segs if not _ok.all() else None)
         os.replace(os.path.join(bout_dir, "stac_ik.tmp.h5"),
                   os.path.join(bout_dir, "stac_ik.h5"))
