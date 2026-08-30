@@ -4,6 +4,13 @@ Sweeps all framesets in the requested split, runs a frozen 2-D front-end +
 reproject (HybridNet3D.reproject_volume), and streams fp16 volumes to a
 memmap so the v2vNet trainer can skip the expensive front-end on every step.
 
+The frameset dataset class is SELECTABLE via ``cache.dataset_version``
+(default ``"v5"``): ``"v5"`` loads ``jarvis_jax.data.v5_3d.
+V5FramesetDataset`` (red_data_3d_v5, per-fly framesets, calibration by
+group); ``"v3"`` preserves the legacy ``jarvis_jax.data.v3_3d.
+V3FramesetDataset`` path (red_data_unified_V3). See
+``run_precompute``'s ``dataset_version`` docstring for details.
+
 The 2-D front-end is SELECTABLE via ``cache.front_end`` (default
 ``"vitpose"``, byte-identical to the pre-selector behavior):
 
@@ -203,11 +210,14 @@ def run_precompute(
     front_end: str = "vitpose",
     frontend_ckpt: str | None = None,
     vitpose_cfg=None,
+    dataset_version: str = "v5",
 ):
     """Precompute reprojected volumes and write them to a memmap cache.
 
     Args:
-        root:        Root of the V3 dataset (contains annotations/, train/, val/).
+        root:        Root of the dataset (v5: contains annotations/, images/,
+                     masks/, calibrations/, manifest.json; v3: contains
+                     annotations/, train/, val/) -- see `dataset_version`.
         cache_dir:   Output directory for the cache files. Callers building
                      BOTH a ViTPose and an EfficientTrackBN cache MUST pass a
                      different cache_dir per arm -- this function does not
@@ -232,12 +242,19 @@ def run_precompute(
                      num_keypoints/in_ch container for EfficientTrackBN, same
                      convention as eval_keypoints_2d.py); built from defaults
                      if None.
+        dataset_version: 'v5' (default) | 'v3'. Selects the frameset dataset
+                     class: 'v5' loads `jarvis_jax.data.v5_3d.
+                     V5FramesetDataset` (red_data_3d_v5, per-fly framesets,
+                     calibration looked up by group); 'v3' preserves the
+                     legacy `jarvis_jax.data.v3_3d.V3FramesetDataset` path
+                     (red_data_unified_V3). Both expose an identical
+                     `__getitem__` schema (see v5_3d.py module docstring) so
+                     nothing else in this file needs to branch on it.
     """
     from flax import nnx
 
     from jarvis_jax.config import ViTPoseConfig
     from jarvis_jax.data.repro_cache import load_cache, write_cache
-    from jarvis_jax.data.v3_3d import V3FramesetDataset
     from jarvis_jax.hybridnet.model import HybridNet3D
     from jarvis_jax.hybridnet.v2vnet import V2VNet
     from jarvis_jax.sharding import data_parallel_mesh, replicate, shard_batch
@@ -246,14 +263,22 @@ def run_precompute(
         raise ValueError(
             f"unknown front_end {front_end!r} (expected one of {_FRONT_ENDS})")
 
+    if str(dataset_version) == "v5":
+        from jarvis_jax.data.v5_3d import V5FramesetDataset as FramesetDataset
+        from jarvis_jax.data.v5_3d import frameset_batches  # noqa: F401
+    else:
+        from jarvis_jax.data.v3_3d import V3FramesetDataset as FramesetDataset
+        from jarvis_jax.data.v3_3d import frameset_batches  # noqa: F401
+
     if vitpose_cfg is None:
         vitpose_cfg = ViTPoseConfig()
 
     # ------------------------------------------------------------------
     # Load dataset to determine n
     # ------------------------------------------------------------------
-    print(f"[precompute] Loading dataset: {root} split={split}")
-    ds = V3FramesetDataset(root, split)
+    print(f"[precompute] Loading dataset: {root} split={split} "
+          f"(dataset_version={dataset_version})")
+    ds = FramesetDataset(root, split)
     total = len(ds)
     n = min(limit, total) if limit > 0 else total
     print(f"[precompute] {total} framesets in split; will cache {n}")
@@ -302,6 +327,11 @@ def run_precompute(
     # EfficientTrackBN cache and lets _cache_is_valid catch a mismatch.
     meta["front_end"] = front_end
     meta["frontend_ckpt"] = ckpt_used
+    # Informational only -- NOT part of _cache_is_valid's staleness gate (that
+    # gate is keyed on front_end/ckpt/n/grid params, unchanged here). Records
+    # which frameset dataset class built this cache (v5's V5FramesetDataset
+    # vs v3's V3FramesetDataset) for provenance when reading meta.json later.
+    meta["dataset_version"] = str(dataset_version)
     # Back-compat: also write the legacy 'vitpose_ckpt' key when this IS a
     # ViTPose cache, so any older reader that only knows that key (e.g.
     # train_3d_cached.py's informational wandb log) keeps working unchanged.
@@ -444,6 +474,12 @@ def main_from_cfg(cfg):
     None) are read via ``.get`` with the pre-selector defaults so composing
     against a ``cache`` group that predates these keys still works
     byte-identically (front_end='vitpose', frontend_ckpt=None -> unused).
+
+    ``cache.dataset_version`` (default 'v5') selects the frameset dataset
+    class -- see `run_precompute`'s `dataset_version` docstring. A `cache`
+    group composed before this key existed still defaults to 'v5' via
+    ``.get``; pass ``cache.dataset_version=v3`` to build against the legacy
+    red_data_unified_V3 tree instead.
     """
     from jarvis_jax.config import ViTPoseConfig
     vitpose_cfg = build_dataclass(ViTPoseConfig, cfg.model.vitpose)
@@ -458,6 +494,7 @@ def main_from_cfg(cfg):
         front_end=cfg.cache.get("front_end", "vitpose"),
         frontend_ckpt=cfg.cache.get("frontend_ckpt", None),
         vitpose_cfg=vitpose_cfg,
+        dataset_version=cfg.cache.get("dataset_version", "v5"),
     )
 
 

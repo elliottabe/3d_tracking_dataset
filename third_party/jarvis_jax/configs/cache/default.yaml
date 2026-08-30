@@ -14,3 +14,8 @@ front_end: vitpose
 # EfficientTrackBN run). Required when front_end != 'vitpose'; ignored
 # (and may be left null) otherwise.
 frontend_ckpt: null
+# Frameset dataset class selector for scripts/precompute_repro_cache.py.
+# 'v5' (default) loads jarvis_jax.data.v5_3d.V5FramesetDataset against a
+# red_data_3d_v5-shaped root (paths.data_root). 'v3' preserves the legacy
+# jarvis_jax.data.v3_3d.V3FramesetDataset path (red_data_unified_V3).
+dataset_version: v5

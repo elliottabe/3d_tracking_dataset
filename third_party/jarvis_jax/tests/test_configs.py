@@ -98,6 +98,22 @@ def test_precompute_main_from_cfg_maps_config(monkeypatch):
     assert captured["root"] == cfg.paths.data_root
     assert captured["vitpose_ckpt"] == cfg.paths.vitpose_ckpt
     assert captured["vitpose_cfg"].num_keypoints == 50
+    # cache.dataset_version defaults to 'v5' (Task 15 selector) and is
+    # threaded through main_from_cfg -- run_precompute picks V5FramesetDataset
+    # vs V3FramesetDataset on this value.
+    assert captured["dataset_version"] == "v5"
+
+
+def test_precompute_main_from_cfg_dataset_version_override(monkeypatch):
+    import importlib.util, os
+    path = os.path.join(os.path.dirname(CONFIG_DIR), "scripts", "precompute_repro_cache.py")
+    spec = importlib.util.spec_from_file_location("precompute_repro_cache", path)
+    mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+    captured = {}
+    monkeypatch.setattr(mod, "run_precompute", lambda **kw: captured.update(kw), raising=False)
+    cfg = _compose(["paths=hyak", "cache=default", "cache.dataset_version=v3"])
+    mod.main_from_cfg(cfg)
+    assert captured["dataset_version"] == "v3"
 
 
 def test_cached3d_main_from_cfg_maps_config(monkeypatch):
