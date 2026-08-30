@@ -171,6 +171,64 @@ class HMCachedConfig:
     exclude_second_fly: bool = False   # A6: drop the 264 two-fly framesets' 2nd fly
     female_weight: float = 1.0         # A7: oversample female framesets (see v5_3d.py)
 
+    # Gradient clipping (optax.clip_by_global_norm, composed BEFORE AdamW).
+    # A7_c2f_aug_femwt (refine_enabled=True) diverged to NaN at step
+    # ~850/1500 with unclipped AdamW (loss 0.02313 at step 800 -> nan at
+    # 850, never recovers -- a single bad step permanently poisons AdamW's
+    # moment estimates); A3_c2f and A6_c2f_aug_norecover (both also
+    # refine_enabled=True) later did the same at steps ~3300 and ~3750 of a
+    # separate 20000-step run. Not a rotation-convention/magnitude bug
+    # (rot_augment-only arms A1/A2/A5 never diverged). The instability
+    # tracks `refine_enabled`, not rotation augmentation.
+    #
+    # Threshold chosen from a 1000-step instrumented reproduction of
+    # A7_c2f_aug_femwt's own config on the real cache (this did NOT
+    # reproduce the NaN itself -- GPU float non-associativity makes the
+    # exact divergence step non-reproducible even from the same seed/data
+    # order, consistent with it being a rare, stochastic bad-batch event
+    # rather than a steady drift -- but it DOES show refine's healthy
+    # operating range, which is what a clip threshold must sit above):
+    # global grad-norm p50=2.0, p90=18.4, p95=41.0, p99=100.0,
+    # p99.5=143.7, max=193.5 over 1000 steps, all finite/healthy. A
+    # matched non-refine (refine_enabled=False, same seed/rot_augment)
+    # reproduction over the same 1000 steps was far calmer (p50=0.03,
+    # p99=0.3, max=1.9 by step 400) -- refine's gradients have a
+    # substantially heavier tail, consistent with the divergence tracking
+    # `refine_enabled`. 150.0 sits above every percentile of the observed
+    # HEALTHY refine distribution (only the single largest of 1000 steps,
+    # 193.5, would have clipped) so it does not touch normal training, while
+    # still being orders of magnitude below what an actual unbounded
+    # explosion would produce. CAVEAT: if the true NaN precursor is a
+    # forward-pass numerical hazard (e.g. refine_keypoints's soft_argmax_3d
+    # dividing by a near-zero, sharpen=3-cubed volume mass -- refine.py
+    # skips the softplus stage-1 applies before its own relu, so it is the
+    # only path that can produce a volume of near-all-zero voxels) rather
+    # than purely a large-but-finite gradient, clipping cannot rescue it: a
+    # NaN loss produces a NaN grad global-norm, and `clip_by_global_norm`
+    # passes NaN through unchanged (its `<` comparison against a NaN norm is
+    # always False, selecting the "already NaN" clip branch). See
+    # `nan_guard` below for the actual safety net in that case; a real fix
+    # would need an epsilon/guard inside refine.py or model.py, which this
+    # trainer may not modify. None (or <=0) DISABLES clipping and must be
+    # byte-identical to the pre-clipping optimizer (same
+    # `optax.adamw(...)` object, not `optax.chain(...)` wrapping a no-op --
+    # a chain changes the optimizer-state pytree shape even when the
+    # clip itself never engages, which would break Orbax restore of
+    # checkpoints saved by the pre-clipping code). See make_optimizer.
+    grad_clip_norm: float | None = 150.0
+
+    # NaN guard -- the PRIMARY safety net, not a secondary one: gradient
+    # clipping only helps a large-but-FINITE gradient; if the true NaN
+    # precursor is a forward-pass numerical hazard (see grad_clip_norm's
+    # docstring above) clipping cannot rescue it at all, and this is the
+    # only thing that stops the waste. A7 ran 650 more steps to a NaN
+    # result before anyone noticed; A3_c2f and A6_c2f_aug_norecover each
+    # burned thousands more (20000-step budget) the same way. When True, a
+    # non-finite step loss is printed loudly (with the step index) and
+    # training stops immediately instead of continuing to the configured
+    # total_steps.
+    nan_guard: bool = True
+
 
 # ---------------------------------------------------------------------------
 # Cache loading
@@ -232,13 +290,27 @@ class C2FModel(nnx.Module):
         self.refine = RefineNet(channels=refine_channels, rngs=rngs) if refine_enabled else None
 
 
-def make_optimizer(model: C2FModel, cfg: HMCachedConfig) -> nnx.Optimizer:
+def _build_tx(cfg: HMCachedConfig):
+    """The raw optax transform `make_optimizer` wraps into an `nnx.Optimizer`
+    -- split out so tests can exercise the clip-vs-plain-AdamW behavior
+    directly on synthetic gradient pytrees, without building a model."""
     decay_steps = max(cfg.total_steps, cfg.warmup_steps + 1)
     sched = optax.warmup_cosine_decay_schedule(
         init_value=0.0, peak_value=cfg.lr, warmup_steps=cfg.warmup_steps,
         decay_steps=decay_steps, end_value=0.0)
-    tx = optax.adamw(sched, weight_decay=cfg.weight_decay)
-    return nnx.Optimizer(model, tx, wrt=nnx.Param)
+    adamw = optax.adamw(sched, weight_decay=cfg.weight_decay)
+    if cfg.grad_clip_norm is None or cfg.grad_clip_norm <= 0:
+        # DISABLED: literally the same `adamw` transform used before gradient
+        # clipping existed -- NOT `optax.chain(identity, adamw)`, which would
+        # change the optimizer-state pytree (an extra EmptyState leaf) even
+        # though the clip never engages, silently breaking Orbax restore of
+        # any checkpoint an already-running/older arm saved with this path.
+        return adamw
+    return optax.chain(optax.clip_by_global_norm(cfg.grad_clip_norm), adamw)
+
+
+def make_optimizer(model: C2FModel, cfg: HMCachedConfig) -> nnx.Optimizer:
+    return nnx.Optimizer(model, _build_tx(cfg), wrt=nnx.Param)
 
 
 # ---------------------------------------------------------------------------
@@ -377,6 +449,21 @@ def make_eval_fn(cfg: HMCachedConfig):
 # run_cached_hm_training
 # ---------------------------------------------------------------------------
 
+def _check_nan_guard(loss: float, step_idx: int, total_steps: int, enabled: bool) -> bool:
+    """Returns True iff a non-finite `loss` should halt training NOW (and, in
+    that case, prints a loud, step-numbered report first) -- see A7_c2f_aug_femwt's
+    divergence: loss was finite (0.02313) at step 800 and `nan` by 850, and
+    the run then burned 650 more steps to a NaN result before anyone noticed.
+    A no-op (returns False, prints nothing) whenever `enabled` is False or
+    `loss` is finite."""
+    if not enabled or np.isfinite(loss):
+        return False
+    print(f"!!! NON-FINITE LOSS at step {step_idx + 1}/{total_steps} "
+          f"(loss={loss}) -- halting training early (nan_guard); "
+          f"{total_steps - step_idx - 1} steps NOT run.", flush=True)
+    return True
+
+
 def save_run_config(run_dir: str, config: dict) -> str:
     os.makedirs(run_dir, exist_ok=True)
     latest = os.path.join(run_dir, "run_config.json")
@@ -471,6 +558,7 @@ def run_cached_hm_training(
     final_loss = 0.0
     step_idx = start
     epoch = 0
+    diverged = False
     while step_idx < cfg.total_steps:
         idx = train_idx_pool.copy()
         np.random.default_rng(cfg.seed + epoch).shuffle(idx)
@@ -487,6 +575,10 @@ def run_cached_hm_training(
             if step_idx == start:
                 first_loss = final_loss
 
+            if _check_nan_guard(final_loss, step_idx, cfg.total_steps, cfg.nan_guard):
+                diverged = True
+                break
+
             if (step_idx + 1) % log_every == 0:
                 print(f"step {step_idx + 1}/{cfg.total_steps}  loss {final_loss:.5f}")
 
@@ -499,9 +591,14 @@ def run_cached_hm_training(
 
             step_idx += 1
         epoch += 1
+        if diverged:
+            break
 
     if mngr is not None:
-        save_step(mngr, cfg.total_steps, model, opt)
+        # step_idx == cfg.total_steps on a normal completion; on an early
+        # nan_guard exit it is the true (lower) number of completed steps --
+        # using it (not cfg.total_steps) keeps this checkpoint's key honest.
+        save_step(mngr, step_idx, model, opt)
         mngr.wait_until_finished()
 
     # ------------------------------------------------------------------
@@ -544,7 +641,8 @@ def run_cached_hm_training(
         "first_loss": first_loss if first_loss is not None else final_loss,
         "final_loss": final_loss,
         "val_mpjpe_3d": val_mpjpe,
-        "steps": cfg.total_steps,
+        "steps": step_idx,
+        "diverged": diverged,
     }
 
 
