@@ -67,13 +67,17 @@ def test_empty_val_is_rejected():
     with pytest.raises(ValueError, match="empty val"):
         make_split(m, _manifest(["rec_a"]), val_recordings=[], female_val_frac=0.0)
 
-def test_mixed_recording_splits_each_fly_by_its_own_sex():
-    """Four recordings label BOTH flies (fly_sex); a recording with one male
-    + one female fly has no well-defined recording-level sex. make_split must
-    resolve sex PER FRAMESET via the fly<k> suffix: fly1 (male) follows the
-    normal whole-recording-holdout rule while fly0 (female) independently
-    keeps the guarded-tail-in-training policy, even though both flies share
-    the same recording (and the same val_recordings membership)."""
+def test_mixed_recording_female_fly_forces_whole_frame_onto_female_policy():
+    """Four recordings label BOTH flies off ONE physical capture per frame --
+    fly0 and fly1 share the same 7 images, so they cannot be split
+    independently by their own per-fly sex without leaking those images
+    across train/val (this superseded the old per-fly-sex policy, which did
+    exactly that: measured val=20/train=330 with 20/20 val frames also in
+    train). Image disjointness wins: a frame goes to exactly one side and
+    every fly in it follows, and a recording with ANY female fly is treated
+    as female for preservation -- kept in training except the guarded tail --
+    so val_recordings can no longer carve a mixed recording's male fly out
+    WHOLE (that would require splitting frames the female fly also needs)."""
     m = _merged_mixed("mixed", 200)
     man = {"recordings": {"mixed": {"fly_sex": {"fly0": "female", "fly1": "male"}}}}
     split = make_split(m, man, val_recordings=["mixed"],
@@ -82,17 +86,25 @@ def test_mixed_recording_splits_each_fly_by_its_own_sex():
     fly0 = {k: v for k, v in split.items() if k.endswith("/fly0")}
     fly1 = {k: v for k, v in split.items() if k.endswith("/fly1")}
 
-    # fly1 (male): normal rule -- 'mixed' is in val_recordings -> held out WHOLE.
-    assert set(fly1.values()) == {"val"}
+    # Same frame, same physical images, for both flies -> same side, always.
+    for k0, v0 in fly0.items():
+        k1 = k0[:-len("fly0")] + "fly1"
+        assert fly1[k1] == v0, f"{k0}={v0} but {k1}={fly1[k1]}"
 
-    # fly0 (female): guarded-tail policy -- mostly train, small contiguous
-    # tail block in val; NEVER held out whole despite 'mixed' being in
-    # val_recordings (female data is the binding constraint).
+    # 'mixed' has a female fly (fly0) -> the WHOLE recording (both flies)
+    # gets the guarded-tail female policy; val_recordings=["mixed"] has no
+    # effect (mirrors the single-fly female case) -- neither fly is held out
+    # WHOLE, and fly1 (male) is NOT all-"val" despite being listed there.
+    assert set(fly1.values()) == {"train", "val"}
     assert set(fly0.values()) == {"train", "val"}
     fly0_val = [k for k, v in fly0.items() if v == "val"]
     assert len(fly0_val) == 20
     val_frames = sorted(int(k.split("Frame_")[1].split("/")[0]) for k in fly0_val)
     assert val_frames == list(range(180, 200))
+
+    # And the image-level guard agrees: this split is leak-free.
+    a = audit_split(m, split, guard=50)
+    assert a["cross_fly_leaked_frames"] == 0, a
 
 def test_two_fly_recording_without_fly_sex_behaves_as_before():
     """A recording with no fly_sex key must behave EXACTLY as before
