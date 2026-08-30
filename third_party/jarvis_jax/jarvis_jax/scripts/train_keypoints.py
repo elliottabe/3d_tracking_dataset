@@ -187,8 +187,13 @@ def run_training(root, *, out_dir, mae_npz=DEFAULT_MAE_NPZ, tcfg=None,
         os.path.join(root, "annotations", "instances_train.json")))["keypoint_names"]
     lr_swap = build_lr_swap(names)
     aug = aug_params if aug_params is not None else AugParams()
+    # sigma explicit here (not left to make_train_step's own 7.0 default) so
+    # train.target_sigma (configs/train/vit2d.yaml) actually reaches the
+    # rendered heatmap targets -- 2026-08-29 fix, see task-9-report.md
+    # "Fix round 1": before this, a run launched with train.target_sigma=2.0
+    # silently trained on sigma=7.0 targets.
     step = make_train_step(tcfg.mask_weight, aug, lr_swap, heatmap_size=cfg.heatmap_size,
-                           mask_dilate=tcfg.mask_dilate)
+                           sigma=tcfg.target_sigma, mask_dilate=tcfg.mask_dilate)
     base_key = jax.random.PRNGKey(tcfg.seed)
     mesh = data_parallel_mesh()
 

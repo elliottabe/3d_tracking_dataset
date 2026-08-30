@@ -26,6 +26,14 @@ class TrainConfig:
     # zero-initialised 4th (SAM-mask) patch-embed channel keeps learning.
     backbone_lr_mult: float = 0.1
     seed: int = 0
+    # Gaussian target sigma (heatmap px) passed through to make_train_step's
+    # `sigma` kwarg at the 2D training entrypoint's call site (see
+    # jarvis_jax/scripts/train_keypoints.py::run_training). Default matches
+    # gaussian_heatmaps'/V3Dataset's 2026-08-29 sharpened default (2.0, not
+    # make_train_step's own 7.0 default -- that default is left alone because
+    # several OTHER callers (densepose CSE training, tracking/finetune_detector,
+    # and multiple unit tests) rely on it implicitly and are out of scope here).
+    target_sigma: float = 2.0
 
 
 def _param_labels(params):
