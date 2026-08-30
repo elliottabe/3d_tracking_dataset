@@ -29,7 +29,8 @@ import jax.numpy as jnp
 from jax import lax
 
 
-def _build_half_grid(grid_size: int, grid_spacing: int) -> jnp.ndarray:
+def _build_half_grid(grid_size: int, grid_spacing: float,
+                     rotation: jnp.ndarray | None = None) -> jnp.ndarray:
     """Build the base (G/2)^3 grid in 3-D world coordinates (no center offset).
 
     Matches the PyTorch constructor::
@@ -37,6 +38,16 @@ def _build_half_grid(grid_size: int, grid_spacing: int) -> jnp.ndarray:
         half_gridsize = int(grid_size/2/2)   # G/4
         grid[i,j,k] = [i - half_gridsize, j - half_gridsize, k - half_gridsize]
         grid *= grid_spacing * 2
+
+    `grid_spacing` is now a FLOAT. At the shipped 1.0 the grid spans 48 world
+    units with 1 voxel = 1 unit ~ 0.17 mm; the distal tarsal segment is 1.59
+    voxels, which is why stage 2 uses 0.25.
+
+    `rotation` (3,3) rotates the grid BASIS. The V2VNet is otherwise
+    world-frame-locked (it learns "dorsal is roughly +Z" for whichever
+    calibration dominates training), so rotating the basis during training --
+    with the labels rotated by the same R -- both removes that dependence and
+    multiplies an otherwise small (3,800-sample) dataset.
 
     Returns shape ``(G/2, G/2, G/2, 3)``, float32.
     """
@@ -48,7 +59,11 @@ def _build_half_grid(grid_size: int, grid_spacing: int) -> jnp.ndarray:
     ig, jg, kg = jnp.meshgrid(idx, idx, idx, indexing="ij")
     # Stack into (G/2, G/2, G/2, 3)
     grid = jnp.stack([ig - half_half_g, jg - half_half_g, kg - half_half_g], axis=-1)
-    return grid * (grid_spacing * 2)
+    grid = grid * (grid_spacing * 2)
+    if rotation is not None:
+        grid = jnp.einsum("...i,ij->...j", grid, rotation.T,
+                          precision=lax.Precision.HIGHEST)
+    return grid
 
 
 def _reproject_single(
@@ -58,8 +73,9 @@ def _reproject_single(
     camera_matrices: jnp.ndarray,  # (num_cam, 4, 3)
     *,
     grid_size: int,
-    grid_spacing: int,
+    grid_spacing: float,
     heatmap_size: int,
+    rotation: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """Reproject heatmaps for a *single* frameset (no batch dimension).
 
@@ -74,7 +90,7 @@ def _reproject_single(
     # ------------------------------------------------------------------
     # 1. Build the (G/2)^3 grid offset by center3D
     # ------------------------------------------------------------------
-    base_grid = _build_half_grid(grid_size, grid_spacing)   # (G/2, G/2, G/2, 3)
+    base_grid = _build_half_grid(grid_size, grid_spacing, rotation)   # (G/2, G/2, G/2, 3)
     grid = base_grid + center3D                              # broadcast (G/2,G/2,G/2,3)
 
     # ------------------------------------------------------------------
@@ -190,8 +206,9 @@ def reproject_heatmaps(
     camera_matrices: jnp.ndarray,    # (B, num_cam, 4, 3)
     *,
     grid_size: int = 48,
-    grid_spacing: int = 1,
+    grid_spacing: float = 1.0,
     heatmap_size: int = 226,
+    rotation: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """Reproject 2-D per-camera heatmaps into a 3-D heatmap volume.
 
@@ -203,16 +220,31 @@ def reproject_heatmaps(
         centerHM:        ``(B, num_cam, 2)``  2-D crop centre (pixels) per camera.
         camera_matrices: ``(B, num_cam, 4, 3)``  DLT projection matrices.
         grid_size:       Side length of the output 3-D volume (default 48).
-        grid_spacing:    World-space units per grid cell (default 1).
+        grid_spacing:    World-space units per grid cell (default 1.0, float).
         heatmap_size:    Spatial size of each input heatmap (default 226).
+        rotation:        Optional ``(3,3)`` (shared across the batch) or
+                         ``(B,3,3)`` (per-sample) rotation applied to the
+                         grid basis. Must be orthogonal. ``None`` (default)
+                         reproduces the shipped world-locked grid exactly.
 
     Returns:
         ``(B, J, grid_size, grid_size, grid_size)`` float32.
     """
-    _single = lambda hm, c3, cHM, cM: _reproject_single(
+    if rotation is not None:
+        rotation = jnp.asarray(rotation, jnp.float32)
+        R2 = rotation if rotation.ndim == 2 else rotation[0]
+        if not bool(jnp.allclose(R2 @ R2.T, jnp.eye(3, dtype=jnp.float32), atol=1e-4)):
+            raise ValueError("rotation must be orthogonal (R @ R.T == I)")
+        rot_in_axis = None if rotation.ndim == 2 else 0
+    else:
+        rot_in_axis = None
+
+    _single = lambda hm, c3, cHM, cM, rot: _reproject_single(
         hm, c3, cHM, cM,
         grid_size=grid_size,
         grid_spacing=grid_spacing,
         heatmap_size=heatmap_size,
+        rotation=rot,
     )
-    return jax.vmap(_single)(heatmaps, center3D, centerHM, camera_matrices)
+    return jax.vmap(_single, in_axes=(0, 0, 0, 0, rot_in_axis))(
+        heatmaps, center3D, centerHM, camera_matrices, rotation)
