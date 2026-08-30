@@ -29,7 +29,7 @@
 
 | quantity | value |
 |---|---|
-| calibration groups | A (bout 28's) 6 recordings / 974 framesets; B 18 / 2532; C 2 / 30 |
+| calibration groups | **bout 28's group is labelled `B`** (6 labeled recordings / 974 framesets); `A` is the big one (18 / 2532); `C` is 2 / 30. Labels are assigned by DESCENDING recording count (`group_calibrations`), so the letter is positional — never hardcode `A` to mean bout 28's group; compute it with `calib_fingerprint` on the Session0 calibration. Verified 2026-08-29. |
 | union | 26 recordings, 3,536 framesets, 3,800 fly-samples |
 | recovered second flies | 264 framesets / 1,673 annotations; 244 in group A |
 | two-fly recordings | `2026_04_08_14_59_45` (214), `2026_04_07_11_33_33` (30), `2026_06_11_13_58_43` (17), `2026_06_11_13_58_45` (3) |
@@ -1099,7 +1099,17 @@ def write_derived(merged: dict, split: dict, out_root: str) -> None:
 Run: `cd $PKG && python -m pytest tests/test_split_v5.py -v`
 Expected: 5 passed
 
-- [ ] **Step 5: Prove the OLD split fails this audit**
+- [ ] **Step 5: Prove the audit detects a genuinely leaky split**
+
+**Controller ruling R11:** an earlier draft pointed this at
+`red_data_unified_V3/annotations`, which is already RECORDING-level split
+(13 train / 4 val, zero overlap) and comes back CLEAN — it does not exercise
+the audit at all. The genuinely leaky source is
+`general_model/<subset>/annotations/instances_{train,val}.json`, where each
+subset splits the SAME recording frame-level. Point the audit there and expect
+**20 of 21 recordings to fail a 50-frame guard, worst case 1 frame apart**,
+reproducing courtship_V3 at 86% and S8_male_R_amp at 100% on the ±3-frame check.
+If it comes back clean, the audit is not measuring what it claims.
 
 ```bash
 cd $PKG && python - <<'PY'
@@ -1962,6 +1972,22 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 ---
 
 ## Task 9: Sharpen the 2D targets and retrain ViTPose (Phase 2)
+
+**Controller ruling R11 — the contamination argument for this retrain is
+WITHDRAWN.** An earlier framing said the shipped detector had seen frames we
+would hold out, so any 3D val number was contaminated through the front-end.
+That is FALSE. Measured directly: `red_data_unified_V4` (what
+`v4_8gpu_20260808` trained on) is split by RECORDING with **zero** train/val
+overlap — 11 train recordings vs 9 val, none shared. Same for
+`red_data_unified_V3`, which the 3D trainer read (13 vs 4, zero shared). The
+frame-level leak is real but confined to `general_model/<subset>/annotations/`,
+which neither trainer reads.
+
+**What still justifies this retrain — and it is sufficient on its own — is the
+sigma measurement in Step 3:** the target Gaussian's σ of 7.0 heatmap px is
+~1.5× longer than the entire 4.6 px distal tarsal segment it must resolve. Do
+not claim a contamination benefit anywhere in this task's commit message or
+report.
 
 **Files:**
 - Modify: `$PKG/jarvis_jax/data/transforms.py:47`, `$PKG/jarvis_jax/data/v3.py:79`
@@ -3182,10 +3208,16 @@ for d in sorted(glob.glob("/gscratch/portia/eabe/data/Johnson_lab/jax_cached3d_r
     p = os.path.join(d, "val_mpjpe.json")
     if os.path.exists(p):
         rows.append((os.path.basename(d), json.load(open(p))))
+# Ruling R10: group letters are positional (descending recording count), so
+# bout 28's group is 'B', not 'A'. Print EVERY group rather than hardcoding a
+# letter — a hardcoded 'A' silently reports the wrong cohort.
 for name, r in rows:
-    print(f"{name:24s} overall {r.get('overall'):.3f}  "
-          f"groupA {r.get('by_calib_group', {}).get('A', float('nan')):.3f}  "
+    groups = r.get('by_calib_group', {})
+    gtxt = "  ".join(f"{g}={groups[g]:.3f}" for g in sorted(groups))
+    print(f"{name:24s} overall {r.get('overall'):.3f}  [{gtxt}]  "
           f"female {r.get('by_sex', {}).get('female', float('nan')):.3f}")
+print("\nbout 28's calibration group is 'B' (verified 2026-08-29) — read that "
+      "column, not 'A'.")
 PY
 ```
 

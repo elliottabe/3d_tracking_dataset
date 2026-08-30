@@ -77,11 +77,28 @@ val framesets having a train frameset within +/-3 frames:
 | `grooming` | 64% |
 | overall | ~50% |
 
-Val MPJPE 1.083 and 0.708 -- and the laplacian ablation that set the current
-config -- were scored on frames whose ~8 ms neighbours were in training. The
-current detector `v4_8gpu_20260808` inherits the same leak, so it contaminates
-any 3D val number *through the front-end* regardless of how clean the 3D split
-is.
+**CORRECTION (2026-08-29, after Task 5): this leakage does NOT reach the
+trained models, and the two claims that followed from it were WRONG.**
+
+The frame-level split above is real, but it lives only in
+`general_model/<subset>/annotations/`. Neither trainer reads those files.
+Measured directly:
+
+| dataset | consumed by | train recs | val recs | shared |
+|---|---|---|---|---|
+| `red_data_unified_V3` | 3D trainer (`paths.data_root`) | 13 | 4 | **0** |
+| `red_data_unified_V4` | detector `v4_8gpu_20260808` | 11 | 9 | **0** |
+| `red_data_unified_V4_femclimb` | — | 12 | 9 | **0** |
+
+All three are RECORDING-level with zero overlap: the unified builders re-split
+by recording, so `general_model`'s frame-level leak never propagated.
+
+Therefore: **val MPJPE 1.083 / 0.708 and the laplacian ablation are NOT
+invalidated by leakage**, and **the shipped detector is NOT contaminated**.
+Retrain it for the sigma fix in 1.2 (a real, independent measurement), not for
+contamination. What survives from this section is narrower but still worth
+doing: our split additionally preserves scarce female data via guard bands and
+covers 26 recordings rather than 17. That is an improvement, not a defect fix.
 
 ### 1.4 264 complete framesets are silently discarded
 
