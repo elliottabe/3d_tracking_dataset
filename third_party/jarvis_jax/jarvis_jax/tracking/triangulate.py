@@ -196,3 +196,66 @@ def triangulate_keypoints(kp2d, conf, cam_mats, *, conf_thresh: float = 0.3,
         flatc[idx] = cmean[idx]
         kp3d = flat3d.reshape(T, K, 3); conf3d = flatc.reshape(T, K)
     return kp3d, conf3d
+
+
+def refine_from_seed(seed_kp3d, kp2d, conf, cam_mats, *, gate_px: float = 15.0,
+                     conf_thresh: float = 0.3, min_views: int = 2):
+    """Stage 3: continuous sub-voxel 3D, gated by a volumetric seed.
+
+    The two lifters fail orthogonally. Plain DLT is continuous and sub-pixel
+    but has no outlier rejection, so a single swapped view drags the solve
+    (measured: 834 jitter spikes on a 921-frame clip). The volumetric net fuses
+    every view and is robust (156 spikes) but quantizes at ~0.17 mm, which is
+    larger than the tarsal segments that ARE the leg kinematics.
+
+    This takes the robustness from the volume and the precision from the DLT:
+    the seed says where the joint is and therefore which views are lying; the
+    surviving views are triangulated continuously.
+
+    Args:
+        seed_kp3d: (T,K,3) stage-1/2 estimate.
+        kp2d:      (T,C,K,2) detector 2D, must be FINITE everywhere.
+        conf:      (T,C,K).
+        cam_mats:  (C,4,3).
+        gate_px:   a view is dropped if its 2D is further than this from the
+                   seed's reprojection.
+        min_views: below this, the seed is returned unchanged rather than
+                   producing a confident wrong point.
+
+    Returns:
+        (kp3d (T,K,3), conf3d (T,K), n_views (T,K))
+    """
+    seed_kp3d = np.asarray(seed_kp3d, np.float64)
+    kp2d = np.asarray(kp2d, np.float64)
+    conf = np.asarray(conf, np.float64)
+    T, C, K = conf.shape
+
+    out = seed_kp3d.copy()
+    out_conf = np.zeros((T, K), np.float32)
+    n_used = np.zeros((T, K), np.int32)
+
+    for t in range(T):
+        for k in range(K):
+            X0 = seed_kp3d[t, k]
+            if not np.all(np.isfinite(X0)):
+                continue
+            proj = _reproject_px(cam_mats, X0[None, :])[0]  # (C,2)
+            d = np.linalg.norm(kp2d[t, :, k, :] - proj, axis=-1)
+            keep = (conf[t, :, k] >= conf_thresh) & (d <= gate_px)
+            idx = np.nonzero(keep)[0]
+            n_used[t, k] = idx.size
+            if idx.size < min_views:
+                continue
+            A = []
+            for c in idx:
+                M = cam_mats[c]                              # (4,3)
+                x, y = kp2d[t, c, k]
+                A.append(x * M[:, 2] - M[:, 0])
+                A.append(y * M[:, 2] - M[:, 1])
+            _, _, Vt = np.linalg.svd(np.stack(A))
+            h = Vt[-1]
+            if abs(h[3]) < 1e-12:
+                continue
+            out[t, k] = h[:3] / h[3]
+            out_conf[t, k] = float(np.mean(conf[t, idx, k]))
+    return out.astype(np.float32), out_conf, n_used
