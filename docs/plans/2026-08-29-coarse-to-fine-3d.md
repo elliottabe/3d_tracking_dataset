@@ -101,7 +101,7 @@ from THIS run rather than from docs/benchmark/2026-08-07-baseline-scorecard.json
 cd /mmfs1/gscratch/portia/eabe/Research/MyRepos/3d_tracking_dataset
 micromamba activate 3d_tracking && unset LD_LIBRARY_PATH
 export MUJOCO_GL=egl XLA_PYTHON_CLIENT_MEM_FRACTION=0.4
-python scripts/run_bout.py paths=hyak recording=session0 +bout_ids=28 2>&1 \
+python scripts/run_bout.py paths=hyak recording=session0 bout_ids=28 2>&1 \
   | tee figures/2026-08-29-c2f-3d/phase0-baseline/run.log
 ```
 
@@ -130,13 +130,23 @@ Expected: `kp2d.npz`, `kp3d.npz`, `outputs.h5` present for both flies.
 
 - [ ] **Step 4: Render the baseline figures**
 
+**Controller ruling R1:** `python -m viz` is **argparse, not hydra**, and
+`compare_stac_fits.py` requires `--xml`/`--anatomy` and has **no `--bout`**.
+Verified real flags:
+
 ```bash
-python -m viz overlay paths=hyak recording=session0 +bout_ids=28 \
-  +out=figures/2026-08-29-c2f-3d/phase0-baseline
-python scripts/viz/compare_stac_fits.py \
-  --fit baseline="$OUT" --bout 28 \
-  --out figures/2026-08-29-c2f-3d/phase0-baseline
+DST=figures/2026-08-29-c2f-3d/phase0-baseline
+for FLY in 0 1; do
+  python -m viz overlay --run "$OUT" --bout 28 --fly $FLY --out $DST
+  python -m viz legskel --run "$OUT" --bout 28 --fly $FLY --out $DST
+done
 ```
+
+`legskel` is the leg-joint-chain view (detector 2D vs fitted 3D) and is the
+most directly relevant figure for this goal. For `compare_stac_fits.py`, read
+its argparse block and pass `--xml`/`--anatomy` from `configs/anatomy/` and the
+`body_model_dir` in `configs/paths/hyak.yaml`. **Record the exact working
+command in the report** so later tasks reuse it rather than rediscovering it.
 
 - [ ] **Step 5: Read the figures and write what they show**
 
@@ -1417,6 +1427,29 @@ mapping is wrong — fix that before asking anyone to sex anything. Then ask the
 user for a `recording -> sex` mapping and apply it with `apply_sex_labels`.
 Do not guess sex from the images yourself.
 
+**Controller ruling R2 — REGENERATE THE SPLIT AFTERWARDS.** `make_split` reads
+`manifest["recordings"][rec]["sex"]`, but Task 7 builds before this sexing pass,
+so on the first build no recording is female and the female guard-band path
+never fires. After `apply_sex_labels`, re-run the (idempotent) build so
+`split.json` and the derived `instances_{train,val}.json` reflect known sex:
+
+```bash
+cd $PKG && python scripts/build_v5_dataset.py paths=hyak
+python - <<'PY'
+import json
+V5 = "/gscratch/portia/eabe/data/Johnson_lab/red_data/red_data_3d_v5"
+man = json.load(open(f"{V5}/manifest.json"))["recordings"]
+fem = [r for r, v in man.items() if v.get("sex") == "female"]
+split = json.load(open(f"{V5}/annotations/split.json"))
+val_fem = [k for k, v in split.items() if v == "val" and k.split("/")[0] in fem]
+print("female recordings:", len(fem), "-> female val framesets:", len(val_fem))
+PY
+```
+
+Expected: a non-zero female val count. **Zero means the guard-band path still
+did not fire and the female val metric does not exist** — the whole reason this
+step is here.
+
 ---
 
 ## Task 7: Build entrypoint and SAM3 masks for the 9 new recordings (Phase 1b)
@@ -2093,10 +2126,14 @@ before/after concentration numbers. Commit that notes file only.
 **Interfaces:**
 - Consumes: nothing new.
 - Produces: `_build_half_grid(grid_size, grid_spacing, *, rotation=None)` and
-  `reproject_heatmaps(..., grid_size=48, grid_spacing=1.0, heatmap_size=226, rotation=None, center_offset=None)`.
-  `rotation` is `(3,3)` or `(B,3,3)` float32 applied to the grid basis;
-  `center_offset` is `(B,3)` added to `center3D` (stage 2 recenters on the
-  stage-1 estimate). Defaults reproduce current behaviour byte-for-byte.
+  `reproject_heatmaps(..., grid_size=48, grid_spacing=1.0, heatmap_size=226, rotation=None)`.
+  `rotation` is `(3,3)` or `(B,3,3)` float32 applied to the grid basis.
+  Defaults reproduce current behaviour byte-for-byte.
+
+  **Controller ruling R3:** an earlier draft also added `center_offset`. It is
+  DROPPED — Task 12 recenters by passing each joint's coarse estimate directly
+  as `center3D`, so the parameter would be dead on arrival. Do not add it, and
+  do not write its test.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -2151,12 +2188,6 @@ def test_rotation_is_orthogonality_checked():
         reproject_heatmaps(**_inputs(), grid_size=16, heatmap_size=64, rotation=bad)
 
 
-def test_center_offset_shifts_the_grid():
-    base = _inputs()
-    off = jnp.asarray(np.array([[3.0, 0.0, 0.0], [0.0, 3.0, 0.0]], np.float32))
-    a = reproject_heatmaps(**base, grid_size=16, heatmap_size=64)
-    b = reproject_heatmaps(**base, grid_size=16, heatmap_size=64, center_offset=off)
-    assert not np.allclose(np.asarray(a), np.asarray(b))
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -2197,22 +2228,20 @@ def _build_half_grid(grid_size: int, grid_spacing: float,
     return grid
 ```
 
-In `_reproject_single`, accept `rotation` and `center_offset`, pass `rotation`
-to `_build_half_grid`, and change:
+In `_reproject_single`, accept `rotation`, pass it to `_build_half_grid`,
+and change:
 
 ```python
     base_grid = _build_half_grid(grid_size, grid_spacing, rotation)
-    centre = center3D if center_offset is None else center3D + center_offset
-    grid = base_grid + centre
+    grid = base_grid + center3D
 ```
 
-In `reproject_heatmaps`, add the parameters, validate, and vmap:
+In `reproject_heatmaps`, add the parameter, validate, and vmap:
 
 ```python
 def reproject_heatmaps(heatmaps, center3D, centerHM, camera_matrices, *,
                        grid_size: int = 48, grid_spacing: float = 1.0,
-                       heatmap_size: int = 226,
-                       rotation=None, center_offset=None):
+                       heatmap_size: int = 226, rotation=None):
     if rotation is not None:
         R = jnp.asarray(rotation, jnp.float32)
         R2 = R if R.ndim == 2 else R[0]
@@ -2222,13 +2251,12 @@ def reproject_heatmaps(heatmaps, center3D, centerHM, camera_matrices, *,
 ```
 
 vmap over the batch with `in_axes` of `None` for a shared `(3,3)` rotation and
-`0` for a per-sample `(B,3,3)`; `center_offset` uses `0` when given, `None`
-otherwise.
+`0` for a per-sample `(B,3,3)`.
 
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `cd $PKG && python -m pytest tests/test_reproject_rotation.py -v`
-Expected: 5 passed
+Expected: 4 passed
 
 - [ ] **Step 5: Verify the existing reprojection parity tests still pass**
 
@@ -2240,7 +2268,7 @@ the default path moved — the refactor is wrong.
 
 ```bash
 git add $PKG/jarvis_jax/hybridnet/reproject.py $PKG/tests/test_reproject_rotation.py
-git commit -m "feat(3d): rotation + float spacing + center offset in reprojection
+git commit -m "feat(3d): rotation + float grid spacing in reprojection
 
 Defaults are byte-identical to the shipped path. Enables stage-2 refinement
 at spacing 0.25 and rotation augmentation of the world-locked grid.
@@ -2370,7 +2398,7 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 - Test: `$PKG/tests/test_refine.py`
 
 **Interfaces:**
-- Consumes: `reproject_heatmaps` (with `grid_spacing`, `center_offset`), `soft_argmax_3d` (fractional spacing), `V2VNet`.
+- Consumes: `reproject_heatmaps` (with `grid_spacing`), `soft_argmax_3d` (fractional spacing), `V2VNet`.
 - Produces:
   - `refine_volumes(heatmaps, coarse_kp3d, centerHM, camera_matrices, *, cube=24, spacing=0.25, heatmap_size=224) -> (B, J, cube, cube, cube)` — one small volume per joint, centred on that joint's coarse estimate
   - `class RefineNet(nnx.Module)`: `__init__(self, *, channels: int = 32, rngs)`, `__call__(vols (B*J, cube, cube, cube, 1), use_running_average: bool) -> (B*J, cube, cube, cube, 1)` — weights SHARED across joints (joint folded into batch)
@@ -3120,6 +3148,30 @@ sleep 600 && nvidia-smi --query-gpu=index,memory.used --format=csv
 Expected: 4 processes each holding GPU memory, no `CUDA_ERROR_UNKNOWN` in any
 log. Only then launch the remaining 4 arms.
 
+- [ ] **Step 4b: Emit the arrays Task 16 consumes (controller ruling R4)**
+
+Task 16 reads `val_pred.npz`, `val_gt.npz` and `keypoint_names.json`, which no
+other task creates. Add to the trainer's eval path: after the final val pass,
+write `<run_dir>/val_pred.npz` with key `kp3d` of shape `(N, 50, 3)`; and write
+`$V5/annotations/val_gt.npz` (same key and shape, ground truth) plus
+`$V5/annotations/keypoint_names.json` (the `keypoint_names` list taken from
+`instances_val.json`) once. Verify:
+
+```bash
+python - <<'PY'
+import numpy as np, json, glob
+for f in sorted(glob.glob("/gscratch/portia/eabe/data/Johnson_lab/"
+                          "jax_cached3d_runs/v5_A*/val_pred.npz")):
+    print(f, np.load(f)["kp3d"].shape)
+V5 = "/gscratch/portia/eabe/data/Johnson_lab/red_data/red_data_3d_v5"
+print("gt", np.load(f"{V5}/annotations/val_gt.npz")["kp3d"].shape,
+      "names", len(json.load(open(f"{V5}/annotations/keypoint_names.json"))))
+PY
+```
+
+Expected: every arm's `val_pred.npz` and the single `val_gt.npz` share
+`(N, 50, 3)`, and `keypoint_names.json` has 50 entries.
+
 - [ ] **Step 5: Collect the scorecard**
 
 ```bash
@@ -3376,20 +3428,56 @@ Create `figures/2026-08-29-c2f-3d/phase4-acceptance/EXPECTATION.md`:
 Bout 28, both flies, new stack (v5_sigma2 detector -> winning arm -> stage-3
 refine -> STAC IK) against the Task-1 baseline.
 
-If the resolution hypothesis is right:
-- tarsal-tip 3D traces LOSE the ~0.17 mm staircase quantization visible in
-  the baseline; leg-angle traces get smoother WITHOUT added lag (a smoother
-  trace that also lags means a filter crept in, not better 3D)
-- female (fly0) reprojection improves more than male (fly1), because the male
-  was already near the detector's noise floor
+**Controller rulings R5/R6 — this expectation was REWRITTEN from Task 1's
+measured baseline.** An earlier draft predicted the new stack would remove a
+~0.17 mm voxel staircase "visible in the baseline". That was wrong: the
+baseline pipeline has NO volumetric lifter at all (`run_bout.py` contains zero
+v2vnet/hybridnet references; Stage B is plain DLT), so it is continuous by
+construction and Task 1 correctly found no staircase. Its absence neither
+confirms nor falsifies the resolution hypothesis — that test is Task 16
+(arm A1's volumetric output against GT), not this one.
+
+Task 1 measured what bout 28's failure ACTUALLY is:
+
+| metric | fly0 (female) | fly1 (male) |
+|---|---|---|
+| reproj median | 10.26 px | 6.02 px |
+| reproj p99 / max | 62.74 / **90.26** px | 7.13 / 7.56 px |
+| **frames with NaN reproj** | **25.2%** | 0.0% |
+| worst window | offsets ~1484-1501 (proximity event) | — |
+
+The female is NOT broadly bad on this bout (10.26 px typical, only 1.7x the
+male — the frozen cohort's 42.3 px median does not describe it). The failure is
+LOCALIZED: a proximity event where the fitted mesh detaches and floats in empty
+space, plus a quarter of frames where DLT cannot triangulate at all.
+
+**So the win must come from coverage and occlusion robustness, not precision.**
+Stage 1 (volumetric fusion) and stage 3 (continuous refine with seed fallback)
+carry it: fusion always yields an answer where DLT NaNs out, and stage 3 keeps
+DLT-grade precision where views are trustworthy. Stage 2 addresses resolution,
+which this bout says is not its binding constraint — judge it on Task 16, not here.
+
+Expected if the approach works:
+- fly0 NaN-frame rate falls well below 25.2%, and the mesh stays ON the animal
+  through the offset ~1484-1501 proximity window
+- fly0 max/p99 reprojection falls from 90.26/62.74 px; fly1 does NOT regress
+  from 6.02 px median (it is already near the detector noise floor)
+- typical-frame reprojection does not regress: fly0 stays at or below 10.26 px
+- leg-angle traces smooth WITHIN the proximity window specifically (fly0 whole-
+  bout p99 step was 30.3 deg, max 71.3 deg, all inside that window) — without
+  added lag, since a smoother trace that also lags means a filter crept in
 - bone-length CV does NOT collapse to ~0: rigid bones enforced for free are a
   known false signal here, not a win
 
-If it is wrong:
-- traces stay equally jagged and reprojection barely moves, meaning the
-  remaining error is upstream (2D) or downstream (IK). The prior measurement
-  that STAC IK reprojects 30-60 px off the DLT 3D it consumes makes IK the
-  first suspect. Report this outcome rather than reaching past it.
+Expected if it does not work:
+- the NaN rate and the proximity failure persist, meaning the problem is
+  upstream (2D detection under occlusion) or downstream (IK). The prior
+  measurement that STAC IK reprojects 30-60 px off the DLT 3D it consumes makes
+  IK the first suspect. Report that outcome rather than reaching past it.
+
+Do NOT reuse the frozen 13-bout scorecard's cohort medians as thresholds for
+this bout — Task 1 showed they describe its worst moments but not its typical
+state. Thresholds come from the table above.
 ```
 
 - [ ] **Step 2: Run bout 28 through the new stack**
@@ -3398,9 +3486,12 @@ If it is wrong:
 cd /mmfs1/gscratch/portia/eabe/Research/MyRepos/3d_tracking_dataset
 micromamba activate 3d_tracking && unset LD_LIBRARY_PATH
 export MUJOCO_GL=egl XLA_PYTHON_CLIENT_MEM_FRACTION=0.4
-python scripts/run_bout.py paths=hyak recording=session0 +bout_ids=28 \
+# Ruling R8 (verified in Task 1): `+bout_ids=28` FAILS — the key is already
+# defined, so use `bout_ids=28` with no `+`. Likewise the hydra config name is
+# `pipeline`, not `config`.
+python scripts/run_bout.py paths=hyak recording=session0 bout_ids=28 \
   detector.ckpt=/gscratch/portia/eabe/data/Johnson_lab/jax_vitpose_runs/v5_sigma2/final \
-  +outputs.out=OutFiles/c2f_3d_bout28 2>&1 \
+  outputs.out=OutFiles/c2f_3d_bout28 2>&1 \
   | tee figures/2026-08-29-c2f-3d/phase4-acceptance/run.log
 ```
 
@@ -3411,13 +3502,19 @@ Expected: stages A–E complete for both flies.
 ```bash
 DST=figures/2026-08-29-c2f-3d/phase4-acceptance
 BASE=figures/2026-08-29-c2f-3d/phase0-baseline/arrays/bout_00028
-# 1. wing + leg angle traces, both flies, baseline vs new
+# 1. wing + leg angle traces, both flies, baseline vs new.
+#    compare_stac_fits.py takes --xml/--anatomy and has NO --bout (ruling R1);
+#    use the exact invocation Task 1's report recorded.
 python scripts/viz/compare_stac_fits.py \
   --fit baseline=$BASE --fit c2f=OutFiles/c2f_3d_bout28 \
-  --bout 28 --out $DST
-# 2. per-camera reprojection overlays incl. an occlusion and a wall frame
-python -m viz overlay paths=hyak recording=session0 +bout_ids=28 \
-  --compare $BASE +out=$DST
+  --xml <from Task 1 report> --anatomy <from Task 1 report> --out $DST
+# 2. per-camera overlays + leg chains, both flies, incl. occlusion and wall frames
+for FLY in 0 1; do
+  python -m viz overlay --run OutFiles/c2f_3d_bout28 --bout 28 --fly $FLY \
+    --compare $BASE --out $DST
+  python -m viz legskel --run OutFiles/c2f_3d_bout28 --bout 28 --fly $FLY \
+    --compare $BASE --out $DST
+done
 # 3. benchmark regression check
 python -m scripts.benchmark.run_variant collect --variant c2f_3d --out $DST
 ```
@@ -3473,7 +3570,7 @@ grouping (Task 2). §6 risks: 8-way ramp (Task 15 Step 4), A5 memory
 Tasks 4 and 7. `merge_annotations` emits `src_ann_id`, which `v5_3d._load_mask`
 reads in Task 8. `make_split`/`audit_split`/`write_derived` signatures match
 their Task 7 call sites. `reproject_heatmaps(..., grid_spacing: float,
-rotation, center_offset)` from Task 10 is called by `refine_volumes` in Task 12.
+rotation)` from Task 10 is called by `refine_volumes` in Task 12.
 `soft_argmax_3d(..., grid_spacing: float, roi_cube: float)` from Task 11 is
 called by `refine_keypoints` in Task 12. `refine_from_seed` returns a 3-tuple in
 both Task 13's tests and its Task 17 use.
