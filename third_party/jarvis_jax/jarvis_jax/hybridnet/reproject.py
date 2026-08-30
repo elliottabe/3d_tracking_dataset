@@ -235,6 +235,11 @@ def reproject_heatmaps(
         R2 = rotation if rotation.ndim == 2 else rotation[0]
         if not bool(jnp.allclose(R2 @ R2.T, jnp.eye(3, dtype=jnp.float32), atol=1e-4)):
             raise ValueError("rotation must be orthogonal (R @ R.T == I)")
+        # Orthogonality alone admits reflections (det == -1), e.g.
+        # diag([1, 1, -1]): R @ R.T == I but it mirrors the grid, which would
+        # swap left/right anatomy (T1L_* vs T1R_*). Require a proper rotation.
+        if not bool(jnp.isclose(jnp.linalg.det(R2), 1.0, atol=1e-4)):
+            raise ValueError("rotation must have det == +1 (no reflections)")
         rot_in_axis = None if rotation.ndim == 2 else 0
     else:
         rot_in_axis = None

@@ -45,3 +45,13 @@ def test_rotation_is_orthogonality_checked():
     bad = jnp.asarray(np.diag([2.0, 1.0, 1.0]).astype(np.float32))
     with pytest.raises(ValueError, match="orthogonal"):
         reproject_heatmaps(**_inputs(), grid_size=16, heatmap_size=64, rotation=bad)
+
+
+def test_reflection_is_rejected():
+    """diag([1, 1, -1]) is orthogonal (R @ R.T == I) but det == -1: a mirror
+    that would swap left/right anatomy (T1L_* vs T1R_* in the 50-kp skeleton).
+    The orthogonality check alone accepts it, so det must be checked too."""
+    reflection = jnp.asarray(np.diag([1.0, 1.0, -1.0]).astype(np.float32))
+    with pytest.raises(ValueError, match="det"):
+        reproject_heatmaps(**_inputs(), grid_size=16, heatmap_size=64,
+                           rotation=reflection)
