@@ -26,6 +26,7 @@ import os
 import numpy as np
 from PIL import Image, ImageDraw
 
+from jarvis_jax.data.build_v5 import iter_resolved_slots
 from viz.core.colors import PALETTE, keypoint_groups
 
 
@@ -63,7 +64,12 @@ def build_contact_sheet(v5_root: str, recording: str, *, n_frames: int = 6,
     for col, key in enumerate(pick):
         fs = blob["framesets"][key]
         for row, cam in enumerate(cams):
-            hit = next(((i, a) for i, a in zip(fs["frames"], fs["ann_ids"])
+            # A camera's slot may be unresolved (ann_id None) -- see Ruling
+            # R15 in build_v5.merge_annotations. iter_resolved_slots skips
+            # those, so an unresolved camera just leaves this cell blank
+            # rather than crashing; the frameset's OTHER resolved cameras
+            # still render below.
+            hit = next(((i, a) for i, a in iter_resolved_slots(fs)
                         if img_by_id[i]["file_name"].split("/")[-2] == cam), None)
             if hit is None:
                 continue

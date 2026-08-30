@@ -108,7 +108,7 @@ def test_discover_sources_real_filesystem_smoke():
     assert "2026_07_30_13_28_99" in srcs
 
 import json
-from jarvis_jax.data.build_v5 import merge_annotations, SourceRec
+from jarvis_jax.data.build_v5 import iter_resolved_slots, merge_annotations, SourceRec
 
 CAMS7 = ["Cam2012630", "Cam2012631", "Cam2012853", "Cam2012855",
          "Cam2012857", "Cam2012861", "Cam2012862"]
@@ -275,3 +275,50 @@ def test_category_renamed_from_rat(tmp_path):
     out.mkdir()
     merged = merge_annotations(srcs, str(out))
     assert merged["categories"][0]["name"] == "fly"
+
+
+def test_iter_resolved_slots_skips_none_but_keeps_the_rest():
+    """Ruling R15: ann_ids runs parallel to frames but may hold None for a
+    camera whose identity could not be resolved. The accessor must yield
+    only the resolved (img_id, ann_id) pairs, in order, never a None ann_id
+    and never dropping a resolved camera alongside it."""
+    frameset = {"recording": "rec_u", "fly_id": 0,
+               "frames": [10, 11, 12, 13],
+               "ann_ids": [100, None, 102, 103]}
+    assert list(iter_resolved_slots(frameset)) == [(10, 100), (12, 102), (13, 103)]
+
+
+def test_iter_resolved_slots_on_real_merge_output(tmp_path):
+    """End-to-end: feed a frameset actually produced by merge_annotations
+    (the disagreeing-camera case from Ruling R15) through the accessor and
+    confirm it drops exactly the one None slot merge_annotations recorded,
+    keeping all 6 resolved cameras."""
+    p = tmp_path / "uneq.json"
+    images, anns, aid = [], [], 0
+    for ci, cam in enumerate(CAMS7):
+        images.append({"id": ci, "width": 1936, "height": 448,
+                       "file_name": f"rec_u/{cam}/Frame_000100.jpg"})
+        n = 1 if ci == 1 else 2  # Cam2012631 (index 1) sees only one fly
+        for k in range(n):
+            anns.append({"id": aid, "image_id": ci,
+                         "bbox": [500.0 if n == 1 else k * 500.0, 0.0, 50.0, 50.0],
+                         "keypoints": [1.0, 2.0, 2] * 50, "num_keypoints": 50,
+                         "sex": "unknown", "behavior": "courtship"})
+            aid += 1
+    p.write_text(json.dumps({
+        "keypoint_names": [f"kp{i}" for i in range(50)], "skeleton": [],
+        "categories": [{"id": 1, "name": "Rat", "num_keypoints": 50}],
+        "images": images, "annotations": anns,
+        "framesets": {"rec_u/Frame_000100": {"datasetName": "rec_u",
+                                             "frames": list(range(7))}},
+        "calibrations": {"rec_u": {}}}))
+    srcs = {"rec_u": SourceRec("rec_u", None, [str(p)], "", "")}
+    out = tmp_path / "v5"; out.mkdir()
+    merged = merge_annotations(srcs, str(out))
+    for key, fs in merged["framesets"].items():
+        resolved = list(iter_resolved_slots(fs))
+        assert len(resolved) == 6, f"{key}: expected 6 resolved cameras, got {len(resolved)}"
+        assert all(ann_id is not None for _, ann_id in resolved)
+        # the accessor must not have invented an entry for the disagreeing
+        # camera's img_id (frames[1]) -- it is simply absent from the result.
+        assert fs["frames"][1] not in [img_id for img_id, _ in resolved]

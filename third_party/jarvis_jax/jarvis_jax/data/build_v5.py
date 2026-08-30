@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 
 from jarvis_jax.data.calib_groups import CAM_GLOB, group_calibrations
@@ -305,6 +306,29 @@ def merge_annotations(sources: dict[str, SourceRec], out_root: str) -> dict:
     with open(os.path.join(ann_dir, "instances.json"), "w") as f:
         json.dump(merged, f)
     return merged
+
+
+def iter_resolved_slots(frameset: dict) -> Iterator[tuple[int, int]]:
+    """Yield (img_id, ann_id) for a frameset's cameras that resolved to a fly.
+
+    `frameset["ann_ids"]` runs parallel to `frameset["frames"]` (image ids)
+    but may legitimately contain `None`: per CONTROLLER RULING R15 in
+    `merge_annotations` above, a camera whose per-frame fly count disagreed
+    with the frameset max cannot be assigned an identity by position, so it
+    is recorded ABSENT (`None`) for every fly in that frameset rather than
+    guessed at. `frameset["frames"]` itself is never `None` -- merge_annotations
+    aborts the whole frameset if any camera's image info is missing.
+
+    A frameset is only ever emitted once at least MIN_CAMS cameras resolved,
+    so this always yields >= MIN_CAMS pairs -- but callers must not assume
+    every camera in `frames`/`ann_ids` is present, and must not index the two
+    lists positionally without this filter. This is the third call site to
+    trip on the raw `None` (after `write_derived` and the frameset loader),
+    so the skip lives here once instead of being reimplemented per consumer.
+    """
+    for img_id, ann_id in zip(frameset["frames"], frameset["ann_ids"]):
+        if ann_id is not None:
+            yield img_id, ann_id
 
 
 _VALID_SEX = {"male", "female", "unknown"}
