@@ -110,41 +110,32 @@ def build_manifest(sources: dict[str, SourceRec], out_root: str) -> dict:
     return man
 
 
-def _looks_like_camera_root(path: str) -> bool:
-    """True if `path` itself directly holds `Cam*` directories.
-
-    Distinguishes a source root that is already scoped to one recording
-    (children are cameras) from a shared multi-recording root such as
-    `general_model/<subset>` or `red_data_unified_V3` (children are
-    `calib_params/`, `train/`, `val/`, `annotations/` -- never cameras). Only
-    the latter needs `rec` joined on; walking the former as if it needed the
-    same join would miss the cameras entirely.
-    """
-    if not os.path.isdir(path):
-        return False
-    return any(d.startswith("Cam") and os.path.isdir(os.path.join(path, d))
-               for d in os.listdir(path))
-
-
 def link_media(sources: dict[str, SourceRec], out_root: str, *,
                copy: bool = False) -> None:
     """Materialize images/ and masks/ as ONE flat per-recording tree.
 
     Symlinks by default: the sources are stable on gscratch and copying costs
     4.4 GB for no benefit. `copy=True` if the tree must be self-contained.
+
+    Known limitations of the idempotency guard (`os.path.lexists`) below --
+    documented, not fixed, since current usage is a single build over stable,
+    symlink-only sources:
+
+    - A broken symlink (its source later removed) is never healed or even
+      reported: `lexists` is True for a dangling link, so a rerun silently
+      skips it and the destination stays broken.
+    - A stale regular file left behind by an earlier `copy=True` run
+      permanently blocks a symlink on a later `copy=False` run over the same
+      recording: `lexists` sees the file and skips it, so the destination
+      never becomes a symlink even though `copy` changed between runs.
     """
     for rec, s in sources.items():
         for kind, src_root in (("images", s.image_root), ("masks", s.mask_root)):
             if src_root is None:
                 continue
             for split in ("train", "val", ""):
-                nested = os.path.join(src_root, split, rec) if split else os.path.join(src_root, rec)
-                bare = os.path.join(src_root, split) if split else src_root
-                if os.path.isdir(nested):
-                    base = nested
-                elif _looks_like_camera_root(bare):
-                    base = bare
-                else:
+                base = os.path.join(src_root, split, rec) if split else os.path.join(src_root, rec)
+                if not os.path.isdir(base):
                     continue
                 for cam in sorted(os.listdir(base)):
                     src_cam = os.path.join(base, cam)

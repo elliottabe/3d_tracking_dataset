@@ -1,16 +1,26 @@
 import json
 import os
-from jarvis_jax.data.build_v5 import SourceRec, build_manifest, link_media
+import pytest
+from jarvis_jax.data.build_v5 import (
+    SourceRec, build_manifest, discover_sources, link_media,
+)
 
 CAMS = ["Cam2012630", "Cam2012631"]
 
 def _fake_source(tmp_path, rec, n_frames=3, first=8.1001, masks=True):
-    img_root = tmp_path / "src" / rec / "images"
+    # Shaped like the REAL trees: <root>/<subset>/{train,val}/<rec>/<Cam*>/...
+    # image_root/mask_root point at the SUBSET root (siblings of many
+    # recordings), never at a root already scoped to one recording -- that
+    # was the fixture bug behind the now-removed `_looks_like_camera_root`
+    # heuristic (Finding 2, fix round 1).
+    subset = f"sub_{rec}"
+    img_root = tmp_path / "src" / subset
     for c in CAMS:
-        (img_root / c).mkdir(parents=True)
+        d = img_root / "train" / rec / c
+        d.mkdir(parents=True)
         for i in range(n_frames):
-            (img_root / c / f"Frame_{i:06d}.jpg").write_bytes(b"\xff\xd8fake")
-    calib = tmp_path / "src" / rec / "calib"
+            (d / f"Frame_{i:06d}.jpg").write_bytes(b"\xff\xd8fake")
+    calib = tmp_path / "src" / subset / "calib_params" / rec
     calib.mkdir(parents=True)
     for c in ["Cam2012630", "Cam2012631", "Cam2012853", "Cam2012855",
               "Cam2012857", "Cam2012861", "Cam2012862"]:
@@ -21,12 +31,13 @@ def _fake_source(tmp_path, rec, n_frames=3, first=8.1001, masks=True):
             f"%YAML:1.0\n---\nprojectionMatrix: !!opencv-matrix\n   data: [ {data} ]\n")
     mask_root = None
     if masks:
-        mask_root = tmp_path / "src" / rec / "masks"
+        mask_root = img_root / "sam3_masks"
         for c in CAMS:
-            (mask_root / c).mkdir(parents=True)
+            d = mask_root / "train" / rec / c
+            d.mkdir(parents=True)
             for i in range(n_frames):
-                (mask_root / c / f"Frame_{i:06d}.npz").write_bytes(b"npz")
-    return SourceRec(recording=rec, subset=f"sub_{rec}", ann_paths=[],
+                (d / f"Frame_{i:06d}.npz").write_bytes(b"npz")
+    return SourceRec(recording=rec, subset=subset, ann_paths=[],
                      calib_dir=str(calib), image_root=str(img_root),
                      mask_root=str(mask_root) if mask_root else None)
 
@@ -61,6 +72,40 @@ def test_link_media_creates_symlinks_with_no_split_dirs(tmp_path):
     # The whole point: no train/ or val/ directory anywhere in the media tree.
     for root, dirs, _ in os.walk(out / "images"):
         assert "train" not in dirs and "val" not in dirs
+
+
+# Finding 1 (fix round 1): discover_sources is the only function that touches
+# the real filesystem and had zero test coverage -- both the implementer and
+# the reviewer independently ran it and got exactly 26 recordings, but that
+# verification lived only in a chat log. Pin it here.
+GENERAL_MODEL_ROOT = "/gscratch/portia/eabe/data/Johnson_lab/red_data/general_model"
+V3_ROOT = "/gscratch/portia/eabe/data/Johnson_lab/red_data/red_data_unified_V3"
+
+
+@pytest.mark.skipif(
+    not (os.path.isdir(GENERAL_MODEL_ROOT) and os.path.isdir(V3_ROOT)),
+    reason="gscratch data not present",
+)
+def test_discover_sources_real_filesystem_smoke():
+    srcs = discover_sources(GENERAL_MODEL_ROOT, V3_ROOT)
+    assert len(srcs) == 26, f"expected 26 recordings, got {len(srcs)}: {sorted(srcs)}"
+
+    # general_model lacks these 5; red_data_unified_V3 is their only source,
+    # and V3 is also where their masks live.
+    v3_only = [
+        "2026_03_22_12_07_40",
+        "2026_04_07_11_33_33",
+        "2026_04_08_14_59_45",
+        "2026_06_11_13_58_43",
+        "2026_06_11_13_58_45",
+    ]
+    for rec in v3_only:
+        assert rec in srcs, f"{rec} missing from discovered sources"
+        assert srcs[rec].mask_root is not None, (
+            f"{rec} is V3-only and must carry a non-None mask_root")
+
+    # general_model-only recording (no V3 counterpart).
+    assert "2026_07_30_13_28_99" in srcs
 
 import json
 from jarvis_jax.data.build_v5 import merge_annotations, SourceRec
