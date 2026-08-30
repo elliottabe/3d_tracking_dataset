@@ -52,6 +52,7 @@ from jarvis_jax.models.efficienttrack import EfficientTrack, build_efficienttrac
 from jarvis_jax.convert.build_checkpoint import build
 from jarvis_jax.data.prefetch import prefetch
 from jarvis_jax.data.v3 import V3Dataset, batches
+from jarvis_jax.data.v5_2d import V5Dataset
 from jarvis_jax.sharding import data_parallel_mesh, replicate
 from jarvis_jax.train.train import (
     TrainConfig, make_optimizer, make_train_step, eval_mpjpe,
@@ -60,6 +61,31 @@ from jarvis_jax.data.augment import build_lr_swap, AugParams
 from jarvis_jax.train.checkpoint import (
     make_manager, save_step, restore_latest, warm_start_restore,
 )
+
+
+def select_dataset_cls(root):
+    """Pick the 2D keypoint dataset class matching `root`'s on-disk layout.
+
+    `red_data_3d_v5`-shaped roots are flat -- no `train/`/`val/` directory
+    anywhere, the split lives only in `annotations/instances_{split}.json`
+    -- and are identifiable by having BOTH an `images/` directory and a
+    `manifest.json` file directly under `root` (this is the same pair of
+    markers `jarvis_jax/data/v5_2d.py`'s module docstring describes for the
+    v5 tree, and the same file `jarvis_jax/data/v5_3d.py::V5FramesetDataset`
+    requires to exist at its root). Anything else -- V3/V4-style roots,
+    which have `train/`/`val/` and carry no `manifest.json` -- keeps using
+    `V3Dataset`, unchanged.
+
+    Constructing the wrong class against a v5 root fails loudly (missing
+    `train/<file>` -> FileNotFoundError on the first sample; see
+    `tests/test_v5_2d.py::test_v3dataset_cannot_read_v5_layout_by_design`)
+    rather than silently, so this selection is the only place that needs to
+    get the layout right.
+    """
+    is_v5 = (os.path.isdir(os.path.join(root, "images")) and
+             os.path.isfile(os.path.join(root, "manifest.json")))
+    return V5Dataset if is_v5 else V3Dataset
+
 
 DEFAULT_MAE_NPZ = "/gscratch/portia/eabe/data/Johnson_lab/mae_vitb.npz"
 # Committed torchvision efficientnet_b3 ImageNet fixture (see
@@ -207,9 +233,12 @@ def run_training(root, *, out_dir, mae_npz=DEFAULT_MAE_NPZ, tcfg=None,
     gdef_o, st_o = nnx.split(opt)
     opt = nnx.merge(gdef_o, replicate(st_o, mesh))
 
-    train_ds = V3Dataset(root, "train")
-    val_ds = V3Dataset(root, "val", recordings=[val_recording])
-    val_ds_all = V3Dataset(root, "val")     # full val = the truthful headline metric
+    # Select the 2D keypoint dataset class by root layout (V3/V4 split-rooted
+    # tree vs v5's flat images/+manifest.json tree) -- see select_dataset_cls.
+    dataset_cls = select_dataset_cls(root)
+    train_ds = dataset_cls(root, "train")
+    val_ds = dataset_cls(root, "val", recordings=[val_recording])
+    val_ds_all = dataset_cls(root, "val")     # full val = the truthful headline metric
 
     # Weighted sampling: EITHER error-weighted hard-example resampling (from a
     # jarvis_jax.scripts.mine_hard_frames.py error npz -- configs/sampling/
