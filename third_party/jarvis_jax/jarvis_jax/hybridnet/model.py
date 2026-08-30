@@ -44,8 +44,8 @@ from jarvis_jax.hybridnet.reproject import reproject_heatmaps
 def soft_argmax_3d(
     vol: jnp.ndarray,
     *,
-    grid_spacing: int = 1,
-    roi_cube: int = 48,
+    grid_spacing: float = 1.0,
+    roi_cube: float = 48.0,
     sharpen: float = 1.0,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Differentiable 3D soft-argmax over a volumetric heatmap.
@@ -54,8 +54,9 @@ def soft_argmax_3d(
 
     Args:
         vol:          ``(B, J, G, G, G)`` raw v2vNet logits (any sign).
-        grid_spacing: World-space units per grid step (default 1).
-        roi_cube:     Full cube side length in world units (default 48).
+        grid_spacing: World-space units per grid step (default 1.0). Fractional
+                      values are supported (e.g. 0.25 for stage-2 refinement).
+        roi_cube:     Full cube side length in world units (default 48.0).
                       World coordinate: ``idx * grid_spacing * 2 - roi_cube / 2.0``.
         sharpen:      Exponent applied to the non-negative heatmap before taking
                       the expectation (default 1.0 = original behavior, exact
@@ -71,9 +72,12 @@ def soft_argmax_3d(
     Returns:
         points: ``(B, J, 3)`` world-space 3-D keypoints (before center3D offset).
         conf:   ``(B, J)``  confidence in [0, 1], clamped max over the volume.
-    """
-    assert grid_spacing == 1, "soft_argmax_3d world offset assumes grid_spacing==1 (offset=roi_cube/2); generalize to roi_cube/grid_spacing/2 + matching grid if this changes"
 
+    GENERALIZED 2026-08-29: grid_spacing was asserted == 1. Stage-2 refinement
+    samples at 0.25 so that 1 voxel ~ 0.8 heatmap px instead of 2.7-3.2, which
+    is the whole point — at spacing 1 the distal tarsal segment spans only 1.59
+    voxels and the kinematics are quantization-limited at ~0.17 mm.
+    """
     # Apply relu to ensure non-negative volumes.
     # Using relu (not softplus) so that zero-valued voxels remain zero, which
     # allows sparse test volumes to yield exact peak recovery.
