@@ -305,3 +305,30 @@ def merge_annotations(sources: dict[str, SourceRec], out_root: str) -> dict:
     with open(os.path.join(ann_dir, "instances.json"), "w") as f:
         json.dump(merged, f)
     return merged
+
+
+_VALID_SEX = {"male", "female", "unknown"}
+
+
+def apply_sex_labels(v5_root: str, labels: dict[str, str]) -> dict:
+    """Write manually-determined sex into manifest.json.
+
+    Keys are recording names, or '<recording>/fly<k>' for the four two-fly
+    recordings where the two slots differ.
+    """
+    path = os.path.join(v5_root, "manifest.json")
+    with open(path) as f:
+        man = json.load(f)
+    for key, sex in labels.items():
+        if sex not in _VALID_SEX:
+            raise ValueError(f"sex must be one of {sorted(_VALID_SEX)}, got {sex!r}")
+        rec = key.split("/")[0]
+        if rec not in man["recordings"]:
+            raise KeyError(f"{rec!r} not in manifest")
+        if "/" in key:
+            man["recordings"][rec].setdefault("fly_sex", {})[key.split("/")[1]] = sex
+        else:
+            man["recordings"][rec]["sex"] = sex
+    with open(path, "w") as f:
+        json.dump(man, f, indent=2)
+    return man
