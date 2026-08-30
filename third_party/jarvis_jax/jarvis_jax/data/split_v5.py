@@ -112,7 +112,15 @@ def write_derived(merged: dict, split: dict, out_root: str) -> None:
     for name in ("train", "val"):
         keys = [k for k, v in split.items() if v == name]
         fs = {k: merged["framesets"][k] for k in keys}
-        ann_ids = {a for v in fs.values() for a in v["ann_ids"]}
+        # ann_ids may legitimately contain None (merge_annotations records a
+        # camera as ABSENT when its per-frame fly count disagrees with the
+        # frameset max) -- drop those before sorting/looking up, but keep the
+        # frameset itself: merge_annotations already guarantees >= MIN_CAMS
+        # resolvable views before it emits the frameset at all.
+        ann_ids = {a for v in fs.values() for a in v["ann_ids"] if a is not None}
+        # frames (image ids) are never None -- merge_annotations only appends
+        # to cam_img_ids for cameras with real image info, and aborts the
+        # whole frameset (`break`) if any camera's frame info is missing.
         img_ids = {i for v in fs.values() for i in v["frames"]}
         blob = {
             "keypoint_names": merged["keypoint_names"],

@@ -1,5 +1,7 @@
+import json
+
 import pytest
-from jarvis_jax.data.split_v5 import make_split, audit_split
+from jarvis_jax.data.split_v5 import make_split, audit_split, write_derived
 
 def _merged(recs):
     """recs: {recording: n_frames}. One fly per frameset, frames spaced by 1."""
@@ -54,3 +56,31 @@ def test_empty_val_is_rejected():
     m = _merged({"rec_a": 10})
     with pytest.raises(ValueError, match="empty val"):
         make_split(m, _manifest(["rec_a"]), val_recordings=[], female_val_frac=0.0)
+
+def test_write_derived_survives_none_ann_ids(tmp_path):
+    """merge_annotations (build_v5.py, commit 89c1b08) legitimately emits
+    ann_ids containing None for a camera whose fly identity could not be
+    resolved. write_derived must drop those None entries rather than crash
+    on sorted({int, None}) or by_id[None], and must NOT drop the frameset
+    itself -- it still has >= MIN_CAMS resolvable views."""
+    merged = {
+        "keypoint_names": ["kp0"], "skeleton": [],
+        "categories": [{"id": 1, "name": "fly"}],
+        "images": [{"id": 0, "file_name": "rec_a/Cam1/Frame_000000.jpg"},
+                   {"id": 1, "file_name": "rec_a/Cam2/Frame_000000.jpg"}],
+        "annotations": [{"id": 0, "image_id": 0, "fly_id": 0},
+                        {"id": 1, "image_id": 1, "fly_id": 0}],
+        "framesets": {
+            "rec_a/Frame_000000/fly0": {
+                "recording": "rec_a", "fly_id": 0,
+                "frames": [0, 1], "ann_ids": [0, None]},
+        },
+    }
+    split = {"rec_a/Frame_000000/fly0": "train"}
+    write_derived(merged, split, str(tmp_path))
+    out = json.load(open(tmp_path / "annotations" / "instances_train.json"))
+    assert "rec_a/Frame_000000/fly0" in out["framesets"], \
+        "frameset with a None ann_id must survive, not be dropped"
+    ann_ids_out = [a["id"] for a in out["annotations"]]
+    assert ann_ids_out == [0]
+    assert None not in ann_ids_out
