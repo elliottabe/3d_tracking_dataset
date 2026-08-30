@@ -629,7 +629,7 @@ discarded, 244 of them in bout 28's own calibration group.
   `annotations/instances.json` with schema:
   - `images[]`: `{id, file_name: "<recording>/<Cam>/Frame_*.jpg", width, height, recording}`
   - `annotations[]`: `{id, image_id, bbox, keypoints, num_keypoints, sex, behavior, fly_id}` where `fly_id` is the 0-based index of this fly WITHIN its frameset, assigned consistently across cameras by source ordering
-  - `framesets{}`: `"<recording>/Frame_<N>/fly<k>"` → `{recording, fly_id, frames: [image_id × 7], ann_ids: [ann_id × 7]}`
+  - `framesets{}`: `"<recording>/Frame_<N>/fly<k>"` → `{recording, fly_id, frames: [image_id × 7], ann_ids: [ann_id | None × 7]}` — **`ann_ids` may contain `None`** for a camera where this fly's identity could not be resolved (ruling R15); at least `MIN_CAMS` = 3 entries are non-`None`
   - `categories`: `[{"id": 1, "name": "fly", "num_keypoints": 50}]`
   - `keypoint_names`, `skeleton` carried through unchanged
 
@@ -701,6 +701,103 @@ def test_fly_id_is_consistent_across_cameras(tmp_path):
         fly_ids = {by_id[a]["fly_id"] for a in fs["ann_ids"]}
         assert len(fly_ids) == 1, f"{k} mixes fly_ids {fly_ids} across cameras"
 
+def test_camera_with_fewer_annotations_is_marked_absent_not_guessed(tmp_path):
+    """Ruling R15. When one camera sees fewer flies than the rest, its lone
+    annotation may belong to EITHER fly — verified real case:
+    2026_04_08_14_59_45/Frame_149677, where Cam2012631's single annotation is
+    the RIGHT fly while positional index 0 would file it as the left one.
+    The merge must record that camera ABSENT for every fly, never guess."""
+    p = tmp_path / "uneq.json"
+    images, anns, aid = [], [], 0
+    for ci, cam in enumerate(CAMS7):
+        images.append({"id": ci, "width": 1936, "height": 448,
+                       "file_name": f"rec_u/{cam}/Frame_000100.jpg"})
+        # Cam2012631 (index 1) sees only ONE fly; every other camera sees two.
+        n = 1 if ci == 1 else 2
+        for k in range(n):
+            anns.append({"id": aid, "image_id": ci,
+                         "bbox": [500.0 if n == 1 else k * 500.0, 0.0, 50.0, 50.0],
+                         "keypoints": [1.0, 2.0, 2] * 50, "num_keypoints": 50,
+                         "sex": "unknown", "behavior": "courtship"})
+            aid += 1
+    p.write_text(json.dumps({
+        "keypoint_names": [f"kp{i}" for i in range(50)], "skeleton": [],
+        "categories": [{"id": 1, "name": "Rat", "num_keypoints": 50}],
+        "images": images, "annotations": anns,
+        "framesets": {"rec_u/Frame_000100": {"datasetName": "rec_u",
+                                             "frames": list(range(7))}},
+        "calibrations": {"rec_u": {}}}))
+    srcs = {"rec_u": SourceRec("rec_u", None, [str(p)], "", "")}
+    out = tmp_path / "v5"; out.mkdir()
+    merged = merge_annotations(srcs, str(out))
+    # BOTH flies survive (6 cameras each, above MIN_CAMS=3) ...
+    assert sorted(merged["framesets"]) == ["rec_u/Frame_000100/fly0",
+                                           "rec_u/Frame_000100/fly1"]
+    for key in merged["framesets"]:
+        ids = merged["framesets"][key]["ann_ids"]
+        assert len(ids) == 7
+        # ... and the disagreeing camera is ABSENT, not guessed at.
+        assert ids[1] is None, f"{key} guessed an identity for Cam2012631"
+        assert sum(a is not None for a in ids) == 6
+
+
+def test_fly_dropped_when_too_few_cameras_resolve_it(tmp_path):
+    """Below MIN_CAMS=3 resolvable cameras a fly cannot be triangulated, so it
+    must be dropped rather than emitted with mostly-None slots."""
+    p = tmp_path / "sparse.json"
+    images, anns, aid = [], [], 0
+    for ci, cam in enumerate(CAMS7):
+        images.append({"id": ci, "width": 1936, "height": 448,
+                       "file_name": f"rec_s/{cam}/Frame_000100.jpg"})
+        n = 2 if ci < 2 else 1          # only 2 cameras resolve two flies
+        for k in range(n):
+            anns.append({"id": aid, "image_id": ci, "bbox": [k * 500.0, 0.0, 50.0, 50.0],
+                         "keypoints": [1.0, 2.0, 2] * 50, "num_keypoints": 50,
+                         "sex": "unknown", "behavior": "courtship"})
+            aid += 1
+    p.write_text(json.dumps({
+        "keypoint_names": [f"kp{i}" for i in range(50)], "skeleton": [],
+        "categories": [{"id": 1, "name": "Rat", "num_keypoints": 50}],
+        "images": images, "annotations": anns,
+        "framesets": {"rec_s/Frame_000100": {"datasetName": "rec_s",
+                                             "frames": list(range(7))}},
+        "calibrations": {"rec_s": {}}}))
+    srcs = {"rec_s": SourceRec("rec_s", None, [str(p)], "", "")}
+    out = tmp_path / "v5"; out.mkdir()
+    merged = merge_annotations(srcs, str(out))
+    assert merged["framesets"] == {}, "2 resolvable cameras is below MIN_CAMS"
+
+
+def test_single_fly_frameset_survives_a_camera_with_no_annotation(tmp_path):
+    """The bug ruling R15 also fixes: under the old `min` rule a single camera
+    with zero annotations discarded the WHOLE frameset, costing 91 framesets
+    from 2026_01_13_18_47_45 and every frameset of wall_frames."""
+    p = tmp_path / "gap.json"
+    images, anns, aid = [], [], 0
+    for ci, cam in enumerate(CAMS7):
+        images.append({"id": ci, "width": 1936, "height": 448,
+                       "file_name": f"rec_g/{cam}/Frame_000100.jpg"})
+        if ci == 3:
+            continue                      # this camera saw nothing
+        anns.append({"id": aid, "image_id": ci, "bbox": [10.0, 0.0, 50.0, 50.0],
+                     "keypoints": [1.0, 2.0, 2] * 50, "num_keypoints": 50,
+                     "sex": "female", "behavior": "general"})
+        aid += 1
+    p.write_text(json.dumps({
+        "keypoint_names": [f"kp{i}" for i in range(50)], "skeleton": [],
+        "categories": [{"id": 1, "name": "Rat", "num_keypoints": 50}],
+        "images": images, "annotations": anns,
+        "framesets": {"rec_g/Frame_000100": {"datasetName": "rec_g",
+                                             "frames": list(range(7))}},
+        "calibrations": {"rec_g": {}}}))
+    srcs = {"rec_g": SourceRec("rec_g", None, [str(p)], "", "")}
+    out = tmp_path / "v5"; out.mkdir()
+    merged = merge_annotations(srcs, str(out))
+    assert list(merged["framesets"]) == ["rec_g/Frame_000100/fly0"]
+    ids = merged["framesets"]["rec_g/Frame_000100/fly0"]["ann_ids"]
+    assert ids[3] is None and sum(a is not None for a in ids) == 6
+
+
 def test_category_renamed_from_rat(tmp_path):
     p = _coco(tmp_path, "one", "rec_one", n_flies=1)
     srcs = {"rec_one": SourceRec("rec_one", None, [p], "", "")}
@@ -723,10 +820,41 @@ import re
 from collections import defaultdict
 
 _FRAME_RE = re.compile(r"Frame_(\d+)")
+# Minimum cameras a fly must appear in to be usable. 3 matches the robust
+# triangulation path, which needs >=3 views for its consensus check.
+MIN_CAMS = 3
 
 
 def merge_annotations(sources: dict[str, SourceRec], out_root: str) -> dict:
     """Merge every source COCO file into one instances.json with per-fly identity.
+
+    CONTROLLER RULING R15 -- how a fly's identity is resolved ACROSS cameras.
+    Real courtship data frequently has one camera drop an annotation (occlusion),
+    so per-camera annotation counts DISAGREE within a frameset. Three rules were
+    considered and two are wrong:
+
+      * `min(counts)` (the original draft) requires all 7 cameras to agree before
+        counting a fly at all. It silently discarded 316 framesets with unequal
+        counts, and dropped 8 recordings' worth of SINGLE-fly data too wherever
+        some camera had zero annotations -- 91 framesets from 2026_01_13_18_47_45
+        and 73 from 2026_03_22_12_07_40 among them. `2026_07_30_13_28_99`
+        (wall_frames) collapsed to ZERO framesets.
+      * `max(counts)` with positional indexing reaches the right TOTAL but creates
+        CHIMERAS. Verified counterexample: in
+        `2026_04_08_14_59_45/Frame_149677`, Cam2012631 carries a single annotation
+        at bbox x=507 while the other six cameras carry two, at x~30-60 (left fly)
+        and x~546-575 (right fly). That lone annotation is the RIGHT fly, so
+        `cam_anns[0]` would file it as fly0 -- a fly whose views come from two
+        different animals, which every downstream metric would report as fine.
+
+    The rule used here: a camera whose annotation count EQUALS the frameset max
+    contributes `cam_anns[k]` -- position-based identity is verified safe in that
+    regime (two-fly framesets triangulate at 0.39 px, identical to single-fly
+    controls). A camera that disagrees on the count cannot be assigned by
+    position, so it is recorded as ABSENT (`None`) for every fly in that
+    frameset. A fly is emitted only if at least MIN_CAMS cameras remain.
+
+    Consumers must therefore treat `ann_ids` as possibly containing `None`.
 
     THE FIX: v3_3d.py mapped image_id -> FIRST annotation, commented "shouldn't
     happen for single-fly". It does happen -- on 2026_04_08 (214 framesets),
@@ -793,13 +921,22 @@ def merge_annotations(sources: dict[str, SourceRec], out_root: str) -> dict:
 
                 if len(cam_img_ids) != len(fsv["frames"]) or not per_cam:
                     continue
-                n_flies = min(len(v) for v in per_cam)
+                # CONTROLLER RULING R15 -- see the block comment above for why
+                # this is NOT `min` (silently drops data) and NOT `max`
+                # (creates chimeras).
+                n_flies = max(len(v) for v in per_cam)
                 if n_flies == 0:
                     continue
 
                 for k in range(n_flies):
                     ann_ids = []
                     for img_id, cam_anns in zip(cam_img_ids, per_cam):
+                        if len(cam_anns) != n_flies:
+                            # This camera disagrees on how many flies it sees,
+                            # so positional index k is NOT safe here. Record the
+                            # camera as ABSENT for this fly rather than guessing.
+                            ann_ids.append(None)
+                            continue
                         a = cam_anns[k]
                         out_anns.append({
                             "id": next_ann, "image_id": img_id,
@@ -812,6 +949,8 @@ def merge_annotations(sources: dict[str, SourceRec], out_root: str) -> dict:
                         })
                         ann_ids.append(next_ann)
                         next_ann += 1
+                    if sum(a is not None for a in ann_ids) < MIN_CAMS:
+                        continue   # too few views to triangulate; drop the fly
                     framesets[f"{rec}/Frame_{frame}/fly{k}"] = {
                         "recording": rec, "fly_id": k,
                         "frames": cam_img_ids, "ann_ids": ann_ids}
@@ -834,7 +973,7 @@ def merge_annotations(sources: dict[str, SourceRec], out_root: str) -> dict:
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `cd $PKG && python -m pytest tests/test_build_v5.py -v`
-Expected: 7 passed
+Expected: 10 passed
 
 - [ ] **Step 5: Verify the recovery count against the real data**
 
@@ -858,10 +997,22 @@ print("second flies by recording:", two, "total", sum(two.values()))
 PY
 ```
 
-Expected: 26 recordings; ~3,800 fly-samples; second flies **264 total**,
-concentrated in `2026_04_08_14_59_45` (214), `2026_04_07_11_33_33` (30),
-`2026_06_11_13_58_43` (17), `2026_06_11_13_58_45` (3).
-If the second-fly total is not 264, stop and reconcile before continuing.
+**CONTROLLER RULING R14 -- the earlier "exactly 264" gate was WRONG** and is
+replaced. That number came from a probe counting framesets where at least ONE
+camera has a second annotation; the algorithm counts something different. Both
+numbers are real, they answer different questions. Re-measured under the R15
+rule:
+
+Expected: **26 recordings**; second flies **260 total** —
+`2026_04_08_14_59_45` **211**, `2026_04_07_11_33_33` **30**,
+`2026_06_11_13_58_43` **16**, `2026_06_11_13_58_45` **3**.
+
+Also assert the regression R15 fixes: **`2026_07_30_13_28_99` (wall_frames) must
+yield MORE THAN ZERO framesets.** Under the old `min` rule it produced none,
+because some camera has zero annotations in every one of its framesets.
+
+If the second-fly total is not 260, stop and reconcile — do NOT adjust the
+algorithm to reach the number.
 
 - [ ] **Step 6: Commit**
 
@@ -989,6 +1140,9 @@ import os
 import re
 
 _FRAME_RE = re.compile(r"Frame_(\d+)")
+# Minimum cameras a fly must appear in to be usable. 3 matches the robust
+# triangulation path, which needs >=3 views for its consensus check.
+MIN_CAMS = 3
 
 
 def _frame_no(key: str) -> int:
@@ -1657,7 +1811,7 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 - Test: `$PKG/tests/test_v5_3d.py`
 
 **Interfaces:**
-- Consumes: `$V5/annotations/instances_{train,val}.json`, `$V5/images`, `$V5/masks`, `$V5/calibrations/<group>`.
+- Consumes: `$V5/annotations/instances_{train,val}.json`, `$V5/images`, `$V5/masks`, `$V5/calibrations/<group>`. **`ann_ids` may contain `None`** (ruling R15) — such cameras contribute a black crop and invisible keypoints.
 - Produces: `V5FramesetDataset(root, split, *, recordings=None, calib_groups=None, sex=None)` with `__len__`, `__getitem__` returning the SAME dict schema as `V3FramesetDataset` (`crops4`, `centerHM`, `center3D`, `cameraMatrices`, `kp3d`, `vis`) plus `fly_id` and `calib_group`; and `frameset_batches(ds, batch_size, *, shuffle, seed, drop_last, female_weight=1.0)`.
 
 The schema match is deliberate: `precompute_repro_cache.py` and
@@ -1875,6 +2029,12 @@ class V5FramesetDataset:
 
         for c, (img_id, ann_id) in enumerate(
                 zip(fsv["frames"][:n_cam], fsv["ann_ids"][:n_cam])):
+            if ann_id is None:
+                # Ruling R15: this camera could not resolve which fly is which,
+                # so it contributes nothing. Leave the crop black and the
+                # keypoints invisible (v=0) -- triangulation already ignores
+                # non-visible views, and a black crop is honest about absence.
+                continue
             info, ann = self._id2img[img_id], self._id2ann[ann_id]
             w, h = info["width"], info["height"]
             kp2d[c] = np.asarray(ann["keypoints"], np.float32).reshape(-1, 3)
