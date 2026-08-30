@@ -35,13 +35,26 @@ def gravity_axis(cam_mats: np.ndarray) -> np.ndarray:
     The arena floor is level and every camera looks roughly inward, so the
     world axis with the most consistent sign across camera image-y directions
     is the gravity axis. Falls back to +Z, which is correct for this rig.
+
+    Uses the UN-centered SVD of the (sign-agnostic) image-y directions: its
+    top right-singular-vector is the direction of maximum shared AGREEMENT
+    across cameras. (Mean-centering first and taking the residual SVD would
+    instead return the axis of maximum *disagreement* between cameras, which
+    is wrong for near-identical rig setups.) Since image-y can point either
+    way per camera, each row is sign-flipped toward the running consensus
+    before the SVD so opposite-facing cameras don't cancel out.
     """
     M = np.asarray(cam_mats, np.float64)
     if M.ndim != 3:
         return np.array([0.0, 0.0, 1.0])
     ydir = M[:, :3, 1]                                   # (C,3)
     ydir = ydir / np.maximum(np.linalg.norm(ydir, axis=1, keepdims=True), 1e-12)
-    u, s, vt = np.linalg.svd(ydir - ydir.mean(0, keepdims=True))
+    # Make signs consistent (axis, not direction, is what we want to agree on).
+    ref = ydir[0]
+    signs = np.sign(ydir @ ref)
+    signs[signs == 0] = 1.0
+    ydir = ydir * signs[:, None]
+    u, s, vt = np.linalg.svd(ydir)
     axis = vt[0] if s[0] > 0 else np.array([0.0, 0.0, 1.0])
     if axis[2] < 0:
         axis = -axis
