@@ -61,3 +61,172 @@ def test_link_media_creates_symlinks_with_no_split_dirs(tmp_path):
     # The whole point: no train/ or val/ directory anywhere in the media tree.
     for root, dirs, _ in os.walk(out / "images"):
         assert "train" not in dirs and "val" not in dirs
+
+import json
+from jarvis_jax.data.build_v5 import merge_annotations, SourceRec
+
+CAMS7 = ["Cam2012630", "Cam2012631", "Cam2012853", "Cam2012855",
+         "Cam2012857", "Cam2012861", "Cam2012862"]
+
+def _coco(tmp_path, name, rec, n_flies):
+    """One frameset over 7 cameras with n_flies annotations per image."""
+    images, anns = [], []
+    aid = 0
+    for ci, cam in enumerate(CAMS7):
+        images.append({"id": ci, "width": 1936, "height": 448,
+                       "file_name": f"{rec}/{cam}/Frame_000100.jpg"})
+        for k in range(n_flies):
+            anns.append({"id": aid, "image_id": ci, "bbox": [k * 100.0, 0.0, 50.0, 50.0],
+                         "keypoints": [1.0, 2.0, 2] * 50, "num_keypoints": 50,
+                         "sex": "unknown", "behavior": "courtship"})
+            aid += 1
+    blob = {"keypoint_names": [f"kp{i}" for i in range(50)], "skeleton": [],
+            "categories": [{"id": 1, "name": "Rat", "num_keypoints": 50}],
+            "images": images, "annotations": anns,
+            "framesets": {f"{rec}/Frame_000100": {"datasetName": rec,
+                                                  "frames": list(range(7))}},
+            "calibrations": {rec: {}}}
+    p = tmp_path / f"{name}.json"
+    p.write_text(json.dumps(blob))
+    return str(p)
+
+def test_two_fly_frameset_yields_two_samples_not_one(tmp_path):
+    """The v3_3d 'keep first annotation' rule silently dropped the second fly.
+    A 7-camera frameset with 2 annotations per image must produce TWO framesets."""
+    p = _coco(tmp_path, "two", "rec_two", n_flies=2)
+    srcs = {"rec_two": SourceRec("rec_two", None, [p], "", "")}
+    out = tmp_path / "v5"
+    out.mkdir()
+    merged = merge_annotations(srcs, str(out))
+    keys = sorted(merged["framesets"])
+    assert keys == ["rec_two/Frame_000100/fly0", "rec_two/Frame_000100/fly1"]
+    for k in keys:
+        assert len(merged["framesets"][k]["frames"]) == 7
+        assert len(merged["framesets"][k]["ann_ids"]) == 7
+    # no annotation may appear in two framesets
+    used = [a for k in keys for a in merged["framesets"][k]["ann_ids"]]
+    assert len(used) == len(set(used)) == 14
+
+def test_single_fly_frameset_unchanged(tmp_path):
+    p = _coco(tmp_path, "one", "rec_one", n_flies=1)
+    srcs = {"rec_one": SourceRec("rec_one", None, [p], "", "")}
+    out = tmp_path / "v5"
+    out.mkdir()
+    merged = merge_annotations(srcs, str(out))
+    assert sorted(merged["framesets"]) == ["rec_one/Frame_000100/fly0"]
+
+def test_fly_id_is_consistent_across_cameras(tmp_path):
+    p = _coco(tmp_path, "two", "rec_two", n_flies=2)
+    srcs = {"rec_two": SourceRec("rec_two", None, [p], "", "")}
+    out = tmp_path / "v5"
+    out.mkdir()
+    merged = merge_annotations(srcs, str(out))
+    by_id = {a["id"]: a for a in merged["annotations"]}
+    for k, fs in merged["framesets"].items():
+        fly_ids = {by_id[a]["fly_id"] for a in fs["ann_ids"]}
+        assert len(fly_ids) == 1, f"{k} mixes fly_ids {fly_ids} across cameras"
+
+def test_camera_with_fewer_annotations_is_marked_absent_not_guessed(tmp_path):
+    """Ruling R15. When one camera sees fewer flies than the rest, its lone
+    annotation may belong to EITHER fly — verified real case:
+    2026_04_08_14_59_45/Frame_149677, where Cam2012631's single annotation is
+    the RIGHT fly while positional index 0 would file it as the left one.
+    The merge must record that camera ABSENT for every fly, never guess."""
+    p = tmp_path / "uneq.json"
+    images, anns, aid = [], [], 0
+    for ci, cam in enumerate(CAMS7):
+        images.append({"id": ci, "width": 1936, "height": 448,
+                       "file_name": f"rec_u/{cam}/Frame_000100.jpg"})
+        # Cam2012631 (index 1) sees only ONE fly; every other camera sees two.
+        n = 1 if ci == 1 else 2
+        for k in range(n):
+            anns.append({"id": aid, "image_id": ci,
+                         "bbox": [500.0 if n == 1 else k * 500.0, 0.0, 50.0, 50.0],
+                         "keypoints": [1.0, 2.0, 2] * 50, "num_keypoints": 50,
+                         "sex": "unknown", "behavior": "courtship"})
+            aid += 1
+    p.write_text(json.dumps({
+        "keypoint_names": [f"kp{i}" for i in range(50)], "skeleton": [],
+        "categories": [{"id": 1, "name": "Rat", "num_keypoints": 50}],
+        "images": images, "annotations": anns,
+        "framesets": {"rec_u/Frame_000100": {"datasetName": "rec_u",
+                                             "frames": list(range(7))}},
+        "calibrations": {"rec_u": {}}}))
+    srcs = {"rec_u": SourceRec("rec_u", None, [str(p)], "", "")}
+    out = tmp_path / "v5"; out.mkdir()
+    merged = merge_annotations(srcs, str(out))
+    # BOTH flies survive (6 cameras each, above MIN_CAMS=3) ...
+    assert sorted(merged["framesets"]) == ["rec_u/Frame_000100/fly0",
+                                           "rec_u/Frame_000100/fly1"]
+    for key in merged["framesets"]:
+        ids = merged["framesets"][key]["ann_ids"]
+        assert len(ids) == 7
+        # ... and the disagreeing camera is ABSENT, not guessed at.
+        assert ids[1] is None, f"{key} guessed an identity for Cam2012631"
+        assert sum(a is not None for a in ids) == 6
+
+
+def test_fly_dropped_when_too_few_cameras_resolve_it(tmp_path):
+    """Below MIN_CAMS=3 resolvable cameras a fly cannot be triangulated, so it
+    must be dropped rather than emitted with mostly-None slots."""
+    p = tmp_path / "sparse.json"
+    images, anns, aid = [], [], 0
+    for ci, cam in enumerate(CAMS7):
+        images.append({"id": ci, "width": 1936, "height": 448,
+                       "file_name": f"rec_s/{cam}/Frame_000100.jpg"})
+        n = 2 if ci < 2 else 1          # only 2 cameras resolve two flies
+        for k in range(n):
+            anns.append({"id": aid, "image_id": ci, "bbox": [k * 500.0, 0.0, 50.0, 50.0],
+                         "keypoints": [1.0, 2.0, 2] * 50, "num_keypoints": 50,
+                         "sex": "unknown", "behavior": "courtship"})
+            aid += 1
+    p.write_text(json.dumps({
+        "keypoint_names": [f"kp{i}" for i in range(50)], "skeleton": [],
+        "categories": [{"id": 1, "name": "Rat", "num_keypoints": 50}],
+        "images": images, "annotations": anns,
+        "framesets": {"rec_s/Frame_000100": {"datasetName": "rec_s",
+                                             "frames": list(range(7))}},
+        "calibrations": {"rec_s": {}}}))
+    srcs = {"rec_s": SourceRec("rec_s", None, [str(p)], "", "")}
+    out = tmp_path / "v5"; out.mkdir()
+    merged = merge_annotations(srcs, str(out))
+    assert merged["framesets"] == {}, "2 resolvable cameras is below MIN_CAMS"
+
+
+def test_single_fly_frameset_survives_a_camera_with_no_annotation(tmp_path):
+    """The bug ruling R15 also fixes: under the old `min` rule a single camera
+    with zero annotations discarded the WHOLE frameset, costing 91 framesets
+    from 2026_01_13_18_47_45 and every frameset of wall_frames."""
+    p = tmp_path / "gap.json"
+    images, anns, aid = [], [], 0
+    for ci, cam in enumerate(CAMS7):
+        images.append({"id": ci, "width": 1936, "height": 448,
+                       "file_name": f"rec_g/{cam}/Frame_000100.jpg"})
+        if ci == 3:
+            continue                      # this camera saw nothing
+        anns.append({"id": aid, "image_id": ci, "bbox": [10.0, 0.0, 50.0, 50.0],
+                     "keypoints": [1.0, 2.0, 2] * 50, "num_keypoints": 50,
+                     "sex": "female", "behavior": "general"})
+        aid += 1
+    p.write_text(json.dumps({
+        "keypoint_names": [f"kp{i}" for i in range(50)], "skeleton": [],
+        "categories": [{"id": 1, "name": "Rat", "num_keypoints": 50}],
+        "images": images, "annotations": anns,
+        "framesets": {"rec_g/Frame_000100": {"datasetName": "rec_g",
+                                             "frames": list(range(7))}},
+        "calibrations": {"rec_g": {}}}))
+    srcs = {"rec_g": SourceRec("rec_g", None, [str(p)], "", "")}
+    out = tmp_path / "v5"; out.mkdir()
+    merged = merge_annotations(srcs, str(out))
+    assert list(merged["framesets"]) == ["rec_g/Frame_000100/fly0"]
+    ids = merged["framesets"]["rec_g/Frame_000100/fly0"]["ann_ids"]
+    assert ids[3] is None and sum(a is not None for a in ids) == 6
+
+
+def test_category_renamed_from_rat(tmp_path):
+    p = _coco(tmp_path, "one", "rec_one", n_flies=1)
+    srcs = {"rec_one": SourceRec("rec_one", None, [p], "", "")}
+    out = tmp_path / "v5"
+    out.mkdir()
+    merged = merge_annotations(srcs, str(out))
+    assert merged["categories"][0]["name"] == "fly"

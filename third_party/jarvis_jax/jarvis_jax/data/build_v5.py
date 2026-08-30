@@ -160,3 +160,157 @@ def link_media(sources: dict[str, SourceRec], out_root: str, *,
                             shutil.copy2(os.path.join(src_cam, fn), dst)
                         else:
                             os.symlink(os.path.join(src_cam, fn), dst)
+
+
+import re
+from collections import defaultdict
+
+_FRAME_RE = re.compile(r"Frame_(\d+)")
+# Minimum cameras a fly must appear in to be usable. 3 matches the robust
+# triangulation path, which needs >=3 views for its consensus check.
+MIN_CAMS = 3
+
+
+def merge_annotations(sources: dict[str, SourceRec], out_root: str) -> dict:
+    """Merge every source COCO file into one instances.json with per-fly identity.
+
+    CONTROLLER RULING R15 -- how a fly's identity is resolved ACROSS cameras.
+    Real courtship data frequently has one camera drop an annotation (occlusion),
+    so per-camera annotation counts DISAGREE within a frameset. Three rules were
+    considered and two are wrong:
+
+      * `min(counts)` (the original draft) requires all 7 cameras to agree before
+        counting a fly at all. It silently discarded 316 framesets with unequal
+        counts, and dropped 8 recordings' worth of SINGLE-fly data too wherever
+        some camera had zero annotations -- 91 framesets from 2026_01_13_18_47_45
+        and 73 from 2026_03_22_12_07_40 among them. `2026_07_30_13_28_99`
+        (wall_frames) collapsed to ZERO framesets.
+      * `max(counts)` with positional indexing reaches the right TOTAL but creates
+        CHIMERAS. Verified counterexample: in
+        `2026_04_08_14_59_45/Frame_149677`, Cam2012631 carries a single annotation
+        at bbox x=507 while the other six cameras carry two, at x~30-60 (left fly)
+        and x~546-575 (right fly). That lone annotation is the RIGHT fly, so
+        `cam_anns[0]` would file it as fly0 -- a fly whose views come from two
+        different animals, which every downstream metric would report as fine.
+
+    The rule used here: a camera whose annotation count EQUALS the frameset max
+    contributes `cam_anns[k]` -- position-based identity is verified safe in that
+    regime (two-fly framesets triangulate at 0.39 px, identical to single-fly
+    controls). A camera that disagrees on the count cannot be assigned by
+    position, so it is recorded as ABSENT (`None`) for every fly in that
+    frameset. A fly is emitted only if at least MIN_CAMS cameras remain.
+
+    Consumers must therefore treat `ann_ids` as possibly containing `None`.
+
+    THE FIX: v3_3d.py mapped image_id -> FIRST annotation, commented "shouldn't
+    happen for single-fly". It does happen -- on 2026_04_08 (214 framesets),
+    2026_04_07 (30), and the two 2026_06_11 recordings (20) -- silently dropping
+    264 complete framesets / 1,673 annotations. A chimera hypothesis (fly A in
+    one camera mixed with fly B in another) was TESTED AND REFUTED: two-fly
+    framesets triangulate at 0.39 px, identical to single-fly controls, so
+    annotation order IS consistent across cameras. Ordering by annotation id
+    within an image therefore assigns fly_id consistently.
+    """
+    out_images: list[dict] = []
+    out_anns: list[dict] = []
+    framesets: dict[str, dict] = {}
+    kp_names: list[str] = []
+    skeleton: list = []
+    next_img, next_ann = 0, 0
+
+    for rec, s in sorted(sources.items()):
+        seen_paths: set[str] = set()
+        img_key_to_id: dict[tuple[str, str], int] = {}
+        anns_by_img: dict[int, list[dict]] = defaultdict(list)
+
+        for ann_path in s.ann_paths:
+            with open(ann_path) as f:
+                blob = json.load(f)
+            kp_names = kp_names or blob.get("keypoint_names", [])
+            skeleton = skeleton or blob.get("skeleton", [])
+            src_img = {i["id"]: i for i in blob["images"]}
+            src_anns = defaultdict(list)
+            for a in blob["annotations"]:
+                src_anns[a["image_id"]].append(a)
+
+            for key, fsv in blob.get("framesets", {}).items():
+                if fsv.get("datasetName") != rec:
+                    continue
+                frame_no = _FRAME_RE.search(key)
+                if frame_no is None:
+                    continue
+                frame = frame_no.group(1)
+                # Deduplicate across the source's train/ and val/ files.
+                if (rec, frame) in seen_paths:
+                    continue
+                seen_paths.add((rec, frame))
+
+                per_cam: list[list[dict]] = []
+                cam_img_ids: list[int] = []
+                for iid in fsv["frames"]:
+                    info = src_img.get(iid)
+                    if info is None:
+                        break
+                    parts = info["file_name"].split("/")
+                    cam = parts[-2]
+                    ikey = (cam, frame)
+                    if ikey not in img_key_to_id:
+                        img_key_to_id[ikey] = next_img
+                        out_images.append({
+                            "id": next_img, "width": info["width"],
+                            "height": info["height"], "recording": rec,
+                            "file_name": f"{rec}/{cam}/Frame_{frame}.jpg"})
+                        next_img += 1
+                    cam_img_ids.append(img_key_to_id[ikey])
+                    # Deterministic order => consistent fly_id across cameras.
+                    per_cam.append(sorted(src_anns.get(iid, []), key=lambda a: a["id"]))
+
+                if len(cam_img_ids) != len(fsv["frames"]) or not per_cam:
+                    continue
+                # CONTROLLER RULING R15 -- see the block comment above for why
+                # this is NOT `min` (silently drops data) and NOT `max`
+                # (creates chimeras).
+                n_flies = max(len(v) for v in per_cam)
+                if n_flies == 0:
+                    continue
+
+                for k in range(n_flies):
+                    ann_ids = []
+                    for img_id, cam_anns in zip(cam_img_ids, per_cam):
+                        if len(cam_anns) != n_flies:
+                            # This camera disagrees on how many flies it sees,
+                            # so positional index k is NOT safe here. Record the
+                            # camera as ABSENT for this fly rather than guessing.
+                            ann_ids.append(None)
+                            continue
+                        a = cam_anns[k]
+                        out_anns.append({
+                            "id": next_ann, "image_id": img_id,
+                            "bbox": a["bbox"], "keypoints": a["keypoints"],
+                            "num_keypoints": a.get("num_keypoints", 50),
+                            "sex": a.get("sex", "unknown"),
+                            "behavior": a.get("behavior", "unknown"),
+                            "fly_id": k,
+                            "src_ann_id": a["id"],   # masks are keyed by this
+                        })
+                        ann_ids.append(next_ann)
+                        next_ann += 1
+                    if sum(a is not None for a in ann_ids) < MIN_CAMS:
+                        continue   # too few views to triangulate; drop the fly
+                    framesets[f"{rec}/Frame_{frame}/fly{k}"] = {
+                        "recording": rec, "fly_id": k,
+                        "frames": cam_img_ids, "ann_ids": ann_ids}
+
+        s.n_framesets = len({k for k in framesets if k.startswith(f"{rec}/")})
+        s.n_flies = sum(1 for k in framesets if k.startswith(f"{rec}/"))
+
+    merged = {
+        "keypoint_names": kp_names, "skeleton": skeleton,
+        "categories": [{"id": 1, "name": "fly", "num_keypoints": 50}],
+        "images": out_images, "annotations": out_anns, "framesets": framesets,
+    }
+    ann_dir = os.path.join(out_root, "annotations")
+    os.makedirs(ann_dir, exist_ok=True)
+    with open(os.path.join(ann_dir, "instances.json"), "w") as f:
+        json.dump(merged, f)
+    return merged
