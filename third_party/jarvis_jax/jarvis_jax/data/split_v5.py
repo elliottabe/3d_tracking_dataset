@@ -13,6 +13,24 @@ so every one stays in training and val is a contiguous tail block separated by a
 guard band. That measures "new pose, same fly and session" and WILL read
 optimistic against bout 28 -- an accepted, documented limit. The real female
 test is bout 28 under GT-free metrics plus rendered overlays.
+
+FRAME-LEVEL, NOT FLY-LEVEL (2026-08-29 fix). Four recordings label BOTH flies
+in the same frames, and both flies' framesets point at the SAME 7 physical
+images -- there is one capture per frame, not one per fly. Splitting those
+recordings per (recording, fly) -- as a prior fix round did, to let a mixed
+recording's two flies (who can have different sex) get different treatment --
+let fly0's female-tail val frames collide with fly1's male-normal-rule train
+frames on the exact same underlying images: a val sample whose pixels are also
+in train. The fix keeps the split decision at (recording, frame) granularity:
+every fly sharing a frame lands on the same side. The female-preservation
+policy is expressed as "a frame joins the guarded-tail-into-val policy (and
+ignores val_recordings, exactly as a single-fly female recording already did)
+if ANY fly annotated in it is female; otherwise the frame follows the normal
+whole-recording-holdout rule." This means a recording with even one female fly
+can no longer be held out WHOLE via val_recordings -- the female-preservation
+intent (scarce data stays in training) outranks the male's normal rule for any
+frame they share, because sharing pixels means they must share a split side,
+and it is train (mostly) that is more valuable for the female-heavy case.
 """
 from __future__ import annotations
 
@@ -36,16 +54,31 @@ def _by_recording(merged: dict) -> dict[str, list[str]]:
     return out
 
 
-def _by_recording_fly(merged: dict) -> dict[tuple[str, str], list[str]]:
-    """Like _by_recording, but keyed by (recording, 'fly<k>') so a mixed
-    recording's two flies -- who can have different sex -- are split
-    independently. Frameset keys are '<recording>/Frame_<N>/fly<k>'."""
-    out: dict[tuple[str, str], list[str]] = {}
+def _frame_groups(merged: dict) -> dict[str, dict[int, list[str]]]:
+    """recording -> {frame_no: [frameset keys, one per fly annotated in it]}.
+
+    Two flies annotated in the same recording+frame share the SAME physical
+    images (this dataset labels both flies off one multi-camera capture), so
+    every key in one inner list MUST end up on the same side of the split --
+    that invariant is the entire reason to group this way instead of by
+    (recording, fly)."""
+    out: dict[str, dict[int, list[str]]] = {}
     for k, v in merged["framesets"].items():
-        out.setdefault((v["recording"], k.split("/")[-1]), []).append(k)
-    for grp in out:
-        out[grp].sort(key=_frame_no)
+        out.setdefault(v["recording"], {}).setdefault(_frame_no(k), []).append(k)
     return out
+
+
+def _recording_is_female(rec: str, frames: dict[int, list[str]],
+                          recs_meta: dict) -> bool:
+    """True if ANY fly annotated anywhere in this recording is female. Sex is
+    a per-(recording, fly) label that is constant across frames, so in
+    practice this is true for either none or all of a recording's frames --
+    but it is cheap and correct to check every key rather than assume."""
+    for keys in frames.values():
+        for k in keys:
+            if _is_female_fly(rec, k.split("/")[-1], recs_meta):
+                return True
+    return False
 
 
 def _is_female_fly(rec: str, fly: str, recs_meta: dict) -> bool:
@@ -64,40 +97,64 @@ def _is_female_fly(rec: str, fly: str, recs_meta: dict) -> bool:
 def make_split(merged: dict, manifest: dict, *, val_recordings=(),
                female_val_frac: float = 0.10, guard: int = 50,
                seed: int = 0) -> dict:
-    groups = _by_recording_fly(merged)
     recs_meta = manifest.get("recordings", {})
-    split: dict[str, str] = {}
     val_recordings = set(val_recordings)
+    by_rec = _frame_groups(merged)
+    split: dict[str, str] = {}
 
-    for (rec, fly), keys in groups.items():
-        is_female = _is_female_fly(rec, fly, recs_meta)
-        if rec in val_recordings and not is_female:
-            for k in keys:
-                split[k] = "val"
-            continue
+    for rec, frames in by_rec.items():
+        frame_nos = sorted(frames)
+        is_female = _recording_is_female(rec, frames, recs_meta)
+
         if not is_female:
-            for k in keys:
-                split[k] = "train"
+            side = "val" if rec in val_recordings else "train"
+            for fn in frame_nos:
+                for k in frames[fn]:
+                    split[k] = side
             continue
 
-        # Female: contiguous tail block for val, guard band dropped entirely.
-        n_val = int(round(len(keys) * female_val_frac))
+        # Female-inclusive recording (>=1 fly in it is female): the decision
+        # is made per FRAME (both flies together), not per fly, so fly0's
+        # tail-into-val and fly1's same-frame samples can never disagree.
+        # val_recordings is ignored here, same as the single-fly-female case
+        # always did -- scarce female data stays in training regardless.
+        n_val = int(round(len(frame_nos) * female_val_frac))
         if n_val == 0:
-            for k in keys:
-                split[k] = "train"
+            for fn in frame_nos:
+                for k in frames[fn]:
+                    split[k] = "train"
             continue
-        val_keys = keys[-n_val:]
-        val_start = _frame_no(val_keys[0])
-        for k in keys[:-n_val]:
-            if val_start - _frame_no(k) <= guard:
+        val_frame_nos = set(frame_nos[-n_val:])
+        val_start = min(val_frame_nos)
+        for fn in frame_nos:
+            if fn in val_frame_nos:
+                side = "val"
+            elif val_start - fn <= guard:
                 continue          # guard band: belongs to neither split
-            split[k] = "train"
-        for k in val_keys:
-            split[k] = "val"
+            else:
+                side = "train"
+            for k in frames[fn]:
+                split[k] = side
 
     if not any(v == "val" for v in split.values()):
         raise ValueError("empty val split — every frameset landed in train")
     return split
+
+
+def _cross_fly_leaks(merged: dict, split: dict) -> list[tuple[str, int]]:
+    """(recording, frame_no) pairs where framesets of the SAME frame --
+    i.e. different flies pointed at the same physical images -- landed on
+    opposite sides of the split. Any non-empty result is a real pixel leak:
+    the exact frame-level defect a prior fly-level split introduced (fly0's
+    val tail colliding with fly1's train, same 7 images, same frame)."""
+    sides: dict[tuple[str, int], set[str]] = {}
+    for k, v in merged["framesets"].items():
+        side = split.get(k)
+        if side not in ("train", "val"):
+            continue
+        key = (v["recording"], _frame_no(k))
+        sides.setdefault(key, set()).add(side)
+    return sorted(key for key, s in sides.items() if len(s) > 1)
 
 
 def audit_split(merged: dict, split: dict, *, guard: int = 50) -> dict:
@@ -121,8 +178,14 @@ def audit_split(merged: dict, split: dict, *, guard: int = 50) -> dict:
         if tr and va and min_dist.get(rec, 0) < guard:
             leaks += 1
     n = sum(1 for v in split.values() if v in ("train", "val"))
+    leaky_frames = _cross_fly_leaks(merged, split)
     return {"cross_recording_leaks": leaks, "min_guard_distance": min_dist,
-            "val_frac": sum(1 for v in split.values() if v == "val") / max(n, 1)}
+            "val_frac": sum(1 for v in split.values() if v == "val") / max(n, 1),
+            # Image-level check (2026-08-29): a frame (same physical images
+            # across every fly annotated in it) must never appear on both
+            # sides. Zero is the only leak-free value.
+            "cross_fly_leaked_frames": len(leaky_frames),
+            "leaky_frame_ids": leaky_frames}
 
 
 def write_derived(merged: dict, split: dict, out_root: str) -> None:

@@ -108,6 +108,42 @@ def test_two_fly_recording_without_fly_sex_behaves_as_before():
                              for k, v in flyset.items() if v == "val")
         assert val_frames == list(range(180, 200)), fly
 
+def test_frame_level_split_has_no_cross_fly_leak():
+    """Regression for the exact leak measured 2026-08-29: a two-fly recording
+    where fly0/fly1 share the same 7 physical images per frame. The bug was
+    resolving the split PER FLY (fly0 female -> tail into val, fly1 male ->
+    normal rule -> train), so a female val frameset's underlying images were
+    also present in train via fly1. val_recordings is deliberately left
+    empty here -- that is the exact configuration the bug report measured
+    (fly1 has no whole-recording-holdout to fall back to; it just goes to
+    train, colliding with fly0's val tail)."""
+    m = _merged_mixed("courtship", 200)
+    man = {"recordings": {"courtship": {"fly_sex": {"fly0": "female", "fly1": "male"}}}}
+    split = make_split(m, man, female_val_frac=0.10, guard=50)
+
+    by_frame: dict[int, set[str]] = {}
+    for k, v in split.items():
+        fn = int(k.split("Frame_")[1].split("/")[0])
+        by_frame.setdefault(fn, set()).add(v)
+    leaking = {fn: sides for fn, sides in by_frame.items() if len(sides) > 1}
+    assert leaking == {}, f"{len(leaking)} frames appear on both sides: {leaking}"
+
+    a = audit_split(m, split, guard=50)
+    assert a["cross_fly_leaked_frames"] == 0, a
+
+def test_audit_detects_cross_fly_frame_leak():
+    """The new image-level check in audit_split must actually be able to
+    return non-zero, or it is decorative. Hand-construct the leaky shape
+    directly (bypassing make_split entirely): fly0 val, fly1 train, on every
+    one of 10 shared frames."""
+    m = _merged_mixed("bad", 10)
+    bad = {}
+    for i in range(10):
+        bad[f"bad/Frame_{i:06d}/fly0"] = "val"
+        bad[f"bad/Frame_{i:06d}/fly1"] = "train"
+    a = audit_split(m, bad, guard=50)
+    assert a["cross_fly_leaked_frames"] == 10, a
+
 def test_write_derived_survives_none_ann_ids(tmp_path):
     """merge_annotations (build_v5.py, commit 89c1b08) legitimately emits
     ann_ids containing None for a camera whose fly identity could not be
