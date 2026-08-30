@@ -4105,6 +4105,123 @@ exactly 1 - P(b male). CV groups by clip, never by frameset.
 Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 ```
 
+---
+
+## Task 19: Diagnose the bout-28 identity/coverage failure (Phase 5)
+
+**Diagnosis only. No fix, no pipeline source changes.** The fix task is written
+only after this answers what actually breaks.
+
+**Files:**
+- Create: `<repo>/scripts/qc/diagnose_mask_dropout.py` (committed — regenerable diagnostic)
+- Outputs: `figures/2026-08-29-c2f-3d/phase5-dropout/`, notes committed to `docs/benchmark/2026-08-29-c2f-3d/dropout-diagnosis.md`
+
+**Interfaces:**
+- Consumes: `sam3_masks/bout_00028/sam3_masks.npz`, the archived `kp2d.npz` / `kp3d.npz` / `qc_perframe.npz` from Task 1, `configs/detector/vitpose_v3.yaml`.
+- Produces: `dropout_report(mask_npz, kp2d, kp3d, *, split_frame) -> dict` with per-camera per-stage survival counts, and a per-stage attrition figure.
+
+### START HERE: two accounts conflict, and resolving that is job one
+
+Task 1's fix round concluded the failure was *"a SAM3 mask/identity failure —
+the mask drifts onto empty background in several cameras."* **Direct
+measurement of `sam3_masks.npz` contradicts that:**
+
+| measurement | value | implication |
+|---|---|---|
+| fly0 centroid step, frames 1495–1510 | **0.1–3.2 px**, every camera | no drift, no jump |
+| fly0↔fly1 centroid separation | ~250–300 px **before and after** 1502 | no merge, no identity swap |
+| fly0 `valid`% after 1502 | 853:100 855:100 630:100 861:75 857:69 862:39 **631:17** | fly0 lost in 4 of 7 cameras |
+| fly1 `valid`% after 1502 | **100 on all seven** | male entirely unaffected |
+| `in_frame` vs `valid` | **identical arrays** | flagged out-of-frame, not mis-segmented |
+
+So the masks are smooth and correctly separated; fly0 is simply marked
+**not in frame** in up to 4 cameras from ~1502, while **three cameras keep 100%
+valid masks** — and the 3D is still NaN for all 505 frames.
+
+**Leading hypothesis for the contradiction:** the Task 1 overlays were rendered
+at frames 1550/1700/1900 without honouring `valid`, so cameras with
+`valid=False` displayed stale or garbage mask content, which reads visually as
+"drifted onto background". Check that first — if true, the recorded root cause
+is wrong and must be corrected before anyone builds a fix on it.
+
+- [ ] **Step 1: Settle the contradiction**
+
+Re-render fly0 mask overlays at frames 1550, 1700, 1900 across all 7 cameras,
+**this time drawing only where `valid[fly, cam, frame]` is True** and annotating
+each panel with its `valid`/`in_frame` flag. Read every panel with the Read
+tool. State plainly which account holds: masks genuinely drifted onto
+background, or masks are absent-and-flagged while the fly is out of view.
+
+- [ ] **Step 2: Follow one frame through every gate**
+
+For a representative dead frame (e.g. offset 1600) and a live one (e.g. 1400),
+tabulate for fly0 what survives each stage, per camera:
+
+| stage | gate | source |
+|---|---|---|
+| mask present | `valid[0, cam, f]` | `sam3_masks.npz` |
+| keypoints emitted | any finite in `kp2d` | Task 1's archived `kp2d.npz` |
+| per-keypoint conf | `conf_thresh: 0.3` | `configs/detector/vitpose_v3.yaml` |
+| per-view median conf | `view_conf_thresh: 0.6` | same |
+| consensus | `reproj_resid_px: 10.0`, needs ≥3 views | `tracking/triangulate.py` |
+| 3D emitted | finite in `kp3d.npz` | Task 1's archive |
+
+**The question this answers:** three cameras hold 100% valid masks through the
+dead zone, which is enough to triangulate. So which gate removes them? If
+`view_conf_thresh: 0.6` is dropping views whose masks are fine, the fix is a
+threshold/coverage problem, not an identity problem — a completely different
+task from the one implied by "identity failure".
+
+- [ ] **Step 3: Test the "most cameras are right" assumption**
+
+`configs/sam3/default.yaml` ships `repair_outliers` (per-camera leave-one-out
+residual > 40 px → box-prompt re-segment) and `repair_missing` (a camera that
+never picked up a fly that walked in; SAM3VideoTracker propagates forward-only
+from frame 0). Neither fired here. Determine which of these is true:
+(a) they fired and were rejected by their accept thresholds
+(`repair_missing_accept_resid: 25.0`, `repair_resid_thresh: 40.0`);
+(b) they never triggered because the fly is flagged out-of-frame rather than
+mis-segmented; or (c) they are structurally blind because they assume most
+cameras are right, and here 4 of 7 fail together.
+Cite the code path and the numbers, not a guess.
+
+- [ ] **Step 4: Establish whether the fly is really out of view**
+
+`repair_missing` exists precisely because the tracker propagates forward-only
+and misses a fly that enters a camera mid-bout. Reproject fly1's 3D position
+and the last good fly0 3D position into each camera at frames 1550/1700/1900
+and check whether those pixel locations lie inside the image bounds. **If fly0
+is predicted inside the frame in cameras reporting `in_frame=0`, this is a
+recoverable tracker failure, not a genuine exit** — and that distinction
+decides the whole fix.
+
+- [ ] **Step 5: Write the attrition figure and READ it**
+
+One figure: x = frame (0–2006), stacked count of fly0 cameras surviving each
+gate in Step 2, with the 1502 boundary marked. **Stated expectation:** if the
+cause is coverage, the mask-present curve drops to ~3 at 1502 and the
+keypoint/conf curves drop to 0 — locating the loss downstream of the masks. If
+the mask curve itself drops to 0, the masks are the whole story. Read the PNG
+and report which shape it has.
+
+- [ ] **Step 6: Commit the diagnostic and the notes**
+
+```bash
+git add scripts/qc/diagnose_mask_dropout.py \
+        docs/benchmark/2026-08-29-c2f-3d/dropout-diagnosis.md
+git commit -m "diag(masks): locate the bout-28 fly0 dropout in the stage chain
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
+```
+
+- [ ] **Step 7: Recommend the fix task, do not write it**
+
+Close the notes with a recommendation naming the single gate or component that
+loses the female, and what a fix would change. If the evidence says the cause is
+a confidence/coverage gate rather than identity, **say so** — Task 20 will be
+scoped from this, and scoping it as an identity fix when it is a coverage
+problem would waste the whole task.
+
 ## Self-Review
 
 **Spec coverage.** §1.1 resolution → Tasks 11, 12, 16. §1.2 sigma → Task 9.
