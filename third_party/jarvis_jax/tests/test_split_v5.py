@@ -16,6 +16,16 @@ def _manifest(recs, female=()):
     return {"recordings": {r: {"sex": "female" if r in female else "male"}
                            for r in recs}}
 
+def _merged_mixed(rec, n):
+    """Two flies per frameset in ONE recording, frames spaced by 1 -- the
+    shape of the four recordings that label both flies."""
+    fs = {}
+    for i in range(n):
+        for fly in (0, 1):
+            fs[f"{rec}/Frame_{i:06d}/fly{fly}"] = {
+                "recording": rec, "fly_id": fly, "frames": [], "ann_ids": []}
+    return {"framesets": fs}
+
 def test_whole_recording_holdout_has_zero_overlap():
     m = _merged({"rec_a": 100, "rec_b": 100})
     split = make_split(m, _manifest(["rec_a", "rec_b"]), val_recordings=["rec_b"])
@@ -56,6 +66,47 @@ def test_empty_val_is_rejected():
     m = _merged({"rec_a": 10})
     with pytest.raises(ValueError, match="empty val"):
         make_split(m, _manifest(["rec_a"]), val_recordings=[], female_val_frac=0.0)
+
+def test_mixed_recording_splits_each_fly_by_its_own_sex():
+    """Four recordings label BOTH flies (fly_sex); a recording with one male
+    + one female fly has no well-defined recording-level sex. make_split must
+    resolve sex PER FRAMESET via the fly<k> suffix: fly1 (male) follows the
+    normal whole-recording-holdout rule while fly0 (female) independently
+    keeps the guarded-tail-in-training policy, even though both flies share
+    the same recording (and the same val_recordings membership)."""
+    m = _merged_mixed("mixed", 200)
+    man = {"recordings": {"mixed": {"fly_sex": {"fly0": "female", "fly1": "male"}}}}
+    split = make_split(m, man, val_recordings=["mixed"],
+                       female_val_frac=0.10, guard=50)
+
+    fly0 = {k: v for k, v in split.items() if k.endswith("/fly0")}
+    fly1 = {k: v for k, v in split.items() if k.endswith("/fly1")}
+
+    # fly1 (male): normal rule -- 'mixed' is in val_recordings -> held out WHOLE.
+    assert set(fly1.values()) == {"val"}
+
+    # fly0 (female): guarded-tail policy -- mostly train, small contiguous
+    # tail block in val; NEVER held out whole despite 'mixed' being in
+    # val_recordings (female data is the binding constraint).
+    assert set(fly0.values()) == {"train", "val"}
+    fly0_val = [k for k, v in fly0.items() if v == "val"]
+    assert len(fly0_val) == 20
+    val_frames = sorted(int(k.split("Frame_")[1].split("/")[0]) for k in fly0_val)
+    assert val_frames == list(range(180, 200))
+
+def test_two_fly_recording_without_fly_sex_behaves_as_before():
+    """A recording with no fly_sex key must behave EXACTLY as before
+    fly-awareness: every fly in it falls back to the recording-level
+    manifest["sex"] alone, so a two-fly recording's flies get IDENTICAL
+    treatment (both female-tail-guarded here), not per-fly divergence."""
+    m = _merged_mixed("fem", 200)
+    man = _manifest(["fem"], female=["fem"])  # recording-level sex only
+    split = make_split(m, man, val_recordings=[], female_val_frac=0.10, guard=50)
+    for fly in ("fly0", "fly1"):
+        flyset = {k: v for k, v in split.items() if k.endswith(f"/{fly}")}
+        val_frames = sorted(int(k.split("Frame_")[1].split("/")[0])
+                             for k, v in flyset.items() if v == "val")
+        assert val_frames == list(range(180, 200)), fly
 
 def test_write_derived_survives_none_ann_ids(tmp_path):
     """merge_annotations (build_v5.py, commit 89c1b08) legitimately emits

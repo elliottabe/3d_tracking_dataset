@@ -36,16 +36,41 @@ def _by_recording(merged: dict) -> dict[str, list[str]]:
     return out
 
 
+def _by_recording_fly(merged: dict) -> dict[tuple[str, str], list[str]]:
+    """Like _by_recording, but keyed by (recording, 'fly<k>') so a mixed
+    recording's two flies -- who can have different sex -- are split
+    independently. Frameset keys are '<recording>/Frame_<N>/fly<k>'."""
+    out: dict[tuple[str, str], list[str]] = {}
+    for k, v in merged["framesets"].items():
+        out.setdefault((v["recording"], k.split("/")[-1]), []).append(k)
+    for grp in out:
+        out[grp].sort(key=_frame_no)
+    return out
+
+
+def _is_female_fly(rec: str, fly: str, recs_meta: dict) -> bool:
+    """Resolve sex for one fly of one recording. A per-fly label in
+    manifest["recordings"][rec]["fly_sex"]["fly<k>"] (written by
+    apply_sex_labels for the two-fly recordings where the slots differ) takes
+    precedence; otherwise fall back to the recording-level manifest["sex"]
+    used for every single-fly recording."""
+    meta = recs_meta.get(rec, {})
+    fly_sex = meta.get("fly_sex", {})
+    if fly in fly_sex:
+        return fly_sex[fly] == "female"
+    return meta.get("sex") == "female"
+
+
 def make_split(merged: dict, manifest: dict, *, val_recordings=(),
                female_val_frac: float = 0.10, guard: int = 50,
                seed: int = 0) -> dict:
-    groups = _by_recording(merged)
+    groups = _by_recording_fly(merged)
     recs_meta = manifest.get("recordings", {})
     split: dict[str, str] = {}
     val_recordings = set(val_recordings)
 
-    for rec, keys in groups.items():
-        is_female = recs_meta.get(rec, {}).get("sex") == "female"
+    for (rec, fly), keys in groups.items():
+        is_female = _is_female_fly(rec, fly, recs_meta)
         if rec in val_recordings and not is_female:
             for k in keys:
                 split[k] = "val"
