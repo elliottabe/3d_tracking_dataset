@@ -14,3 +14,12 @@ roi_cube: 48
 grid_spacing: 1
 num_cameras: 7
 sharpen: 3.0
+
+# Stage-2 per-joint refinement. cube*spacing*2 = +/-3 world units of capture,
+# against a ~1-unit stage-1 error. 1 voxel ~ 0.8 heatmap px at spacing 0.25.
+refine:
+  enabled: true
+  cube: 24
+  spacing: 0.25
+  channels: 32
+  sharpen: 3.0
