@@ -4222,6 +4222,165 @@ a confidence/coverage gate rather than identity, **say so** — Task 20 will be
 scoped from this, and scoping it as an identity fix when it is a coverage
 problem would waste the whole task.
 
+---
+
+## Task 20: Graceful degradation of a partial 3D signal (Phase 5)
+
+Scoped **from Task 19's evidence**, not from the assumption that preceded it.
+Task 19 refuted the identity/mask-drift framing outright; do not reintroduce it.
+
+**Files:**
+- Modify: `<repo>/scripts/run_bout.py` (`finite_frame_mask`, `NAN_SOLVE_MIN_SEG` path)
+- Modify: `<repo>/configs/pipeline.yaml` (new gate settings, defaults preserving current behaviour)
+- Possibly: `third_party/jarvis_jax/jarvis_jax/tracking/stac.py` (`ik_only_bout`)
+- Test: `<repo>/tests/test_partial_frame_solve.py`
+
+**Interfaces:**
+- Produces: `finite_frame_mask(kp3d, *, min_keypoints: int | None = None)` — `None` preserves today's all-or-nothing behaviour exactly; an int accepts a frame with at least that many finite keypoints.
+- Produces: a marker-validity mask threaded to the IK so absent markers contribute nothing to the residual.
+
+### What Task 19 established (numbers, not guesses)
+
+On bout 28 fly0, frames 1502–2006 read as 100% NaN. Three mechanisms compound:
+
+| mechanism | measured contribution |
+|---|---|
+| `masks.min_views: 4` on the `kp_mask_agree_fly_lengths: 3.0`-adjusted count | blanks **338/505 (66.9%)** of frames outright |
+| `view_conf_thresh: 0.6` vs real median confidence **0.44–0.59** | only **20/505 (4.0%)** frames retain all 50 keypoints |
+| `finite_frame_mask` + `NAN_SOLVE_MIN_SEG=30` (after `NAN_SOLVE_MAX_GAP=10`) | needs ≥30 *consecutive fully-complete* frames; the only usable segment in the whole bout is `[0, 1502)` |
+
+Underneath all three, **raw DLT still recovers a partial signal in 18.2% of the tail frames** — and the female is genuinely leaving 4 of 7 camera views, with coverage bottoming out at 2–3 cameras for a sustained run.
+
+### Non-goals — each rejected on evidence
+
+- **Do NOT chase an identity or segmentation bug.** Masks are smooth, correctly separated, and `in_frame` agrees with `valid` bit-for-bit.
+- **Do NOT globally lower `masks.min_views`.** The config's own comment records a measurement that this makes bones flex 20–50%. If you touch it at all it must be per-frame and gated, never a corpus-wide default change.
+- **Do NOT aim for zero loss.** Where only 2 cameras genuinely see her, full-body DLT is ill-conditioned and the frames are not recoverable. The target is **less total loss**, and the report must state honestly how much remains.
+
+- [ ] **Step 1: Determine whether the IK can accept partial markers — this decides everything after it**
+
+`finite_frame_mask` (`scripts/run_bout.py:567`) requires **every** keypoint finite. The fix depends on whether the solver can ignore absent markers.
+
+Read `stac-mjx/stac_mjx/stac_core.py` and `jarvis_jax/tracking/stac.py::ik_only_bout`. Establish, with the code path cited:
+- Does the residual support a **per-marker weight or mask**? (`q_reg_weights` exists for qpos regularization — that is NOT the same thing.)
+- What does the solver currently do with a NaN marker — propagate NaN through the whole solve, or ignore it?
+
+Write the answer in your report before writing any fix. **If per-marker masking already exists, the fix is small: relax the frame gate and pass the mask. If it does not, STOP and report** — adding it means changing the `stac-mjx` submodule, which is a separate decision I need to make (that submodule already carries uncommitted local changes).
+
+- [ ] **Step 2: Write the failing test**
+
+```python
+# <repo>/tests/test_partial_frame_solve.py
+import numpy as np
+import pytest
+
+from scripts.run_bout import finite_frame_mask, contiguous_segments, NAN_SOLVE_MIN_SEG
+
+
+def _kp(T=100, K=50, missing=()):
+    kp = np.random.default_rng(0).normal(size=(T, K, 3)).astype(np.float32)
+    for t, joints in missing:
+        kp[t, list(joints)] = np.nan
+    return kp
+
+
+def test_default_is_byte_identical_to_all_or_nothing():
+    """The shipped behaviour must not move unless explicitly opted in."""
+    kp = _kp(missing=[(5, [0]), (6, [1, 2])])
+    np.testing.assert_array_equal(finite_frame_mask(kp),
+                                  finite_frame_mask(kp, min_keypoints=None))
+    assert not finite_frame_mask(kp)[5]
+
+
+def test_min_keypoints_accepts_a_partial_frame():
+    """A frame missing 3 of 50 keypoints is usable; today it is discarded."""
+    kp = _kp(missing=[(5, [0, 1, 2])])
+    assert finite_frame_mask(kp, min_keypoints=40)[5]
+    assert not finite_frame_mask(kp, min_keypoints=50)[5]
+
+
+def test_min_keypoints_still_rejects_a_mostly_empty_frame():
+    kp = _kp(missing=[(5, range(45))])
+    assert not finite_frame_mask(kp, min_keypoints=40)[5]
+
+
+def test_partial_frames_can_form_a_solvable_segment():
+    """The bout-28 failure in miniature: scattered complete frames never reach
+    NAN_SOLVE_MIN_SEG, but the same frames counted partially do."""
+    kp = _kp(T=100)
+    for t in range(100):
+        if t % 3:                       # 2 of every 3 frames lose 3 keypoints
+            kp[t, [0, 1, 2]] = np.nan
+    assert contiguous_segments(finite_frame_mask(kp), NAN_SOLVE_MIN_SEG) == []
+    segs = contiguous_segments(finite_frame_mask(kp, min_keypoints=40),
+                               NAN_SOLVE_MIN_SEG)
+    assert segs and (segs[0][1] - segs[0][0]) >= NAN_SOLVE_MIN_SEG
+
+
+def test_marker_mask_matches_the_accepted_frames():
+    """Every keypoint the solver is told to ignore must be exactly the NaN ones —
+    an off-by-one here silently drops real observations."""
+    from scripts.run_bout import marker_validity_mask
+    kp = _kp(missing=[(5, [0, 1, 2]), (7, [9])])
+    m = marker_validity_mask(kp)
+    assert m.shape == kp.shape[:2]
+    assert not m[5, 0] and not m[5, 1] and not m[5, 2] and m[5, 3]
+    assert not m[7, 9] and m[7, 8]
+    np.testing.assert_array_equal(m, np.isfinite(kp).all(axis=-1))
+```
+
+- [ ] **Step 3: Run it and see it fail**
+
+Run: `cd <repo> && python -m pytest tests/test_partial_frame_solve.py -v`
+Expected: `TypeError: finite_frame_mask() got an unexpected keyword argument 'min_keypoints'`, and `ImportError` for `marker_validity_mask`.
+
+- [ ] **Step 4: Implement**
+
+Add `min_keypoints` to `finite_frame_mask` (default `None` = unchanged), add
+`marker_validity_mask`, thread the mask through `ik_only_bout` to the solver
+per Step 1's finding, and add config keys under `postprocessing` (or wherever
+`NAN_SOLVE_*` is configured) whose **defaults reproduce today's behaviour
+exactly**. A run that does not opt in must be byte-identical.
+
+- [ ] **Step 5: Measure on bout 28 and bout 3 — read the figures**
+
+**Stated expectation:** with `min_keypoints` around 40, bout 28 fly0's usable
+segment extends past frame 1502 and the NaN-frame rate falls from 25.2%. It
+will **not** reach zero — Task 19 showed coverage genuinely bottoms out at 2–3
+cameras — and a fitted pose in those frames must be treated with suspicion, not
+celebrated. Bout 3 (fly0 0% NaN, median 9.52 px, p99 132.1 px) is the control:
+**it must not regress**, since it has no coverage problem to fix.
+
+If the recovered tail frames show the mesh detached from the animal, the
+partial solve is fabricating kinematics from too few markers and `min_keypoints`
+is too low. Report that rather than the improved NaN rate alone — a lower NaN
+rate with a worse fit is a regression wearing a better number.
+
+- [ ] **Step 6: Frozen-benchmark gate**
+
+Run the 13-bout benchmark (`scripts/benchmark/run_variant.py`) with the feature
+ON and compare against the committed baseline scorecard. **No cohort may
+regress.** Task 19 was explicit that a `min_views`/STAC-criterion change must be
+validated corpus-wide rather than assumed safe from one bout — this is that gate.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add scripts/run_bout.py configs/pipeline.yaml tests/test_partial_frame_solve.py \
+        docs/benchmark/2026-08-29-c2f-3d/partial-solve-results.md
+git commit -m "feat(ik): accept partial keypoint frames instead of all-or-nothing
+
+Task 19 measured that bout 28 fly0's 505-frame NaN block is a coverage-gate
+cascade, not an identity failure: raw DLT recovers a partial signal in 18.2%
+of those frames, but finite_frame_mask requires all 50 keypoints and
+NAN_SOLVE_MIN_SEG needs 30 consecutive complete frames, so the only solvable
+segment in the bout is [0, 1502).
+
+Defaults preserve the existing behaviour exactly; the relaxation is opt-in.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
+```
+
 ## Self-Review
 
 **Spec coverage.** §1.1 resolution → Tasks 11, 12, 16. §1.2 sigma → Task 9.
