@@ -49,6 +49,19 @@ level (verified: headless/amputee annotations carry `num_keypoints` < 50 but
 special-casing is needed here; `transforms.transform_keypoints` already
 marks any v<=0 joint not-visible, which is exactly the desired behaviour for
 a padded-absent joint too.
+
+Sex resolution (`self.sex`, feeding `balanced_weights`/`class_counts`):
+measured on real red_data_3d_v5, per-annotation `sex` is "unknown" for 81%
+of annotations (3,485 male / 1,081 female / 19,330 unknown across train) --
+only 8 source recordings carried the field at annotation level. The human
+sex labels were instead applied to `manifest.json`'s
+`recordings[<rec>]["sex"]` (14 male / 8 female / 4 unknown) and, for the 4
+two-fly recordings, per-fly `["fly_sex"]["fly<k>"]`. Reading `self.sex` from
+the annotation field alone -- which is what this module did before -- makes
+`balanced_weights(key="sex")` balance across three classes including a bogus
+19,330-strong "unknown" bucket, boosting the unlabelled bulk instead of the
+under-represented female class. `_resolve_sex` below is the fix: see its
+docstring for the fallback order.
 """
 from __future__ import annotations
 
@@ -90,6 +103,35 @@ def _load_mask(root, file_name, ann_id, src_ann_id, img_w, img_h):
         return np.zeros((img_h, img_w), dtype=np.float32)
 
 
+def _resolve_sex(ann_sex, fly_id, rec_meta):
+    """Resolve one annotation's sex via a fallback chain (see module note
+    above for the measured counts motivating this):
+
+      1. the annotation's own `sex`, if not "unknown"
+      2. else `rec_meta["fly_sex"]["fly<fly_id>"]` -- the per-fly label
+         carried by the 4 two-fly recordings, keyed by THIS annotation's
+         fly, not the recording as a whole (a mixed-sex two-fly recording
+         has no single recording-level sex to fall back to)
+      3. else `rec_meta["sex"]` -- the recording-level label
+      4. else "unknown"
+
+    Never raises: a recording missing from the manifest, or missing both
+    `fly_sex` and `sex`, degrades to "unknown" rather than erroring, since
+    real data legitimately has some of each (see module docstring).
+    """
+    if ann_sex and ann_sex != "unknown":
+        return ann_sex
+    fly_sex = rec_meta.get("fly_sex")
+    if fly_sex:
+        per_fly = fly_sex.get(f"fly{fly_id}")
+        if per_fly and per_fly != "unknown":
+            return per_fly
+    rec_sex = rec_meta.get("sex")
+    if rec_sex and rec_sex != "unknown":
+        return rec_sex
+    return "unknown"
+
+
 class V5Dataset:
     """Per-annotation 2D keypoint dataset over red_data_3d_v5.
 
@@ -124,6 +166,18 @@ class V5Dataset:
         id2file = {im["id"]: im["file_name"] for im in coco["images"]}
         id2wh = {im["id"]: (im["width"], im["height"]) for im in coco["images"]}
 
+        # manifest.json carries the human sex labels `_resolve_sex` falls
+        # back to (see module note); tolerate it being absent entirely
+        # (older/partial fixtures) rather than requiring every caller to
+        # have one -- resolution then just can't reach past the
+        # annotation's own `sex` field.
+        manifest_path = os.path.join(root, "manifest.json")
+        if os.path.exists(manifest_path):
+            with open(manifest_path) as f:
+                self.manifest = json.load(f).get("recordings", {})
+        else:
+            self.manifest = {}
+
         self.file_names = []
         self.bboxes = []
         self.keypoints = []
@@ -146,7 +200,9 @@ class V5Dataset:
             self.ann_ids.append(ann_id)
             self.src_ann_ids.append(a.get("src_ann_id", ann_id))
             self.img_wh.append(id2wh[a["image_id"]])
-            self.sex.append(a.get("sex", "unknown"))
+            rec_meta = self.manifest.get(fn.split("/")[0], {})
+            self.sex.append(
+                _resolve_sex(a.get("sex", "unknown"), a.get("fly_id", 0), rec_meta))
             self.behavior.append(a.get("behavior", "unknown"))
             self.category.append(a.get("category", "unknown"))
 

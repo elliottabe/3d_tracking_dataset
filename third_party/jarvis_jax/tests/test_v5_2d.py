@@ -218,6 +218,131 @@ def test_v5dataset_batches_stacks(tmp_path):
     assert vis.shape == (2, 50)
 
 
+# --- sex resolution fallback (human labels live mostly on manifest.json) ---
+#
+# Measured on real red_data_3d_v5: per-annotation `sex` is "unknown" for 81%
+# of annotations (only 8 source recordings carried it) while manifest.json's
+# `recordings[<rec>]["sex"]`/`["fly_sex"]` carries the human labels for all
+# but 4 recordings. `balanced_weights(key="sex")` reading `self.sex` alone
+# therefore balanced across a bogus 19,330-strong "unknown" bucket instead of
+# the true male/female split. `_resolve_sex` below is the fix: each
+# annotation's sex is (1) its own `sex` if not "unknown", else (2) the
+# manifest recording's `fly_sex["fly<fly_id>"]` (the 4 two-fly recordings),
+# else (3) the manifest recording's `sex`, else (4) "unknown".
+
+def _v5_root_sex_fallback(tmp_path):
+    """One annotation per fallback branch, verified against the real shape
+    of the defect: most annotations carry sex=="unknown" and the human
+    label lives on manifest.json instead, either per-recording (`sex`) or,
+    for the 4 two-fly recordings, per-fly (`fly_sex`, keyed by "fly<fly_id>"
+    -- NOT by recording, since a mixed-sex two-fly recording has no single
+    recording-level answer).
+
+      - recLabeled: annotation sex="male" already set -> wins outright even
+        though the manifest (deliberately) disagrees ("female"); branch 1.
+      - recTwoFly (fly_id 0 AND 1): both annotations are sex="unknown" (as
+        every real two-fly recording's annotations are); the manifest
+        recording's own sex is ALSO "unknown" but carries
+        fly_sex={"fly0":"male","fly1":"female"} -- branch 2, keyed by
+        fly_id, not recording.
+      - recSingle: annotation sex="unknown"; manifest has no fly_sex but a
+        recording-level sex="female" -- branch 3.
+      - recBlank: annotation sex="unknown"; recBlank is absent from the
+        manifest entirely -- branch 4, stays "unknown".
+
+    No image files are written -- these tests only exercise `self.sex`
+    (populated in `__init__`), never `__getitem__`.
+    """
+    root = tmp_path / "v5_sex"
+    (root / "annotations").mkdir(parents=True)
+
+    images, annotations = [], []
+    iid = aid = 0
+
+    def add(rec, cam, fly_id, ann_sex):
+        nonlocal iid, aid
+        images.append({"id": iid, "file_name": f"{rec}/{cam}/Frame_0.jpg",
+                        "width": 100, "height": 100})
+        annotations.append({
+            "id": aid, "image_id": iid, "bbox": [0, 0, 10, 10],
+            "keypoints": [1.0, 1.0, 1] * 50, "num_keypoints": 50,
+            "sex": ann_sex, "fly_id": fly_id, "src_ann_id": aid,
+        })
+        iid += 1
+        aid += 1
+
+    add("recLabeled", "Cam1", 0, "male")
+    add("recTwoFly", "Cam1", 0, "unknown")
+    add("recTwoFly", "Cam1", 1, "unknown")
+    add("recSingle", "Cam1", 0, "unknown")
+    add("recBlank", "Cam1", 0, "unknown")
+
+    coco = {
+        "keypoint_names": [f"kp{i}" for i in range(50)], "skeleton": [],
+        "categories": [{"id": 1, "name": "fly", "keypoints": [], "skeleton": []}],
+        "images": images, "annotations": annotations, "framesets": {},
+    }
+    for split in ("train", "val"):
+        (root / "annotations" / f"instances_{split}.json").write_text(json.dumps(coco))
+
+    manifest = {"recordings": {
+        "recLabeled": {"sex": "female"},          # disagrees; must lose to branch 1
+        "recTwoFly": {"sex": "unknown",
+                      "fly_sex": {"fly0": "male", "fly1": "female"}},
+        "recSingle": {"sex": "female"},
+        # recBlank intentionally absent from the manifest
+    }}
+    (root / "manifest.json").write_text(json.dumps(manifest))
+    return root
+
+
+def test_v5dataset_sex_own_annotation_wins_over_manifest(tmp_path):
+    """Branch 1: an annotation that already carries a real sex is
+    authoritative even when the manifest disagrees."""
+    from jarvis_jax.data.v5_2d import V5Dataset
+    root = _v5_root_sex_fallback(tmp_path)
+    ds = V5Dataset(str(root), "train", recordings=["recLabeled"])
+    assert ds.sex == ["male"]
+
+
+def test_v5dataset_sex_falls_back_to_per_fly_fly_sex(tmp_path):
+    """Branch 2: the two-fly recording's own annotations are BOTH
+    sex=="unknown" (as every real one is) -- resolution must key off
+    fly_id, not recording, since fly0 and fly1 disagree."""
+    from jarvis_jax.data.v5_2d import V5Dataset
+    root = _v5_root_sex_fallback(tmp_path)
+    ds = V5Dataset(str(root), "train", recordings=["recTwoFly"])
+    assert ds.sex == ["male", "female"]
+
+
+def test_v5dataset_sex_falls_back_to_recording_level_sex(tmp_path):
+    """Branch 3: no fly_sex on the manifest entry -> recording-level sex."""
+    from jarvis_jax.data.v5_2d import V5Dataset
+    root = _v5_root_sex_fallback(tmp_path)
+    ds = V5Dataset(str(root), "train", recordings=["recSingle"])
+    assert ds.sex == ["female"]
+
+
+def test_v5dataset_sex_stays_unknown_when_manifest_has_nothing(tmp_path):
+    """Branch 4: recording absent from the manifest entirely -> "unknown",
+    never a crash on a missing manifest entry."""
+    from jarvis_jax.data.v5_2d import V5Dataset
+    root = _v5_root_sex_fallback(tmp_path)
+    ds = V5Dataset(str(root), "train", recordings=["recBlank"])
+    assert ds.sex == ["unknown"]
+
+
+def test_v5dataset_missing_manifest_json_degrades_to_unknown_not_a_crash(tmp_path):
+    """A root with no manifest.json at all (the older `_v5_root` fixture
+    above) must not crash V5Dataset -- resolution just can't reach past
+    branch 1, which is fine since that fixture's annotations already carry
+    real sex values."""
+    from jarvis_jax.data.v5_2d import V5Dataset
+    root = _v5_root(tmp_path)  # no manifest.json in this older fixture
+    ds = V5Dataset(str(root), "train")
+    assert ds.sex == ["male", "female", "male"]
+
+
 # --- real-data regression (skipped when the dataset isn't present) ---------
 
 ROOT = "/gscratch/portia/eabe/data/Johnson_lab/red_data/red_data_3d_v5"

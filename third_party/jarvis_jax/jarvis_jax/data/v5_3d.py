@@ -48,6 +48,48 @@ _CROP = 448
 _GRID_SPACING = 1
 
 
+def _resolve_sex(ann_sex, fly_id, rec_meta):
+    """Resolve one (fly, recording)'s sex via a fallback chain -- duplicated
+    verbatim from `data/v5_2d.py::_resolve_sex` (see that module's docstring
+    for the measured counts motivating it) rather than imported, mirroring
+    this repo's existing precedent of keeping `data/v5_2d.py` and
+    `data/v5_3d.py` deliberately un-coupled (see both modules' `_load_mask`):
+
+      1. the annotation's own `sex`, if not "unknown"
+      2. else `rec_meta["fly_sex"]["fly<fly_id>"]` -- the per-fly label
+         carried by the 4 two-fly recordings, keyed by THIS fly, not the
+         recording as a whole (a mixed-sex two-fly recording has no single
+         recording-level sex to fall back to)
+      3. else `rec_meta["sex"]` -- the recording-level label
+      4. else "unknown"
+
+    Never raises: a recording missing from the manifest, or missing both
+    `fly_sex` and `sex`, degrades to "unknown" rather than erroring.
+    """
+    if ann_sex and ann_sex != "unknown":
+        return ann_sex
+    fly_sex = rec_meta.get("fly_sex")
+    if fly_sex:
+        per_fly = fly_sex.get(f"fly{fly_id}")
+        if per_fly and per_fly != "unknown":
+            return per_fly
+    rec_sex = rec_meta.get("sex")
+    if rec_sex and rec_sex != "unknown":
+        return rec_sex
+    return "unknown"
+
+
+def _frameset_own_sex(fsv, id2ann):
+    """The frameset's own annotation-level `sex`, from the first camera
+    whose slot resolved to a real annotation id (ruling R15 may leave some
+    cameras unresolved as None -- see module docstring); "unknown" if every
+    camera is unresolved or the resolved annotation lacks the field."""
+    for ann_id in fsv.get("ann_ids", []):
+        if ann_id is not None:
+            return id2ann[ann_id].get("sex", "unknown")
+    return "unknown"
+
+
 def _load_mask(v5_root, file_name, src_ann_id, merged_ann_id, w, h):
     """Mask for ONE annotation.
 
@@ -100,10 +142,10 @@ class V5FramesetDataset:
         If given, only include framesets whose recording's calib_group (per
         manifest.json) is in this list.
     sex : str | None
-        If given, only include framesets whose recording's sex (per
-        manifest.json) equals this. NOTE: every recording currently reads
-        sex == "unknown" (the sexing pass hasn't run) so sex="female" or
-        sex="male" legitimately yields zero samples today.
+        If given, only include framesets whose resolved sex (see
+        `_resolve_sex`: the frameset's own annotation `sex`, else the
+        manifest recording's per-fly `fly_sex["fly<fly_id>"]`, else the
+        manifest recording's `sex`, else "unknown") equals this.
     """
 
     def __init__(self, root: str, split: str, *, recordings=None,
@@ -123,6 +165,7 @@ class V5FramesetDataset:
         self._tools: dict[str, ReprojectionTool] = {}
         self.keys: list[str] = []
         self._fs: list[dict] = []
+        self._sex: list[str] = []   # resolved sex, parallel to self._fs/keys
         for key, fsv in sorted(coco["framesets"].items()):
             rec = fsv["recording"]
             meta = self.manifest.get(rec, {})
@@ -131,7 +174,9 @@ class V5FramesetDataset:
                 continue
             if calib_groups is not None and grp not in calib_groups:
                 continue
-            if sex is not None and meta.get("sex") != sex:
+            resolved_sex = _resolve_sex(
+                _frameset_own_sex(fsv, self._id2ann), fsv["fly_id"], meta)
+            if sex is not None and resolved_sex != sex:
                 continue
             if grp not in self._tools:
                 d = os.path.join(root, "calibrations", str(grp))
@@ -140,12 +185,17 @@ class V5FramesetDataset:
                 self._tools[grp] = ReprojectionTool(d)
             self.keys.append(key)
             self._fs.append(fsv)
+            self._sex.append(resolved_sex)
 
     def __len__(self) -> int:
         return len(self._fs)
 
     def is_female(self, idx: int) -> bool:
-        return self.manifest.get(self._fs[idx]["recording"], {}).get("sex") == "female"
+        # Shares `_resolve_sex` with the `sex=` filter above (not the raw
+        # recording-level manifest field) -- a two-fly recording's female
+        # fly must be seen as female even when the RECORDING-level sex is
+        # "unknown" (see module note / `_resolve_sex`).
+        return self._sex[idx] == "female"
 
     def __getitem__(self, idx: int) -> dict:
         fsv = self._fs[idx]
