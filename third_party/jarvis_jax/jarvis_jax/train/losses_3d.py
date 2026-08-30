@@ -167,7 +167,18 @@ def heatmap3d_mse(
     Returns:
         Scalar foreground-weighted masked MSE loss.
     """
-    assert grid_spacing == 1, "heatmap3d_mse grid-index inverse assumes grid_spacing==1; must match soft_argmax_3d"
+    # GENERALIZED 2026-08-30 (Task 15, A5_hires): this function's own
+    # grid-index inverse (idx = (local_world + roi_cube/2) / (grid_spacing*2),
+    # see docstring above) is ALREADY parameterized by grid_spacing exactly
+    # like soft_argmax_3d's (model.py, "GENERALIZED 2026-08-29") forward
+    # formula it inverts -- the assert below only ever guarded against an
+    # UNVERIFIED caller, not a real restriction. `G` is read from
+    # pred_vol.shape, i.e. whatever post-V2VNet resolution this arm's
+    # grid_size produces, so a finer grid_spacing (e.g. A5_hires's 0.5)
+    # keeps the same physical FOV with a proportionally narrower Gaussian
+    # target (sigma is in GRID units) -- narrower is the intended effect of
+    # a finer grid, not a bug.
+    assert grid_spacing > 0, "heatmap3d_mse grid_spacing must be positive"
 
     B, J, G, _, _ = pred_vol.shape
 
