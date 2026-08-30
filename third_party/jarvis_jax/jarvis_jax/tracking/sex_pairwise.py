@@ -39,13 +39,28 @@ _SEGMENTS = [
 
 def _scalars(kp3d: np.ndarray, names: list[str]) -> np.ndarray:
     out = []
+    resolved = 0
     for a, b in _SEGMENTS:
         if a in names and b in names:
+            resolved += 1
             d = kp3d[names.index(a)] - kp3d[names.index(b)]
             v = float(np.linalg.norm(d))
             out.append(v if np.isfinite(v) else 0.0)
         else:
             out.append(0.0)
+    if resolved < len(_SEGMENTS) / 2:
+        # A wrong keypoint_names ordering (this repo has a documented
+        # tracking-order vs XML/model-order gotcha) zeros out most named
+        # scalars while the whole-cloud `extent` feature below survives (it
+        # does no name lookup) -- training on degraded-but-not-chance
+        # features and reporting plausible, quietly-wrong accuracy is worse
+        # for detectability than clean chance. Refuse instead of degrading
+        # silently.
+        raise ValueError(
+            f"only {resolved}/{len(_SEGMENTS)} named _SEGMENTS resolved "
+            "against keypoint_names -- check keypoint_names is in the same "
+            "order/skeleton as kp3d (tracking-order vs XML/model-order)"
+        )
     finite = kp3d[np.isfinite(kp3d).all(axis=-1)]
     extent = (float(np.linalg.norm(finite.max(0) - finite.min(0)))
               if finite.shape[0] >= 2 else 0.0)

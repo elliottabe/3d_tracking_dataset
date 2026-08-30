@@ -100,3 +100,33 @@ def test_nan_keypoints_do_not_poison_features():
     b[NAMES.index("WingL_V12")] = np.nan
     f = pair_features(a, b, NAMES)
     assert np.all(np.isfinite(f)), "NaN keypoints must degrade, not propagate"
+
+
+def test_scalars_raises_when_majority_of_named_segments_do_not_resolve():
+    """Under a wrong keypoint-name ordering (this repo has a documented
+    tracking-order vs XML/model-order gotcha), most named _SEGMENTS fail to
+    resolve and contribute 0.0 -- but the whole-cloud `extent` feature
+    survives regardless (it does no name lookup). That means the model
+    trains on degraded-but-not-chance features and reports plausible,
+    quietly-wrong accuracy with no error -- worse than clean chance for
+    detectability. Must raise loudly instead of silently zeroing out."""
+    from jarvis_jax.tracking.sex_pairwise import _scalars, _SEGMENTS
+
+    # Only EyeL/EyeR and T1L_FeTi/T1L_TiTa resolve: 2 of 6 _SEGMENTS.
+    bad_names = ["EyeL", "EyeR", "T1L_FeTi", "T1L_TiTa", "Abd_tip"]
+    kp = np.zeros((len(bad_names), 3), np.float64)
+    with pytest.raises(ValueError, match="_SEGMENTS"):
+        _scalars(kp, bad_names)
+
+
+def test_scalars_does_not_raise_at_exactly_half_resolved():
+    """Exactly half resolving (the boundary, not 'fewer than half') must
+    still be allowed."""
+    from jarvis_jax.tracking.sex_pairwise import _scalars, _SEGMENTS
+
+    assert len(_SEGMENTS) == 6
+    # Scutellum/Abd_tip, Scutellum/Abd_A4, Abd_A4/Abd_tip resolve: 3 of 6.
+    ok_names = ["Scutellum", "Abd_tip", "Abd_A4", "WingL_base", "EyeL"]
+    kp = np.zeros((len(ok_names), 3), np.float64)
+    out = _scalars(kp, ok_names)
+    assert out.shape == (len(_SEGMENTS) + 2,)
