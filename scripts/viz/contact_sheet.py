@@ -54,6 +54,9 @@ def build_contact_sheet(v5_root: str, recording: str, *, n_frames: int = 6,
     pick = keys[:: max(1, len(keys) // max(n_frames, 1))][:n_frames]
 
     groups = keypoint_groups(blob["keypoint_names"])
+    # keypoint_groups returns {group_name: [indices]}; invert it so a keypoint
+    # index can look up its own group name below.
+    idx2group = {i: g for g, idxs in groups.items() for i in idxs}
     sheet = Image.new("RGB", (cell * len(pick), cell * len(cams)), (12, 12, 14))
     draw = ImageDraw.Draw(sheet)
 
@@ -82,7 +85,7 @@ def build_contact_sheet(v5_root: str, recording: str, *, n_frames: int = 6,
                 cx, cy = (px - x0) * sx, (py - y0) * sy
                 if not (0 <= cx < cell and 0 <= cy < cell):
                     continue
-                colour = PALETTE.get(groups.get(j, "other"), (255, 255, 255))
+                colour = PALETTE.get(idx2group.get(j), (255, 255, 255))
                 cd.ellipse([cx - 2, cy - 2, cx + 2, cy + 2], fill=tuple(colour))
             sheet.paste(crop, (col * cell, row * cell))
             draw.text((col * cell + 4, row * cell + 4), f"{cam}", fill=(230, 230, 230))

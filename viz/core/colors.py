@@ -13,6 +13,8 @@ PALETTE = {
     "fit": (0, 255, 0),      # green
     "mask": (200, 200, 200), # grey fill
     "mesh": (200, 200, 200),
+    "abdomen": (255, 0, 200),  # magenta; distinct from every entry above
+    "legs": (255, 140, 0),     # orange; distinct from fly1's (0,165,255)
 }
 
 def keypoint_groups(kp_names):
