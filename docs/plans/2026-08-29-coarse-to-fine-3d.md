@@ -3746,6 +3746,365 @@ decision** (spec §2 non-goals) — present the evidence and let the user make i
 
 ---
 
+---
+
+## Task 18: Pairwise male/female classifier (Phase 5)
+
+The existing wing-song sexing got **24 of 160 hand-reviewed bouts wrong (15%)**.
+This task builds a classifier that decides, for two flies **in the same
+frameset**, which is the male — the shape the courtship problem actually has.
+
+**Files:**
+- Create: `$PKG/jarvis_jax/tracking/sex_pairwise.py`
+- Create: `<repo>/scripts/viz/sex_pair_sheet.py` (committed — the labelling aid)
+- Test: `$PKG/tests/test_sex_pairwise.py`
+
+**Interfaces:**
+- Consumes: `$V5/annotations/instances.json` (needs Task 4's recovered second flies), `V5FramesetDataset` for 3D keypoints.
+- Produces:
+  - `pair_features(kp3d_a, kp3d_b, keypoint_names) -> np.ndarray` — **antisymmetric**: `pair_features(b, a) == -pair_features(a, b)` exactly.
+  - `fit_pairwise(X, y, groups) -> dict` — logistic regression, **no intercept**, group-aware CV.
+  - `predict_male_slot(model, kp3d_a, kp3d_b, names) -> tuple[int, float]` — 0 or 1, plus probability.
+  - `clip_index(merged) -> dict[str, list[str]]` — frameset keys grouped into contiguous clips.
+
+### Why pairwise, and why antisymmetric
+
+Sex is **perfectly confounded with recording** in the absolute labels: all 4
+male-labelled recordings are 100% male, all 4 female ones 100% female. A
+per-fly classifier trained on those can score perfectly by learning lighting or
+one individual's quirks. The two-fly recordings remove that entirely — both
+animals appear in the **same frame, same camera, same instant**, so the only
+difference is the animal.
+
+Antisymmetry is enforced by construction, not hoped for: every feature is
+`f(a) - f(b)`, and the model has **no intercept**, so
+`P(a is male) = 1 - P(b is male)` identically. A classifier that could call
+both flies male is not a classifier of a courtship pair.
+
+### Labelling: 29 decisions, not 264
+
+Measured: the 264 two-fly framesets fall into **29 contiguous clips**
+(`2026_04_08_14_59_45` 7 clips / 214 framesets, `2026_04_07_11_33_33` 9 / 30,
+`2026_06_11_13_58_43` 10 / 17, `2026_06_11_13_58_45` 3 / 3).
+
+Annotation order is **not** spatial (`ann0 < ann1` in only 53% of framesets) but
+**is** a stable track identity within a clip: on 113 near-adjacent frameset
+pairs, slot 0 stayed with the nearer fly **100%** of the time. So one
+"which slot is the male" decision per clip labels every frameset in it.
+
+- [ ] **Step 1: Write the failing test**
+
+```python
+# $PKG/tests/test_sex_pairwise.py
+import numpy as np
+import pytest
+
+from jarvis_jax.tracking.sex_pairwise import (
+    pair_features, fit_pairwise, predict_male_slot, clip_index)
+
+NAMES = ["Scutellum", "Abd_A4", "Abd_tip", "WingL_base", "WingL_V12",
+         "EyeL", "EyeR", "T1L_FeTi", "T1L_TiTa"]
+
+
+def _fly(scale=1.0, abd=1.0):
+    """Synthetic fly: `scale` sets overall size, `abd` the abdomen extension."""
+    kp = np.zeros((len(NAMES), 3), np.float32)
+    kp[NAMES.index("Scutellum")] = [0, 0, 0]
+    kp[NAMES.index("Abd_A4")] = [0, -6 * scale, 0]
+    kp[NAMES.index("Abd_tip")] = [0, -13 * scale * abd, 0]
+    kp[NAMES.index("WingL_base")] = [1 * scale, -1 * scale, 0]
+    kp[NAMES.index("WingL_V12")] = [3 * scale, -18 * scale, 0]
+    kp[NAMES.index("EyeL")] = [-2 * scale, 4 * scale, 0]
+    kp[NAMES.index("EyeR")] = [2 * scale, 4 * scale, 0]
+    kp[NAMES.index("T1L_FeTi")] = [-3 * scale, 1 * scale, 0]
+    kp[NAMES.index("T1L_TiTa")] = [-5 * scale, -2 * scale, 0]
+    return kp
+
+
+def test_pair_features_are_exactly_antisymmetric():
+    """The property the whole design rests on: swapping the pair must negate
+    the features, so P(a male) == 1 - P(b male) by construction."""
+    a, b = _fly(1.0), _fly(1.25, abd=1.1)
+    fab = pair_features(a, b, NAMES)
+    fba = pair_features(b, a, NAMES)
+    np.testing.assert_allclose(fab, -fba, atol=1e-6)
+
+
+def test_identical_flies_give_zero_features():
+    a = _fly(1.0)
+    np.testing.assert_allclose(pair_features(a, a.copy(), NAMES), 0.0, atol=1e-6)
+
+
+def test_features_are_not_all_scale_normalised_away():
+    """Size IS the signal (females are larger). A feature vector that is
+    invariant to overall scale has thrown away the main cue."""
+    small, big = _fly(1.0), _fly(1.3)
+    f = pair_features(small, big, NAMES)
+    assert np.abs(f).max() > 1e-3
+
+
+def test_prediction_is_swap_consistent():
+    rng = np.random.default_rng(0)
+    X, y, g = [], [], []
+    for i in range(40):
+        male = _fly(1.0 + rng.normal(0, .02), abd=1.0)
+        female = _fly(1.25 + rng.normal(0, .02), abd=1.15)
+        # alternate which slot holds the male so the label is not slot-correlated
+        if i % 2:
+            X.append(pair_features(male, female, NAMES)); y.append(0)
+        else:
+            X.append(pair_features(female, male, NAMES)); y.append(1)
+        g.append(f"clip{i // 8}")
+    m = fit_pairwise(np.array(X), np.array(y), np.array(g))
+    male, female = _fly(1.0), _fly(1.25, abd=1.15)
+    s0, p0 = predict_male_slot(m, male, female, NAMES)
+    s1, p1 = predict_male_slot(m, female, male, NAMES)
+    assert s0 == 0 and s1 == 1, (s0, s1)
+    assert abs(p0 - p1) < 1e-6, "swap must give the mirrored probability"
+
+
+def test_model_has_no_intercept():
+    """An intercept would break antisymmetry: the model could prefer slot 0."""
+    rng = np.random.default_rng(1)
+    X = rng.normal(size=(30, 4)); y = (X[:, 0] > 0).astype(int)
+    g = np.array([f"c{i//5}" for i in range(30)])
+    m = fit_pairwise(X, y, g)
+    assert float(np.abs(m["intercept"])) == 0.0
+
+
+def test_cv_groups_by_clip_never_by_frameset():
+    """Adjacent framesets in a clip are near-duplicates. Grouping CV by
+    frameset would leak exactly the way the dataset split used to."""
+    rng = np.random.default_rng(2)
+    X = rng.normal(size=(40, 3)); y = (X[:, 0] > 0).astype(int)
+    g = np.array([f"clip{i//10}" for i in range(40)])
+    m = fit_pairwise(X, y, g)
+    assert set(m["cv_groups"]) == {"clip0", "clip1", "clip2", "clip3"}
+    assert len(m["fold_accuracy"]) == 4
+
+
+def test_clip_index_splits_on_frame_gaps():
+    merged = {"framesets": {}}
+    for f in [10, 11, 12, 900, 901]:
+        merged["framesets"][f"rec_a/Frame_{f:06d}/fly0"] = {
+            "recording": "rec_a", "fly_id": 0, "frames": [], "ann_ids": []}
+    clips = clip_index(merged, gap=100)
+    assert len(clips) == 2
+    assert sorted(len(v) for v in clips.values()) == [2, 3]
+
+
+def test_nan_keypoints_do_not_poison_features():
+    a, b = _fly(1.0), _fly(1.25)
+    b[NAMES.index("WingL_V12")] = np.nan
+    f = pair_features(a, b, NAMES)
+    assert np.all(np.isfinite(f)), "NaN keypoints must degrade, not propagate"
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `cd $PKG && python -m pytest tests/test_sex_pairwise.py -v`
+Expected: FAIL — `ModuleNotFoundError: No module named 'jarvis_jax.tracking.sex_pairwise'`
+
+- [ ] **Step 3: Write the implementation**
+
+```python
+# $PKG/jarvis_jax/tracking/sex_pairwise.py
+"""Which of two flies in one frameset is the male?
+
+WHY PAIRWISE. In the absolute labels, sex is perfectly confounded with
+recording: all 4 male-labelled recordings are 100% male, all 4 female ones 100%
+female. A per-fly classifier can score perfectly by learning lighting or one
+individual's quirks, and nothing in an in-recording validation would show it.
+The two-fly courtship recordings remove the confound completely -- both animals
+appear in the same frame, same camera, same instant.
+
+WHY ANTISYMMETRIC. Every feature is f(a) - f(b) and the model carries NO
+intercept, so P(a is male) == 1 - P(b is male) identically. A model that could
+call both flies in a courtship pair male is not modelling the problem.
+
+CUES. Females are larger with a longer, more pointed abdomen; males are smaller
+with a blunter, darker tip. Overall SIZE is a real cue here, so features are
+deliberately NOT scale-normalised. Note the recorded gotcha: mask AREA is
+backwards during courtship because the male extends a wing during song, so his
+silhouette is LARGER -- that is why these features come from 3-D keypoint
+geometry, not from silhouette extent.
+"""
+from __future__ import annotations
+
+import re
+
+import numpy as np
+
+_FRAME_RE = re.compile(r"Frame_(\d+)")
+
+# (name_a, name_b) segment lengths used as scalar descriptors.
+_SEGMENTS = [
+    ("Scutellum", "Abd_tip"),     # body length
+    ("Scutellum", "Abd_A4"),      # thorax->mid-abdomen
+    ("Abd_A4", "Abd_tip"),        # abdomen taper section
+    ("WingL_base", "WingL_V12"),  # wing length
+    ("EyeL", "EyeR"),             # head width
+    ("T1L_FeTi", "T1L_TiTa"),     # tibia
+]
+
+
+def _scalars(kp3d: np.ndarray, names: list[str]) -> np.ndarray:
+    out = []
+    for a, b in _SEGMENTS:
+        if a in names and b in names:
+            d = kp3d[names.index(a)] - kp3d[names.index(b)]
+            v = float(np.linalg.norm(d))
+            out.append(v if np.isfinite(v) else 0.0)
+        else:
+            out.append(0.0)
+    finite = kp3d[np.isfinite(kp3d).all(axis=-1)]
+    extent = (float(np.linalg.norm(finite.max(0) - finite.min(0)))
+              if finite.shape[0] >= 2 else 0.0)
+    out.append(extent)
+    body = out[0]
+    # abdomen fraction of body: shape cue that survives a size difference
+    out.append(out[2] / body if body > 1e-9 else 0.0)
+    return np.asarray(out, np.float64)
+
+
+def pair_features(kp3d_a, kp3d_b, keypoint_names) -> np.ndarray:
+    """Antisymmetric descriptor of the ORDERED pair (a, b)."""
+    a = _scalars(np.asarray(kp3d_a, np.float64), list(keypoint_names))
+    b = _scalars(np.asarray(kp3d_b, np.float64), list(keypoint_names))
+    f = a - b
+    return np.nan_to_num(f, nan=0.0, posinf=0.0, neginf=0.0)
+
+
+def fit_pairwise(X, y, groups) -> dict:
+    """Logistic regression, NO intercept, leave-one-group-out CV.
+
+    `groups` MUST be clip ids, never frameset ids: adjacent framesets inside a
+    clip are near-duplicates, and grouping by frameset would leak exactly the
+    way this project's dataset split used to.
+    """
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.model_selection import LeaveOneGroupOut
+
+    X = np.asarray(X, np.float64)
+    y = np.asarray(y, int)
+    groups = np.asarray(groups)
+
+    accs, uniq = [], sorted(set(groups.tolist()))
+    logo = LeaveOneGroupOut()
+    for tr, te in logo.split(X, y, groups):
+        if len(set(y[tr].tolist())) < 2:
+            continue
+        m = LogisticRegression(fit_intercept=False, max_iter=2000)
+        m.fit(X[tr], y[tr])
+        accs.append(float(m.score(X[te], y[te])))
+
+    final = LogisticRegression(fit_intercept=False, max_iter=2000)
+    final.fit(X, y)
+    return {"coef": final.coef_[0].copy(), "intercept": 0.0,
+            "fold_accuracy": accs, "cv_groups": uniq,
+            "cv_mean": float(np.mean(accs)) if accs else float("nan"),
+            "_model": final}
+
+
+def predict_male_slot(model, kp3d_a, kp3d_b, keypoint_names):
+    """-> (slot, probability). slot 0 means `kp3d_a` is the male."""
+    f = pair_features(kp3d_a, kp3d_b, keypoint_names)
+    z = float(np.dot(model["coef"], f))       # no intercept => exactly antisymmetric
+    p_b_male = 1.0 / (1.0 + np.exp(-z))
+    return (1, p_b_male) if p_b_male >= 0.5 else (0, 1.0 - p_b_male)
+
+
+def clip_index(merged: dict, *, gap: int = 100) -> dict[str, list[str]]:
+    """Group frameset keys into contiguous clips (frame gaps > `gap` split).
+
+    Annotation order is NOT spatial (ann0 < ann1 in only 53% of framesets) but
+    IS a stable track identity within a clip -- measured: on 113 near-adjacent
+    frameset pairs, slot 0 stayed with the nearer fly 100% of the time. So one
+    'which slot is the male' decision labels a whole clip.
+    """
+    per_rec: dict[str, list[tuple[int, str]]] = {}
+    for key, v in merged["framesets"].items():
+        m = _FRAME_RE.search(key)
+        if m is None:
+            continue
+        per_rec.setdefault(v["recording"], []).append((int(m.group(1)), key))
+    clips: dict[str, list[str]] = {}
+    for rec, items in per_rec.items():
+        items.sort()
+        idx, cur, prev = 0, [], None
+        for fr, key in items:
+            if prev is not None and fr - prev > gap:
+                clips[f"{rec}#clip{idx:03d}"] = cur
+                idx += 1
+                cur = []
+            cur.append(key)
+            prev = fr
+        if cur:
+            clips[f"{rec}#clip{idx:03d}"] = cur
+    return clips
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `cd $PKG && python -m pytest tests/test_sex_pairwise.py -v`
+Expected: 8 passed
+
+- [ ] **Step 5: Build the 29 clip sheets and STOP for labelling**
+
+Write `<repo>/scripts/viz/sex_pair_sheet.py`, reusing `scripts/viz/contact_sheet.py`
+(Task 6) for crop extraction. One PNG per clip: both flies side by side, slot 0
+left and slot 1 right, several frames across the clip, two cameras, keypoints
+overlaid, filename `<recording>#clip<NNN>.png`.
+
+**Read at least 5 sheets with the Read tool and confirm the two panels really
+show different animals** — if slot 0 and slot 1 look like the same fly, the
+clip's track identity is broken and that clip must be excluded, not labelled.
+
+Then hand them to the user for 29 `clip -> male_slot` decisions. **Do not guess
+sex yourself.** Write the answers to `$V5/annotations/sex_pairs.json` as
+`{"<recording>#clip<NNN>": 0|1}`.
+
+- [ ] **Step 6: Train, and report the HONEST number**
+
+```bash
+cd $PKG && python -m jarvis_jax.tracking.sex_pairwise \
+  --v5-root $V5 --labels $V5/annotations/sex_pairs.json \
+  --out ../../figures/2026-08-29-c2f-3d/phase5-sex/
+```
+
+Report BOTH numbers, and lead with the second:
+1. **leave-one-CLIP-out** accuracy — optimistic; clips within a recording share
+   the same two individuals.
+2. **leave-one-RECORDING-out** accuracy — the honest one. Only 4 recordings, so
+   this is 4 folds and will be noisy; report per-fold, not just the mean.
+
+**Independent check:** run the trained model on the 8 sex-labelled single-fly
+recordings by pairing a male frameset against a female frameset (it never saw
+any of them). Report accuracy. If leave-one-recording-out is near chance while
+leave-one-clip-out is high, the model learned the individuals, not the sex —
+**say so plainly rather than reporting the flattering number.**
+
+**Figure gate:** per-feature male-vs-female distributions, **coloured by
+recording**. Stated expectation: if the separation is real, the male and female
+clusters stay separated *within* every recording's own colour; if the
+separation only appears between recording colours, the model is reading
+individuals or lighting, and the pairwise design has not saved us.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add $PKG/jarvis_jax/tracking/sex_pairwise.py $PKG/tests/test_sex_pairwise.py \
+        scripts/viz/sex_pair_sheet.py
+git commit -m "feat(sexing): antisymmetric pairwise male/female classifier
+
+Wing-song sexing got 24 of 160 hand-reviewed bouts wrong (15%). This decides
+which of two flies in ONE frameset is the male, so lighting, session and
+individual are controlled by construction. No intercept => P(a male) is
+exactly 1 - P(b male). CV groups by clip, never by frameset.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
+```
+
 ## Self-Review
 
 **Spec coverage.** §1.1 resolution → Tasks 11, 12, 16. §1.2 sigma → Task 9.
