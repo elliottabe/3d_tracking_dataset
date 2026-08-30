@@ -46,6 +46,22 @@ def discover_sources(general_model_root: str, v3_root: str) -> dict[str, SourceR
     more that general_model lacks (2026_03_22, 2026_04_07, 2026_04_08, and the
     two 2026_06_11 recordings). The union is 26 -- V3's 3D training only ever
     used 17.
+
+    For the 12 recordings general_model AND V3 both cover, V3's annotations
+    -- not general_model's -- are used, for two reasons verified against the
+    real tree (identical frameset counts for all 12; same frames/keypoints,
+    just re-numbered ids):
+      1. general_model annotations never carry `sex` at all; V3's do.
+      2. The SAM3 masks for these 12 (borrowed from V3, `mask_root` below)
+         are keyed by V3's own annotation ids. Sourcing frame/annotation
+         data from general_model instead put `src_ann_id` in a DIFFERENT id
+         space than the mask files' `ann_ids` -- 0% mask hits for exactly
+         these 12 recordings, verified as the dominant cause of an
+         overall ~30% hit rate across all 17 V3-mask recordings (the other
+         5, V3-only, already matched at ~100%: (5*100 + 12*0)/17 ~= 29%).
+    Only image_root/calib_dir stay general_model's -- that's where the
+    actual jpgs and this rig's calibration files live; nothing there
+    disagrees between the two trees.
     """
     srcs: dict[str, SourceRec] = {}
     for subset in sorted(os.listdir(general_model_root)):
@@ -64,7 +80,9 @@ def discover_sources(general_model_root: str, v3_root: str) -> dict[str, SourceR
     v3_anns = sorted(glob.glob(os.path.join(v3_root, "annotations", "instances_*.json")))
     for rec in sorted(os.listdir(v3_calib)):
         if rec in srcs:
-            # Already covered by general_model, but V3 is where its masks live.
+            # Already covered by general_model, but V3 is where its masks
+            # live AND (see docstring) the annotation source of record.
+            srcs[rec].ann_paths = v3_anns
             srcs[rec].mask_root = os.path.join(v3_root, "sam3_masks")
             continue
         srcs[rec] = SourceRec(
@@ -163,6 +181,132 @@ _FRAME_RE = re.compile(r"Frame_(\d+)")
 MIN_CAMS = 3
 
 
+def build_recording_sex_map(ann_paths: list[str]) -> tuple[dict[str, str], list[str]]:
+    """Recover a per-recording sex label from raw COCO annotation files.
+
+    BUG THIS FIXES: `general_model/<subset>/annotations/instances_*.json` has
+    no `sex` field on its annotations at all (keys are just `bbox,
+    category_id, id, image_id, iscrowd, keypoints, num_keypoints,
+    segmentation`) -- only `red_data_unified_V3/annotations/` records it.
+    `discover_sources` prefers general_model for the 21 recordings it
+    covers, so `merge_annotations` used to read `a.get("sex", "unknown")`
+    straight off THOSE sex-less annotations and silently default everyone to
+    "unknown" (3,922 male / 1,229 female annotations lost). V3's own
+    annotation files, however, cover many of the SAME recordings (by name,
+    via `file_name`'s leading path component) and DO carry sex there, so it
+    can be recovered without touching a single pixel of image data.
+
+    Callers pass the union of every source's `ann_paths` -- for the current
+    tree this always includes the V3-only recordings' `ann_paths`, which
+    point at the very same `red_data_unified_V3/annotations/instances_*.json`
+    files that also hold annotations for the general_model-sourced
+    recordings, since a V3 annotation file is not scoped to one recording.
+
+    A recording's sex is recovered ONLY when every annotation that carries a
+    non-"unknown" `sex` for it AGREES -- "unknown" is silently ignored (a
+    recording with 4,592 'unknown' and 0 anything-else has no signal, not a
+    unanimous 'unknown'), but a recording that shows BOTH 'male' and
+    'female' among its real (non-"unknown") values is never resolved: that
+    is reported back as `mixed` so the caller can leave it 'unknown' rather
+    than guess. The four two-fly recordings (2026_04_07_11_33_33,
+    2026_04_08_14_59_45, and the two 2026_06_11 recordings) fall out of this
+    naturally: V3 never recorded per-fly sex for them, so every annotation
+    is "unknown" and they get no map entry -- correctly, since a single
+    recording-level label would be wrong for a recording with one male and
+    one female fly. Their sex comes only from the human labels
+    (`apply_sex_labels`), keyed per fly slot.
+
+    Returns `(recording -> sex, sorted list of mixed recordings)`.
+    """
+    seen: dict[str, set[str]] = defaultdict(set)
+    for path in sorted(set(ann_paths)):
+        with open(path) as f:
+            blob = json.load(f)
+        img_rec = {img["id"]: img["file_name"].split("/")[0]
+                   for img in blob.get("images", [])}
+        for a in blob.get("annotations", []):
+            sex = a.get("sex", "unknown")
+            if sex == "unknown":
+                continue
+            rec = img_rec.get(a["image_id"])
+            if rec is not None:
+                seen[rec].add(sex)
+
+    rec_sex: dict[str, str] = {}
+    mixed: list[str] = []
+    for rec, sexes in seen.items():
+        if len(sexes) == 1:
+            rec_sex[rec] = next(iter(sexes))
+        else:
+            mixed.append(rec)
+    return rec_sex, sorted(mixed)
+
+
+def _canonical_keypoint_names(ann_paths: list[str]) -> list[str]:
+    """The FULL keypoint schema, used to pad every reduced-schema source
+    (headless recordings: 47 keypoints, missing Antenna_Base/EyeL/EyeR;
+    single-leg-amputation recordings: 44, missing one T1 leg's 6 points) up
+    to a common slot count. Every reduced schema is verified (BY NAME, not
+    just by length) to be a strict, in-canonical-order subset of the
+    longest `keypoint_names` list seen anywhere in the tree, so that
+    longest list IS the canonical schema. This is recomputed from the data
+    -- never hardcoded -- so a future reduced schema this wasn't checked
+    against fails loudly in `_keypoint_remap` instead of silently
+    corrupting anatomy.
+    """
+    best: list[str] = []
+    for path in sorted(set(ann_paths)):
+        with open(path) as f:
+            blob = json.load(f)
+        names = blob.get("keypoint_names", [])
+        if len(names) > len(best):
+            best = names
+    return best
+
+
+def _keypoint_remap(source_names: list[str], canonical: list[str]) -> list[int | None]:
+    """Index map, BY NAME, from a canonical slot to its index in a source
+    keypoints array shaped like `source_names` -- never positional. This
+    repo has a documented history of positional keypoint-order bugs that
+    scrambled anatomy while every downstream metric looked fine (LOO/IoU,
+    residual/NaN checks were all blind to it); mapping by name is how this
+    fix avoids repeating it.
+
+    Every name in `source_names` must exist in `canonical` -- if the two
+    schemas are not simply subset/superset, silently padding would be a
+    guess, so this raises instead (a BLOCKED-level finding to report, not
+    paper over).
+    """
+    missing = [n for n in source_names if n not in canonical]
+    if missing:
+        raise ValueError(
+            f"keypoint name(s) {missing} exist in a source schema but not "
+            f"in the canonical {len(canonical)}-keypoint schema -- cannot "
+            f"pad by name; this needs a human decision, not a guess")
+    name_to_src_idx = {n: i for i, n in enumerate(source_names)}
+    return [name_to_src_idx.get(n) for n in canonical]
+
+
+def _pad_keypoints(kps: list[float], remap: list[int | None]) -> list[float]:
+    """Expand a flat (x, y, v) x N_source keypoints array to the canonical
+    schema via `remap` (canonical slot -> source index, or None).
+
+    A canonical slot with no source counterpart is padded (0.0, 0.0, 0):
+    v=0 is the existing "not visible" sentinel, and that IS the correct
+    meaning here -- an amputated leg or a removed head is an anatomically
+    ABSENT structure, not a missing observation, so the model must learn
+    nothing about it from these frames and IK must not attempt to fit it.
+    Never interpolate or infer a value for these slots.
+    """
+    out: list[float] = []
+    for src_idx in remap:
+        if src_idx is None:
+            out.extend((0.0, 0.0, 0))
+        else:
+            out.extend(kps[3 * src_idx:3 * src_idx + 3])
+    return out
+
+
 def merge_annotations(sources: dict[str, SourceRec], out_root: str) -> dict:
     """Merge every source COCO file into one instances.json with per-fly identity.
 
@@ -206,11 +350,31 @@ def merge_annotations(sources: dict[str, SourceRec], out_root: str) -> dict:
     out_images: list[dict] = []
     out_anns: list[dict] = []
     framesets: dict[str, dict] = {}
-    kp_names: list[str] = []
     skeleton: list = []
     next_img, next_ann = 0, 0
 
+    # Recording-level sex recovery (see build_recording_sex_map docstring):
+    # general_model annotations never carry `sex`, but V3's own annotation
+    # files -- referenced somewhere in `sources` for any recording V3 has
+    # data on, whether or not that recording's SourceRec.ann_paths point at
+    # them -- do. Scanning the union up front lets a general_model-sourced
+    # recording recover its sex from V3's copy of the same recording.
+    all_ann_paths = sorted({p for s in sources.values() for p in s.ann_paths})
+    rec_sex_map, mixed_sex_recs = build_recording_sex_map(all_ann_paths)
+    if mixed_sex_recs:
+        print(f"merge_annotations: {len(mixed_sex_recs)} recording(s) show "
+              f"CONFLICTING non-unknown sex across V3 annotations -- left "
+              f"'unknown' rather than guessed: {mixed_sex_recs}")
+
+    # Canonical keypoint schema (see _canonical_keypoint_names docstring):
+    # headless/leg-amputation recordings carry 47/44 keypoints, a strict
+    # in-order subset of the full 50. Every emitted annotation is padded to
+    # this schema BY NAME so the loader always sees a uniform-length array.
+    kp_names = _canonical_keypoint_names(all_ann_paths)
+
     for rec, s in sorted(sources.items()):
+        recovered_sex = rec_sex_map.get(rec, "unknown")
+        s.sex = recovered_sex
         seen_paths: set[str] = set()
         img_key_to_id: dict[tuple[str, str], int] = {}
         anns_by_img: dict[int, list[dict]] = defaultdict(list)
@@ -218,8 +382,12 @@ def merge_annotations(sources: dict[str, SourceRec], out_root: str) -> dict:
         for ann_path in s.ann_paths:
             with open(ann_path) as f:
                 blob = json.load(f)
-            kp_names = kp_names or blob.get("keypoint_names", [])
             skeleton = skeleton or blob.get("skeleton", [])
+            blob_kp_names = blob.get("keypoint_names", [])
+            # Fast path: this source already uses the canonical schema (the
+            # overwhelming majority of annotations) -- no remap needed.
+            kp_remap = (None if blob_kp_names == kp_names else
+                        _keypoint_remap(blob_kp_names, kp_names))
             src_img = {i["id"]: i for i in blob["images"]}
             src_anns = defaultdict(list)
             for a in blob["annotations"]:
@@ -276,11 +444,27 @@ def merge_annotations(sources: dict[str, SourceRec], out_root: str) -> dict:
                             ann_ids.append(None)
                             continue
                         a = cam_anns[k]
+                        # THE FIX (label-loss bug): a general_model annotation
+                        # has no "sex" key at all, so `a.get(..., "unknown")`
+                        # always fell back to "unknown" for the 21 recordings
+                        # general_model is preferred for -- 3,922 male and
+                        # 1,229 female annotations silently dropped. Recover
+                        # it from V3's recording-level map when the
+                        # per-annotation value is itself "unknown"/absent.
+                        ann_sex = a.get("sex", "unknown")
+                        if ann_sex == "unknown":
+                            ann_sex = recovered_sex
+                        # Pad a reduced-schema source (headless/amputation
+                        # recordings) to the canonical 50 keypoints BY NAME
+                        # -- see _pad_keypoints: missing slots are (0,0,0),
+                        # i.e. genuinely not-visible, never guessed at.
+                        kps = (a["keypoints"] if kp_remap is None
+                               else _pad_keypoints(a["keypoints"], kp_remap))
                         out_anns.append({
                             "id": next_ann, "image_id": img_id,
-                            "bbox": a["bbox"], "keypoints": a["keypoints"],
+                            "bbox": a["bbox"], "keypoints": kps,
                             "num_keypoints": a.get("num_keypoints", 50),
-                            "sex": a.get("sex", "unknown"),
+                            "sex": ann_sex,
                             "behavior": a.get("behavior", "unknown"),
                             "fly_id": k,
                             "src_ann_id": a["id"],   # masks are keyed by this

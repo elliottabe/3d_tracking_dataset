@@ -48,9 +48,28 @@ _CROP = 448
 _GRID_SPACING = 1
 
 
-def _load_mask(v5_root, file_name, src_ann_id, w, h):
-    """Mask for ONE annotation. Keyed by src_ann_id, which is how the SAM3
-    labeling tool stores them (ann_ids array parallel to masks)."""
+def _load_mask(v5_root, file_name, src_ann_id, merged_ann_id, w, h):
+    """Mask for ONE annotation.
+
+    Two DIFFERENT keying schemes coexist in the same v5 masks/ tree, both
+    verified against real data:
+      - The 17 recordings whose masks were borrowed from
+        red_data_unified_V3's own sam3_masks/ store `ann_ids` in V3's
+        annotation id space -- `src_ann_id` (the merged annotation's
+        `src_ann_id` field) matches these directly, PROVIDED the merge's
+        annotation source for that recording is also V3 (see
+        `discover_sources`'s V3-annotation preference for the 21
+        recordings it overlaps).
+      - The 9 recordings whose masks were generated fresh against the v5
+        tree key `ann_ids` by the merged v5 `id` instead (there is no V3
+        copy to borrow an id space from).
+    Trying `src_ann_id` FIRST costs nothing (the array is small) and is
+    correct for the large majority; falling back to `merged_ann_id` makes a
+    future source-preference change unable to silently zero out this
+    channel again the way the id-space mismatch previously did (verified:
+    ~0.1% hit rate for the 12 recordings general_model sourced but V3
+    masked, before that mismatch was fixed upstream).
+    """
     rec, cam, fn = file_name.split("/")
     path = os.path.join(v5_root, "masks", rec, cam, fn.replace(".jpg", ".npz"))
     if not os.path.exists(path):
@@ -58,6 +77,8 @@ def _load_mask(v5_root, file_name, src_ann_id, w, h):
     with np.load(path) as z:
         ids = z["ann_ids"]
         hit = np.nonzero(ids == src_ann_id)[0]
+        if hit.size == 0:
+            hit = np.nonzero(ids == merged_ann_id)[0]
         if hit.size == 0 or not z["matched"][hit[0]]:
             return np.zeros((h, w), np.uint8)
         return z["masks"][hit[0]].astype(np.uint8)
@@ -172,7 +193,7 @@ class V5FramesetDataset:
             with Image.open(path) as pil:
                 img = np.asarray(pil.convert("RGB"), np.uint8)
             mask = _load_mask(self.root, info["file_name"],
-                              ann.get("src_ann_id", ann_id), w, h)
+                              ann.get("src_ann_id", ann_id), ann_id, w, h)
             bbox = np.asarray(ann["bbox"], np.float32)
             x0, y0 = crop_origin(bbox, w, h, _CROP)
             crops4[c, ..., :3] = img[y0:y0 + _CROP, x0:x0 + _CROP]

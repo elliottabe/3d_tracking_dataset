@@ -108,7 +108,11 @@ def test_discover_sources_real_filesystem_smoke():
     assert "2026_07_30_13_28_99" in srcs
 
 import json
-from jarvis_jax.data.build_v5 import iter_resolved_slots, merge_annotations, SourceRec
+from jarvis_jax.data.build_v5 import (
+    apply_sex_labels, build_recording_sex_map, _canonical_keypoint_names,
+    _keypoint_remap, _pad_keypoints, iter_resolved_slots, merge_annotations,
+    SourceRec,
+)
 
 CAMS7 = ["Cam2012630", "Cam2012631", "Cam2012853", "Cam2012855",
          "Cam2012857", "Cam2012861", "Cam2012862"]
@@ -322,3 +326,320 @@ def test_iter_resolved_slots_on_real_merge_output(tmp_path):
         # the accessor must not have invented an entry for the disagreeing
         # camera's img_id (frames[1]) -- it is simply absent from the result.
         assert fs["frames"][1] not in [img_id for img_id, _ in resolved]
+
+
+# --- Label-loss bug fix: general_model annotations never carry `sex`, but
+# V3's own annotation files (unscoped to one recording) usually do, for the
+# same recording. build_recording_sex_map recovers it; merge_annotations
+# uses that recovery as the fallback when a per-annotation `sex` is itself
+# "unknown"/absent. -----------------------------------------------------
+
+def test_build_recording_sex_map_recovers_unanimous_recording(tmp_path):
+    p = tmp_path / "v3.json"
+    p.write_text(json.dumps({
+        "images": [{"id": 0, "file_name": "rec_a/Cam2012630/Frame_000100.jpg"},
+                   {"id": 1, "file_name": "rec_a/Cam2012631/Frame_000100.jpg"}],
+        "annotations": [{"id": 0, "image_id": 0, "sex": "male"},
+                        {"id": 1, "image_id": 1, "sex": "male"}]}))
+    rec_sex, mixed = build_recording_sex_map([str(p)])
+    assert rec_sex == {"rec_a": "male"}
+    assert mixed == []
+
+def test_build_recording_sex_map_reports_mixed_as_unresolved(tmp_path):
+    """A recording with BOTH 'male' and 'female' among its non-unknown
+    values is a real data conflict, not a majority to break -- it must be
+    reported, not silently resolved either way."""
+    p = tmp_path / "v3.json"
+    p.write_text(json.dumps({
+        "images": [{"id": 0, "file_name": "rec_b/Cam2012630/Frame_000100.jpg"},
+                   {"id": 1, "file_name": "rec_b/Cam2012631/Frame_000100.jpg"}],
+        "annotations": [{"id": 0, "image_id": 0, "sex": "male"},
+                        {"id": 1, "image_id": 1, "sex": "female"}]}))
+    rec_sex, mixed = build_recording_sex_map([str(p)])
+    assert "rec_b" not in rec_sex
+    assert mixed == ["rec_b"]
+
+def test_build_recording_sex_map_all_unknown_is_no_signal_not_unanimous(tmp_path):
+    """4,592 'unknown' annotations (2026_06_01_15_34_04's real count) is NOT
+    a unanimous 'unknown' recording -- it is no signal at all, so it must
+    not appear in the map (and must not be reported as mixed either)."""
+    p = tmp_path / "v3.json"
+    p.write_text(json.dumps({
+        "images": [{"id": 0, "file_name": "rec_c/Cam2012630/Frame_000100.jpg"}],
+        "annotations": [{"id": 0, "image_id": 0, "sex": "unknown"}]}))
+    rec_sex, mixed = build_recording_sex_map([str(p)])
+    assert rec_sex == {}
+    assert mixed == []
+
+def _no_sex_key_coco(tmp_path, name, rec, frame, image_id_base):
+    """Shaped exactly like a REAL general_model instances_*.json: annotation
+    keys are bbox, category_id, id, image_id, iscrowd, keypoints,
+    num_keypoints, segmentation -- no 'sex' key at all."""
+    images = [{"id": image_id_base + ci, "width": 1936, "height": 448,
+               "file_name": f"{rec}/{cam}/Frame_{frame}.jpg"}
+              for ci, cam in enumerate(CAMS7)]
+    anns = [{"id": image_id_base + ci, "image_id": image_id_base + ci,
+             "bbox": [0.0, 0.0, 50.0, 50.0], "keypoints": [1.0, 2.0, 2] * 50,
+             "num_keypoints": 50}
+            for ci in range(7)]
+    blob = {"keypoint_names": [f"kp{i}" for i in range(50)], "skeleton": [],
+            "categories": [{"id": 1, "name": "fly", "num_keypoints": 50}],
+            "images": images, "annotations": anns,
+            "framesets": {f"{rec}/Frame_{frame}": {"datasetName": rec,
+                                                    "frames": list(range(image_id_base, image_id_base + 7))}}}
+    p = tmp_path / f"{name}.json"
+    p.write_text(json.dumps(blob))
+    return str(p)
+
+def test_merge_annotations_recovers_sex_from_v3_when_general_model_lacks_it(tmp_path):
+    """Regression for the label-loss bug: 'rec_gm' is sourced (ann_paths)
+    from a general_model-style file with NO 'sex' key anywhere. Its sex must
+    still be recovered from V3's OWN annotation file -- referenced here only
+    via a completely different recording's SourceRec.ann_paths, exactly as
+    happens for real (a V3 annotations file is not scoped to one
+    recording, so it carries rec_gm's data too even though rec_gm's frames
+    are read from general_model)."""
+    gm = _no_sex_key_coco(tmp_path, "gm", "rec_gm", "000100", image_id_base=0)
+
+    v3 = tmp_path / "v3.json"
+    v3_images = [{"id": 100 + ci, "width": 1936, "height": 448,
+                  "file_name": f"rec_v3only/{cam}/Frame_000200.jpg"}
+                 for ci, cam in enumerate(CAMS7)]
+    v3_anns = [{"id": 100 + ci, "image_id": 100 + ci, "bbox": [0.0, 0.0, 50.0, 50.0],
+                "keypoints": [1.0, 2.0, 2] * 50, "num_keypoints": 50, "sex": "unknown"}
+               for ci in range(7)]
+    # rec_gm's OWN entry inside V3's (unscoped) annotation file, carrying sex.
+    v3_images += [{"id": 200 + ci, "width": 1936, "height": 448,
+                   "file_name": f"rec_gm/{cam}/Frame_000900.jpg"}
+                  for ci, cam in enumerate(CAMS7)]
+    v3_anns += [{"id": 200 + ci, "image_id": 200 + ci, "bbox": [0.0, 0.0, 50.0, 50.0],
+                 "keypoints": [1.0, 2.0, 2] * 50, "num_keypoints": 50, "sex": "male"}
+                for ci in range(7)]
+    v3.write_text(json.dumps({
+        "keypoint_names": [f"kp{i}" for i in range(50)], "skeleton": [],
+        "categories": [{"id": 1, "name": "fly", "num_keypoints": 50}],
+        "images": v3_images, "annotations": v3_anns,
+        "framesets": {"rec_v3only/Frame_000200": {"datasetName": "rec_v3only",
+                                                   "frames": list(range(100, 107))}}}))
+
+    srcs = {
+        "rec_gm": SourceRec("rec_gm", "some_subset", [gm], "", ""),
+        "rec_v3only": SourceRec("rec_v3only", None, [str(v3)], "", ""),
+    }
+    out = tmp_path / "v5"; out.mkdir()
+    merged = merge_annotations(srcs, str(out))
+
+    gm_anns_out = [a for a in merged["annotations"]
+                   if merged["images"][a["image_id"]]["recording"] == "rec_gm"]
+    assert gm_anns_out, "expected merged annotations for rec_gm"
+    assert all(a["sex"] == "male" for a in gm_anns_out), (
+        "general_model-sourced annotations (no 'sex' key at all) must "
+        "recover sex from V3's recording-level map instead of defaulting "
+        "to 'unknown'")
+    assert srcs["rec_gm"].sex == "male", (
+        "the recovered sex must also be recorded on SourceRec.sex, the "
+        "baseline build_manifest writes into manifest.json")
+
+def test_merge_annotations_leaves_conflicting_recording_unknown_not_guessed(tmp_path):
+    """If a recording's sex disagrees across its own annotation sources (a
+    real data conflict), annotations with no sex of their own must stay
+    'unknown' rather than being assigned either value."""
+    gm = _no_sex_key_coco(tmp_path, "gm", "rec_mixed", "000100", image_id_base=0)
+
+    v3 = tmp_path / "v3.json"
+    v3_images = [{"id": 100 + ci, "width": 1936, "height": 448,
+                  "file_name": f"rec_mixed/{cam}/Frame_000900.jpg"}
+                 for ci, cam in enumerate(CAMS7)]
+    v3_anns = [{"id": 100 + ci, "image_id": 100 + ci, "bbox": [0.0, 0.0, 50.0, 50.0],
+                "keypoints": [1.0, 2.0, 2] * 50, "num_keypoints": 50,
+                "sex": "male" if ci < 4 else "female"}
+               for ci in range(7)]
+    v3.write_text(json.dumps({
+        "keypoint_names": [f"kp{i}" for i in range(50)], "skeleton": [],
+        "categories": [{"id": 1, "name": "fly", "num_keypoints": 50}],
+        "images": v3_images, "annotations": v3_anns, "framesets": {}}))
+
+    srcs = {"rec_mixed": SourceRec("rec_mixed", "some_subset", [gm, str(v3)], "", "")}
+    out = tmp_path / "v5"; out.mkdir()
+    merged = merge_annotations(srcs, str(out))
+    assert merged["annotations"], "expected merged annotations for rec_mixed"
+    assert all(a["sex"] == "unknown" for a in merged["annotations"])
+    assert srcs["rec_mixed"].sex == "unknown"
+
+def test_apply_sex_labels_overrides_recovered_sex_baseline(tmp_path):
+    """Ordering guarantee: apply_sex_labels (the human labels, Part 2) is
+    the authority and must win over whatever merge_annotations/build_manifest
+    already wrote as a recovered baseline (Part 1) -- it is called strictly
+    AFTER the full build, and unconditionally overwrites the 'sex' key."""
+    srcs = {"rec_a": _fake_source(tmp_path, "rec_a")}
+    srcs["rec_a"].sex = "male"          # simulates Part 1's recovered baseline
+    out = tmp_path / "v5"
+    man = build_manifest(srcs, str(out))
+    assert man["recordings"]["rec_a"]["sex"] == "male"
+
+    man2 = apply_sex_labels(str(out), {"rec_a": "female"})
+    assert man2["recordings"]["rec_a"]["sex"] == "female"
+    on_disk = json.load(open(out / "manifest.json"))
+    assert on_disk["recordings"]["rec_a"]["sex"] == "female"
+
+
+# --- Finding 2: general_model-sourced annotations for a recording V3 ALSO
+# covers put `src_ann_id` in a different id space than the V3-borrowed SAM3
+# masks (~0% mask hits for exactly those 12 recordings). Fix: prefer V3's
+# annotations for any recording V3 covers -- same-length framesets verified
+# identical on the real tree, so this is lossless. -----------------------
+
+def test_discover_sources_prefers_v3_annotations_for_overlap_recording(tmp_path):
+    gm_root = tmp_path / "general_model"
+    v3_root = tmp_path / "v3"
+    rec = "rec_overlap"
+
+    gm_calib = gm_root / "sub1" / "calib_params" / rec
+    gm_calib.mkdir(parents=True)
+    (gm_calib / "Cam1.yaml").write_text("dummy")
+    gm_ann_dir = gm_root / "sub1" / "annotations"
+    gm_ann_dir.mkdir(parents=True)
+    (gm_ann_dir / "instances_train.json").write_text(
+        json.dumps({"images": [], "annotations": []}))
+
+    v3_calib = v3_root / "calib_params" / rec
+    v3_calib.mkdir(parents=True)
+    (v3_calib / "Cam1.yaml").write_text("dummy")
+    v3_ann_dir = v3_root / "annotations"
+    v3_ann_dir.mkdir(parents=True)
+    v3_train = v3_ann_dir / "instances_train.json"
+    v3_train.write_text(json.dumps({"images": [], "annotations": []}))
+
+    srcs = discover_sources(str(gm_root), str(v3_root))
+    assert srcs[rec].subset == "sub1", "still general_model-attributed (image_root/calib_dir)"
+    assert srcs[rec].ann_paths == [str(v3_train)], (
+        "a recording V3 also covers must take its ANNOTATIONS from V3, not "
+        "general_model -- otherwise sex is lost and src_ann_id lands in "
+        "the wrong id space for the (also V3-sourced) masks")
+    assert srcs[rec].mask_root == str(v3_root / "sam3_masks")
+
+def test_discover_sources_v3_only_recording_still_gets_v3_annotations(tmp_path):
+    """A recording general_model doesn't have at all must be unaffected by
+    the overlap-preference branch."""
+    gm_root = tmp_path / "general_model"
+    gm_root.mkdir()
+    v3_root = tmp_path / "v3"
+    rec = "rec_v3_only"
+    v3_calib = v3_root / "calib_params" / rec
+    v3_calib.mkdir(parents=True)
+    (v3_calib / "Cam1.yaml").write_text("dummy")
+    v3_ann_dir = v3_root / "annotations"
+    v3_ann_dir.mkdir(parents=True)
+    v3_train = v3_ann_dir / "instances_train.json"
+    v3_train.write_text(json.dumps({"images": [], "annotations": []}))
+
+    srcs = discover_sources(str(gm_root), str(v3_root))
+    assert srcs[rec].subset is None
+    assert srcs[rec].ann_paths == [str(v3_train)]
+
+
+# --- Finding 3: headless/leg-amputation recordings carry 47/44 keypoints
+# (a strict, in-canonical-order subset of the full 50) instead of 50. The
+# loader used to drop those cameras entirely (683 of 3,717 fly-samples
+# unusable). Fix: pad every annotation to the canonical 50 BY NAME, never
+# positionally -- a positional pad would place leg keypoints on the head.
+
+def test_canonical_keypoint_names_is_the_longest_schema_seen(tmp_path):
+    full = tmp_path / "full.json"
+    full.write_text(json.dumps({"keypoint_names": ["a", "b", "c", "d"]}))
+    reduced = tmp_path / "reduced.json"
+    reduced.write_text(json.dumps({"keypoint_names": ["a", "c"]}))
+    assert _canonical_keypoint_names([str(full), str(reduced)]) == ["a", "b", "c", "d"]
+
+def test_keypoint_remap_maps_by_name_not_position():
+    canonical = ["head", "leg_L", "leg_R", "tail"]
+    # source is missing 'leg_L' -- a REAL reduced schema is always a subset
+    # in canonical order, exactly like this.
+    source = ["head", "leg_R", "tail"]
+    remap = _keypoint_remap(source, canonical)
+    # canonical[1] ('leg_L') has no source counterpart -> None.
+    assert remap == [0, None, 1, 2]
+
+def test_keypoint_remap_raises_on_a_name_canonical_does_not_have(tmp_path):
+    """A source name absent from canonical is a BLOCKED-level finding --
+    the two schemas aren't simply subset/superset, so padding would be a
+    guess. Must raise, never silently drop the point."""
+    with pytest.raises(ValueError):
+        _keypoint_remap(["head", "extra_never_seen"], ["head", "leg_L"])
+
+def test_pad_keypoints_fills_missing_slots_invisible_not_guessed():
+    # source has 2 points (x,y,v each); canonical has 3, with the source's
+    # points landing at canonical slots 0 and 2.
+    kps = [10.0, 20.0, 1, 30.0, 40.0, 1]
+    remap = [0, None, 1]
+    padded = _pad_keypoints(kps, remap)
+    assert padded == [10.0, 20.0, 1, 0.0, 0.0, 0, 30.0, 40.0, 1]
+
+def _coco_reduced_schema(tmp_path, name, rec, kp_names, n_kp):
+    """A single-fly, single-camera-count-agreeing frameset whose annotations
+    use a REDUCED keypoint schema (like a real headless/amputation
+    recording) -- `n_kp` points instead of the canonical 50."""
+    images, anns, aid = [], [], 0
+    for ci, cam in enumerate(CAMS7):
+        images.append({"id": ci, "width": 1936, "height": 448,
+                       "file_name": f"{rec}/{cam}/Frame_000100.jpg"})
+        anns.append({"id": aid, "image_id": ci, "bbox": [0.0, 0.0, 50.0, 50.0],
+                     "keypoints": [1.0, 2.0, 1] * n_kp, "num_keypoints": n_kp,
+                     "sex": "unknown", "behavior": "unknown"})
+        aid += 1
+    blob = {"keypoint_names": kp_names, "skeleton": [],
+            "categories": [{"id": 1, "name": "fly", "num_keypoints": n_kp}],
+            "images": images, "annotations": anns,
+            "framesets": {f"{rec}/Frame_000100": {"datasetName": rec,
+                                                  "frames": list(range(7))}}}
+    p = tmp_path / f"{name}.json"
+    p.write_text(json.dumps(blob))
+    return str(p)
+
+def test_merge_annotations_pads_reduced_schema_to_canonical_by_name(tmp_path):
+    canonical = ["Antenna_Base", "EyeL", "EyeR", "T1L_Tro", "T1R_Tro"]
+    reduced = ["T1L_Tro", "T1R_Tro"]     # a "headless" fly: missing head points
+    # Canonical-schema source (a small custom schema, not the unrelated
+    # 50-name one `_coco` uses, so this test controls exactly what's canonical).
+    full_p = tmp_path / "canon.json"
+    images, anns, aid = [], [], 0
+    for ci, cam in enumerate(CAMS7):
+        images.append({"id": ci, "width": 1936, "height": 448,
+                       "file_name": f"rec_canon/{cam}/Frame_000200.jpg"})
+        anns.append({"id": aid, "image_id": ci, "bbox": [0.0, 0.0, 50.0, 50.0],
+                     "keypoints": [9.0, 9.0, 1] * len(canonical), "num_keypoints": len(canonical),
+                     "sex": "unknown", "behavior": "unknown"})
+        aid += 1
+    full_p.write_text(json.dumps({
+        "keypoint_names": canonical, "skeleton": [],
+        "categories": [{"id": 1, "name": "fly", "num_keypoints": len(canonical)}],
+        "images": images, "annotations": anns,
+        "framesets": {"rec_canon/Frame_000200": {"datasetName": "rec_canon",
+                                                  "frames": list(range(7))}}}))
+    headless = _coco_reduced_schema(tmp_path, "headless", "rec_headless", reduced, len(reduced))
+
+    srcs = {
+        "rec_canon": SourceRec("rec_canon", None, [str(full_p)], "", ""),
+        "rec_headless": SourceRec("rec_headless", None, [headless], "", ""),
+    }
+    out = tmp_path / "v5"; out.mkdir()
+    merged = merge_annotations(srcs, str(out))
+
+    assert merged["keypoint_names"] == canonical
+    img_by_id = {i["id"]: i for i in merged["images"]}
+    headless_anns = [a for a in merged["annotations"]
+                     if img_by_id[a["image_id"]]["recording"] == "rec_headless"]
+    assert headless_anns, "expected merged annotations for rec_headless"
+    for a in headless_anns:
+        assert len(a["keypoints"]) == len(canonical) * 3
+        kps = a["keypoints"]
+        invisible = {canonical[i] for i in range(len(canonical)) if kps[3 * i + 2] == 0}
+        assert invisible == {"Antenna_Base", "EyeL", "EyeR"}, (
+            f"wrong slots marked invisible: {invisible} (must be BY NAME, "
+            f"not position, or this would place a leg keypoint on the head)")
+        # the two points the reduced schema DOES have must carry real values,
+        # not be zeroed out.
+        for name in ("T1L_Tro", "T1R_Tro"):
+            i = canonical.index(name)
+            assert kps[3 * i:3 * i + 2] == [1.0, 2.0]
+            assert kps[3 * i + 2] != 0
