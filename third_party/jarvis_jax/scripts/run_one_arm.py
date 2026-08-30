@@ -47,6 +47,11 @@ def main():
     ap.add_argument("--runs-root", required=True)
     ap.add_argument("--steps", type=int, default=20000)
     ap.add_argument("--batch-size", type=int, default=32)
+    # Default raised from make_manager's own 3 -- that default pruned A7's
+    # pre-divergence checkpoint before its NaN divergence could be
+    # investigated (Task 15). Cheap in disk; buys forensics on any arm that
+    # goes unstable later in a long resumed run.
+    ap.add_argument("--max-ckpt-to-keep", type=int, default=10)
     args = ap.parse_args()
 
     overrides = dict(ARMS[args.arm])
@@ -64,7 +69,8 @@ def main():
     result = run_cached_hm_training(
         args.cache_dir, out_dir=out_dir, ckpt_dir=ckpt_dir, cfg=cfg,
         v5_root=args.v5_root, save_every=max(args.steps // 10, 1),
-        log_every=50, eval_every=max(args.steps // 4, 1))
+        log_every=50, eval_every=max(args.steps // 4, 1),
+        max_ckpt_to_keep=args.max_ckpt_to_keep)
 
     print(f"[run_one_arm] {args.arm} DONE: {result}", flush=True)
     with open(os.path.join(run_dir, "result.json"), "w") as f:

@@ -36,6 +36,7 @@ def main():
     ap.add_argument("--max-parallel", type=int, default=4)
     ap.add_argument("--steps", type=int, default=20000)
     ap.add_argument("--mem-fraction", type=float, default=0.9)
+    ap.add_argument("--max-ckpt-to-keep", type=int, default=10)
     # GPU index assigned to arms[i] is (gpu_offset + i) % 8. Needed because a
     # SECOND invocation of this launcher (the "ramp to 8" step, run after a
     # first batch is confirmed healthy) would otherwise enumerate its OWN
@@ -53,7 +54,8 @@ def main():
         cmd = [sys.executable, "-u", os.path.join(_HERE, "run_one_arm.py"),
                "--arm", arm, "--cache-dir", args.cache_dir,
                "--v5-root", args.v5_root, "--runs-root", args.runs_root,
-               "--steps", str(args.steps)]
+               "--steps", str(args.steps),
+               "--max-ckpt-to-keep", str(args.max_ckpt_to_keep)]
         env = dict(os.environ,
                    CUDA_VISIBLE_DEVICES=str(gpu),
                    XLA_PYTHON_CLIENT_MEM_FRACTION=str(args.mem_fraction))

@@ -399,7 +399,7 @@ def _batches(cache, idx_pool, batch_size, *, shuffle, seed):
 def run_cached_hm_training(
     cache_dir: str, *, out_dir: str, ckpt_dir: str = None, cfg: HMCachedConfig = None,
     v5_root: str = None, save_every: int = 1000, log_every: int = 50,
-    eval_every: int = 1000,
+    eval_every: int = 1000, max_ckpt_to_keep: int = 3,
 ) -> dict:
     cfg = cfg or HMCachedConfig()
 
@@ -418,7 +418,12 @@ def run_cached_hm_training(
                      refine_channels=cfg.refine_channels, rngs=rngs)
     opt = make_optimizer(model, cfg)
 
-    mngr = make_manager(ckpt_dir) if ckpt_dir else None
+    # max_ckpt_to_keep default (3) pruned A7's own pre-divergence checkpoint
+    # before anyone could look at it (Task 15: A7 went NaN ~step 850, but by
+    # the time that was noticed only steps 1200/1350/1500 -- all already
+    # NaN -- survived Orbax's rolling retention). Callers investigating an
+    # unstable arm should raise this.
+    mngr = make_manager(ckpt_dir, max_to_keep=max_ckpt_to_keep) if ckpt_dir else None
     start = 0
     if mngr is not None:
         model, opt, start = restore_latest(mngr, model, opt)
