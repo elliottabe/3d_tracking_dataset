@@ -9,3 +9,6 @@ vitpose_ckpt:   /gscratch/portia/${paths.user}/data/Johnson_lab/jax_vitpose_runs
 mae_npz:        /gscratch/portia/${paths.user}/data/Johnson_lab/mae_vitb.npz
 body_model_dir: /gscratch/portia/${paths.user}/Research/MyRepos/fruitfly_body_models/
 project_dir:    /gscratch/portia/${paths.user}/Research/MyRepos/
+v5_root:        /gscratch/portia/${paths.user}/data/Johnson_lab/red_data/red_data_3d_v5
+general_model:  /gscratch/portia/${paths.user}/data/Johnson_lab/red_data/general_model
+v3_root:        /gscratch/portia/${paths.user}/data/Johnson_lab/red_data/red_data_unified_V3
