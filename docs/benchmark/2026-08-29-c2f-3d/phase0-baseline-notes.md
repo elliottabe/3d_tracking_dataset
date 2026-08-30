@@ -256,3 +256,72 @@ python scripts/viz/compare_stac_fits.py \
    Flagging this because Task 1's premise ("the only artifact that cannot be
    regenerated after configs change") assumes a fresh run — this baseline is
    current-state-valid but not freshly executed today.
+
+---
+
+## Fix round 1 correction (2026-08-29)
+
+Two critical findings from an independent review of this report required
+investigation and correction. No pipeline source changes, no submodule
+changes, no re-running the pipeline — see the "Fix round 1" section of
+`.superpowers/sdd/2026-08-29-coarse-to-fine-3d/task-1-report.md` for the
+full evidence trail; summary below.
+
+**1. The fly0 NaN block (offsets 1502-2006, 505/2007 frames) is a permanent
+loss for the last quarter of the bout, not a localized ~20-frame proximity
+spike, and it is deeper than "the female is lost":**
+
+- Raw triangulation (`kp3d.npz`) is only *partially* destroyed in this span:
+  413/505 frames (82%) have every keypoint NaN, but 92/505 (18%) have most or
+  ALL 50 keypoints present and finite (20 frames are 100% complete). Yet
+  `qpos_refined.npz`/`outputs.h5` (Stage C STAC-IK output) is **fully NaN
+  for all 505 frames without exception**, including the 20 with perfectly
+  complete raw input. `qc_perframe.reproj_px` reprojects the FITTED FK sites
+  (not raw triangulation), so it goes NaN in lockstep with the fitted qpos.
+- This aligns with a STAC clip boundary (`configs/stac/courtship.yaml`:
+  `n_frames_per_clip: 500` → clip starts at 0/500/1000/1500/2000; frame 1500
+  is exactly a clip start, and is where the archived qpos first goes NaN).
+  `stac_mjx/stac_core_jaxls.py` already contains comments describing
+  anti-poisoning protection against "one NaN frame" freezing a whole clip's
+  batched LM solve; that protection does not fully hold for bout 28's
+  sustained bad stretch. Not confirmed by re-running/instrumenting (out of
+  scope here) — reported as the most parsimonious explanation, worth
+  confirming computationally in a later task.
+- Visually (mask overlays rendered+read at offsets 1550/1700/1900, all 7
+  cameras): in several camera views (most consistently `Cam2012630`,
+  `Cam2012861`) the SAM3 mask sits on empty background with no fly under it,
+  while the real female remains clearly visible and in focus elsewhere in
+  the same frame — an identity/mask-tracking failure, not occlusion, not a
+  wall, and not a handoff to the male. `Cam2012862` tracks the real animal
+  correctly throughout. At least one camera (`Cam2012853`) stays
+  "confidently" above `view_conf_thresh=0.6` while intermittently showing
+  the same fly-less phantom blob — a "confidently wrong" view the gate does
+  not catch (the ~5% blind spot the config's own docstring documents).
+- **Corrected language**: fly0's 10.26 px median is supported by only
+  1501/2007 frames (74.8% of the bout) — it is silent on the remaining
+  25.2%, which is *absent*, not merely worse. The "1.7x vs. cohort 5.9x"
+  comparison above describes only that 74.8%; fly1 tracks normally
+  (median 6.16 px) through the exact span fly0 has no pose at all. Whether
+  that missing quarter should count toward the female/male gap is an
+  acceptance-criteria choice for Task 17, not a number this report can
+  settle.
+
+**2. The stac-mjx submodule is dirty, but confirmed inert for these
+arrays.** `git submodule status` shows `+25a098b...` (checked-out HEAD ahead
+of what the superproject records, `763b6f6`). The submodule's own reflog
+shows zero commits between `763b6f6` (2026-08-15) and `25a098b` (2026-08-28
+14:43 -0700, ~16h AFTER these arrays were written on 2026-08-27); the
+current uncommitted diff on top of `25a098b` (`stac.py`, `stac_core.py`,
+`stac_core_jaxls.py`) is later still (mtimes 2026-08-28 18:24, matching
+`slurm_logs/` wing-rest-prior A/B job timestamps 14:23-22:54 that day). The
+diff adds a wing rest-pose regularizer (`JAXLS_Q_REG_TO_REST`/
+`JAXLS_REG_GATE`) that is `getattr(cfg.model, KEY, None)`-gated and
+short-circuits to inert when the key is absent — confirmed absent from
+every config in the repo (`grep -rln` over `configs/`), including
+`configs/anatomy/v1.yaml` used here. Net: Stage C/D numerics for bout 28
+are byte-identical whether measured against `763b6f6` (what produced these
+arrays) or the current dirty tree — but this conclusion is scoped to this
+run's config and does not generalize. Exact blob hashes for
+`stac.py`/`stac_core.py`/`stac_core_jaxls.py` at working-tree/`25a098b`/
+`763b6f6` are recorded in `task-1-report.md`'s Fix round 1 section for
+Task 17 to reproduce or invalidate.
