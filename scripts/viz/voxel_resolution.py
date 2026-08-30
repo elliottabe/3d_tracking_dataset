@@ -26,6 +26,12 @@ SEGMENTS = [
     ("T1L_TaT3", "T1L_TaTip"), ("T3L_TiTa", "T3L_TaT1"), ("EyeL", "EyeR"),
 ]
 
+# Below this many voxels, quantization is presumed to dominate. 2.0 used to
+# strand the T1L_TaT3->T1L_TaTip tarsal link (2.17 voxels) in neither bin,
+# leaving the short-vs-long verdict resting on only 2 of 9 segments (1.98,
+# 1.59). Widened to include all three canonical short tarsal links.
+SHORT_CUTOFF_VOXELS = 2.2
+
 
 def segment_lengths_voxels(kp3d, keypoint_names, grid_spacing: float = 1.0) -> dict:
     """Median segment length expressed in VOXELS at the given grid spacing."""
@@ -61,8 +67,8 @@ def plot_error_vs_segment(pred, gt, keypoint_names, *, out_png,
     ax.scatter(xs, ys, s=48, c="#00c2c7")
     for x, y, n in zip(xs, ys, names):
         ax.annotate(n, (x, y), fontsize=7, xytext=(4, 4), textcoords="offset points")
-    ax.axvline(2.0, ls="--", c="#888",
-               label="2 voxels — below this, quantization dominates")
+    ax.axvline(SHORT_CUTOFF_VOXELS, ls="--", c="#888",
+               label=f"{SHORT_CUTOFF_VOXELS:.1f} voxels — below this, quantization dominates")
     ax.set_xlabel("segment length (voxels at grid_spacing=%.2f)" % grid_spacing)
     ax.set_ylabel("median 3D error / segment length")
     ax.set_title(f"Per-joint error vs segment resolution {label}")
@@ -72,12 +78,16 @@ def plot_error_vs_segment(pred, gt, keypoint_names, *, out_png,
     fig.savefig(out_png, dpi=150)
     plt.close(fig)
 
+    short_ys = [y for x, y in zip(xs, ys) if x < SHORT_CUTOFF_VOXELS]
+    long_ys = [y for x, y in zip(xs, ys) if x >= 4.0]
+    # n is reported alongside each mean so a thin bin (e.g. 2 segments
+    # driving the whole short-vs-long verdict) is visible, not implied.
     stats = {"lengths_voxels": lengths,
              "err_over_length": dict(zip(names, ys)),
-             "short_segments_mean": float(np.mean([y for x, y in zip(xs, ys) if x < 2.0]))
-             if any(x < 2.0 for x in xs) else None,
-             "long_segments_mean": float(np.mean([y for x, y in zip(xs, ys) if x >= 4.0]))
-             if any(x >= 4.0 for x in xs) else None}
+             "short_segments_mean": float(np.mean(short_ys)) if short_ys else None,
+             "short_segments_n": len(short_ys),
+             "long_segments_mean": float(np.mean(long_ys)) if long_ys else None,
+             "long_segments_n": len(long_ys)}
     with open(out_png.replace(".png", ".json"), "w") as f:
         json.dump(stats, f, indent=2)
     return stats
