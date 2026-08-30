@@ -82,6 +82,16 @@ def refine_keypoints(net: RefineNet, heatmaps, coarse_kp3d, centerHM,
     flat = vols.reshape(B * J, cube, cube, cube, 1)
     logits = net(flat, use_running_average=use_running_average)
     logits = logits.reshape(B * J, 1, cube, cube, cube)
+    # soft_argmax_3d assumes its input is ALREADY strictly positive (see its
+    # docstring / relu comment in hybridnet/model.py): stage 1 guarantees this
+    # by applying softplus to the raw V2VNet output before calling it. `net`
+    # here returns raw, signed conv logits, so the same softplus must be
+    # applied here -- otherwise relu zeroes any voxel below 0 outright (often
+    # an entire joint's window), and soft_argmax_3d's zero-guard then returns
+    # a fixed, input-independent grid corner for that joint instead of a
+    # small, content-sensitive offset (see tests/test_refine.py's
+    # `test_refine_keypoints_does_not_collapse_negative_windows_to_a_fixed_corner`).
+    logits = jax.nn.softplus(logits)
     roi = cube * spacing * 2.0
     delta, _ = soft_argmax_3d(logits, grid_spacing=spacing, roi_cube=roi,
                               sharpen=sharpen)
