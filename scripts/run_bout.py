@@ -562,12 +562,40 @@ def _backfill_qc_perframe(cfg, bout_idx: int, fly: int, bout_dir: str) -> None:
 # ---------------------------------------------------------------------------
 NAN_SOLVE_MAX_GAP = 10      # frames; gaps this short are interpolated
 NAN_SOLVE_MIN_SEG = 30      # frames; shorter finite runs are not worth solving
+NAN_SOLVE_MIN_KEYPOINTS = None  # None = all-or-nothing (unchanged); see cfg.nan_solve.min_keypoints
 
 
-def finite_frame_mask(kp3d) -> np.ndarray:
-    """(T,) bool: frames whose keypoints are entirely finite."""
+def finite_frame_mask(kp3d, *, min_keypoints: int | None = None) -> np.ndarray:
+    """(T,) bool: frames usable for the IK solve.
+
+    min_keypoints=None (default): every keypoint must be finite -- today's
+    all-or-nothing behaviour, byte-identical to before this parameter existed.
+    min_keypoints=N: a frame is usable if at least N of its K keypoints are
+    themselves entirely finite (all coordinates present), even if others are
+    NaN. This is safe to relax because the IK residual already ignores a NaN
+    marker per-frame, per-keypoint (stac_core_jaxls.py's marker_cost: `finite
+    = jnp.isfinite(kp)`, zeroing that marker's contribution and gradient) --
+    see marker_validity_mask below for the matching per-marker mask.
+    """
     a = np.asarray(kp3d)
-    return np.isfinite(a).all(axis=tuple(range(1, a.ndim)))
+    # Per-keypoint finiteness (all coordinates present), i.e. marker_validity_mask.
+    per_kp = np.isfinite(a).all(axis=tuple(range(2, a.ndim)))
+    if min_keypoints is None:
+        return per_kp.all(axis=1)
+    return per_kp.sum(axis=1) >= int(min_keypoints)
+
+
+def marker_validity_mask(kp3d) -> np.ndarray:
+    """(T, K) bool: which individual keypoints are entirely finite.
+
+    The per-marker counterpart to finite_frame_mask -- exactly the markers the
+    IK solver already treats as absent (NaN in, zero residual/gradient out;
+    see stac_core_jaxls.py's marker_cost). Used to gate/report partial-frame
+    acceptance; the mask itself does not need separate plumbing into the
+    solver because a NaN marker already carries that meaning there.
+    """
+    a = np.asarray(kp3d)
+    return np.isfinite(a).all(axis=tuple(range(2, a.ndim)))
 
 
 def fill_short_gaps(kp3d, max_gap=NAN_SOLVE_MAX_GAP):
@@ -1136,9 +1164,30 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
         # the bout into independently-solved segments so a gap cannot
         # propagate NaN gradients across it. A fully-finite bout takes the
         # original single-solve path unchanged.
+        #
+        # nan_solve.min_keypoints (absent/null by default -> None) relaxes the
+        # frame-acceptance gate from "every keypoint finite" to "at least N of
+        # K finite": a frame missing a few markers is still a real partial
+        # measurement, and the IK residual already ignores a NaN marker
+        # per-frame/per-keypoint (see finite_frame_mask's docstring), so it
+        # costs nothing to let the solver see it. Absent/null reproduces
+        # today's all-or-nothing behaviour exactly.
+        _nan_cfg = cfg.get("nan_solve") or {}
+        _min_kp_cfg = _nan_cfg.get("min_keypoints", None)
         _kp_solve, _filled = fill_short_gaps(kp3d)
-        _ok = finite_frame_mask(_kp_solve)
+        _ok = finite_frame_mask(_kp_solve, min_keypoints=_min_kp_cfg)
         _segs = contiguous_segments(_ok)
+        if _min_kp_cfg is not None:
+            _strict_ok = finite_frame_mask(_kp_solve)
+            _partial_ok = _ok & ~_strict_ok
+            if _partial_ok.any():
+                _mm = marker_validity_mask(_kp_solve)[_partial_ok]
+                print(f"[stac] bout {bout_idx} fly{fly}: nan_solve.min_keypoints="
+                      f"{_min_kp_cfg} additionally accepted {int(_partial_ok.sum())} "
+                      f"partial frame(s) (mean {float(_mm.sum(axis=1).mean()):.1f}/"
+                      f"{_mm.shape[1]} markers present) -- these are real but "
+                      f"incomplete observations; treat the fitted pose there with "
+                      f"suspicion, not as a full measurement.", flush=True)
         if _ok.all():
             if _filled.any():
                 print(f"[stac] interpolated {_filled.sum()} short-gap frame(s) "
@@ -1158,6 +1207,7 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
                 "status": "unsolvable",
                 "reason": "no_finite_segment",
                 "min_segment_frames": int(NAN_SOLVE_MIN_SEG),
+                "min_keypoints": None if _min_kp_cfg is None else int(_min_kp_cfg),
                 "n_frames": int(len(_ok)),
                 "n_nan_frames": int((~_ok).sum()),
                 "note": ("no run of measured frames long enough to fit; the "
@@ -1176,9 +1226,13 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
                 cfg, _kp_solve, kp_names, _segs, offsets_path=offsets_path,
                 out_h5="stac_ik.tmp.h5", bout_dir=bout_dir, scale=scale,
                 n_frames=len(_kp_solve), bout_idx=bout_idx, fly=fly)
-        # Frames we never measured must not masquerade as solved.
+        # Frames we never measured must not masquerade as solved. Same gate as
+        # above: a partial-but-accepted frame (raw kp3d, not gap-filled) is a
+        # real measurement and must survive; a frame only "ok" in _kp_solve
+        # because fill_short_gaps interpolated it is not, and stays re-NaN'd.
         _restore_unsolved_nan(os.path.join(bout_dir, "stac_ik.tmp.h5"),
-                              finite_frame_mask(kp3d), _segs if not _ok.all() else None)
+                              finite_frame_mask(kp3d, min_keypoints=_min_kp_cfg),
+                              _segs if not _ok.all() else None)
         os.replace(os.path.join(bout_dir, "stac_ik.tmp.h5"),
                   os.path.join(bout_dir, "stac_ik.h5"))
 

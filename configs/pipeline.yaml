@@ -165,6 +165,31 @@ filtering:
     window_length: 7    # key must be `window_length` (filter_keypoints reads that; `window` is ignored -> default 11)
     polyorder: 2
 
+# Task 20: partial-keypoint-frame acceptance for Stage C's NaN-robust STAC
+# solve (scripts/run_bout.py finite_frame_mask/contiguous_segments, around
+# NAN_SOLVE_MAX_GAP/NAN_SOLVE_MIN_SEG above). Absent/null (default) is the
+# all-or-nothing gate this pipeline has always used -- every one of a frame's
+# keypoints must be finite for that frame to enter a solvable segment, and a
+# run that does not set this key is byte-identical to before this feature
+# existed.
+#
+# min_keypoints: N relaxes that to "at least N of the K keypoints are
+# entirely finite (present in all 3 coords)". This is safe to turn on because
+# the IK residual already ignores an absent (NaN) marker per-frame/per-marker
+# without contributing to the cost or its gradient (stac_core_jaxls.py's
+# marker_cost: `finite = jnp.isfinite(kp)`) -- relaxing the frame gate only
+# decides which partial frames are OFFERED to the solver, not how it treats
+# an individual missing marker once offered.
+# Measured motivation (Task 19, bout_00028 fly0): the tail 505 frames read as
+# 100% NaN under the strict gate, yet raw triangulation still recovers a
+# partial (>=40/50 keypoint) signal in 18.2% of them -- data the strict gate
+# was discarding outright. This does NOT reach zero loss: where coverage
+# genuinely bottoms out at 2-3 cameras, full-body DLT is ill-conditioned and
+# those frames stay unsolvable regardless of this setting.
+# null = off (strict no-op, current behaviour).
+nan_solve:
+  min_keypoints: null
+
 # Stale-mask invalidation policy (scripts.sync_policy, gates run_bout.py's
 # staleness cascade). Production leaves this on: when a recording's sync plan
 # changes, pose artifacts derived from the old masks are stale and must
