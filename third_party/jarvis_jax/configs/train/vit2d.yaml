@@ -26,3 +26,6 @@ num_workers: 8      # thread-pool workers for the data-loading `batches()` sampl
 # fine-tune) -- resume beats warm_start on requeue; warm_start only seeds the
 # very first launch.
 warm_start: ''
+# Gaussian target sigma in heatmap px. 2.0 from the 2026-08-29 resolution
+# analysis (see data/transforms.py). 7.0 reproduces the pre-2026-08-29 detector.
+target_sigma: 2.0

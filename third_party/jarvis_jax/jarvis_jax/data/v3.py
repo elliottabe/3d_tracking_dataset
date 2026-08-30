@@ -76,7 +76,7 @@ def _resolve_mask_path(root, split, img_record, source_root):
 
 
 class V3Dataset:
-    def __init__(self, root, split, *, crop=448, heatmap_size=224, sigma=7.0,
+    def __init__(self, root, split, *, crop=448, heatmap_size=224, sigma=2.0,
                  recordings=None, source_root=None):
         self.root = root
         self.split = split

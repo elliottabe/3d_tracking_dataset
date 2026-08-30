@@ -44,10 +44,20 @@ def transform_keypoints(kps, x0, y0, crop=448, heatmap_size=224):
     return hm_xy, vis
 
 
-def gaussian_heatmaps(hm_xy, vis, heatmap_size=224, sigma=7.0):
+def gaussian_heatmaps(hm_xy, vis, heatmap_size=224, sigma=2.0):
     """Render (heatmap_size, heatmap_size, K) Gaussian heatmaps (peak 1.0).
 
-    hm_xy: (K, 2) array with columns [x (col), y (row)]."""
+    hm_xy: (K, 2) array with columns [x (col), y (row)].
+
+    sigma DEFAULT CHANGED 7.0 -> 2.0 (2026-08-29). Measured: 1 voxel is 2.7-3.2
+    heatmap px and the distal tarsal segment T1L_TaT3->T1L_TaTip is 1.59 voxels
+    ~ 4.6 heatmap px, so a sigma of 7 px is ~1.5x LONGER than the whole segment
+    and adjacent tarsal targets overlap almost completely. That is the direct
+    cause of the 0.352 peak concentration measured on the shipped detector.
+    sigma/heatmap_size = 3.1% matches the COCO convention, but COCO was tuned
+    for humans whose limb segments span a large fraction of the frame; against
+    the fly's ~37 heatmap-px body length, sigma=7 is ~19% -- about 5x too wide.
+    """
     k = hm_xy.shape[0]
     hm = np.zeros((heatmap_size, heatmap_size, k), dtype=np.float32)
     grid = np.arange(heatmap_size, dtype=np.float32)
