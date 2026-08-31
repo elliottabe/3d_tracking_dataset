@@ -79,6 +79,10 @@ SUBSET_RULES: dict[str, tuple] = {
     "courtship_V3": "identity",
     "courtship_V4": "identity",
     "female": "identity",
+    # Female climbing the arena wall during courtship (Session0
+    # 2025_10_20_13_20_04, frames inside bout_00028). Verified 50 names in
+    # IDENTICAL order to the other courtship subsets, so identity.
+    "20_04_female_climbing": "identity",
     "grooming": "identity",
     "wall_frames": "identity",
     # 47 keypoints -> fly50 minus head nodes {Antenna_Base, EyeL, EyeR}.
@@ -109,6 +113,11 @@ SUBSET_CATEGORY: dict[str, str] = {
     "courtship_11_50_female": "courtship_female",
     "courtship_25_51_female": "courtship_female",
     "courtship_28_34_female": "courtship_female",
+    # Categorised as courtship_female, not "wall": it is a courtship female
+    # (the fly this data exists to improve), and "wall" is the separate
+    # single-fly wall_frames set. Climbing is the novel CONDITION within
+    # courtship_female, not a different behavioural bucket.
+    "20_04_female_climbing": "courtship_female",
     "courtship_11_50_male": "courtship_male",
     "courtship_25_51_male": "courtship_male",
     "courtship_28_34_male": "courtship_male",
@@ -160,6 +169,11 @@ SUBSET_SEX_BEHAVIOR: dict[str, tuple[str, str]] = {
     "courtship_11_50_female": ("female", "courtship"),
     "courtship_25_51_female": ("female", "courtship"),
     "courtship_28_34_female": ("female", "courtship"),
+    # Session0 2025_10_20 female climbing the arena wall mid-courtship. Tagged
+    # ("female", "courtship") so it joins the SAME under-represented class the
+    # oversampler already targets, rather than forming a class of its own that
+    # weighted sampling would have to be re-tuned for.
+    "20_04_female_climbing": ("female", "courtship"),
     "courtship_11_50_male": ("male", "courtship"),
     "courtship_25_51_male": ("male", "courtship"),
     "courtship_28_34_male": ("male", "courtship"),
