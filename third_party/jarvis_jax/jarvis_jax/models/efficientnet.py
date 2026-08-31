@@ -262,22 +262,41 @@ class MBConvBlockJAX(nnx.Module):
 
 
 class EfficientNetB3(nnx.Module):
-    """EfficientNet-b3 truncated backbone returning (P3, P4, P5) feature maps.
+    """EfficientNet backbone (JARVIS-custom InstanceNorm variant), truncated to
+    return (P3, P4, P5) feature maps.
+
+    Despite the name (kept for backward compat -- this class was written for
+    b3/``large`` first), this is fully parameterized by ``width_coefficient``/
+    ``depth_coefficient`` and works for any of JARVIS's ``efficientnet-b{N}``
+    entries: everything downstream of them (``round_filters``/``round_repeats``,
+    ``_build_all_block_meta``, ``_compute_save_idxs_and_truncate``) is already
+    generic -- only the two coefficients (and the resulting concrete per-stage
+    shapes) differ per size. Defaults are the b3 values, so existing callers
+    (``EfficientTrack``'s ``large`` config) are byte-identical.
 
     Mirrors ``jarvis/efficienttrack/model.py::EfficientNet`` (the BiFPN
     front-end wrapper), NOT the plain classifier's ``forward`` (which returns
-    only the final tensor). Channel dims for b3: P3=24, P4=48, P5=120.
+    only the final tensor).
+
+    Verified (see ``jarvis_jax.models.efficienttrack._MODEL_SIZE_TABLE`` for
+    provenance) P3/P4/P5 channel dims by ``(width_coefficient, depth_coefficient)``,
+    matching JARVIS's own ``conv_channel_coef`` per named size exactly:
+      * b3 / ``large``  (1.1, 1.2) -> (24, 48, 120)
+      * b1 / ``medium`` (1.0, 1.0) -> (24, 40, 112)
+      * b0 / ``small``  (0.5, 0.5) -> (16, 24, 56)
     """
 
-    def __init__(self, *, in_channels: int = 4, rngs: nnx.Rngs):
+    def __init__(self, *, in_channels: int = 4, width_coefficient: float = 1.1,
+                 depth_coefficient: float = 1.2, rngs: nnx.Rngs):
         self.in_channels = in_channels
-        stem_out = round_filters(32, width_coefficient=1.1)
+        stem_out = round_filters(32, width_coefficient=width_coefficient)
         self.conv_stem = nnx.Conv(
             in_channels, stem_out, kernel_size=(3, 3), strides=(2, 2),
             padding=((1, 1), (1, 1)), use_bias=False, rngs=rngs,
         )
 
-        all_metas = _build_all_block_meta()
+        all_metas = _build_all_block_meta(
+            width_coefficient=width_coefficient, depth_coefficient=depth_coefficient)
         truncated_metas, save_idxs = _compute_save_idxs_and_truncate(all_metas)
         self._save_idxs = save_idxs  # plain python list, static (not a param)
 

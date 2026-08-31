@@ -289,12 +289,41 @@ class BiFPNJAX(nnx.Module):
         return (p3_out, p4_out, p5_out, p6_out, p7_out)
 
 
-class EfficientTrack(nnx.Module):
-    """EfficientTrack: EfficientNet-b3 backbone + BiFPN(large) + detection head.
+# Size table, transcribed VERBATIM from
+# third_party/JARVIS-HybridNet/jarvis/efficienttrack/model.py
+# (EfficientTrackBackbone.__init__'s ``if model_size == ...`` ladder) --
+# fpn_num_filters/fpn_cell_repeats/final_layer_sizes/conv_channel_coef per
+# named size. ``backbone_width``/``backbone_depth`` are the
+# ``width_coefficient``/``depth_coefficient`` each size's PyTorch-side
+# ``backbone_compound_coef`` (0/1/3) resolves to via JARVIS's OWN
+# ``efficientnet_params()`` table (jarvis/efficienttrack/utils.py:150-164 --
+# NOT the standard EfficientNet paper table; JARVIS's is shifted by one index,
+# e.g. its "b3" = the official b2 config): b0->(0.5,0.5), b1->(1.0,1.0),
+# b3->(1.1,1.2). Cross-checked independently: feeding each (backbone_width,
+# backbone_depth) pair through ``_build_all_block_meta``/
+# ``_compute_save_idxs_and_truncate`` reproduces the matching
+# ``conv_channel_coef`` in this table exactly (24/48/120 for large, 24/40/112
+# for medium, 16/24/56 for small) -- see EfficientNetB3's docstring.
+_MODEL_SIZE_TABLE = {
+    "small":  dict(fpn_num_filters=56,  fpn_cell_repeats=3, final_layer_sizes=64,
+                   conv_channel_coef=(16, 24, 56),  backbone_width=0.5, backbone_depth=0.5),
+    "medium": dict(fpn_num_filters=88,  fpn_cell_repeats=4, final_layer_sizes=88,
+                   conv_channel_coef=(24, 40, 112), backbone_width=1.0, backbone_depth=1.0),
+    "large":  dict(fpn_num_filters=160, fpn_cell_repeats=6, final_layer_sizes=160,
+                   conv_channel_coef=(24, 48, 120), backbone_width=1.1, backbone_depth=1.2),
+}
 
-    ``large`` config (the only one this port targets): fpn_num_filters=160,
-    fpn_cell_repeats=6 (1x BiFPN_first + 5x BiFPN), final_layer_sizes=160,
-    conv_channel_coef=[24, 48, 120].
+
+class EfficientTrack(nnx.Module):
+    """EfficientTrack: EfficientNet backbone + BiFPN + detection head,
+    parameterized over JARVIS's ``small``/``medium``/``large`` size table
+    (see ``_MODEL_SIZE_TABLE``). ``model_size="large"`` (the default,
+    preserved for backward compat) is byte-identical to the original
+    large-only port: fpn_num_filters=160, fpn_cell_repeats=6 (1x BiFPN_first +
+    5x BiFPN), final_layer_sizes=160, conv_channel_coef=[24, 48, 120].
+    ``model_size="medium"`` (EfficientNet-b1 backbone) is CenterDetect's
+    config: fpn_num_filters=88, fpn_cell_repeats=4, final_layer_sizes=88,
+    conv_channel_coef=[24, 40, 112].
 
     ``__call__`` returns **res2** (the deconv'd, full-resolution heatmap) --
     the tensor HybridNet consumes. ``forward_both`` also exposes res1 (half
@@ -304,15 +333,26 @@ class EfficientTrack(nnx.Module):
     def __init__(self, *, num_joints: int = 50, in_channels: int = 4,
                  # 4 = JARVIS unified_V3_masked "large"-config convention
                  # (RGB + SAM3 mask channel); upstream PyTorch reference
-                 # defaults to 3 (RGB only).
+                 # defaults to 3 (RGB only). CenterDetect (any size) is
+                 # always in_channels=3 (no mask channel).
+                 model_size: str = "large",
                  rngs: nnx.Rngs):
+        if model_size not in _MODEL_SIZE_TABLE:
+            raise ValueError(
+                f"model_size must be one of {sorted(_MODEL_SIZE_TABLE)}, got {model_size!r}")
+        size_cfg = _MODEL_SIZE_TABLE[model_size]
+        self.model_size = model_size
         self.num_joints = num_joints
-        self.fpn_num_filters = 160
-        self.fpn_cell_repeats = 6
-        self.final_layer_sizes = 160
-        self.conv_channel_coef = (24, 48, 120)
+        self.fpn_num_filters = size_cfg["fpn_num_filters"]
+        self.fpn_cell_repeats = size_cfg["fpn_cell_repeats"]
+        self.final_layer_sizes = size_cfg["final_layer_sizes"]
+        self.conv_channel_coef = size_cfg["conv_channel_coef"]
 
-        self.backbone = EfficientNetB3(in_channels=in_channels, rngs=rngs)
+        self.backbone = EfficientNetB3(
+            in_channels=in_channels,
+            width_coefficient=size_cfg["backbone_width"],
+            depth_coefficient=size_cfg["backbone_depth"],
+            rngs=rngs)
 
         cells = [BiFPNFirstJAX(self.fpn_num_filters, self.conv_channel_coef, rngs=rngs)]
         cells += [BiFPNJAX(self.fpn_num_filters, rngs=rngs)

@@ -48,7 +48,8 @@ def _state_dict_to_z(state_dict: dict, *, strip_prefix: str = "") -> dict:
 
 
 def convert_efficienttrack_pth(pth_path: str, num_joints: int, out_dir: str, *,
-                                strip_prefix: str = "") -> EfficientTrack:
+                                strip_prefix: str = "",
+                                model_size: str = "large") -> EfficientTrack:
     """Load *pth_path*, build+load an ``EfficientTrack``, save an Orbax ckpt.
 
     Args:
@@ -57,6 +58,10 @@ def convert_efficienttrack_pth(pth_path: str, num_joints: int, out_dir: str, *,
         num_joints: number of output joints/keypoints.
         out_dir: Orbax checkpoint output directory.
         strip_prefix: optional key prefix to select+strip (submodule namespacing).
+        model_size: ``"small"``/``"medium"``/``"large"`` -- must match the
+            checkpoint (``large`` = KeypointDetect/HybridNet's EfficientTrack;
+            ``medium`` = CenterDetect's EfficientTrack-b1 -- see
+            ``jarvis_jax.models.efficienttrack._MODEL_SIZE_TABLE``).
 
     Returns:
         The loaded ``EfficientTrack`` NNX module (also saved to ``out_dir``).
@@ -71,7 +76,8 @@ def convert_efficienttrack_pth(pth_path: str, num_joints: int, out_dir: str, *,
     z["num_joints"] = np.int64(num_joints)
     z["in_channels"] = np.int64(in_channels)
 
-    model = EfficientTrack(num_joints=num_joints, in_channels=in_channels, rngs=nnx.Rngs(0))
+    model = EfficientTrack(num_joints=num_joints, in_channels=in_channels,
+                            model_size=model_size, rngs=nnx.Rngs(0))
     load_efficienttrack_from_npz(model, z)
 
     _, state = nnx.split(model)
@@ -82,7 +88,8 @@ def convert_efficienttrack_pth(pth_path: str, num_joints: int, out_dir: str, *,
 
 
 def load_efficienttrack_ckpt(out_dir: str, num_joints: int, *,
-                              in_channels: int = 4) -> EfficientTrack:
+                              in_channels: int = 4,
+                              model_size: str = "large") -> EfficientTrack:
     """Restore an ``EfficientTrack`` from an Orbax checkpoint directory.
 
     Mirrors ``build_checkpoint.load_vitpose``: build an abstract (shape-only)
@@ -91,7 +98,7 @@ def load_efficienttrack_ckpt(out_dir: str, num_joints: int, *,
     """
     m_abstract = nnx.eval_shape(
         lambda: EfficientTrack(num_joints=num_joints, in_channels=in_channels,
-                                rngs=nnx.Rngs(0)))
+                                model_size=model_size, rngs=nnx.Rngs(0)))
     gdef, abstract_state = nnx.split(m_abstract)
 
     ckptr = ocp.StandardCheckpointer()
