@@ -44,19 +44,40 @@ def transform_keypoints(kps, x0, y0, crop=448, heatmap_size=224):
     return hm_xy, vis
 
 
-def gaussian_heatmaps(hm_xy, vis, heatmap_size=224, sigma=2.0):
+def gaussian_heatmaps(hm_xy, vis, heatmap_size=224, sigma=7.0):
     """Render (heatmap_size, heatmap_size, K) Gaussian heatmaps (peak 1.0).
 
     hm_xy: (K, 2) array with columns [x (col), y (row)].
 
-    sigma DEFAULT CHANGED 7.0 -> 2.0 (2026-08-29). Measured: 1 voxel is 2.7-3.2
-    heatmap px and the distal tarsal segment T1L_TaT3->T1L_TaTip is 1.59 voxels
-    ~ 4.6 heatmap px, so a sigma of 7 px is ~1.5x LONGER than the whole segment
-    and adjacent tarsal targets overlap almost completely. That is the direct
-    cause of the 0.352 peak concentration measured on the shipped detector.
-    sigma/heatmap_size = 3.1% matches the COCO convention, but COCO was tuned
-    for humans whose limb segments span a large fraction of the frame; against
-    the fly's ~37 heatmap-px body length, sigma=7 is ~19% -- about 5x too wide.
+    sigma is 7.0 and MUST STAY 7.0. It was changed to 2.0 on 2026-08-29 and
+    reverted on 2026-08-30 after the retrain measured a 6.5x regression:
+
+        same data/sampling/aug, eval @1500   sigma=7.0 -> 28.98 px
+                                             sigma=2.0 -> 86.17 px
+        trained out, 30k steps               sigma=7.0 ->  6.448 px
+                                             sigma=2.0 -> 55.528 px
+
+    The argument for 2.0 was anatomical and is reproduced here because it is
+    seductive and WRONG: 1 voxel is 2.7-3.2 heatmap px, the distal tarsal
+    segment T1L_TaT3->T1L_TaTip is 1.59 voxels ~ 4.6 heatmap px, so sigma=7 is
+    ~1.5x longer than the whole segment and adjacent tarsal targets overlap
+    almost completely -- apparently the cause of the 0.352 peak concentration
+    on the shipped detector.
+
+    Why it does not follow: **sigma sets the optimisation basin, not the
+    resolution ceiling.** The target's width governs how far a mispredicted
+    peak can be and still get gradient pointing home; it does not cap how
+    sharply the trained model can peak. At sigma=2 the model learned peaks that
+    were SHARPER (concentration 0.885 vs 0.352) and fired them on the wrong
+    legs -- 70.6% of its >30 px misses landed nearer the mirror keypoint's GT
+    than their own. Sharpening the target bought peak quality and destroyed the
+    correspondence that makes a peak mean anything.
+
+    sigma/heatmap_size ~ 3% is an OPTIMISATION convention, not an anatomical
+    one: 7/224 = 3.1% is textbook, 2/224 = 0.9% is far below anything standard.
+    The tarsal-resolution problem is real but belongs downstream, in the
+    coarse-to-fine stage-2 refinement volumes -- not in a tighter 2D target.
+    See docs/specs/2026-08-29-coarse-to-fine-3d-design.md section 1.2.
     """
     k = hm_xy.shape[0]
     hm = np.zeros((heatmap_size, heatmap_size, k), dtype=np.float32)

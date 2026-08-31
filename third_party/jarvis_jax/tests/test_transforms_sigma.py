@@ -62,6 +62,39 @@ def test_adjacent_tarsal_targets_separate_at_sigma_two():
         assert separated == expect_separated, (sigma, at_neighbor, peak)
 
 
-def test_default_sigma_is_two():
+# --- 2026-08-30 -------------------------------------------------------------
+# The two tests above still assert TRUE properties of the renderer: sigma=2 does
+# produce far more concentrated targets, and adjacent tarsal targets at 4.6 px
+# separation do overlap at sigma=7. Those measurements were never wrong.
+#
+# What was wrong is the inference that drove the default from 7.0 to 2.0 --
+# that a more concentrated target yields a better detector. It does not. The
+# retrain measured sigma=2.0 at 55.528 px val MPJPE against sigma=7.0's
+# 6.448 px on identical data, a 6.5x regression, and the sigma=2 model learned
+# SHARPER peaks (0.885 vs 0.352) that it fired on the wrong legs. sigma sets
+# the optimisation basin, not the resolution ceiling.
+#
+# So the renderer tests stay and the default is pinned back to 7.0. Anyone
+# tempted by the concentration argument above should read
+# jarvis_jax/data/transforms.py:gaussian_heatmaps first.
+
+
+def test_default_sigma_is_seven_everywhere():
+    """Pin sigma=7.0 at all three defaults that feed a training run.
+
+    sigma=2.0 shipped as the default for one day (2026-08-29 -> 08-30) and cost
+    a 6.5x regression. A run launched without an explicit
+    `train.target_sigma=7.0` must not be able to pick up 2.0 again from any of
+    these three places.
+    """
     import inspect
-    assert inspect.signature(gaussian_heatmaps).parameters["sigma"].default == 2.0
+    import yaml
+    from pathlib import Path
+    from jarvis_jax.train.train import TrainConfig
+
+    assert inspect.signature(gaussian_heatmaps).parameters["sigma"].default == 7.0
+    assert TrainConfig().target_sigma == 7.0
+
+    cfg = yaml.safe_load(
+        (Path(__file__).resolve().parents[1] / "configs/train/vit2d.yaml").read_text())
+    assert cfg["target_sigma"] == 7.0

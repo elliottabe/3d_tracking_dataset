@@ -33,7 +33,7 @@ class TrainConfig:
     # make_train_step's own 7.0 default -- that default is left alone because
     # several OTHER callers (densepose CSE training, tracking/finetune_detector,
     # and multiple unit tests) rely on it implicitly and are out of scope here).
-    target_sigma: float = 2.0
+    target_sigma: float = 7.0   # do NOT lower; sigma=2.0 measured a 6.5x regression (see data/transforms.py)
 
 
 def _param_labels(params):
