@@ -1,0 +1,41 @@
+# @package slurm
+# Small-footprint ckpt-all profile for BACKFILL, not for speed.
+#
+# ckpt_all.yaml asks for a whole node (8 GPUs / 32 CPUs / 128G). On a busy
+# ckpt-all that job waits on queue POSITION even when whole nodes sit idle:
+# measured 2026-08-31, four fully idle 8-GPU nodes inside the constraint set
+# (g3132 h200:8, g3135-3137 l40s:8) against 197 pending jobs, and an 8-GPU
+# request still PENDING (Priority). A 2-GPU request backfills into partially
+# used nodes that a full-node request cannot touch, so it starts far sooner.
+#
+# This is mathematically identical to the 8-GPU profile, not an approximation:
+#   * train.batch_size is the GLOBAL batch (scripts/train_keypoints.py asserts
+#     batch_size % n_dev == 0 and shards it), so device count changes speed,
+#     not the math. 32 % 2 == 0.
+#   * the data stream is host-side `_epochs(train_ds, batch_size, tcfg.seed)`
+#     -- seeded, device-count independent; the mesh only shards it.
+#   * augmentation (incl. flip) is keyed on jax.random.fold_in(base_key, step)
+#     with shape=(B,) over the GLOBAL batch, and threefry is deterministic in
+#     (key, shape), not in device layout.
+#   * base_batch / lr_scaling in configs/train/vit2d.yaml are vestigial -- they
+#     appear in no python or shell file -- so the LR carries no device-count
+#     dependence either.
+# Only floating-point reduction ORDER differs, which is not systematic.
+#
+# time is 12h rather than ckpt_all's 3 days: a shorter wall-clock request also
+# backfills better, and 30k steps is ~6h at 2 GPUs (~90 min at 8), so this
+# leaves ~2x margin. Preemption is covered by --requeue + the trainer's
+# restore_latest() (save_every=1000); note SLURM does NOT requeue on TIMEOUT,
+# which is why the margin matters.
+partition: ckpt-all
+constraint: 'h200|a100|l40s|l40|a40'
+account: portia
+gpus: 2
+cpus: 12
+mem: 48
+time: '12:00:00'
+requeue: true
+nodelist: ''
+exclude: ''
+conda_env: 3d_tracking
+mail_user: eabe@uw.edu
