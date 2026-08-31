@@ -52,6 +52,10 @@ export LD_PRELOAD="\$CONDA_PREFIX/lib/libstdc++.so.6"
 unset LD_LIBRARY_PATH        # let JAX use its bundled CUDA wheels
 unset JAX_PLATFORMS          # never inherit JAX_PLATFORMS=cpu from the submit env
 export MUJOCO_GL=egl
+# 0.6 leaves headroom to coexist with other work on a shared card. It is NOT
+# enough for ViTPose training at batch 32 -- measured 2026-08-31, that OOMs
+# under 0.6 and needs ~0.9. Override per job by prefixing the command:
+#   submit_task.sh myrun 'export XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 && python ...'
 export XLA_PYTHON_CLIENT_MEM_FRACTION=0.6
 cd $REPO
 $CMD
