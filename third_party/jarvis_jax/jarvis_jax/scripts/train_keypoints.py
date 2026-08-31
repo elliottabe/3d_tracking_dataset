@@ -53,6 +53,8 @@ from jarvis_jax.convert.build_checkpoint import build
 from jarvis_jax.data.prefetch import prefetch
 from jarvis_jax.data.v3 import V3Dataset, batches
 from jarvis_jax.data.v5_2d import V5Dataset
+from jarvis_jax.data.device import normalize_image, normalize_image_center_channel
+from jarvis_jax.data.center_channel import DEFAULT_CENTER_SIGMA_PX
 from jarvis_jax.sharding import data_parallel_mesh, replicate
 from jarvis_jax.train.train import (
     TrainConfig, make_optimizer, make_train_step, eval_mpjpe,
@@ -209,6 +211,20 @@ def run_training(root, *, out_dir, mae_npz=DEFAULT_MAE_NPZ, tcfg=None,
         if start:
             print(f"resuming from checkpoint at step {start}")
 
+    if tcfg.mask_ablation and tcfg.center_channel_input:
+        raise ValueError(
+            "train.mask_ablation and train.center_channel_input are mutually "
+            "exclusive -- both wrap the 4th input channel differently and "
+            "cannot both apply to the same run.")
+    # Which function rescales the 4th input channel to float — normal (SAM
+    # mask, already {0,1}) vs the center_channel ablation arm (a 0..255-coded
+    # Gaussian that needs /255 to land back in [0,1]; see
+    # device.py::normalize_image_center_channel). Threaded through BOTH
+    # make_train_step (below) and every eval_mpjpe call further down so
+    # train and eval agree on the encoding.
+    norm_fn = (normalize_image_center_channel if tcfg.center_channel_input
+              else normalize_image)
+
     names = json.load(open(
         os.path.join(root, "annotations", "instances_train.json")))["keypoint_names"]
     lr_swap = build_lr_swap(names)
@@ -219,7 +235,8 @@ def run_training(root, *, out_dir, mae_npz=DEFAULT_MAE_NPZ, tcfg=None,
     # "Fix round 1": before this, a run launched with train.target_sigma=2.0
     # silently trained on sigma=7.0 targets.
     step = make_train_step(tcfg.mask_weight, aug, lr_swap, heatmap_size=cfg.heatmap_size,
-                           sigma=tcfg.target_sigma, mask_dilate=tcfg.mask_dilate)
+                           sigma=tcfg.target_sigma, mask_dilate=tcfg.mask_dilate,
+                           normalize_fn=norm_fn)
     base_key = jax.random.PRNGKey(tcfg.seed)
     mesh = data_parallel_mesh()
 
@@ -252,6 +269,23 @@ def run_training(root, *, out_dir, mae_npz=DEFAULT_MAE_NPZ, tcfg=None,
         train_ds = ZeroMaskDataset(train_ds)
         val_ds = ZeroMaskDataset(val_ds)
         val_ds_all = ZeroMaskDataset(val_ds_all)
+
+    if tcfg.center_channel_input:
+        # Center-channel ablation: replace the 4th input channel with a
+        # Gaussian at the TARGET fly's own bbox center (train-time: always
+        # GT-driven), both here and via normalize_image_center_channel at
+        # train/eval — see center_channel.py module docstring for the
+        # eval-time GT-vs-predicted-center distinction this does NOT resolve
+        # on its own (that needs a separate post-hoc eval pass with
+        # predicted_centers_xy once a CenterDetect checkpoint exists).
+        from jarvis_jax.data.center_channel import CenterChannelDataset
+        print("[center-channel] replacing the 4th input channel with a "
+              "target-fly-center Gaussian (train.center_channel_input=true, "
+              f"sigma={DEFAULT_CENTER_SIGMA_PX}px) -- model keeps in_ch=4, "
+              "capacity fixed")
+        train_ds = CenterChannelDataset(train_ds)
+        val_ds = CenterChannelDataset(val_ds)
+        val_ds_all = CenterChannelDataset(val_ds_all)
 
     # Weighted sampling: EITHER error-weighted hard-example resampling (from a
     # jarvis_jax.scripts.mine_hard_frames.py error npz -- configs/sampling/
@@ -328,8 +362,8 @@ def run_training(root, *, out_dir, mae_npz=DEFAULT_MAE_NPZ, tcfg=None,
         if (i + 1) % log_every == 0:
             print(f"step {i+1}/{tcfg.total_steps} loss {final_loss:.5f}")
         if (i + 1) % eval_every == 0:
-            full = eval_mpjpe(model, val_ds_all, tcfg.batch_size)
-            fem = eval_mpjpe(model, val_ds, tcfg.batch_size)
+            full = eval_mpjpe(model, val_ds_all, tcfg.batch_size, normalize_fn=norm_fn)
+            fem = eval_mpjpe(model, val_ds, tcfg.batch_size, normalize_fn=norm_fn)
             print(f"  val MPJPE {full:.3f}px (female {val_recording}: {fem:.3f}px)")
         if mngr is not None and (i + 1) % save_every == 0:
             save_step(mngr, i + 1, model, opt)
@@ -338,8 +372,8 @@ def run_training(root, *, out_dir, mae_npz=DEFAULT_MAE_NPZ, tcfg=None,
         save_step(mngr, tcfg.total_steps, model, opt)
         mngr.wait_until_finished()
 
-    val_mpjpe = eval_mpjpe(model, val_ds_all, tcfg.batch_size)
-    fem_mpjpe = eval_mpjpe(model, val_ds, tcfg.batch_size)
+    val_mpjpe = eval_mpjpe(model, val_ds_all, tcfg.batch_size, normalize_fn=norm_fn)
+    fem_mpjpe = eval_mpjpe(model, val_ds, tcfg.batch_size, normalize_fn=norm_fn)
     print(f"final val MPJPE {val_mpjpe:.3f}px "
           f"(female {val_recording}: {fem_mpjpe:.3f}px)")
 

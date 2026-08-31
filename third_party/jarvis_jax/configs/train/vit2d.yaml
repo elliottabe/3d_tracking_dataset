@@ -33,6 +33,11 @@ warm_start: ''
 # unchanged behaviour. See
 # .superpowers/sdd/2026-08-29-coarse-to-fine-3d/mask-channel-ablation.md
 mask_ablation: false
+# Center-channel (instance-cue) ablation arm: 4th input channel = a Gaussian
+# at the TARGET fly's own bbox center, replacing the SAM mask, instead of
+# zeroing it (mask_ablation above). Mutually exclusive with mask_ablation.
+# See jarvis_jax/data/center_channel.py and train/train.py::TrainConfig.
+center_channel_input: false
 # Gaussian target sigma in heatmap px. MUST STAY 7.0: the 2026-08-29
 # resolution analysis argued for 2.0 and the 2026-08-30 retrain measured a 6.5x
 # regression (6.448 px -> 55.528 px val MPJPE, identical data/sampling/aug).

@@ -44,6 +44,28 @@ def transform_keypoints(kps, x0, y0, crop=448, heatmap_size=224):
     return hm_xy, vis
 
 
+def gaussian_blob(shape, cx, cy, sigma):
+    """(H,W) float32 Gaussian, peak 1.0, centered at (cx, cy) with std `sigma`
+    (px, in the SAME units as cx/cy/shape). ``shape`` is an (H, W) tuple or a
+    single int for a square blob.
+
+    Single-point single-channel primitive factored out of
+    ``gaussian_heatmaps``'s per-channel loop body (identical formula,
+    verified by that function's existing tests -- this is a
+    behaviour-preserving extraction, not a new numeric recipe) so every
+    single-peak Gaussian render in this repo (per-keypoint heatmap targets
+    here, the CenterDetect per-instance target render in
+    ``jarvis_jax/train/losses.py``, and the "target fly" instance-channel
+    render in ``jarvis_jax/data/center_channel.py``) shares one
+    implementation instead of three copies of ``np.exp(-(dx**2+dy**2)/2s^2)``.
+    """
+    h, w = (shape, shape) if isinstance(shape, int) else shape
+    ys = np.arange(h, dtype=np.float32)[:, None]
+    xs = np.arange(w, dtype=np.float32)[None, :]
+    two_s2 = 2.0 * float(sigma) * float(sigma)
+    return np.exp(-(((xs - cx) ** 2) + ((ys - cy) ** 2)) / two_s2).astype(np.float32)
+
+
 def gaussian_heatmaps(hm_xy, vis, heatmap_size=224, sigma=7.0):
     """Render (heatmap_size, heatmap_size, K) Gaussian heatmaps (peak 1.0).
 
@@ -81,13 +103,9 @@ def gaussian_heatmaps(hm_xy, vis, heatmap_size=224, sigma=7.0):
     """
     k = hm_xy.shape[0]
     hm = np.zeros((heatmap_size, heatmap_size, k), dtype=np.float32)
-    grid = np.arange(heatmap_size, dtype=np.float32)
-    yy, xx = np.meshgrid(grid, grid, indexing="ij")  # (H,W)
-    two_s2 = 2.0 * sigma * sigma
     for j in range(k):
         if not vis[j]:
             continue
         cx, cy = hm_xy[j]  # hm_xy columns are [x (col), y (row)]
-        g = np.exp(-(((xx - cx) ** 2) + ((yy - cy) ** 2)) / two_s2)
-        hm[:, :, j] = g
+        hm[:, :, j] = gaussian_blob(heatmap_size, cx, cy, sigma)
     return hm

@@ -43,6 +43,16 @@ class TrainConfig:
     # populated mask. Default False -- byte-identical to before this field
     # existed for every other caller of TrainConfig.
     mask_ablation: bool = False
+    # Center-channel (instance-cue) ablation arm: when True, train_keypoints.py
+    # wraps every dataset (train/val) in
+    # jarvis_jax.data.center_channel.CenterChannelDataset, which REPLACES the
+    # 4th input channel with a Gaussian at the TARGET fly's own bbox center
+    # (in place of the SAM mask), and trains/evaluates through
+    # normalize_image_center_channel instead of normalize_image. Mutually
+    # exclusive with mask_ablation (train_keypoints.run_training raises if
+    # both are set). Default False -- byte-identical to before this field
+    # existed for every other caller of TrainConfig.
+    center_channel_input: bool = False
 
 
 def _param_labels(params):
@@ -72,7 +82,7 @@ def make_optimizer(model, cfg):
 
 
 def make_train_step(mask_weight, aug_params=None, lr_swap=None, heatmap_size=224,
-                    sigma=7.0, joint_weight=None, mask_dilate=0):
+                    sigma=7.0, joint_weight=None, mask_dilate=0, normalize_fn=None):
     """Return an nnx.jit train step. When aug_params.enabled, the batch is
     augmented on-device (using the per-step `key`) before normalize/render.
 
@@ -81,8 +91,15 @@ def make_train_step(mask_weight, aug_params=None, lr_swap=None, heatmap_size=224
     the CSE wing fine-tune to sharpen + emphasise the densely-packed wing verts.
     ``mask_dilate`` (static int) grows the SAM mask before the containment
     penalty (Phase 5 edge slack); captured as a Python int at call time like
-    ``mask_weight``, so the jitted step recompiles per distinct value."""
+    ``mask_weight``, so the jitted step recompiles per distinct value.
+    ``normalize_fn`` (defaults to ``jarvis_jax.data.device.normalize_image`` --
+    byte-identical to before this parameter existed for every caller that
+    does not pass it) selects how the 4th input channel is rescaled; the
+    ``center_channel`` ablation arm passes
+    ``jarvis_jax.data.device.normalize_image_center_channel`` instead (see
+    that function's docstring for why the two differ)."""
     from jarvis_jax.data.augment import augment_batch, AugParams
+    norm_fn = normalize_fn if normalize_fn is not None else normalize_image
     mw = float(mask_weight)
     md = int(mask_dilate)
     ap = aug_params if aug_params is not None else AugParams(enabled=False)
@@ -93,7 +110,7 @@ def make_train_step(mask_weight, aug_params=None, lr_swap=None, heatmap_size=224
     jw = None if joint_weight is None else jnp.asarray(joint_weight, dtype=jnp.float32)
 
     def loss_fn(model, img4_u8, kp_xy, vis):
-        img = normalize_image(img4_u8)
+        img = norm_fn(img4_u8)
         hm = render_heatmaps(kp_xy, vis, heatmap_size=heatmap_size, sigma=sig)
         pred = model(img, use_running_average=False)
         loss = heatmap_mse(pred, hm, vis, joint_weight=jw)
@@ -121,16 +138,23 @@ def _eval_forward(model, img):
     return model(img, use_running_average=True)
 
 
-def eval_mpjpe(model, ds, batch_size, *, in_size=448):
+def eval_mpjpe(model, ds, batch_size, *, in_size=448, normalize_fn=None):
     """Average MPJPE over the dataset (single device). GT keypoints are the true
-    annotation coords (kp_xy scaled to in_size), not a decode of GT heatmaps."""
+    annotation coords (kp_xy scaled to in_size), not a decode of GT heatmaps.
+
+    ``normalize_fn`` (default ``jarvis_jax.data.device.normalize_image``, i.e.
+    byte-identical to before this parameter existed) mirrors
+    ``make_train_step``'s kwarg of the same name -- pass
+    ``normalize_image_center_channel`` to evaluate a model trained with the
+    ``center_channel`` ablation arm's 4th-channel encoding."""
     from jarvis_jax.data.v3 import batches
+    norm_fn = normalize_fn if normalize_fn is not None else normalize_image
     model.eval()
     scale = in_size / float(ds.heatmap_size)
     total, count = 0.0, 0
     for img4_u8, kp_xy, vis in batches(ds, batch_size, shuffle=False,
                                        drop_last=False):
-        img = normalize_image(jnp.asarray(img4_u8))
+        img = norm_fn(jnp.asarray(img4_u8))
         pred = _eval_forward(model, img)
         pk = heatmaps_to_keypoints(pred, in_size=in_size)
         gk = jnp.asarray(kp_xy) * scale
