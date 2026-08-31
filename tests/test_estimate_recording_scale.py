@@ -33,6 +33,12 @@ from scripts.estimate_recording_scale import (
     segment_scale_diagnostics,
     warn_if_estimator_ignored,
     WITHIN_BONE_CV_WARN_THRESH,
+    implied_body_length_mm,
+    assert_plausible_body_scale,
+    WORLD_UNITS_TO_MM,
+    BODY_LENGTH_MM_MIN,
+    BODY_LENGTH_MM_MAX,
+    BODY_LENGTH_REF_PAIR,
     main as estimate_scale_main,
 )
 
@@ -904,3 +910,90 @@ def test_run_bout_help_exits_0_after_estimator_warning_wiring():
                        capture_output=True, text=True, cwd=REPO_ROOT, timeout=240)
     assert "ModuleNotFoundError" not in r.stderr, r.stderr[-2000:]
     assert r.returncode == 0, r.stderr[-2000:]
+
+
+# ---------------------------------------------------------------------------
+# Physical sanity gate on `scale` (implied body length in mm) -- regression
+# coverage for the "scale does double duty" gap: nothing previously checked
+# a fitted scale's OWN physical plausibility, so a badly wrong scale (like
+# the historical 38x scale-from-first-bout defect) looked dimensionally fine
+# and was absorbed by marker offsets instead of failing.
+# ---------------------------------------------------------------------------
+
+def _known_good_scale():
+    """A `scale` (model_units/data_units) that implies a body length in the
+    middle of the plausible band, derived from the REAL model's own
+    BODY_LENGTH_REF_PAIR rest-pose distance -- exact by construction, so the
+    test does not depend on any particular recording's fitted scale."""
+    ref = _ref_positions_for(list(BODY_LENGTH_REF_PAIR))
+    model_length = float(np.linalg.norm(ref[0] - ref[1]))
+    target_mm = (BODY_LENGTH_MM_MIN + BODY_LENGTH_MM_MAX) / 2.0
+    target_data_units = target_mm / WORLD_UNITS_TO_MM
+    return model_length / target_data_units, target_mm
+
+
+def test_implied_body_length_mm_recovers_target_length():
+    _require_model()
+    scale, target_mm = _known_good_scale()
+    mm = implied_body_length_mm(scale, str(MODEL_XML))
+    assert mm == pytest.approx(target_mm, rel=1e-9)
+
+
+def test_implied_body_length_mm_nan_for_nonpositive_scale():
+    _require_model()
+    assert np.isnan(implied_body_length_mm(0.0, str(MODEL_XML)))
+    assert np.isnan(implied_body_length_mm(-1.0, str(MODEL_XML)))
+    assert np.isnan(implied_body_length_mm(float("nan"), str(MODEL_XML)))
+
+
+def test_assert_plausible_body_scale_passes_for_plausible_scale():
+    """A scale implying a body length inside [2.0, 3.0] mm must return that
+    length and raise nothing."""
+    _require_model()
+    scale, target_mm = _known_good_scale()
+    mm = assert_plausible_body_scale(scale, str(MODEL_XML))
+    assert mm == pytest.approx(target_mm, rel=1e-9)
+
+
+def test_assert_plausible_body_scale_raises_on_historical_38x_defect():
+    """The historical scale-from-first-bout defect: one bad bout-fly's scale
+    was 38x too small (0.000338 vs a good 0.010994). A scale too small means
+    `model_dist / scale` (the implied DATA-space body length) is inflated --
+    this must raise, not warn, and the message must be actionable."""
+    _require_model()
+    good_scale, good_mm = _known_good_scale()
+    bad_scale = good_scale / 38.0
+
+    with pytest.raises(ValueError) as excinfo:
+        assert_plausible_body_scale(bad_scale, str(MODEL_XML), context="bout22 fly0")
+
+    msg = str(excinfo.value)
+    assert "bout22 fly0" in msg
+    assert f"{bad_scale!r}" in msg or "scale=" in msg
+    implied_mm = good_mm * 38.0
+    assert f"{implied_mm:.3f}" in msg or f"{implied_mm:.1f}" in msg[:msg.find("mm")]
+    assert "2.0" in msg and "3.0" in msg
+
+
+def test_assert_plausible_body_scale_raises_on_implausibly_small_body():
+    """The failure mode is not one-directional: a scale too LARGE implies an
+    implausibly SHORT body and must also raise."""
+    _require_model()
+    good_scale, _ = _known_good_scale()
+    too_large_scale = good_scale * 10.0
+
+    with pytest.raises(ValueError):
+        assert_plausible_body_scale(too_large_scale, str(MODEL_XML))
+
+
+def test_run_bout_scale_block_calls_the_shared_physical_sanity_gate():
+    """scripts/run_bout.py's scale.json block (both rigid_segment and
+    trunk/all branches funnel into the SAME `scale` local below) must call
+    the shared assert_plausible_body_scale after resolving per-fly-vs-shared
+    scale -- not duplicate the check inline, and not skip it for either
+    branch."""
+    src = (REPO_ROOT / "scripts" / "run_bout.py").read_text()
+    assert "assert_plausible_body_scale" in src
+    idx = src.index("scale = float(_scale_data[\"scale\"])")
+    tail = src[idx:idx + 1500]
+    assert "assert_plausible_body_scale(" in tail

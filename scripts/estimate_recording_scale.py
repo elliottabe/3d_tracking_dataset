@@ -149,6 +149,105 @@ THORAX_PAIRS: Tuple[Tuple[str, str], ...] = (
 # above the male ceiling (~0.062) and well below the female floor (~0.20).
 WITHIN_BONE_CV_WARN_THRESH = 0.15
 
+# ---------------------------------------------------------------------------
+# Physical sanity gate on the fitted `scale` itself.
+#
+# `scale` (model_units / data_units, this module's convention) does DOUBLE
+# DUTY: it is simultaneously the world->model unit conversion AND the
+# per-animal body-size fit. Nothing upstream checks either factor
+# independently, so a badly wrong scale still looks "dimensionally
+# plausible" and gets silently absorbed by marker offsets -- exactly how the
+# historical 38x scale-from-first-bout defect (bout22/fly0: 0.000338 vs a
+# pooled 0.010994) survived both residual and NaN checks and was caught only
+# by looking at a render (see docs/... / MEMORY "Scale-from-first-bout
+# defect"). This gate converts a candidate `scale` back into a physical body
+# length in mm and fails loudly if that length is not a plausible D.
+# melanogaster.
+#
+# WORLD_UNITS_TO_MM: this rig's raw triangulated ("world") units are ~10x
+# too large to already be mm. Three independent anchors on real data
+# (Session0/2025_10_20_13_20_04, bout 28), all consistent with a single
+# 0.1 mm/world-unit conversion:
+#   track-merge body length (run_bout.check_track_merge)  22.65 world -> 2.265 mm
+#     (textbook D. melanogaster body length: 2.0-2.5 mm)
+#   T1 femur, Tro->FeTi (fly1/male, this bout)              5.05 world -> 0.505 mm
+#     (real adult fly T1 femur: ~0.5 mm)
+#   T3 femur, Tro->FeTi (fly1/male, this bout)               6.96 world -> 0.696 mm
+#     (real adult fly T3 femur: ~0.7-0.8 mm)
+# NOTE: this does NOT change any existing `_mm`-suffixed value (kp3d_mm,
+# mesh_mm, ...) -- those names are misleading (off by ~10x) but renaming them
+# touches every consumer and is a separate job. This constant exists ONLY to
+# convert a `scale` candidate into mm for the plausibility check below.
+WORLD_UNITS_TO_MM = 0.1  # mm per raw triangulated ("world") unit; see anchors above
+
+# Plausibility band for the body length a candidate `scale` implies, in mm.
+# D. melanogaster body length is textbook 2.0-2.5 mm; the band is widened
+# slightly (2.0-3.0 mm) to tolerate normal individual/measurement spread
+# without narrowing the gate to the point it flags good scales.
+BODY_LENGTH_MM_MIN = 2.0  # mm
+BODY_LENGTH_MM_MAX = 3.0  # mm
+
+# Reference keypoint pair used to turn a model-space rest-pose distance into
+# the "body length" the gate checks -- head (antenna base) to abdomen tip,
+# the same head-to-tail span run_bout.check_track_merge's "body_length"
+# approximates (median distance from Scutellum to the fly's OWN furthest
+# keypoint). Both names are present in every anatomy config's KP_NAMES/
+# tracking[...] sites (v1, v2_3, v2_muscles).
+BODY_LENGTH_REF_PAIR: Tuple[str, str] = ("Antenna_Base", "Abd_tip")
+
+
+def implied_body_length_mm(scale: float, model_xml: str, *,
+                           ref_pair: Tuple[str, str] = BODY_LENGTH_REF_PAIR) -> float:
+    """Body length (mm) implied by a candidate data->model `scale`.
+
+    `scale` = model_units / data_units (this module's convention, shared with
+    ``jarvis_jax.tracking.scale.compute_trunk_scale``). The model's OWN
+    rest-pose distance between ``ref_pair``'s two tracking sites is fixed
+    and data-independent; dividing it by `scale` gives the body length
+    `scale` implies IN DATA (world) UNITS, and `WORLD_UNITS_TO_MM` converts
+    that to mm -- the number the plausibility gate below checks. Returns
+    ``nan`` for a non-finite or non-positive `scale` (caller decides whether
+    that itself is an error).
+    """
+    if not np.isfinite(scale) or scale <= 0:
+        return float("nan")
+    idx = _tracking_site_idx(model_xml)
+    a, b = ref_pair
+    if a not in idx or b not in idx:
+        raise ValueError(
+            f"implied_body_length_mm: reference pair {ref_pair} not both "
+            f"present as tracking[...] sites in {model_xml}")
+    ref_arr = _ref_positions(model_xml, [a, b])
+    model_length = float(np.linalg.norm(ref_arr[0] - ref_arr[1]))
+    return model_length / scale * WORLD_UNITS_TO_MM
+
+
+def assert_plausible_body_scale(scale: float, model_xml: str, *, context: str = "") -> float:
+    """Fail loudly if `scale` implies an unphysical D. melanogaster body length.
+
+    Raises ``ValueError`` (never a warning -- a wrong body scale silently
+    poisons a whole recording, per the historical 38x defect) when the
+    implied body length falls outside
+    ``[BODY_LENGTH_MM_MIN, BODY_LENGTH_MM_MAX]`` mm. The message states the
+    computed length, the scale, and the reference anchor used so it is
+    actionable without re-deriving anything. Returns the implied length (mm)
+    on success.
+    """
+    mm = implied_body_length_mm(scale, model_xml)
+    if not np.isfinite(mm) or not (BODY_LENGTH_MM_MIN <= mm <= BODY_LENGTH_MM_MAX):
+        a, b = BODY_LENGTH_REF_PAIR
+        raise ValueError(
+            f"implausible body scale{f' ({context})' if context else ''}: "
+            f"scale={scale!r} implies a body length of {mm:.3f} mm via "
+            f"{a}->{b} (model_dist / scale * {WORLD_UNITS_TO_MM} mm/world-unit), "
+            f"outside the plausible D. melanogaster range "
+            f"[{BODY_LENGTH_MM_MIN}, {BODY_LENGTH_MM_MAX}] mm. This is the "
+            f"check that would have caught the historical 38x "
+            f"scale-from-first-bout defect (0.000338 vs a good 0.010994) "
+            f"before it poisoned a whole recording -- see this module's "
+            f"WORLD_UNITS_TO_MM anchors.")
+    return mm
+
 
 def warn_if_estimator_ignored(estimator: str, *, caller: str = "estimate_run_root") -> None:
     """Emit a ``UserWarning`` if ``estimator`` is anything but the default
@@ -848,6 +947,9 @@ def estimate_run_root(run_root: Path, cfg, *, estimator: str = "umeyama",
         result["scale_by_fly"] = scale_by_fly
         result["scale"] = float(np.median(list(scale_by_fly.values())))
         result["diagnostics"] = diagnostics
+        for fly_str, fly_scale in scale_by_fly.items():
+            assert_plausible_body_scale(
+                fly_scale, model_xml, context=f"{run_root} fly{fly_str}")
     else:
         # Fly slot is not a stable individual label here -- pool every
         # bout-fly together instead of blending two individuals per slot.
@@ -869,6 +971,7 @@ def estimate_run_root(run_root: Path, cfg, *, estimator: str = "umeyama",
         result["scale_by_fly"] = None
         result["scale"] = diag["scale"]
         result["diagnostics"] = {"pooled": diag}
+        assert_plausible_body_scale(result["scale"], model_xml, context=f"{run_root} pooled")
 
     return result
 

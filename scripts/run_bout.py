@@ -1239,6 +1239,24 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
     else:
         scale = float(_scale_data["scale"])
 
+    # Physical sanity gate: whatever branch/mode produced `scale` above (fresh
+    # rigid_segment pool, fresh single-bout fallback, fresh trunk/all fit, OR a
+    # stale scale.json read back on resume), `scale` does double duty as BOTH
+    # the world->model unit conversion and the per-animal body-size fit, and
+    # nothing else checks either factor independently -- a badly wrong scale
+    # still looks dimensionally plausible and gets absorbed by marker offsets,
+    # which is exactly how the historical 38x scale-from-first-bout defect
+    # survived both residual and NaN checks. Checking HERE, after the
+    # per-fly-vs-shared resolution above, covers every path that can produce
+    # the `scale` this bout-fly actually uses. Error, not warning -- see
+    # scripts.estimate_recording_scale.assert_plausible_body_scale.
+    try:
+        from scripts.estimate_recording_scale import assert_plausible_body_scale
+    except ModuleNotFoundError:  # direct invocation: sys.path[0] is scripts/, not repo root
+        from estimate_recording_scale import assert_plausible_body_scale
+    assert_plausible_body_scale(
+        scale, cfg.silhouette.xml, context=f"bout {bout_idx} fly{fly} ({scale_path})")
+
     # -- segment_scales.json: per-segment (per-limb) SHAPE calibration. Like
     #    scale.json, this is a per-fly-constant morph computed ONCE per session
     #    (shared across all bouts/flies, whoever gets there first) and persisted
@@ -1427,9 +1445,48 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
             for t in range(T)
         ]
         if not stage_done(qc_json_path):
+            # ik_reproj metric (additive qc.json key): FITTED (kp3d_by_frame,
+            # the FK'd outputs.h5 sites above) vs MEASURED -- the RAW
+            # triangulated kp3d.npz, reloaded explicitly here rather than
+            # reused from the `kp3d` local, which Stage B2 (cfg.filtering)
+            # may have already overwritten with the filtered kp3d_filt.npz
+            # array by this point in the function. Same kp2d_by_frame/
+            # vis_by_frame gate as every other metric above -- the point is
+            # to compare fitted vs. measured against the SAME 2-D, not to
+            # introduce a second gate.
+            with np.load(kp3d_path) as _zm:
+                kp3d_measured_raw = np.asarray(_zm["kp3d"])
+            kp3d_measured_by_frame = [kp3d_measured_raw[t] for t in range(T)]
+
+            # Per-group breakdown from viz.core.colors.keypoint_groups (the
+            # repo's shared keypoint-semantics module) -- trunk/legs/wings/
+            # abdomen, the split that matters for IK work: "wings" is
+            # keypoint_groups' "thorax" bucket split by the "Wing" name
+            # prefix, "trunk" is what's left of head+thorax. jarvis_jax
+            # (qc.py) deliberately has no dependency on the top-level `viz`
+            # package, so that split is built HERE and passed in as
+            # `group_defs`, not inside qc.py.
+            try:
+                from viz.core.colors import keypoint_groups
+            except ModuleNotFoundError:  # direct invocation: sys.path[0] is scripts/, not repo root
+                _repo = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
+                if _repo not in sys.path:
+                    sys.path.insert(0, _repo)
+                from viz.core.colors import keypoint_groups
+            _kg = keypoint_groups(kp_names)
+            _wings_idx = [i for i in _kg["thorax"] if kp_names[i].startswith("Wing")]
+            group_defs = {
+                "trunk": _kg["head"] + [i for i in _kg["thorax"] if i not in _wings_idx],
+                "legs": _kg["legs"],
+                "wings": _wings_idx,
+                "abdomen": _kg["abdomen"],
+            }
+
             qc_report(rt, kp3d_by_frame=kp3d_by_frame, mesh_by_frame=mesh_by_frame,
                      kp2d_by_frame=kp2d_by_frame, vis_by_frame=vis_by_frame,
-                     masks_by_frame=masks_by_frame, out_json=qc_json_path)
+                     masks_by_frame=masks_by_frame, out_json=qc_json_path,
+                     kp3d_measured_by_frame=kp3d_measured_by_frame,
+                     kp_names=kp_names, group_defs=group_defs)
 
         # -- per-frame QC (Gate A inputs): soft/hard silhouette IoU, marker
         #    reproj, n_cams, one row per frame -- next to qc.json. Reuses the
@@ -1525,13 +1582,23 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
             cmd = [sys.executable, "-m", "viz", "sidebyside",
                    "--run", run_root, "--bout", str(bout_idx), "--fly", str(fly),
                    "--n", str(n_sbs),
-                   # View-matched right panel: the fitted mesh reprojected into
-                   # the SAME camera as the left one. The old default rendered
-                   # MuJoCo's model-space `track1`, whose extrinsics are
-                   # unrelated to the left camera -- so the fly appeared rotated
-                   # between the panes and a correct fit read as "facing the
-                   # wrong way". Pass `--right mujoco` for the old behaviour.
-                   "--right", "reproj",
+                   # View-matched right panel, configurable via
+                   # cfg.outputs.sidebyside_right (default "rigcam"): a MuJoCo
+                   # render from a camera built off the LEFT panel's own
+                   # calibration. The rig is orthographic (verified:
+                   # P[2,:3]==0 for all 7 cameras), so an orthographic MuJoCo
+                   # camera matches it exactly -- an actual view-matched IK
+                   # render, not just fitted points. "reproj" (points only, no
+                   # MuJoCo) is cheaper but isn't "the IK rendering with the
+                   # frames" a reader asked for. The OLD default, `mujoco`,
+                   # rendered MuJoCo's model-space `track1` camera, whose
+                   # extrinsics are unrelated to the left camera -- so the fly
+                   # appeared rotated between the panes and a correct fit read
+                   # as "facing the wrong way", and per its own --help it
+                   # "cannot be used to judge orientation"; `rigcam` (added
+                   # after this comment was first written) is the fix for
+                   # exactly that, not `reproj`.
+                   "--right", str(cfg.outputs.get("sidebyside_right", "rigcam")),
                    "--conf", str(float(cfg.detector.conf_thresh)),
                    "--session-dir", str(cfg.recording.session_dir),
                    "--predictions-dir", str(cfg.recording.predictions_dir),

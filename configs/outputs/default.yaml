@@ -19,3 +19,13 @@ mesh_subset: fps_500+wing        # for output h5 verts
 # long bouts. Set sidebyside: false to skip.
 sidebyside: true
 sidebyside_frames: 300
+# Right panel mode passed to `python -m viz sidebyside --right`. "rigcam"
+# (default) renders MuJoCo through a camera built from the LEFT panel's own
+# calibration -- the rig is orthographic (verified: P[2,:3]==0 for all 7
+# cameras) so an orthographic MuJoCo camera matches it exactly, giving a
+# genuinely view-matched IK render. "reproj" draws the fitted mesh/sites as
+# reprojected POINTS (no MuJoCo render at all) -- cheaper but not what a
+# reader expects from "render the IK". "mujoco" renders the model-space
+# `track1` camera, which is NOT view-matched to the left panel and, per its
+# own help, "cannot be used to judge orientation" -- do not use it.
+sidebyside_right: rigcam
