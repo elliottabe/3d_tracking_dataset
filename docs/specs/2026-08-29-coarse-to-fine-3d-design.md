@@ -63,6 +63,52 @@ sigma/heatmap_size = 3.1% matches the COCO convention, but COCO was tuned for
 humans, whose limb segments span a large fraction of the frame. Against the
 fly's ~37 heatmap-px body length, sigma=7 is ~19% -- about 5x too wide.
 
+**CORRECTION (2026-08-30, after the Phase 2 retrains): the prescription in
+this section was WRONG. sigma=7.0 is correct and sigma=2.0 is a 6.5x
+regression.** The anatomical measurement above is right; the inference drawn
+from it does not follow.
+
+Controlled test, same dataset / sampling / augmentation, first eval at step
+1500 -- the only variable is sigma:
+
+| target sigma | val MPJPE @1500 |
+|---|---|
+| 7.0 | 28.98 px |
+| 2.0 | 86.17 px |
+
+Trained to completion, on the new leakage-free split (female =
+`2026_05_27_11_56_05`):
+
+| run | data | sigma | sampling | aug | val MPJPE | female |
+|---|---|---|---|---|---|---|
+| `v4_8gpu_20260808` | old | 7.0 | -- | default | 8.553 px | 16.524 px |
+| `v5_sigma2_bal` | new | **2.0** | balanced | heavy | **55.528 px** | 62.382 px |
+| `v5_s70_bal` | new | 7.0 | balanced | heavy | 6.448 px | 20.678 px |
+| `v5_s70_bal_augdef` | new | 7.0 | balanced | default | **5.915 px** | **14.239 px** |
+
+**Why the reasoning failed: sigma sets the optimisation basin, not the
+resolution ceiling.** This section compared sigma to the *animal* (7 px against
+a 4.6 px tarsal segment, hence "5x too wide"). But the target Gaussian's width
+determines how far a mispredicted peak can be and still receive gradient toward
+the right answer -- it does not cap how sharply the trained model can peak. The
+~3% sigma/heatmap convention is an optimisation constant, and sigma=7/224 =
+3.1% is textbook where sigma=2/224 = 0.9% is far below anything standard. At
+sigma=2 the model still learned crisp peaks (concentration 0.885, up from
+0.352) -- it just fired them **on the wrong legs**: 70.6% of its >30 px misses
+land closer to the mirror keypoint's GT than to their own. Sharpening the
+target bought peak quality and lost the correspondence that makes a peak mean
+anything.
+
+**The tarsal-resolution problem in 1.1 is real and unaffected by this.** It
+must be fixed downstream, in coarse-to-fine stage 2, not by tightening the 2D
+target. The measurement in 1.1 stands; only 1.2's remedy is withdrawn.
+
+Two consequences for what follows. First, Phase 2's sigma change is reversed
+(see below) -- the retrain is still worth doing, but for the dataset, not the
+sigma. Second, one earlier test is downgraded rather than refuted: the
+flip-augmentation A/B (72.9 vs 73.6 px) ran at sigma=2, where **both** arms
+were broken, so it was inconclusive about flip and was never rerun at sigma=7.
+
 ### 1.3 The train/val split leaks, so no prior 3D number is trustworthy
 
 The split is **within-recording and frame-level**: `general_model/<subset>/`
@@ -248,9 +294,17 @@ the two OOD recordings we are adding specifically for the female.
 
 ### Phase 2 -- ViTPose retrain with sharp targets
 
-- Target **sigma 7.0 -> 2.0** heatmap px (fixes 1.2; ~2.5 px is the anatomical
-  scale of a tarsal segment, so 2.0 is deliberately just inside it).
-- Trained on the leakage-free split (fixes 1.3 at the front-end).
+- ~~Target **sigma 7.0 -> 2.0** heatmap px (fixes 1.2; ~2.5 px is the
+  anatomical scale of a tarsal segment, so 2.0 is deliberately just inside
+  it).~~ **REVERSED 2026-08-30: sigma stays 7.0.** See the correction in 1.2 --
+  sigma=2.0 measured 55.528 px val MPJPE against sigma=7.0's 6.448 px on
+  identical data. `transforms.py` and `configs/train/vit2d.yaml` keep
+  `target_sigma: 7.0`.
+- Trained on the leakage-free split -- **this, not sigma, is what Phase 2
+  delivers.** New data at sigma=7.0 with balanced sampling and `aug=default`
+  reaches 5.915 px val MPJPE vs the shipped detector's 8.553 px (31% better),
+  and 14.239 px vs 16.524 px on the female (14% better). `aug=heavy` was
+  actively hurting the female (20.678 px) and is not used.
 - **One 8-GPU data-parallel run**, like `v4_8gpu_20260808`. This is the
   critical path and wants all 32 CPUs feeding one process's JPEG decode.
 - The sigma=7.0 control is free: `v4_8gpu_20260808` itself. Its val number is
