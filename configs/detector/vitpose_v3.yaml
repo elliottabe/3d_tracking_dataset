@@ -117,6 +117,47 @@ kp2d_filter:
   d_cutoff: 1.0
   preserve_raw_patterns: [Wing]
 
+# Per-(camera,keypoint) displacement gate: drops (zeroes the confidence of) a
+# frame whose raw 2D position hops further than that keypoint's own
+# threshold from the immediately preceding CONFIDENT frame. Targets a
+# correlated camera-majority landmark flip (WingL_V13, Session0
+# 2025_10_20_13_20_04 bout 28: alternates between two real-but-wrong visible
+# wing structures at conf 0.91-0.94) that conf_thresh/view_conf_thresh
+# (both candidates score high), reproj_resid_px (the majority IS wrong, so
+# there's no minority view to reject) and kp2d_filter (1-Euro's speed
+# adaptivity reads the jump as fast real motion) all measurably fail to
+# catch. See jarvis_jax.tracking.kp2d_displacement_gate's module docstring
+# and .superpowers/sdd/2026-08-29-coarse-to-fine-3d/displacement-gate.md.
+#
+# LIMITATION (read before enabling on a new bout/rig): this is a
+# magnitude-only gate. It suppresses the artifact only because ITS hop
+# (measured 120-330px) exceeds this bout's largest confirmed real wing
+# displacement (~130px) -- a motion-energy check run alongside this
+# measurement does NOT separate real vs. artifact jumps at matched
+# displacement (AUC 0.473, chance). A same-pixel-scale confusion on a
+# different bout/keypoint would pass straight through. Validated on ONE
+# bout, ONE fly's ground truth: 82.5% artifact suppression, 100.0%
+# real-motion preservation across 5 confirmed real windows. Default-off.
+kp2d_displacement_gate:
+  enabled: false
+  # Fallback threshold (px) for any keypoint not listed below. Derived from
+  # fly1 (male)'s own bout-28 frame-to-frame displacement distribution
+  # (p99.5, pooled over confident/consecutive frames, all 7 cameras) x1.2
+  # safety margin, floored at 40px -- see displacement-gate.md for the full
+  # per-keypoint table and derivation. 46/50 keypoints land on this floor;
+  # only wing tips and the fastest distal-tarsus points need a higher value.
+  default_px: 40.0
+  per_keypoint_px:
+    WingL_V12: 188.5
+    WingL_V13: 152.4     # the calibration keypoint (p99.5=127.0px, matches
+                          # wing-gating.md's independently-measured ~130px
+                          # real-motion ceiling almost exactly)
+    WingR_V13: 64.7
+    T1R_TaT3: 45.3
+    T1R_TaTip: 77.6
+    T2L_TaTip: 60.9
+    T2R_TaTip: 59.2
+
 # Dilate the distractor-fly mask (px) before gray-filling it out of the crop,
 # and dilate the target mask by the same amount when excluding it so the
 # target's own limbs are never filled. A SAM3 mask is the BODY silhouette: the

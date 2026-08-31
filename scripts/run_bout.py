@@ -976,6 +976,35 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
         # every downstream stage are consistently in cfg.model.KP_NAMES order.
         kp2d, conf = reorder_detector_to_model(
             kp2d, conf, list(cfg.detector.kp_names), list(cfg.model.KP_NAMES))
+        # Optional per-(camera,keypoint) displacement gate: drops (zeroes the
+        # confidence of) a frame whose 2D position hops further than that
+        # keypoint's own threshold from the immediately preceding frame.
+        # Targets a correlated majority-flip artifact (WingL_V13, Session0
+        # bout 28: a landmark alternating between two real-but-wrong visible
+        # structures at high confidence, camera majority flipping frame to
+        # frame) that confidence gating, multi-view consensus, and 1-Euro
+        # smoothing all measurably fail to catch -- see
+        # jarvis_jax.tracking.kp2d_displacement_gate's module docstring and
+        # .superpowers/sdd/2026-08-29-coarse-to-fine-3d/displacement-gate.md.
+        # Applied BEFORE kp2d_filter (raw detector signal, post-reorder):
+        # thresholds were derived from RAW frame-to-frame displacement, and a
+        # smoothed signal would systematically under-trigger it. Default-off,
+        # magnitude-only -- read the module docstring's LIMITATION before
+        # enabling on a new bout/camera rig.
+        _dg = cfg.detector.get("kp2d_displacement_gate", None)
+        if _dg is not None and bool(_dg.get("enabled", False)):
+            from jarvis_jax.tracking.kp2d_displacement_gate import displacement_gate_kp2d
+            _conf_before = conf
+            conf = displacement_gate_kp2d(
+                kp2d, conf, list(cfg.model.KP_NAMES),
+                default_px=float(_dg.get("default_px", 40.0)),
+                per_keypoint_px=dict(_dg.get("per_keypoint_px", {}) or {}),
+                conf_thresh=float(cfg.detector.conf_thresh))
+            _n_dropped = int(((_conf_before >= float(cfg.detector.conf_thresh))
+                              & (conf < float(cfg.detector.conf_thresh))).sum())
+            print(f"[displacement-gate] bout {bout_idx} fly{fly}: dropped "
+                  f"{_n_dropped} (frame,camera,keypoint) views exceeding their "
+                  f"displacement threshold")
         # Optional per-camera 1-Euro 2D smoothing (kills ViTPose soft-argmax
         # high-freq wobble at the source, before triangulation). Applied in
         # MODEL kp order (post-reorder) so preserve_raw_patterns match KP_NAMES.
