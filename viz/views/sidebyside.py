@@ -75,6 +75,67 @@ _MASK_FILL = (180, 120, 60)        # BGR fill for the SAM mask overlay
 _MESH_COLOR = (170, 170, 170)      # BGR: reprojected fitted mesh cloud
 _FIT_COLOR = (90, 220, 90)         # BGR: fitted 3D sites + their chains
 
+# Measured-vs-fitted marker colors, used by the multi-view draw_right committed
+# in 9a13b23. They were only ever defined in an uncommitted working-tree hunk,
+# so HEAD raised NameError on any --views render; defining them here makes the
+# committed multi-view path self-contained.
+_MEAS_WING = (255, 0, 255)         # magenta: measured wing keypoint
+_FIT_WING = (0, 255, 255)          # yellow:  fitted   wing marker
+_MEAS_OTHER = (200, 120, 60)       # dim blue-grey: measured, non-wing
+_FIT_OTHER = (120, 200, 120)       # dim green:     fitted,   non-wing
+
+# --verify overlay on the LEFT (video) panel: a three-level check in one frame.
+# 2D identity/anatomy (are the named landmarks on the right body parts, and is
+# left/right cleanly separated?) plus 3D consistency (does triangulated kp3d
+# reproject onto its own detections?). BGR, so these really are blue/orange.
+_VER_L = (255, 120, 0)             # BLUE   : a LEFT-side keypoint
+_VER_R = (0, 180, 255)             # ORANGE : a RIGHT-side keypoint
+_VER_MID = (220, 220, 220)         # grey   : midline / unsided
+_VER_KP3D = (255, 0, 255)          # magenta cross: measured kp3d reprojected
+# Sparse labels: the landmarks that would expose a keypoint-ORDER scramble
+# (eyes on legs) or a LEFT/RIGHT swap. Labelling all 50 is unreadable.
+_VER_LABELS = {"Antenna_Base": "ANT", "EyeL": "EyeL", "EyeR": "EyeR",
+               "WingL_base": "WgL", "WingR_base": "WgR", "Abd_tip": "ABDtip",
+               "T1L_TaTip": "T1L", "T1R_TaTip": "T1R",
+               "T3L_TaTip": "T3L", "T3R_TaTip": "T3R"}
+
+
+def _ver_side_color(name):
+    if name.startswith(("T1L", "T2L", "T3L", "WingL", "EyeL")):
+        return _VER_L
+    if name.startswith(("T1R", "T2R", "T3R", "WingR", "EyeR")):
+        return _VER_R
+    return _VER_MID
+
+
+def _draw_verify(bgr, uv, meas_uv, kp_names):
+    """LEFT-panel verification overlay: L/R-coloured detections, magenta
+    crosses for reprojected measured kp3d, sparse anatomy labels.
+
+    The gap between a coloured dot and its magenta cross is the TRIANGULATION
+    residual for that keypoint in this camera (male median ~2 px). Blue and
+    orange interleaved on one flank means a left/right swap; a label sitting on
+    the wrong body part means the detector keypoint ORDER is wrong. Neither is
+    visible to any metric in qc.json -- reorder_detector_to_model depends on the
+    checkpoint's training order, so swapping checkpoints can silently scramble
+    anatomy, and this overlay is the gate for that.
+    """
+    for i, n in enumerate(kp_names):
+        if not np.isfinite(uv[i]).all():
+            continue
+        col = _ver_side_color(n)
+        cv2.circle(bgr, (int(uv[i][0]), int(uv[i][1])), 4, col, -1)
+        if meas_uv is not None and np.isfinite(meas_uv[i]).all():
+            cv2.drawMarker(bgr, (int(meas_uv[i][0]), int(meas_uv[i][1])),
+                           _VER_KP3D, cv2.MARKER_CROSS, 9, 1)
+        lab = _VER_LABELS.get(n)
+        if lab:
+            cv2.putText(bgr, lab, (int(uv[i][0]) + 6, int(uv[i][1]) - 6),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, col, 1)
+
+
+
+
 
 def _compose_cfg():
     """Re-compose the raw `pipeline` DictConfig, needed only for
@@ -327,6 +388,12 @@ def run(args):
         for grp, color in _GROUP_COLORS.items():
             if groups[grp]:
                 overlays.draw_points(bgr, uv[groups[grp]], color, radius=2)
+        if verify and kp_names is not None:
+            meas_uv = None
+            if rig.get("meas") is not None and t < len(rig["meas"]):
+                meas_uv = reproject.project(rig["cam_mat"],
+                                            np.nan_to_num(rig["meas"][t]))
+            _draw_verify(bgr, uv, meas_uv, kp_names)
         crop = bgr[cy0:cy1, cx0:cx1]
         return cv2.resize(crop, (left_w, panel_h))
 
@@ -502,7 +569,8 @@ def _build_multiview_rig(cam_name, cam_mats, cam_names, cfg, kp_names, wing_idx,
 
 
 def _make_multiview_drawers(cam_idx, rig, mk, mv, kp2d, conf2d, edges, groups,
-                            conf_thr, panel_h, W, H, T0, N):
+                            conf_thr, panel_h, W, H, T0, N,
+                            kp_names=None, verify=False):
     """Crop window + (draw_left, draw_right) closures for ONE row/camera of a
     multi-view render. Same crop-window and drawing logic as run()'s
     _draw_left / _draw_right_rigcam, generalized over an explicit camera
@@ -715,7 +783,9 @@ def _run_multiview(args, views_arg):
         rig = _build_multiview_rig(cam_name, cam_mats, cam_names, cfg, kp_names, wing_idx,
                                    rig_world, rig_meas, rig_qpos, W, H)
         drawers.append(_make_multiview_drawers(cam_idx, rig, mk, mv, kp2d, conf2d, edges,
-                                               groups, conf_thr, panel_h, W, H, T0, N))
+                                               groups, conf_thr, panel_h, W, H, T0, N,
+                                               kp_names=kp_names,
+                                               verify=bool(getattr(args, "verify", False))))
         print(f"[sidebyside] row {role}: {rigviews.format_view_label(role, rv)}")
 
     out_path = args.out or f"sidebyside_mv_bout{bout}_fly{fly}.mp4"

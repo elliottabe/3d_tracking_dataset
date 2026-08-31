@@ -10,7 +10,22 @@
 # 41% better when they are apart); 92% of the frames it loses are
 # close-interaction. Cause is the JAX port omitting JARVIS's distractor-fly
 # RGB gray-fill, not this checkpoint.
-ckpt: ${paths.vit_runs_root}/v4_8gpu_20260808/final
+# 2026-08-31: SWITCHED v4_8gpu_20260808 -> v5_s70_bal_augdef_full.
+# Trained on red_data_3d_v5 (the leakage-free rebuild: 26 recordings, frame-level
+# split audited on BOTH the same-frame and cross-fly checks, 100% mask coverage),
+# at target_sigma=7.0 with balanced sampling on sex (alpha=0.7) and aug=default.
+# Val MPJPE 5.915 px vs v4's 8.553 px = 31% better overall, and 14.239 vs 16.524
+# on the FEMALE (the hard fly). aug=heavy was measurably worse for her
+# (20.678 px) and is deliberately not used.
+# Keypoint order is UNCHANGED by this swap -- verified, not assumed:
+# red_data_3d_v5/annotations/keypoint_names.json is identical to the kp_names
+# list below, so reorder_detector_to_model needs no change. v4 could not be
+# checked this way at all (red_data_unified_V4 ships no keypoint_names.json), so
+# verify_detector_kp_order only WARNS on it and VERIFIES on v5 -- the swap makes
+# the order machine-checkable for the first time.
+# The v4 provenance above is retained: its distractor-fly overlap weakness is a
+# JAX-port gray-fill gap, not a checkpoint property, so it may still apply here.
+ckpt: ${paths.vit_runs_root}/v5_s70_bal_augdef_full/final
 num_keypoints: 50
 crop: 448
 heatmap_size: 224

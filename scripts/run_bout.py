@@ -50,7 +50,8 @@ from jarvis_jax.tracking.resume import (
     atomic_save_npz, atomic_save_json, stage_done, mark_done, bout_complete)
 from jarvis_jax.tracking.bout_masks import load_bout_masks, check_bout_camera_order
 from jarvis_jax.tracking.predict_2d import (
-    load_detector, predict_bout_2d, reorder_detector_to_model)
+    load_detector, predict_bout_2d, reorder_detector_to_model,
+    verify_detector_kp_order)
 from jarvis_jax.tracking.triangulate import (triangulate_keypoints,
                                              view_median_conf)
 from jarvis_jax.tracking.filter import filter_bout_kp3d
@@ -961,6 +962,10 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
             _distractor = _other["masks"]
             print(f"[gray-fill] bout {bout_idx} fly{fly}: using fly{1 - fly} masks "
                   f"as distractor ({int(_other['valid'].sum())} valid views)")
+        # cfg.detector.kp_names is an ASSERTION about this checkpoint's channel
+        # order; a wrong one permutes every keypoint silently (residuals stay
+        # plausible). Check it against the checkpoint's own training order first.
+        verify_detector_kp_order(cfg.detector.ckpt, list(cfg.detector.kp_names))
         vit = load_detector(cfg.detector.ckpt, num_keypoints=int(cfg.detector.num_keypoints))
         kp2d, conf = predict_bout_2d(
             vit, _frames_iter(), masks_dict["masks"], centroids, masks_dict["valid"], cam_mats,

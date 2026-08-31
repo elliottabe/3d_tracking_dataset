@@ -116,6 +116,11 @@ def build_parser():
                         "MUST match the session being rendered: the right panel is built "
                         "from these camera poses.")
     s.add_argument("--conf", type=float, default=0.3, help="2D keypoint confidence threshold")
+    s.add_argument("--verify", action="store_true",
+                   help="LEFT panel: three-level verification overlay -- detections coloured "
+                        "BLUE=left / ORANGE=right, magenta crosses for reprojected measured kp3d, "
+                        "and sparse anatomy labels. Catches keypoint-order scrambles and left/right "
+                        "swaps, which no qc.json metric can see. Multi-view (--views) only.")
     s.add_argument("--panel-h", dest="panel_h", type=int, default=480)
     s.add_argument("--fps", type=int, default=30); s.add_argument("--out", default=None)
     s.add_argument("--session-dir", dest="session_dir", default=None,

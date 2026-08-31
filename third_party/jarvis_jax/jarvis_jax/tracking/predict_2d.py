@@ -64,6 +64,99 @@ def reorder_detector_to_model(kp2d, conf, detector_kp_names, model_kp_names):
     return kp2d[..., perm, :], conf[..., perm]
 
 
+class DetectorOrderMismatch(ValueError):
+    """A checkpoint's recorded training keypoint order disagrees with the order
+    the config declares it emits."""
+
+
+def _training_kp_names_for_ckpt(ckpt_path):
+    """Recover the keypoint order a detector checkpoint was TRAINED on.
+
+    `cfg.detector.kp_names` is a hand-maintained assertion about what channel
+    order a checkpoint emits. Nothing checked it, and a wrong assertion
+    scrambles anatomy silently: reorder_detector_to_model is name-based, so a
+    mislabelled channel list permutes every keypoint into the wrong slot while
+    residuals, NaN counts and IoU all stay plausible. This is the same failure
+    class as the historical keypoint-order bug that LOO/IoU was blind to.
+
+    Resolution chain, all on-disk artifacts:
+        <ckpt>/..            -> the run directory (ckpt is <run>/final)
+        <run>/.hydra/overrides.yaml -> paths.data_root
+        <data_root>/annotations/keypoint_names.json -> the true training order
+
+    Returns the name list, or None when the chain cannot be resolved (older
+    runs predate `keypoint_names.json`; red_data_unified_V4 has none).
+    """
+    import json
+    import os
+    run_dir = os.path.dirname(os.path.normpath(str(ckpt_path)))
+    ov = os.path.join(run_dir, ".hydra", "overrides.yaml")
+    if not os.path.exists(ov):
+        return None
+    data_root = None
+    with open(ov) as f:
+        for line in f:
+            line = line.strip().lstrip("- ").strip()
+            if line.startswith("paths.data_root="):
+                data_root = line.split("=", 1)[1].strip()
+    if not data_root:
+        return None
+    names_path = os.path.join(data_root, "annotations", "keypoint_names.json")
+    if not os.path.exists(names_path):
+        return None
+    with open(names_path) as f:
+        d = json.load(f)
+    if isinstance(d, dict):
+        d = d.get("keypoint_names") or d.get("names") or next(iter(d.values()))
+    return list(d)
+
+
+def verify_detector_kp_order(ckpt_path, declared_kp_names, *, strict=True):
+    """Check `declared_kp_names` against the checkpoint's own training order.
+
+    Raises DetectorOrderMismatch when the two disagree -- that is a silent
+    anatomy scramble, so it must stop the run rather than warn. Returns the
+    recovered training order on success.
+
+    When the checkpoint predates `annotations/keypoint_names.json` the order
+    cannot be verified from artifacts; that WARNS rather than raises, because
+    refusing to run on an old-but-known-good checkpoint would be worse than
+    the risk it carries. `strict=False` downgrades a real mismatch to a warning
+    too -- for tooling that deliberately inspects a mismatched pair.
+    """
+    import warnings
+    trained = _training_kp_names_for_ckpt(ckpt_path)
+    declared = list(declared_kp_names)
+    if trained is None:
+        warnings.warn(
+            f"detector keypoint order UNVERIFIED for {ckpt_path}: no "
+            f"annotations/keypoint_names.json reachable via its "
+            f".hydra/overrides.yaml. Trusting cfg.detector.kp_names "
+            f"({len(declared)} names) on faith.", UserWarning, stacklevel=2)
+        return None
+    if trained == declared:
+        return trained
+    if set(trained) == set(declared):
+        first = next(i for i, (a, b) in enumerate(zip(trained, declared)) if a != b)
+        detail = (f"same {len(trained)} landmarks, PERMUTED: first disagreement at "
+                  f"channel {first} (trained {trained[first]!r} vs declared "
+                  f"{declared[first]!r})")
+    else:
+        detail = (f"different landmark sets: only in training "
+                  f"{sorted(set(trained) - set(declared))[:5]}; only in config "
+                  f"{sorted(set(declared) - set(trained))[:5]}")
+    msg = (f"detector keypoint order MISMATCH for {ckpt_path}: {detail}. "
+           f"cfg.detector.kp_names does not describe this checkpoint, so "
+           f"reorder_detector_to_model would permute every keypoint into the "
+           f"wrong slot and the error would be invisible to residual/NaN/IoU "
+           f"checks. Fix cfg.detector.kp_names to the checkpoint's training "
+           f"order before running.")
+    if strict:
+        raise DetectorOrderMismatch(msg)
+    warnings.warn(msg, UserWarning, stacklevel=2)
+    return trained
+
+
 def peaks_and_conf(hm, *, decode_sharpen=1.0):
     """hm (B,Hh,Wh,K) logits -> (kp2d_crop (B,K,2) in 448px, conf (B,K) peak value).
     decode_sharpen>1 sharpens the soft-argmax centroid (kills high-freq wobble
