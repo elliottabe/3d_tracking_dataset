@@ -103,6 +103,14 @@ def build_parser():
                         "'reproj' draws the fitted mesh/sites reprojected as points (no "
                         "MuJoCo); 'mujoco' renders the model-space track1 camera, which is "
                         "NOT view-matched and cannot be used to judge orientation")
+    s.add_argument("--views", default=None,
+                   help="opt-in MULTI-VIEW mode: comma-separated roles and/or explicit "
+                        "camera names, e.g. 'left,top,right' -- one output ROW per entry, "
+                        "each its own [video+SAM+2D | view-matched MuJoCo rigcam] built from "
+                        "THAT camera's own calibration. Roles are derived from the rig "
+                        "geometry (viz.core.rigviews), never hardcoded per session. Default "
+                        "(omitted) is the single-view behaviour above, unchanged. Requires "
+                        "--right rigcam (the only view-matched multi-camera mode).")
     s.add_argument("--calib-dir", dest="calib_dir", default=None,
                    help="camera calibration dir (default: <session-dir>/calibration). "
                         "MUST match the session being rendered: the right panel is built "
