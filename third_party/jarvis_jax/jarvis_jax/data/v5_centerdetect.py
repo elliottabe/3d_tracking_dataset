@@ -8,8 +8,8 @@ dataset row here is one FULL FRAME (resized to a square, matching JARVIS's
 own ``Dataset2D(mode='CenterDetect')`` -- see
 ``third_party/JARVIS-HybridNet/jarvis/dataset/dataset2D.py::_build_augpipe``,
 which does ``iaa.Resize(IMAGE_SIZE)``, i.e. an aspect-distorting resize to a
-SQUARE target, not a crop), carrying the (0, 1, or 2) animal centers present
-in that frame -- never a single annotation.
+SQUARE target, not a crop), carrying the (1 or 2) animal centers present
+in that frame -- zero-annotation images are excluded entirely (see below).
 
 Center = the annotation's own bbox center (``bbox[0]+bbox[2]/2``,
 ``bbox[1]+bbox[3]/2``), the same convention JARVIS's
@@ -19,6 +19,29 @@ locations are directly comparable to the PyTorch baseline's.
 K_MAX=2 is an assumption about this data (courtship = 2 flies, free-running
 = 1), not a general multi-animal cap -- checked (not assumed) at construction
 time; a 3rd annotation on one image raises rather than silently truncating.
+
+**Zero-annotation images are EXCLUDED, not treated as background negatives.**
+``red_data_3d_v5``'s own image count (22,449 train / 1,729 val) is larger
+than its annotated-image count (22,040 / 1,690) by 409 / 39 images that
+carry media but no annotation. An earlier version of this module read that
+gap as "pure background frames" and kept them as `num_flies=="0"` training
+rows -- WRONG: they are unannotated, not empty. Three were rendered and
+inspected (`figures/2026-08-31-zerofly/zero_annotation_frames.png`); all
+three show a plainly visible, unambiguous fly. The likely upstream cause is
+the v5 builder's ``MIN_CAMS=3`` rule (a frameset with fewer than 3
+resolvable per-camera annotations is dropped) leaving `link_media` having
+already linked that frameset's images. Keeping them as negatives would
+train the model to predict NOTHING on frames that contain a fly -- exactly
+the collapse this whole task exists to fix, and worse than not balancing at
+all (measured: at alpha=0.5 they got a 5.49x sampling boost). This is a
+DATASET defect, not a CenterDetect-specific one: every PER-ANNOTATION
+consumer (``V5Dataset``/keypoint training) is silently unaffected by it
+(zero-annotation images are simply invisible to a per-annotation iterator),
+but any OTHER per-image consumer built against this root will hit the same
+trap. ``__init__`` asserts/warns loudly (naming the count) rather than
+silently excluding, so a future change to the source data that legitimately
+introduces verified-empty frames does not silently reintroduce this exact
+mistake unnoticed.
 
 Sex resolution reuses ``jarvis_jax.data.v5_2d._resolve_sex`` UNCHANGED (see
 that module's docstring for the fallback chain and why the raw per-annotation
@@ -82,28 +105,22 @@ class V5CenterDetectDataset:
         self.img_wh = []          # (w, h) original
         self.centers = []         # list[np.ndarray (n_i, 2)] full-image px
         self.sexes = []           # list[list[str]] aligned with centers, len n_i
-        self.num_flies = []       # str per image, for balanced_weights(key="num_flies")
-        # Iterate every IMAGE, not just annotated ones: real_data_3d_v5's own
-        # headline counts (22,449 train / 1,729 val images vs. 23,527 /
-        # 1,871 annotations) include images with ZERO fly annotations (409
-        # train / 39 val, measured) -- pure-background frames. Dropping them
-        # would silently undercount against the task's own stated split
-        # sizes AND remove the background-only supervision JARVIS's own
-        # ``Dataset2D._get_item_center`` explicitly keeps (its
-        # ``has_valid=False`` dummy-center branch) -- a real frame with no
-        # fly is a real "predict nothing here" training signal, not nothing.
-        # ``num_flies=="0"`` becomes its own (small, ~1.8%) class for
-        # ``balanced_weights`` -- not requested by the task's "1 vs 2"
-        # framing, but a natural byproduct of NOT dropping real data: with
-        # ``key="num_flies"`` it is simply a third minority class alongside
-        # "2", both boosted relative to the majority "1" -- harmless to, and
-        # does not compete with, the actual 1-vs-2 balancing this task asks
-        # for.
+        self.num_flies = []       # str per image ("1"/"2"), for balanced_weights
+        self.n_dropped_zero_ann = 0   # images with media but NO annotation -- see below
+        # Iterate every IMAGE, but EXCLUDE zero-annotation ones (module
+        # docstring: they are unannotated, not empty -- keeping them as
+        # `num_flies=="0"` negatives was measured to train the model to
+        # predict nothing on frames that DO contain a fly). Loud, not
+        # silent: warn naming the count, so a future change to the source
+        # data cannot silently reintroduce this as an unnoticed regression.
         for image_id, im in id2img.items():
             anns = by_image.get(image_id, [])
             fn = im["file_name"]
             if recordings is not None and not any(
                     fn.startswith(r + "/") for r in recordings):
+                continue
+            if len(anns) == 0:
+                self.n_dropped_zero_ann += 1
                 continue
             if len(anns) > K_MAX:
                 raise ValueError(
@@ -126,6 +143,18 @@ class V5CenterDetectDataset:
             self.centers.append(np.asarray(ctrs, dtype=np.float64).reshape(-1, 2))
             self.sexes.append(sexes)
             self.num_flies.append(str(len(anns)))
+
+        if self.n_dropped_zero_ann:
+            import warnings
+            warnings.warn(
+                f"V5CenterDetectDataset({split!r}): dropped "
+                f"{self.n_dropped_zero_ann} image(s) with media but ZERO "
+                "annotations (unannotated, not verified-empty -- see module "
+                "docstring). Excluded from the dataset entirely, not kept "
+                "as background negatives.", stacklevel=2)
+            print(f"[V5CenterDetectDataset:{split}] WARNING: excluded "
+                  f"{self.n_dropped_zero_ann} zero-annotation image(s) "
+                  "(unannotated, not empty -- not used as negatives)")
 
     def __len__(self):
         return len(self.file_names)

@@ -59,6 +59,38 @@ def _make_fixture(tmp_path):
     return str(root)
 
 
+def _make_fixture_with_zero_ann(tmp_path):
+    """Same as `_make_fixture` plus a THIRD image (recC) that has media but
+    ZERO annotations -- the label-defect case (unannotated, not verified
+    empty) this dataset must exclude rather than treat as a background
+    negative."""
+    root = _make_fixture(tmp_path)
+    (root_p := __import__("pathlib").Path(root))
+    (root_p / "images" / "recC" / "cam1").mkdir(parents=True)
+    Image.new("RGB", (200, 100), (70, 80, 90)).save(
+        root_p / "images" / "recC" / "cam1" / "Frame_0.jpg")
+    for split in ("train", "val"):
+        ann_path = root_p / "annotations" / f"instances_{split}.json"
+        coco = json.load(open(ann_path))
+        coco["images"].append({"id": 2, "width": 200, "height": 100,
+                               "recording": "recC",
+                               "file_name": "recC/cam1/Frame_0.jpg"})
+        # deliberately NO annotation added for image id 2
+        json.dump(coco, open(ann_path, "w"))
+    return root
+
+
+def test_zero_annotation_images_are_excluded_not_kept_as_negatives(tmp_path):
+    root = _make_fixture_with_zero_ann(tmp_path)
+    with pytest.warns(UserWarning, match="dropped"):
+        ds = V5CenterDetectDataset(root, "train")
+    assert ds.n_dropped_zero_ann == 1
+    assert "recC/cam1/Frame_0.jpg" not in ds.file_names
+    assert len(ds) == 2                        # still just the 2 real (1-fly, 2-fly) images
+    assert set(ds.num_flies) == {"1", "2"}      # never "0"
+    assert ds.class_counts(key="num_flies") == {"1": 1, "2": 1}
+
+
 def test_groups_by_image_not_by_annotation(tmp_path):
     root = _make_fixture(tmp_path)
     ds = V5CenterDetectDataset(root, "train")
