@@ -235,3 +235,5 @@ third_party/jarvis_jax/jarvis_jax/convert/reproject_fixture.npz
 # scripts/viz/*), and heavy, so kept out of the repo.
 docs/benchmark/
 docs/qc/
+
+slurm_logs/
