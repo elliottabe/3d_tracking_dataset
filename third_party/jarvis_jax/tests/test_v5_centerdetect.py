@@ -97,6 +97,7 @@ def test_groups_by_image_not_by_annotation(tmp_path):
     assert len(ds) == 2                       # 2 IMAGES, not 3 annotations
     assert sorted(ds.num_flies) == ["1", "2"]
     assert ds.two_fly_indices() == [ds.num_flies.index("2")]
+    assert ds.single_fly_indices() == [ds.num_flies.index("1")]
 
 
 def test_getitem_shapes_and_resize(tmp_path):

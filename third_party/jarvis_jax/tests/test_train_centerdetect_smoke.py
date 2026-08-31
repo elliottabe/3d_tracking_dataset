@@ -73,3 +73,20 @@ def test_run_training_one_epoch_smoke(tmp_path):
 
     summary = json.load(open(os.path.join(run_dir, "summary.json")))
     assert summary["best_epoch"]["epoch"] == 1
+
+
+def test_run_training_with_copy_paste_smoke(tmp_path):
+    """Wiring smoke test for the optional copy-paste-synthesis path (masks
+    are absent in this fixture -- `_load_mask` degrades to an all-zero/
+    all-transparent sprite rather than raising, so this proves
+    `run_training(copy_paste_p=...)` runs end to end and reports the new
+    false-positive metrics, not that the pasted content looks like a fly)."""
+    root = _make_fixture(tmp_path)
+    run_dir = tmp_path / "run_cp"
+    metrics = run_training(root, str(run_dir), epochs=1, batch_size=2,
+                           num_workers=1, seed=0, copy_paste_p=1.0)
+    assert len(metrics) == 1
+    m = metrics[0]
+    assert "fp_rate_ratio_ge_0.5" in m
+    assert m["n_single_fly_val"] == 0   # this fixture's val split is all two-fly
+    assert np.isnan(m["fp_conf1_mean"])  # no single-fly val rows -- nan, not a crash

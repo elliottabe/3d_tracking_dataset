@@ -169,6 +169,15 @@ class V5CenterDetectDataset:
         two-peak-rate evaluation set."""
         return [i for i, n in enumerate(self.num_flies) if n == "2"]
 
+    def single_fly_indices(self):
+        """Row indices with exactly 1 valid instance -- the held-out-val
+        FALSE-POSITIVE (spurious second peak) evaluation set: a model that
+        has learned to always emit two confident peaks would show up here,
+        not in ``two_fly_indices()`` (see the copy-paste-synthesis task
+        brief's acceptance criterion 2 -- a two-peak-rate gain bought with
+        single-fly false positives is not a gain)."""
+        return [i for i, n in enumerate(self.num_flies) if n == "1"]
+
     def __getitem__(self, i):
         fn = self.file_names[i]
         img_w, img_h = self.img_wh[i]

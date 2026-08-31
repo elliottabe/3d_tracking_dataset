@@ -21,14 +21,37 @@ Per-epoch (NOT per-loss-step) two-peak-rate evaluation on the held-out
 labelled two-fly val frames is the acceptance signal this script reports --
 loss alone hid the PyTorch retrain's epoch-10-vs-epoch-40 degradation (see
 the phase-b report), so this script evaluates and CHECKPOINTS every epoch
-specifically so that curve stays visible.
+specifically so that curve stays visible. It ALSO evaluates, every epoch, a
+single-fly-frame FALSE-POSITIVE rate (spurious second peak) -- the risk the
+two-peak metric alone cannot see: training heavily on two-fly frames can
+teach the model to always emit two confident peaks, hallucinating a second
+fly where there is one. Both curves land in the same ``metrics.json``.
+
+Optional 4th modification, OFF BY DEFAULT (``--copy-paste-p 0.0``, this
+file's original behaviour when the flag is omitted -- see
+``.superpowers/sdd/2026-08-29-coarse-to-fine-3d/centerdetect-copypaste.md``):
+copy-paste synthesis of two-fly TRAIN frames
+(``jarvis_jax.data.copy_paste.CopyPasteCenterDetectDataset``) -- cuts a fly
+out along its own SAM mask from a single-fly image and pastes it into
+ANOTHER single-fly image on the SAME camera, at a sampled separation, to
+break the 6.7%-two-fly-images data bottleneck that oversampling alone
+cannot fix (oversampling only reweights the SAME 1,487 real two-fly images,
+adding no pose/position/separation diversity). Applied to the TRAIN dataset
+ONLY -- val is always the plain, unwrapped ``V5CenterDetectDataset``, so the
+acceptance metrics above are always measured on real frames.
 
 CLI:
     python -m jarvis_jax.scripts.train_centerdetect \\
         --root /gscratch/portia/eabe/data/Johnson_lab/red_data/red_data_3d_v5_valfix \\
         --run-dir /gscratch/portia/eabe/data/Johnson_lab/jax_centerdetect_runs/<run_id> \\
         --epochs 30 --batch-size 32 \\
-        --warm-start-pth .../fly50_V6/models/CenterDetect/Run_20260810-094955/EfficientTrack-medium_final.pth
+        --warm-start-pth .../fly50_V6/models/CenterDetect/Run_20260810-094955/EfficientTrack-medium_final.pth \\
+        [--copy-paste-p 0.3]
+
+    # Render N composites to <dump-dir> and exit WITHOUT training (visual
+    # verification path -- see the copy-paste task brief):
+    python -m jarvis_jax.scripts.train_centerdetect --root ... --run-dir /tmp/unused \\
+        --copy-paste-p 1.0 --dump-samples 12 --dump-dir figures/2026-08-31-copypaste/grid
 """
 from __future__ import annotations
 
@@ -209,10 +232,75 @@ def eval_two_peak_rate(model, val_ds, two_fly_idx, *, batch_size=16,
     }
 
 
+def eval_single_fly_false_positive(model, val_ds, single_fly_idx, *, batch_size=16,
+                                   suppression_radius=SUPPRESSION_RADIUS,
+                                   conf_ratio_thresholds=(0.25, 0.5, 0.75)):
+    """False-positive (spurious second peak) rate on the held-out labelled
+    SINGLE-fly val frames -- the risk ``eval_two_peak_rate`` cannot see
+    (see module docstring / the copy-paste-synthesis task brief's
+    acceptance criterion 2): training heavily on two-fly frames can teach
+    the model to always emit two confident peaks, hallucinating a second
+    fly where there is only one. A two-peak-rate gain bought with
+    single-fly false positives is not a real gain -- the production
+    pipeline would triangulate a phantom animal.
+
+    Decodes top-2 peaks exactly like ``eval_two_peak_rate`` (same scale,
+    same ``suppression_radius``). ``conf1`` is the peak nearest the single
+    GT fly (should be a hit almost always); ``conf2`` is the OTHER peak --
+    on a genuinely single-fly frame conf2 should be low. Reports, for each
+    threshold `t` in `conf_ratio_thresholds`, the fraction of frames where
+    ``conf2 / max(conf1, eps) >= t`` (a peak nearly as confident as the
+    real fly's own peak), plus the raw conf2/conf1 distribution -- "their
+    confidence relative to the true peak" per the task brief.
+    """
+    import jax.numpy as jnp
+    from jarvis_jax.data.device import IMAGENET_MEAN_J, IMAGENET_STD_J
+    from jarvis_jax.eval.centerdetect_decode import extract_top_k_peaks, peaks_to_full_image
+
+    model.eval()
+    conf1s, conf2s = [], []
+    for i0 in range(0, len(single_fly_idx), batch_size):
+        idxs = single_fly_idx[i0:i0 + batch_size]
+        imgs, centers, valid = zip(*(val_ds[i] for i in idxs))
+        img_u8 = jnp.asarray(np.stack(imgs))
+        img = (img_u8.astype(jnp.float32) / 255.0 - IMAGENET_MEAN_J) / IMAGENET_STD_J
+        _, res2 = model.forward_both(img)
+        peaks_hm, conf = extract_top_k_peaks(np.asarray(res2), k=2,
+                                             suppression_radius=suppression_radius)
+        for b, i in enumerate(idxs):
+            img_w, img_h = val_ds.img_wh[i]
+            peaks_full = peaks_to_full_image(peaks_hm[b:b + 1], heatmap_size=OUT2,
+                                             img_w=img_w, img_h=img_h)[0]
+            gt = val_ds.centers[i][0]                        # (2,) the ONE real fly
+            d = np.linalg.norm(peaks_full - gt[None, :], axis=-1)
+            nearest = int(np.argmin(d))
+            other = 1 - nearest
+            conf1s.append(float(conf[b, nearest]))
+            conf2s.append(float(conf[b, other]))
+
+    conf1s = np.asarray(conf1s, dtype=np.float64)
+    conf2s = np.asarray(conf2s, dtype=np.float64)
+    ratio = conf2s / np.maximum(conf1s, 1e-6)
+    out = {
+        "n_frames": int(len(conf1s)),
+        "conf1_mean": float(conf1s.mean()) if len(conf1s) else float("nan"),
+        "conf2_mean": float(conf2s.mean()) if len(conf2s) else float("nan"),
+        "conf2_median": float(np.median(conf2s)) if len(conf2s) else float("nan"),
+        "conf_ratio_mean": float(ratio.mean()) if len(ratio) else float("nan"),
+        "conf_ratio_median": float(np.median(ratio)) if len(ratio) else float("nan"),
+    }
+    for t in conf_ratio_thresholds:
+        key = f"fp_rate_ratio_ge_{t:g}"
+        out[key] = float((ratio >= t).mean()) if len(ratio) else float("nan")
+    return out
+
+
 def run_training(root, run_dir, *, epochs=30, batch_size=32, lr=3e-4,
                  bg_weight=0.1, seed=0, num_workers=8, warm_start_pth=None,
                  balance_alpha=0.5, max_repeat=20.0, image_size=IMAGE_SIZE,
-                 log_every=50):
+                 log_every=50, copy_paste_p=0.0, copy_paste_sep_low=None,
+                 copy_paste_sep_high=None, copy_paste_near_boundary=None,
+                 copy_paste_near_frac=None, copy_paste_feather_sigma=None):
     """Full Phase B training loop. Writes ``run_dir/metrics.json`` (per-epoch
     two-peak rate + loss) and one Orbax checkpoint per epoch under
     ``run_dir/ckpt/epoch_<N>`` so the best (NOT necessarily last -- see task
@@ -230,8 +318,10 @@ def run_training(root, run_dir, *, epochs=30, batch_size=32, lr=3e-4,
     train_ds = V5CenterDetectDataset(root, "train", image_size=image_size)
     val_ds = V5CenterDetectDataset(root, "val", image_size=image_size)
     two_fly_idx = val_ds.two_fly_indices()
+    single_fly_idx = val_ds.single_fly_indices()
     print(f"train: {len(train_ds)} imgs ({train_ds.class_counts('num_flies')}); "
-          f"val: {len(val_ds)} imgs, {len(two_fly_idx)} two-fly")
+          f"val: {len(val_ds)} imgs, {len(two_fly_idx)} two-fly, "
+          f"{len(single_fly_idx)} single-fly")
 
     weights = train_ds.balanced_weights(key="num_flies", alpha=balance_alpha,
                                         max_repeat=max_repeat)
@@ -245,6 +335,29 @@ def run_training(root, run_dir, *, epochs=30, batch_size=32, lr=3e-4,
         print(f"    {c}fly {n_c:>6} imgs ({100 * n_c / len(train_ds):5.1f}% of data) "
               f"-> {100 * share[c]:5.1f}% of samples "
               f"({share[c] * len(train_ds) / n_c:5.2f}x repeat)")
+
+    # Optional 4th modification: copy-paste synthesis of two-fly TRAIN
+    # frames -- OFF (copy_paste_p=0.0) reproduces this script's original
+    # behaviour exactly (the control run, job 39394959, used no such flag).
+    # val_ds is NEVER wrapped -- see module docstring.
+    if copy_paste_p > 0.0:
+        from jarvis_jax.data.copy_paste import CopyPasteCenterDetectDataset
+        cp_kwargs = {"p": copy_paste_p, "seed": seed}
+        if copy_paste_sep_low is not None:
+            cp_kwargs["sep_low"] = copy_paste_sep_low
+        if copy_paste_sep_high is not None:
+            cp_kwargs["sep_high"] = copy_paste_sep_high
+        if copy_paste_near_boundary is not None:
+            cp_kwargs["sep_near_boundary"] = copy_paste_near_boundary
+        if copy_paste_near_frac is not None:
+            cp_kwargs["sep_near_frac"] = copy_paste_near_frac
+        if copy_paste_feather_sigma is not None:
+            cp_kwargs["feather_sigma"] = copy_paste_feather_sigma
+        train_ds = CopyPasteCenterDetectDataset(train_ds, **cp_kwargs)
+        est_two_fly_share = share.get("2", 0.0) + share.get("1", 0.0) * copy_paste_p
+        print(f"copy-paste synthesis: p={copy_paste_p} sep=[{cp_kwargs.get('sep_low', 'default')},"
+              f"{cp_kwargs.get('sep_high', 'default')}]px -- estimated two-fly-labelled "
+              f"sample share (real + synthetic) ~= {100 * est_two_fly_share:.1f}%")
 
     steps_per_epoch = len(train_ds) // batch_size
     total_steps = steps_per_epoch * epochs
@@ -281,11 +394,15 @@ def run_training(root, run_dir, *, epochs=30, batch_size=32, lr=3e-4,
         train_loss = float(np.mean(losses)) if losses else float("nan")
 
         two_peak = eval_two_peak_rate(model, val_ds, two_fly_idx, batch_size=batch_size)
+        false_pos = eval_single_fly_false_positive(model, val_ds, single_fly_idx,
+                                                    batch_size=batch_size)
         dt = time.time() - t0
         print(f"epoch {epoch}/{epochs}: train_loss={train_loss:.5f} "
               f"two_peak_rate={two_peak['two_peak_rate']:.3f} "
               f"({two_peak['n_frames']} val two-fly frames) "
               f"median_dist={two_peak['dists_median_px']:.1f}px "
+              f"fp_rate(ratio>=0.5)={false_pos.get('fp_rate_ratio_ge_0.5', float('nan')):.3f} "
+              f"({false_pos['n_frames']} val single-fly frames) "
               f"[{dt:.1f}s]")
         metrics.append({"epoch": epoch, "train_loss": train_loss,
                         "two_peak_rate": two_peak["two_peak_rate"],
@@ -293,6 +410,15 @@ def run_training(root, run_dir, *, epochs=30, batch_size=32, lr=3e-4,
                         "dists_median_px": two_peak["dists_median_px"],
                         "dists_mean_px": two_peak["dists_mean_px"],
                         "dists_p90_px": two_peak["dists_p90_px"],
+                        "n_single_fly_val": false_pos["n_frames"],
+                        "fp_conf1_mean": false_pos["conf1_mean"],
+                        "fp_conf2_mean": false_pos["conf2_mean"],
+                        "fp_conf2_median": false_pos["conf2_median"],
+                        "fp_conf_ratio_mean": false_pos["conf_ratio_mean"],
+                        "fp_conf_ratio_median": false_pos["conf_ratio_median"],
+                        "fp_rate_ratio_ge_0.25": false_pos.get("fp_rate_ratio_ge_0.25"),
+                        "fp_rate_ratio_ge_0.5": false_pos.get("fp_rate_ratio_ge_0.5"),
+                        "fp_rate_ratio_ge_0.75": false_pos.get("fp_rate_ratio_ge_0.75"),
                         "epoch_seconds": dt})
         with open(os.path.join(run_dir, "metrics.json"), "w") as f:
             json.dump(metrics, f, indent=2)
@@ -317,6 +443,77 @@ def jax_asarray(x):
     return jnp.asarray(x)
 
 
+def dump_copy_paste_samples(root, dump_dir, n, *, image_size=IMAGE_SIZE, seed=0,
+                            copy_paste_p=1.0, copy_paste_sep_low=None,
+                            copy_paste_sep_high=None, copy_paste_near_boundary=None,
+                            copy_paste_near_frac=None, copy_paste_feather_sigma=None):
+    """Render `n` FULL-RESOLUTION (not the training-time squished 320x320)
+    copy-paste composites to `dump_dir`, plus a `meta.json` recording each
+    one's host/donor file names, camera, same-recording flag, z-order, and
+    sampled/achieved separation -- for visual verification (per the task
+    brief: a synthesis pipeline whose output nobody has looked at is exactly
+    how a model learns to detect seams instead of flies). PIL-only (no
+    matplotlib dependency in this package); the annotated/labelled grid PNG
+    for actual review is built by the repo's own
+    ``scripts/viz/render_copypaste_samples.py`` from these dumps.
+
+    Spreads its `n` draws round-robin across every camera present in the
+    train split (so the dump cannot accidentally be all one viewpoint), and
+    always synthesizes (``p`` is only used to size the estimated real-run
+    sample composition printed alongside; every dumped row is an actual
+    composite, using ``sample_with_meta`` which ignores `p`).
+    """
+    from jarvis_jax.data.copy_paste import CopyPasteCenterDetectDataset
+    from jarvis_jax.data.v5_centerdetect import V5CenterDetectDataset
+    from collections import defaultdict
+    from PIL import Image as PILImage
+
+    os.makedirs(dump_dir, exist_ok=True)
+    train_ds = V5CenterDetectDataset(root, "train", image_size=image_size)
+    cp_kwargs = {"p": copy_paste_p, "seed": seed}
+    for k, v in (("sep_low", copy_paste_sep_low), ("sep_high", copy_paste_sep_high),
+                ("sep_near_boundary", copy_paste_near_boundary),
+                ("sep_near_frac", copy_paste_near_frac),
+                ("feather_sigma", copy_paste_feather_sigma)):
+        if v is not None:
+            cp_kwargs[k] = v
+    cp = CopyPasteCenterDetectDataset(train_ds, **cp_kwargs)
+
+    single_idx = train_ds.single_fly_indices()
+    by_cam = defaultdict(list)
+    for i in single_idx:
+        cam = train_ds.file_names[i].split("/")[1]
+        by_cam[cam].append(i)
+    cams = sorted(by_cam)
+    print(f"[dump-samples] {len(single_idx)} single-fly train rows across "
+          f"{len(cams)} cameras: {cams}")
+
+    records = []
+    for k in range(n):
+        cam = cams[k % len(cams)]
+        pool = by_cam[cam]
+        host_idx = pool[(k // len(cams)) % len(pool)]
+        composite_full, _img_out, _centers_out, meta = cp.sample_with_meta(
+            host_idx, seed=seed * 100000 + k)
+        fn = f"sample_{k:03d}.jpg"
+        PILImage.fromarray(composite_full).save(os.path.join(dump_dir, fn))
+        meta["camera"] = cam
+        meta["file"] = fn
+        records.append(meta)
+        print(f"  [{k}] cam={cam} host={meta['host_file_name']} "
+              f"donor={meta['donor_file_name']} same_rec={meta['same_recording']} "
+              f"top_is_donor={meta['top_is_donor']} "
+              f"sep_sampled={meta['sep_sampled_px']:.1f}px "
+              f"sep_achieved={meta['sep_achieved_px']:.1f}px")
+
+    seps = np.asarray([r["sep_achieved_px"] for r in records])
+    print(f"[dump-samples] achieved separation: mean={seps.mean():.1f}px "
+          f"median={np.median(seps):.1f}px min={seps.min():.1f}px max={seps.max():.1f}px")
+    with open(os.path.join(dump_dir, "meta.json"), "w") as f:
+        json.dump(records, f, indent=2)
+    return records
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -331,12 +528,45 @@ def main():
     ap.add_argument("--warm-start-pth", default=None)
     ap.add_argument("--balance-alpha", type=float, default=0.5)
     ap.add_argument("--max-repeat", type=float, default=20.0)
+    ap.add_argument("--copy-paste-p", type=float, default=0.0,
+                    help="Probability a single-fly TRAIN draw is turned into a "
+                    "synthetic two-fly composite (0.0 = off, this script's "
+                    "original behaviour). See jarvis_jax.data.copy_paste.")
+    ap.add_argument("--copy-paste-sep-low", type=float, default=None)
+    ap.add_argument("--copy-paste-sep-high", type=float, default=None)
+    ap.add_argument("--copy-paste-near-boundary", type=float, default=None)
+    ap.add_argument("--copy-paste-near-frac", type=float, default=None)
+    ap.add_argument("--copy-paste-feather-sigma", type=float, default=None)
+    ap.add_argument("--dump-samples", type=int, default=0,
+                    help="If >0, render this many copy-paste composites to "
+                    "--dump-dir and EXIT without training.")
+    ap.add_argument("--dump-dir", default=None)
     args = ap.parse_args()
+
+    if args.dump_samples > 0:
+        if not args.dump_dir:
+            ap.error("--dump-samples requires --dump-dir")
+        dump_copy_paste_samples(
+            args.root, args.dump_dir, args.dump_samples, seed=args.seed,
+            copy_paste_p=args.copy_paste_p if args.copy_paste_p > 0 else 1.0,
+            copy_paste_sep_low=args.copy_paste_sep_low,
+            copy_paste_sep_high=args.copy_paste_sep_high,
+            copy_paste_near_boundary=args.copy_paste_near_boundary,
+            copy_paste_near_frac=args.copy_paste_near_frac,
+            copy_paste_feather_sigma=args.copy_paste_feather_sigma)
+        return
+
     run_training(args.root, args.run_dir, epochs=args.epochs,
                  batch_size=args.batch_size, lr=args.lr, bg_weight=args.bg_weight,
                  seed=args.seed, num_workers=args.num_workers,
                  warm_start_pth=args.warm_start_pth,
-                 balance_alpha=args.balance_alpha, max_repeat=args.max_repeat)
+                 balance_alpha=args.balance_alpha, max_repeat=args.max_repeat,
+                 copy_paste_p=args.copy_paste_p,
+                 copy_paste_sep_low=args.copy_paste_sep_low,
+                 copy_paste_sep_high=args.copy_paste_sep_high,
+                 copy_paste_near_boundary=args.copy_paste_near_boundary,
+                 copy_paste_near_frac=args.copy_paste_near_frac,
+                 copy_paste_feather_sigma=args.copy_paste_feather_sigma)
 
 
 if __name__ == "__main__":
