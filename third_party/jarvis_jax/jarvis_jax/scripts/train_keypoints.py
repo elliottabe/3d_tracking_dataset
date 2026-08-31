@@ -240,6 +240,19 @@ def run_training(root, *, out_dir, mae_npz=DEFAULT_MAE_NPZ, tcfg=None,
     val_ds = dataset_cls(root, "val", recordings=[val_recording])
     val_ds_all = dataset_cls(root, "val")     # full val = the truthful headline metric
 
+    if tcfg.mask_ablation:
+        # Mask-channel ablation: zero the 4th (SAM-mask) input channel of
+        # every train/val sample, both here (dataset construction) and via
+        # the identical wrap in eval_keypoints_2d.py / ad-hoc eval scripts,
+        # so this run never sees a populated mask at train OR eval time.
+        # Model stays in_ch=4 (capacity fixed) -- see mask_zero.py.
+        from jarvis_jax.data.mask_zero import ZeroMaskDataset
+        print("[mask-ablation] zeroing the SAM-mask input channel "
+              "(train.mask_ablation=true) -- model keeps in_ch=4, capacity fixed")
+        train_ds = ZeroMaskDataset(train_ds)
+        val_ds = ZeroMaskDataset(val_ds)
+        val_ds_all = ZeroMaskDataset(val_ds_all)
+
     # Weighted sampling: EITHER error-weighted hard-example resampling (from a
     # jarvis_jax.scripts.mine_hard_frames.py error npz -- configs/sampling/
     # hard_error.yaml) OR the older category oversampling of an

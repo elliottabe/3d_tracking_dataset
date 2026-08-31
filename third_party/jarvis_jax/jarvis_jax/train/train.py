@@ -34,6 +34,15 @@ class TrainConfig:
     # several OTHER callers (densepose CSE training, tracking/finetune_detector,
     # and multiple unit tests) rely on it implicitly and are out of scope here).
     target_sigma: float = 7.0   # do NOT lower; sigma=2.0 measured a 6.5x regression (see data/transforms.py)
+    # Mask-channel ablation (2026-08-31 mask-channel-ablation task): when
+    # True, train_keypoints.py wraps every dataset (train/val) in
+    # jarvis_jax.data.mask_zero.ZeroMaskDataset, which zeroes the 4th
+    # (SAM-mask) input channel of every sample. Model stays in_ch=4 (capacity
+    # held fixed) -- only the mask's INFORMATION is removed, both at train
+    # and eval time, so a checkpoint trained with this on has never seen a
+    # populated mask. Default False -- byte-identical to before this field
+    # existed for every other caller of TrainConfig.
+    mask_ablation: bool = False
 
 
 def _param_labels(params):

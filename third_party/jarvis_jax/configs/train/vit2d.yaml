@@ -26,6 +26,13 @@ num_workers: 8      # thread-pool workers for the data-loading `batches()` sampl
 # fine-tune) -- resume beats warm_start on requeue; warm_start only seeds the
 # very first launch.
 warm_start: ''
+# Mask-channel ablation (2026-08-31): when true, every dataset (train/val)
+# is wrapped in jarvis_jax.data.mask_zero.ZeroMaskDataset, which zeroes the
+# 4th (SAM-mask) input channel of every sample -- model stays in_ch=4
+# (capacity fixed), only the mask's information is removed. Default false =
+# unchanged behaviour. See
+# .superpowers/sdd/2026-08-29-coarse-to-fine-3d/mask-channel-ablation.md
+mask_ablation: false
 # Gaussian target sigma in heatmap px. MUST STAY 7.0: the 2026-08-29
 # resolution analysis argued for 2.0 and the 2026-08-30 retrain measured a 6.5x
 # regression (6.448 px -> 55.528 px val MPJPE, identical data/sampling/aug).
