@@ -25,10 +25,29 @@ register_resolvers()
 
 # Held out WHOLE. Chosen to resemble bout 28: a Group-A courtship recording
 # plus one from each other calibration group so per-group val is reportable.
+#
+# 2026_04_07_11_33_33 added 2026-08-31 to fix a coverage hole: the val split
+# above had ZERO two-fly frames, so every detector val number (overall px,
+# female px, the v4 gain, the mask-channel ablation delta) was silently a
+# single-fly number even though this detector family's documented weakness
+# is precisely overlap. All four two-fly recordings had landed in train
+# because none of them were in VAL_RECORDINGS. Of the four,
+# 2026_04_08_14_59_45 holds 82% of all two-fly data and must stay in train;
+# the 2026_06_11_13_58_43/_45 pair are ~2s apart and would have to move
+# together or not at all (a worse, correlated choice); 2026_04_07_11_33_33
+# is standalone and is the largest two-fly sample left (181 two-fly / 217
+# frames) -- and configs/detector_finetune.yaml already lists it as a val
+# recording, so holding it out here has precedent. Note: the per-annotation
+# `sex` field is "unknown" for all four two-fly recordings, but sex is still
+# resolvable per fly via manifest.json's recordings[rec]["fly_sex"]["fly<k>"]
+# (see jarvis_jax.data.v5_2d._resolve_sex) -- for this recording fly0=male,
+# fly1=female, so the added val slice IS sexed. See split_v5.py's docstring
+# for why female-inclusive recordings ignore this list entirely regardless.
 VAL_RECORDINGS = [
     "2026_03_18_15_31_22",   # group A, courtship  (137 framesets)
     "2026_06_15_12_12_33",   # group B, courtship male
     "2026_05_27_11_57_05",   # group C, courtship male
+    "2026_04_07_11_33_33",   # group B, two-fly (181/217 frames two-fly)
 ]
 
 
