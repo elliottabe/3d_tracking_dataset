@@ -74,11 +74,10 @@ _MASK_FILL = (180, 120, 60)        # BGR fill for the SAM mask overlay
 # Repo visual language (viz/core/colors.py): grey = mesh, green = fit.
 _MESH_COLOR = (170, 170, 170)      # BGR: reprojected fitted mesh cloud
 _FIT_COLOR = (90, 220, 90)         # BGR: fitted 3D sites + their chains
-
-# Measured-vs-fitted marker colors, used by the multi-view draw_right committed
-# in 9a13b23. They were only ever defined in an uncommitted working-tree hunk,
-# so HEAD raised NameError on any --views render; defining them here makes the
-# committed multi-view path self-contained.
+# rigcam pane: MEASURED (triangulated kp3d) vs FITTED (FK'd model sites).
+# The MuJoCo render's own spheres colour 19 body+wing keypoints identically,
+# so a wing vein cannot be told from an antenna or an eye. These separate the
+# wings and, more importantly, separate measurement from fit.
 _MEAS_WING = (255, 0, 255)         # magenta: measured wing keypoint
 _FIT_WING = (0, 255, 255)          # yellow:  fitted   wing marker
 _MEAS_OTHER = (200, 120, 60)       # dim blue-grey: measured, non-wing
@@ -132,8 +131,6 @@ def _draw_verify(bgr, uv, meas_uv, kp_names):
         if lab:
             cv2.putText(bgr, lab, (int(uv[i][0]) + 6, int(uv[i][1]) - 6),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, col, 1)
-
-
 
 
 
@@ -291,7 +288,10 @@ def run(args):
             from viz.core.mjcam import (mujoco_camera_from_affine,
                                         similarity_from_points)
             _outs = vio.load_outputs(args.run, bout, fly)
-            rig_world = np.asarray(_outs["kp3d_mm"], float)
+            rig_world = np.asarray(_outs["kp3d_mm"], float)      # FITTED sites
+            _kp3d_p = os.path.join(vio.fly_dir(args.run, bout, fly), "kp3d.npz")
+            rig_meas = (np.asarray(np.load(_kp3d_p)["kp3d"], float)
+                        if os.path.exists(_kp3d_p) else None)   # MEASURED kp
             rig_qpos = np.asarray(np.load(qref_path)["qpos"], float)
             _cam_mats, _cam_names = reproject.camera_matrices(calib_dir)
             _cam_names = list(_cam_names)
@@ -316,7 +316,8 @@ def run(args):
                 cid=mujoco.mj_name2id(_mj, mujoco.mjtObj.mjOBJ_CAMERA, "rigcam"),
                 sidx=[a for a, _ in _pairs], kidx=[b for _, b in _pairs],
                 cam_mat=_cam_mats[_cam_names.index(left_cam)],
-                qpos=rig_qpos, world=rig_world,
+                qpos=rig_qpos, world=rig_world, meas=rig_meas,
+                wing=[i for i, n in enumerate(kp_names) if "Wing" in n],
                 renderer=mujoco.Renderer(_mj, height=int(H), width=int(W)),
                 cam_from_affine=mujoco_camera_from_affine,
                 similarity=similarity_from_points)
@@ -424,6 +425,35 @@ def run(args):
         bgr = cv2.cvtColor(rig["renderer"].render(), cv2.COLOR_RGB2BGR)
         if mk is not None and mv[t, lc]:
             overlays.draw_mask(bgr, mk[t, lc], _MASK_FILL, alpha=0.0)
+        # MEASURED (triangulated) vs FITTED (FK'd model site), same camera.
+        # The gap between a magenta and its yellow partner IS the fit residual
+        # for that wing vein; a magenta that jumps while its yellow stays put
+        # is a 2-D detection error the solver correctly refused to follow.
+        wing = set(rig.get("wing") or [])
+        cm = rig["cam_mat"]
+        fit = rig["world"][t] if t < len(rig["world"]) else None
+        meas = (rig["meas"][t] if rig.get("meas") is not None
+                and t < len(rig["meas"]) else None)
+        for arr, wcol, ocol, rad in ((meas, _MEAS_WING, _MEAS_OTHER, 4),
+                                     (fit, _FIT_WING, _FIT_OTHER, 3)):
+            if arr is None:
+                continue
+            good = np.isfinite(arr).all(axis=1)
+            if not good.any():
+                continue
+            uv = reproject.project(cm, np.nan_to_num(arr))
+            for i, p in enumerate(uv):
+                if not good[i]:
+                    continue
+                overlays.draw_points(bgr, p[None], wcol if i in wing else ocol,
+                                     radius=rad)
+        # tie each measured wing keypoint to its fitted partner
+        if fit is not None and meas is not None:
+            uvf = reproject.project(cm, np.nan_to_num(fit))
+            uvm = reproject.project(cm, np.nan_to_num(meas))
+            for i in wing:
+                if np.isfinite(fit[i]).all() and np.isfinite(meas[i]).all():
+                    overlays.draw_chain(bgr, [uvm[i], uvf[i]], _MEAS_WING)
         crop = bgr[cy0:cy1, cx0:cx1]
         return cv2.resize(crop, (left_w, panel_h))
 
@@ -447,7 +477,8 @@ def run(args):
     # --- composite left+right per frame, collect BGR frames, write mp4 + still ---
     left_title = f"{left_cam} video + SAM mask + ViTPose 2D skeleton"
     right_title = {
-        "rigcam": f"MuJoCo IK @ {left_cam} rig camera (same view) + SAM outline",
+        "rigcam": (f"MuJoCo IK @ {left_cam} rig cam | wings: measured=MAGENTA "
+                   f"fitted=YELLOW (line = residual)"),
         "reproj": f"fitted mesh + sites reprojected into {left_cam} (same view)",
     }.get(right_mode, f"MuJoCo IK render ({render_cam}) -- NOT view-matched")
     frames_out = []
