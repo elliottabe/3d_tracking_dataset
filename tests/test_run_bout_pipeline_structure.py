@@ -84,3 +84,78 @@ def test_nan_helpers_are_module_level(tree):
     for name in ("finite_frame_mask", "fill_short_gaps", "contiguous_segments",
                  "_solve_segments_into", "_restore_unsolved_nan", "joints_frozen"):
         assert name in top, f"{name} is not defined at module level"
+
+
+def test_stage_b_locals_are_not_bound_only_inside_stage_a(tree):
+    """Names Stage B reads must be bound OUTSIDE the `if not stage_done(kp2d_path)`
+    guard, or a resume raises UnboundLocalError.
+
+    Real regression (2026-08-29): the Stage-B mask-agreement gate (commit
+    0aaccec) reads `centroids`, but `centroids = masks_dict["centroids"]` was
+    bound inside the Stage A block. Every fresh run was fine -- Stage A runs, so
+    the name exists -- and every fully-DONE bout was fine too, because
+    `bout_complete` skips the whole fly. It only fires on the path where kp2d.npz
+    exists and kp3d.npz does not, which is exactly the re-run needed after
+    invalidating triangulation that predates the outlier gate:
+
+        UnboundLocalError: cannot access local variable 'centroids'
+
+    That path had never been exercised, so nothing caught it.
+    """
+    fn = _functions(tree)["process_bout_fly"]
+
+    def _guard_is_stage_a(node):
+        return (isinstance(node, ast.If)
+                and "kp2d_path" in ast.dump(node.test)
+                and "stage_done" in ast.dump(node.test))
+
+    stage_a = [n for n in ast.walk(fn) if _guard_is_stage_a(n)]
+    assert stage_a, "could not locate the Stage A guard in process_bout_fly"
+
+    def _names(target):
+        """All Names bound by an assignment target, incl. tuple/list unpacking.
+
+        `kp2d, conf = z["kp2d"], z["conf"]` rebinds kp2d AFTER Stage A; missing
+        tuple targets here made this test flag kp2d as a false positive.
+        """
+        out = set()
+        for n in ast.walk(target):
+            if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store):
+                out.add(n.id)
+        return out
+
+    def _assigned(node):
+        out = set()
+        for n in ast.walk(node):
+            if isinstance(n, (ast.Assign, ast.AugAssign, ast.AnnAssign)):
+                for t in (n.targets if isinstance(n, ast.Assign) else [n.target]):
+                    out |= _names(t)
+            elif isinstance(n, (ast.For, ast.withitem)):
+                tgt = getattr(n, "target", None) or getattr(n, "optional_vars", None)
+                if tgt is not None:
+                    out |= _names(tgt)
+        return out
+
+    bound_in_stage_a = set()
+    for blk in stage_a:
+        bound_in_stage_a |= _assigned(blk)
+
+    stage_a_nodes = {id(x) for blk in stage_a for x in ast.walk(blk)}
+    bound_outside = set()
+    for n in ast.walk(fn):
+        if id(n) in stage_a_nodes:
+            continue
+        if isinstance(n, (ast.Assign, ast.AugAssign, ast.AnnAssign, ast.For, ast.withitem)):
+            bound_outside |= _assigned(n)
+
+    # names read by Stage B onward (everything after the Stage A guard ends)
+    a_end = max(getattr(n, "lineno", 0) for blk in stage_a for n in ast.walk(blk))
+    read_later = {n.id for n in ast.walk(fn)
+                  if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)
+                  and getattr(n, "lineno", 0) > a_end}
+
+    only_in_stage_a = (bound_in_stage_a & read_later) - bound_outside
+    assert not only_in_stage_a, (
+        "these names are bound ONLY inside the Stage A block but read by a later "
+        f"stage, so resuming with kp2d.npz present raises UnboundLocalError: "
+        f"{sorted(only_in_stage_a)}")

@@ -931,14 +931,18 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
             except OSError:
                 pass
 
+    # Centroids come from masks_dict (already reordered/autofixed above), NOT a
+    # fresh raw npz read -- they must stay in lockstep with masks_dict["masks"]'s
+    # camera axis (see autofix_bout_camera_order above).
+    # Bound HERE, outside Stage A, because Stage B's mask-agreement gate needs it
+    # too: when kp2d.npz already exists but kp3d.npz does not (the re-run path
+    # after invalidating stale triangulation), Stage A is skipped and a
+    # Stage-A-local binding raised UnboundLocalError.
+    centroids = masks_dict["centroids"]
+
     # -- Stage A: ViTPose 2-D ---------------------------------------------------
     if not stage_done(kp2d_path):
         start = bout_start_frame(cfg, bout_idx)
-        # Centroids come from masks_dict (already reordered/autofixed above),
-        # NOT a fresh raw npz read -- they must stay in lockstep with
-        # masks_dict["masks"]'s camera axis (see autofix_bout_camera_order
-        # above).
-        centroids = masks_dict["centroids"]
 
         def _frames_iter():
             # read_window yields (frames (C,H,W,3), present (C,) bool) per canonical
