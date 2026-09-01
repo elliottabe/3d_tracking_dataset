@@ -16,21 +16,50 @@ from __future__ import annotations
 
 import numpy as np
 
+def _in_bounds_pixels(verts2d, H, W):
+    """Unique flat pixel indices the rounded verts land on, in-bounds only.
+
+    This is exactly the set of True pixels of the old dense ``pred`` mask:
+    rounding to pixel then dropping out-of-bounds. Non-finite verts round to
+    INT64_MIN and are dropped by the bounds test, same as before.
+    """
+    v = np.asarray(verts2d)
+    with np.errstate(invalid="ignore"):
+        xs = np.round(v[:, 0]).astype(np.int64)
+        ys = np.round(v[:, 1]).astype(np.int64)
+    ok = (xs >= 0) & (xs < W) & (ys >= 0) & (ys < H)
+    if not ok.any():
+        return np.zeros(0, np.int64)
+    return np.unique(ys[ok] * W + xs[ok])
+
+
 def iou_of_projected_verts(verts2d, mask_shape, ref_mask) -> float:
     """Coarse silhouette HARD-IoU: splat projected 2-D verts to a binary mask
     (round to pixel), IoU vs ref_mask. Out-of-bounds verts dropped. Pure NumPy.
     The before/after DELTA is what matters (a point-splat is sparse vs a filled
-    silhouette); the baseline-comparable absolute is soft_iou_of_verts below."""
+    silhouette); the baseline-comparable absolute is soft_iou_of_verts below.
+
+    Sparse since 2026-09-01: instead of materialising an (H, W) ``pred`` mask
+    and running full-frame ``logical_and``/``logical_or`` (867k px per camera
+    per frame in the live QC path), it counts on the |verts| pixels the splat
+    actually touches. |pred & ref| and |pred | ref| are integer counts, so this
+    is BIT-IDENTICAL, not merely close -- see
+    tests/test_mesh_iou_fast_equivalence.py.
+    """
     H, W = mask_shape
-    pred = np.zeros((H, W), dtype=bool)
-    v = np.asarray(verts2d)
-    xs = np.round(v[:, 0]).astype(int)
-    ys = np.round(v[:, 1]).astype(int)
-    ok = (xs >= 0) & (xs < W) & (ys >= 0) & (ys < H)
-    pred[ys[ok], xs[ok]] = True
     ref = np.asarray(ref_mask, dtype=bool)
-    inter = np.logical_and(pred, ref).sum()
-    union = np.logical_or(pred, ref).sum()
+    if ref.shape != (H, W):
+        raise ValueError(f"ref_mask shape {ref.shape} != mask_shape {(H, W)}")
+    return _hard_iou_from_pixels(_in_bounds_pixels(verts2d, H, W),
+                                 ref.reshape(-1), int(ref.sum()))
+
+
+def _hard_iou_from_pixels(flat, ref_flat, ref_n) -> float:
+    """|pred & ref| / |pred | ref| from pred's unique flat pixel indices."""
+    if flat.size == 0:
+        return float(0 / ref_n) if ref_n > 0 else 0.0
+    inter = int(np.count_nonzero(ref_flat[flat]))
+    union = ref_n + int(flat.size - inter)
     return float(inter / union) if union > 0 else 0.0
 
 
@@ -51,6 +80,55 @@ def filled_tri_iou(verts2d, faces, mask_shape, ref_mask) -> float:
     return float(inter / union) if union > 0 else 0.0
 
 
+def _soft_splat_bbox(verts2d, H, W, sigma, splat_k):
+    """(soft, y0, x0) -- the soft-occupancy grid over ONLY the bounding box the
+    splat can reach, plus its offset in the full frame. ``None`` when nothing
+    lands in frame (soft occupancy identically zero).
+
+    Bit-identical to building the full (H, W) grid and slicing it:
+      * a vert whose whole (2k+1)^2 window is out of frame contributed
+        ``np.where(valid, w, 0.0) == 0.0`` at every offset, and adding 0.0 to a
+        float64 accumulator is exact -- so dropping it changes nothing;
+      * the surviving (offset, vert) pairs are accumulated in the SAME order
+        (offset-major, vert-inner), which is what fixes the float64 rounding of
+        overlapping splats;
+      * ``1 - exp(-0) == 0`` exactly, so every pixel outside the box is
+        genuinely zero rather than negligible.
+    """
+    v = np.asarray(verts2d, dtype=np.float64)
+    with np.errstate(invalid="ignore"):
+        bx = np.floor(v[:, 0])
+        by = np.floor(v[:, 1])
+    keep = (np.isfinite(bx) & np.isfinite(by)
+            & (bx + splat_k >= 0) & (bx - splat_k < W)
+            & (by + splat_k >= 0) & (by - splat_k < H))
+    if not keep.any():
+        return None
+    vx = v[keep, 0]
+    vy = v[keep, 1]
+    bxi = bx[keep].astype(np.int64)
+    byi = by[keep].astype(np.int64)
+    x0 = max(0, int(bxi.min()) - splat_k)
+    x1 = min(W, int(bxi.max()) + splat_k + 1)
+    y0 = max(0, int(byi.min()) - splat_k)
+    y1 = min(H, int(byi.max()) + splat_k + 1)
+    # offsets in the original loop order (di outer, dj inner) so the C-order
+    # ravel below reproduces the old np.add.at accumulation order exactly.
+    off = np.arange(-splat_k, splat_k + 1)
+    di, dj = np.meshgrid(off, off, indexing="ij")
+    cx = bxi[None, :] + dj.reshape(-1, 1)                 # (K*K, V)
+    cy = byi[None, :] + di.reshape(-1, 1)
+    valid = (cx >= 0) & (cx < W) & (cy >= 0) & (cy < H)
+    cxv = cx[valid]
+    cyv = cy[valid]
+    dx = cxv + 0.5 - np.broadcast_to(vx, cx.shape)[valid]
+    dy = cyv + 0.5 - np.broadcast_to(vy, cy.shape)[valid]
+    w = np.exp(-((dx ** 2 + dy ** 2)) / (2 * sigma ** 2))
+    grid = np.zeros((y1 - y0, x1 - x0), dtype=np.float64)
+    np.add.at(grid, (cyv - y0, cxv - x0), w)
+    return 1.0 - np.exp(-grid), y0, x0
+
+
 def soft_iou_of_verts(verts2d, mask, *, sigma: float = 1.3, splat_k: int = 2) -> float:
     """EVAL-ONLY soft-IoU (baseline-comparable). NOT an objective term.
 
@@ -69,27 +147,59 @@ def soft_iou_of_verts(verts2d, mask, *, sigma: float = 1.3, splat_k: int = 2) ->
 
     Returns:
         soft-IoU in [0, 1]; 0.0 if the mask is empty.
+
+    Bounding-boxed since 2026-09-01 (the dense version rasterised, exp'd and
+    summed 867k px per camera per frame -- ~7 ms x 14049 (frame, camera) pairs
+    per bout in live QC). The grid itself is bit-identical (see
+    ``_soft_splat_bbox``); the two REDUCTIONS are algebraically rearranged, so
+    they can differ in the last ulp:
+        inter = sum(soft * mask)          -- zero outside the box
+        union = sum(soft + mask - soft*mask) = |mask| + sum(soft * (1 - mask))
+    Measured on Session0 bout 28 fly0 (840 real (frame, camera) pairs): max
+    absolute deviation 1.1e-16, max relative 5.9e-16, i.e. 1-2 ulp.
+    ``|mask|`` is counted on the mask's own dtype rather than a float32 copy;
+    for a bool/{0,1} mask below 2**24 pixels both are exactly the pixel count.
     """
-    mask = np.asarray(mask).astype(np.float32)
+    mask = np.asarray(mask)
     H, W = mask.shape
-    if mask.sum() == 0:
+    mask_sum = float(mask.sum())
+    if mask_sum == 0:
         return 0.0
-    v = np.asarray(verts2d, dtype=np.float64)
-    grid = np.zeros((H, W), dtype=np.float64)
-    bx = np.floor(v[:, 0]).astype(int)
-    by = np.floor(v[:, 1]).astype(int)
-    for di in range(-splat_k, splat_k + 1):
-        for dj in range(-splat_k, splat_k + 1):
-            cx = bx + dj
-            cy = by + di
-            w = np.exp(-(((cx + 0.5 - v[:, 0]) ** 2 + (cy + 0.5 - v[:, 1]) ** 2))
-                       / (2 * sigma ** 2))
-            valid = (cx >= 0) & (cx < W) & (cy >= 0) & (cy < H)
-            np.add.at(grid, (np.clip(cy, 0, H - 1), np.clip(cx, 0, W - 1)),
-                      np.where(valid, w, 0.0))
-    soft = 1.0 - np.exp(-grid)                       # soft occupancy in [0,1)
-    inter = float((soft * mask).sum())
-    union = float((soft + mask - soft * mask).sum())
+    return _soft_iou_from_bbox(_soft_splat_bbox(verts2d, H, W, sigma, splat_k),
+                               mask, mask_sum)
+
+
+def _soft_iou_from_bbox(splat, mask, mask_sum) -> float:
+    if splat is None:
+        return 0.0
+    soft, y0, x0 = splat
+    h, w = soft.shape
+    m = mask[y0:y0 + h, x0:x0 + w].astype(np.float32)
+    inter = float((soft * m).sum())
+    union = mask_sum + float((soft * (1.0 - m)).sum())
     return inter / union if union > 0 else 0.0
 
 
+def hard_soft_iou_of_verts(verts2d, mask, *, sigma: float = 1.3,
+                           splat_k: int = 2):
+    """``(hard, soft)`` IoU for one (camera, frame) in one pass.
+
+    Identical to calling ``iou_of_projected_verts(verts2d, mask.shape, mask)``
+    and ``soft_iou_of_verts(verts2d, mask)``, but counts ``|mask|`` once: that
+    full-frame reduction is 0.25 ms per call on this rig's (448, 1936) masks and
+    the QC path needs it for both metrics.
+    """
+    mask = np.asarray(mask)
+    H, W = mask.shape
+    ref = mask.astype(bool, copy=False)
+    ref_n = int(ref.sum())
+    hard = _hard_iou_from_pixels(_in_bounds_pixels(verts2d, H, W),
+                                 ref.reshape(-1), ref_n)
+    # |mask| for the soft-IoU denominator. For a bool mask (what the live QC
+    # path passes -- bout_masks unpacks SAM3 to bool) it is provably the same
+    # count as `ref_n`, so the shared reduction is exact; anything else gets its
+    # own sum rather than silently assuming {0,1}.
+    mask_sum = float(ref_n) if mask.dtype == bool else float(mask.sum())
+    soft = 0.0 if mask_sum == 0 else _soft_iou_from_bbox(
+        _soft_splat_bbox(verts2d, H, W, sigma, splat_k), mask, mask_sum)
+    return hard, soft

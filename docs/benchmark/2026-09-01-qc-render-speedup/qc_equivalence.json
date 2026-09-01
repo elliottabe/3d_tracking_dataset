@@ -1,0 +1,155 @@
+{
+  "timings": {
+    "qc.json BEFORE": 269.51839876174927,
+    "qc_perframe BEFORE": 181.14883470535278,
+    "shared frame_metrics AFTER": 11.273294687271118,
+    "qc.json AFTER (excl shared)": 4.078166723251343,
+    "qc_perframe AFTER (excl shared)": 0.05533933639526367,
+    "qc.json AFTER standalone": 15.48624300956726,
+    "qc_perframe AFTER standalone": 11.332329750061035
+  },
+  "qc_max_abs": 0.0,
+  "qc_max_rel": 0.0,
+  "worst": [
+    {
+      "key": "per_camera_reproj_px.median",
+      "before": 6.964397169505164,
+      "after": 6.964397169505164,
+      "abs": 0.0,
+      "rel": 0.0
+    },
+    {
+      "key": "per_camera_reproj_px.n",
+      "before": 11804.0,
+      "after": 11804.0,
+      "abs": 0.0,
+      "rel": 0.0
+    },
+    {
+      "key": "loo_reproj_px.median",
+      "before": 3.6109359856450824,
+      "after": 3.6109359856450824,
+      "abs": 0.0,
+      "rel": 0.0
+    },
+    {
+      "key": "loo_reproj_px.n_frames",
+      "before": 2007.0,
+      "after": 2007.0,
+      "abs": 0.0,
+      "rel": 0.0
+    },
+    {
+      "key": "mesh_mask_iou.hard_median",
+      "before": 0.029486415118128488,
+      "after": 0.029486415118128488,
+      "abs": 0.0,
+      "rel": 0.0
+    },
+    {
+      "key": "mesh_mask_iou.soft_median",
+      "before": 0.1780901644140058,
+      "after": 0.1780901644140058,
+      "abs": 0.0,
+      "rel": 0.0
+    },
+    {
+      "key": "mesh_mask_iou.n_frames",
+      "before": 2007.0,
+      "after": 2007.0,
+      "abs": 0.0,
+      "rel": 0.0
+    },
+    {
+      "key": "n_frames",
+      "before": 2007.0,
+      "after": 2007.0,
+      "abs": 0.0,
+      "rel": 0.0
+    },
+    {
+      "key": "ik_reproj.fitted_median_px",
+      "before": 7.614613311774179,
+      "after": 7.614613311774179,
+      "abs": 0.0,
+      "rel": 0.0
+    },
+    {
+      "key": "ik_reproj.measured_median_px",
+      "before": 2.655049573372368,
+      "after": 2.655049573372368,
+      "abs": 0.0,
+      "rel": 0.0
+    },
+    {
+      "key": "ik_reproj.ratio_fitted_over_measured",
+      "before": 2.8679740627600845,
+      "after": 2.8679740627600845,
+      "abs": 0.0,
+      "rel": 0.0
+    },
+    {
+      "key": "ik_reproj.n_fitted",
+      "before": 580502.0,
+      "after": 580502.0,
+      "abs": 0.0,
+      "rel": 0.0
+    },
+    {
+      "key": "ik_reproj.n_measured",
+      "before": 579807.0,
+      "after": 579807.0,
+      "abs": 0.0,
+      "rel": 0.0
+    },
+    {
+      "key": "ik_reproj.per_keypoint.Scutellum.fitted_median_px",
+      "before": 6.200038350284786,
+      "after": 6.200038350284786,
+      "abs": 0.0,
+      "rel": 0.0
+    },
+    {
+      "key": "ik_reproj.per_keypoint.Scutellum.measured_median_px",
+      "before": 2.0836380721897494,
+      "after": 2.0836380721897494,
+      "abs": 0.0,
+      "rel": 0.0
+    },
+    {
+      "key": "ik_reproj.per_keypoint.Scutellum.ratio_fitted_over_measured",
+      "before": 2.9755831557488315,
+      "after": 2.9755831557488315,
+      "abs": 0.0,
+      "rel": 0.0
+    },
+    {
+      "key": "ik_reproj.per_keypoint.Scutellum.n_fitted",
+      "before": 11387.0,
+      "after": 11387.0,
+      "abs": 0.0,
+      "rel": 0.0
+    },
+    {
+      "key": "ik_reproj.per_keypoint.Scutellum.n_measured",
+      "before": 11387.0,
+      "after": 11387.0,
+      "abs": 0.0,
+      "rel": 0.0
+    },
+    {
+      "key": "ik_reproj.per_keypoint.WingL_base.fitted_median_px",
+      "before": 7.452212000384895,
+      "after": 7.452212000384895,
+      "abs": 0.0,
+      "rel": 0.0
+    },
+    {
+      "key": "ik_reproj.per_keypoint.WingL_base.measured_median_px",
+      "before": 2.5624616745196405,
+      "after": 2.5624616745196405,
+      "abs": 0.0,
+      "rel": 0.0
+    }
+  ]
+}

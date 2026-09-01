@@ -18,11 +18,82 @@ Pure-ish functions (no FK -- callers pass already-FK'd 3-D points/mesh):
     structurally tiny for a sparse mesh-vertex subset regardless of fit
     quality. This is the one metric that can tell "IK is bad" apart from
     "2D/triangulation is bad".
+  * frame_metrics -- the per-(frame, camera) arrays qc_report AND
+    qc_perframe.per_frame_qc both need; compute once, pass to both.
   * qc_report -- bundles all four across frames into one dict, saves json.
+
+VECTORISED 2026-09-01 (behaviour-preserving). Every function here used to call
+``rt.reproject_point`` / ``rt.reconstruct_point`` once per (point, camera,
+frame) from Python -- ~7M scalar calls per bout, which made qc.json (3m39s) +
+qc_perframe.npz (2m52s) half of a 35-minute bout. They now use the batched
+``ReprojectionTool.reproject_points`` / ``.reconstruct_points``, which are
+bit-identical to the scalar versions (einsum keeps the dot order; numpy's
+stacked SVD calls the same LAPACK routine per matrix), and the mesh-vs-mask
+IoU is bounding-boxed in ``tracking.mesh_iou``. An ``rt`` that only implements
+the scalar API (test doubles, the JARVIS torch adapter in
+``predict.sam3_driver``) still works: the SAME code path just falls back to
+looping the scalar primitive, so there is one algorithm, not two.
 """
 from __future__ import annotations
 import json
 import numpy as np
+
+
+# ---------------------------------------------------------------------------
+# Batched reprojection / triangulation, with a scalar fallback.
+# ---------------------------------------------------------------------------
+
+def _reproject_all(rt, pts):
+    """(..., 3) world points -> (..., num_cam, 2) pixels.
+
+    Uses ``rt.reproject_points`` (batched, bit-identical -- see
+    ``jarvis_jax.geometry.reprojection_tool``) when the tool provides it, else
+    loops ``rt.reproject_point`` so any object with only the scalar API keeps
+    working.
+    """
+    pts = np.asarray(pts, dtype=float)
+    batch = getattr(rt, "reproject_points", None)
+    if batch is not None:
+        return np.asarray(batch(pts))
+    flat = pts.reshape(-1, 3)
+    out = np.stack([np.asarray(rt.reproject_point(p), float) for p in flat])
+    return out.reshape(*pts.shape[:-1], out.shape[-2], out.shape[-1])
+
+
+def _reconstruct_all(rt, obs, cams):
+    """Triangulate N systems. ``obs`` (N, n, 2) are the observations of the
+    cameras named by ``cams`` (N, n), in DLT-row order.
+
+    Uses ``rt.reconstruct_points`` (batched, bit-identical) when available,
+    else loops ``rt.reconstruct_point`` with a full-length ``points2d`` array
+    exactly as the scalar callers did (it only reads ``cams_to_use`` rows).
+    """
+    obs = np.asarray(obs, dtype=float)
+    cams = np.asarray(cams, dtype=int)
+    batch = getattr(rt, "reconstruct_points", None)
+    if batch is not None:
+        return np.asarray(batch(obs, cams))
+    n_cam = int(getattr(rt, "num_cameras", int(cams.max()) + 1 if cams.size else 0))
+    out = np.empty((cams.shape[0], 3), dtype=float)
+    for i in range(cams.shape[0]):
+        full = np.zeros((n_cam, 2))
+        full[cams[i]] = obs[i]
+        out[i] = rt.reconstruct_point(full, cams_to_use=list(cams[i]))
+    return out
+
+
+def _px_err(uv, obs):
+    """Row-wise pixel distance, BIT-IDENTICAL to the per-point
+    ``np.linalg.norm(uv - obs)`` it replaced.
+
+    ``np.linalg.norm`` of a 1-D vector is ``sqrt(np.dot(x, x))``, i.e. a BLAS
+    ddot, which contracts ``x0*x0 + x1*x1`` into an FMA. So the obvious
+    ``np.linalg.norm(d, axis=-1)`` / ``sqrt((d*d).sum(-1))`` disagree in the
+    last ulp on ~8% of pairs (measured). The batched matmul below goes through
+    the SAME BLAS kernel: 0 mismatches in 200k random pairs, and faster than
+    ``np.linalg.norm`` besides."""
+    d = np.ascontiguousarray(np.asarray(uv, float) - np.asarray(obs, float))
+    return np.sqrt(np.matmul(d[..., None, :], d[..., :, None])[..., 0, 0])
 
 
 def per_camera_reproj_error(rt, kp3d_mm, kp2d_by_cam, vis_by_cam):
@@ -39,23 +110,18 @@ def per_camera_reproj_error(rt, kp3d_mm, kp2d_by_cam, vis_by_cam):
     164949 (cam,kp) pairs still `vis=True` inside them -- median NaN, n=12232
     -- while fly1, with no such frames, reported a real number)."""
     kp3d_mm = np.asarray(kp3d_mm, float)
+    n_kp = len(kp3d_mm)
+    uv_all = _reproject_all(rt, kp3d_mm)                  # (K, C, 2)
+    xyz_ok = np.isfinite(kp3d_mm).all(-1)                 # (K,)
     out = {}
     for c, kp2d in kp2d_by_cam.items():
-        vis = np.asarray(vis_by_cam.get(c, np.ones(len(kp3d_mm), bool)), bool)
-        errs = []
-        for j in range(len(kp3d_mm)):
-            if not vis[j]:
-                continue
-            xyz = kp3d_mm[j]
-            obs = np.asarray(kp2d[j], float)
-            if not (np.all(np.isfinite(xyz)) and np.all(np.isfinite(obs))):
-                continue
-            uv = rt.reproject_point(xyz)[c]
-            if not np.all(np.isfinite(uv)):
-                continue
-            errs.append(float(np.linalg.norm(uv - obs)))
-        if errs:
-            out[c] = float(np.median(errs))
+        vis = np.asarray(vis_by_cam.get(c, np.ones(n_kp, bool)), bool)
+        obs = np.asarray(kp2d, float)
+        uv = uv_all[..., c, :]
+        good = (vis & xyz_ok & np.isfinite(obs).all(-1)
+                & np.isfinite(uv).all(-1))
+        if good.any():
+            out[c] = float(np.median(_px_err(uv[good], obs[good])))
     return out
 
 
@@ -65,35 +131,44 @@ def loo_reproj(rt, kp2d_by_cam, vis_by_cam):
     For each kp: gather cams where it is visible; for each held-out visible
     cam with >=2 OTHER visible cams, triangulate from the others, reproject
     into the held-out cam, pixel error vs that cam's own observation.
+
+    Batched over keypoints: every held-out solve for a kp with V visible cams
+    uses V-1 others, so all kps sharing the same V share one (G*V, 2(V-1), 4)
+    DLT stack and one stacked SVD -- at most 5 batched solves per frame
+    instead of up to 350 scalar ones.
     """
     cams = sorted(kp2d_by_cam)
     if not cams:
         return {"per_kp": np.zeros(0), "median": float("nan"), "n": 0}
     n_kp = len(next(iter(kp2d_by_cam.values())))
+    cam_ids = np.asarray(cams, int)
     per_kp = np.full(n_kp, np.nan)
+    vis = np.stack([np.asarray(vis_by_cam.get(c, np.ones(n_kp, bool)), bool)
+                    for c in cams], axis=1)               # (K, nc)
+    obs = np.stack([np.asarray(kp2d_by_cam[c], float) for c in cams], axis=1)
+    n_vis = vis.sum(axis=1)                               # (K,)
     all_errs = []
-    for j in range(n_kp):
-        vis_cams = [c for c in cams
-                    if np.asarray(vis_by_cam.get(c, np.ones(n_kp, bool)))[j]]
-        if len(vis_cams) < 3:
-            continue
-        obs = np.zeros((rt.num_cameras, 2))
-        for c in vis_cams:
-            obs[c] = np.asarray(kp2d_by_cam[c][j], float)
-        kp_errs = []
-        for held in vis_cams:
-            others = [c for c in vis_cams if c != held]
-            if len(others) < 2:
-                continue
-            X = rt.reconstruct_point(obs, cams_to_use=others)
-            proj = rt.reproject_point(X)[held]
-            kp_errs.append(float(np.linalg.norm(proj - obs[held])))
-        if kp_errs:
-            per_kp[j] = float(np.mean(kp_errs))
-            all_errs.extend(kp_errs)
+    for V in np.unique(n_vis[n_vis >= 3]):
+        V = int(V)
+        js = np.nonzero(n_vis == V)[0]                    # (G,)
+        # visible cameras per kp, ascending -- `cams` is sorted, so this is the
+        # same `vis_cams` list the scalar version built.
+        sel = np.nonzero(vis[js])[1].reshape(len(js), V)  # (G, V) column idx
+        cam_sel = cam_ids[sel]                            # (G, V) camera ids
+        obs_sel = np.take_along_axis(obs[js], sel[..., None], axis=1)  # (G,V,2)
+        errs = np.empty((len(js), V), float)
+        for h in range(V):
+            keep = [k for k in range(V) if k != h]        # `others`, in order
+            X = _reconstruct_all(rt, obs_sel[:, keep], cam_sel[:, keep])
+            proj = _reproject_all(rt, X)                  # (G, C, 2)
+            held = cam_sel[:, h]
+            errs[:, h] = _px_err(proj[np.arange(len(js)), held], obs_sel[:, h])
+        per_kp[js] = errs.mean(axis=1)
+        all_errs.append(errs.reshape(-1))
+    all_errs = np.concatenate(all_errs) if all_errs else np.zeros(0)
     return {"per_kp": per_kp,
-            "median": float(np.median(all_errs)) if all_errs else float("nan"),
-            "n": len(all_errs)}
+            "median": float(np.median(all_errs)) if all_errs.size else float("nan"),
+            "n": int(all_errs.size)}
 
 
 def mesh_mask_iou_report(rt, mesh_mm, masks_by_cam):
@@ -114,18 +189,20 @@ def mesh_mask_iou_report(rt, mesh_mm, masks_by_cam):
     run ~0.025 hard / ~0.15 soft and always have (phase-0 baseline recorded
     0.0287/0.0251). Treat it as a relative proxy between runs, never as
     "2.5% of the fly is covered", and do not gate on it.
+
+    The mesh is reprojected ONCE for all cameras (it used to be reprojected
+    per camera, per vertex, from Python: 500 x 7 scalar calls per frame).
     """
-    from jarvis_jax.tracking.mesh_iou import (
-        iou_of_projected_verts, soft_iou_of_verts)
+    from jarvis_jax.tracking.mesh_iou import hard_soft_iou_of_verts
     mesh_mm = np.asarray(mesh_mm, float)
     hard, soft = {}, {}
-    for c, mask in masks_by_cam.items():
-        if mask is None or len(mesh_mm) == 0:
-            continue
-        mask = np.asarray(mask)
-        uv = np.stack([rt.reproject_point(mesh_mm[k])[c] for k in range(len(mesh_mm))], 0)
-        hard[c] = iou_of_projected_verts(uv, mask.shape, mask)
-        soft[c] = soft_iou_of_verts(uv, mask)
+    if len(mesh_mm):
+        uv_all = _reproject_all(rt, mesh_mm)              # (V, C, 2)
+        for c, mask in masks_by_cam.items():
+            if mask is None:
+                continue
+            hard[c], soft[c] = hard_soft_iou_of_verts(uv_all[..., c, :],
+                                                      np.asarray(mask))
     hm = float(np.mean(list(hard.values()))) if hard else float("nan")
     sm = float(np.mean(list(soft.values()))) if soft else float("nan")
     return {"hard": hard, "soft": soft, "hard_mean": hm, "soft_mean": sm}
@@ -139,22 +216,22 @@ def _ik_reproj_samples(rt, kp3d_mm, kp2d_by_cam, vis_by_cam):
     guard as ``per_camera_reproj_error`` above)."""
     kp3d_mm = np.asarray(kp3d_mm, float)
     n_kp = len(kp3d_mm)
+    uv_all = _reproject_all(rt, kp3d_mm)                  # (K, C, 2)
+    xyz_ok = np.isfinite(kp3d_mm).all(-1)
     idx_out, err_out = [], []
     for c, kp2d in kp2d_by_cam.items():
         vis = np.asarray(vis_by_cam.get(c, np.ones(n_kp, bool)), bool)
-        for j in range(n_kp):
-            if not vis[j]:
-                continue
-            xyz = kp3d_mm[j]
-            obs = np.asarray(kp2d[j], float)
-            if not (np.all(np.isfinite(xyz)) and np.all(np.isfinite(obs))):
-                continue
-            uv = rt.reproject_point(xyz)[c]
-            if not np.all(np.isfinite(uv)):
-                continue
-            idx_out.append(j)
-            err_out.append(float(np.linalg.norm(uv - obs)))
-    return np.asarray(idx_out, int), np.asarray(err_out, float)
+        obs = np.asarray(kp2d, float)
+        uv = uv_all[..., c, :]
+        good = (vis & xyz_ok & np.isfinite(obs).all(-1)
+                & np.isfinite(uv).all(-1))
+        if good.any():
+            idx_out.append(np.nonzero(good)[0])
+            err_out.append(_px_err(uv[good], obs[good]))
+    if not idx_out:
+        return np.zeros(0, int), np.zeros(0, float)
+    return (np.concatenate(idx_out).astype(int),
+            np.concatenate(err_out).astype(float))
 
 
 def _median_or_nan(err):
@@ -233,6 +310,76 @@ def ik_reproj_report(rt, *, kp3d_fitted_by_frame, kp2d_by_frame, vis_by_frame,
     return report
 
 
+# ---------------------------------------------------------------------------
+# The (frame, camera) metrics qc_report and per_frame_qc SHARE.
+# ---------------------------------------------------------------------------
+
+def frame_metrics(rt, *, kp3d_by_frame, mesh_by_frame, kp2d_by_frame,
+                  vis_by_frame, masks_by_frame):
+    """Per-(frame, camera) mesh-vs-mask IoU and keypoint reprojection error.
+
+    ``qc_report`` (median across the bout, for qc.json) and
+    ``qc_perframe.per_frame_qc`` (one row per frame, for the pseudo-label
+    Gate A) computed the SAME two things independently, so a bout paid for
+    ``mesh_mask_iou_report`` + ``per_camera_reproj_error`` twice -- the single
+    largest cost in each stage. Compute this once and pass it to both as
+    ``frame_metrics=``; both still compute it themselves when it is omitted,
+    so every existing caller is unaffected.
+
+    Returns ``{"cameras": [...], "hard_iou": (T,C), "soft_iou": (T,C),
+    "reproj_px": (T,C), "mask_present": (T,C) bool}``; NaN marks a (frame,
+    camera) the corresponding metric skipped (no mask / no usable keypoint).
+    """
+    T = len(kp3d_by_frame)
+    cams = sorted({c for t in range(T) for c in kp2d_by_frame[t]}
+                  | {c for t in range(T) for c in masks_by_frame[t]})
+    col = {c: i for i, c in enumerate(cams)}
+    hard = np.full((T, len(cams)), np.nan)
+    soft = np.full((T, len(cams)), np.nan)
+    reproj = np.full((T, len(cams)), np.nan)
+    present = np.zeros((T, len(cams)), bool)
+    for t in range(T):
+        for c, m in masks_by_frame[t].items():
+            present[t, col[c]] = m is not None
+        sr = mesh_mask_iou_report(rt, mesh_by_frame[t], masks_by_frame[t])
+        for c, v in sr["hard"].items():
+            hard[t, col[c]] = v
+        for c, v in sr["soft"].items():
+            soft[t, col[c]] = v
+        for c, v in per_camera_reproj_error(rt, kp3d_by_frame[t],
+                                           kp2d_by_frame[t], vis_by_frame[t]).items():
+            reproj[t, col[c]] = v
+    return {"cameras": cams, "hard_iou": hard, "soft_iou": soft,
+            "reproj_px": reproj, "mask_present": present}
+
+
+# Private alias: `qc_report`/`per_frame_qc` take a `frame_metrics=` KWARG that
+# shadows the function name inside their bodies.
+_frame_metrics = frame_metrics
+
+
+def _row_mean(a):
+    """Per-row mean over the non-NaN entries; NaN for an all-NaN row.
+
+    Equals ``np.mean(list(d.values()))`` over the present cameras: NaN entries
+    contribute an exact 0.0 to ``nansum`` and are excluded from the count."""
+    cnt = np.count_nonzero(~np.isnan(a), axis=1)
+    with np.errstate(invalid="ignore"):
+        out = np.where(cnt > 0, np.nansum(a, axis=1) / np.maximum(cnt, 1), np.nan)
+    return out
+
+
+def _row_median(a):
+    """Per-row median over the non-NaN entries; NaN for an all-NaN row
+    (``np.nanmedian`` without its all-NaN RuntimeWarning)."""
+    out = np.full(a.shape[0], np.nan)
+    rows = np.nonzero(np.count_nonzero(~np.isnan(a), axis=1) > 0)[0]
+    for i in rows:
+        r = a[i]
+        out[i] = np.median(r[~np.isnan(r)])
+    return out
+
+
 def _jsonable(o):
     if isinstance(o, dict):
         return {str(k): _jsonable(v) for k, v in o.items()}
@@ -247,7 +394,8 @@ def _jsonable(o):
 
 def qc_report(rt, *, kp3d_by_frame, mesh_by_frame, kp2d_by_frame,
               vis_by_frame, masks_by_frame, out_json=None,
-              kp3d_measured_by_frame=None, kp_names=None, group_defs=None):
+              kp3d_measured_by_frame=None, kp_names=None, group_defs=None,
+              frame_metrics=None):
     """Bundle per-camera reproj, LOO reproj, mesh-vs-mask IoU, and (additive)
     the IK reprojection metric over frames.
 
@@ -260,20 +408,31 @@ def qc_report(rt, *, kp3d_by_frame, mesh_by_frame, kp2d_by_frame,
     ``jarvis_jax.tracking.qc.ik_reproj_report``. Omitting them (the default)
     is byte-for-byte the previous report; existing qc.json files and callers
     (e.g. the COCO-val Phase-7 driver) are unaffected.
+
+    ``frame_metrics``: an already-computed ``frame_metrics(...)`` result for
+    these same inputs, so a caller that also writes qc_perframe.npz does not
+    pay for the shared (frame, camera) metrics twice. None (default) computes
+    them here, unchanged.
     """
     T = len(kp3d_by_frame)
-    per_cam_all, loo_all, iou_hard_all, iou_soft_all = [], [], [], []
+    fm = frame_metrics
+    if fm is None:
+        fm = _frame_metrics(
+            rt, kp3d_by_frame=kp3d_by_frame, mesh_by_frame=mesh_by_frame,
+            kp2d_by_frame=kp2d_by_frame, vis_by_frame=vis_by_frame,
+            masks_by_frame=masks_by_frame)
+
+    per_cam_all = fm["reproj_px"][~np.isnan(fm["reproj_px"])]
+    iou_hard_all = _row_mean(fm["hard_iou"])
+    iou_soft_all = _row_mean(fm["soft_iou"])
+    iou_hard_all = iou_hard_all[np.isfinite(iou_hard_all)]
+    iou_soft_all = iou_soft_all[np.isfinite(iou_soft_all)]
+
+    loo_all = []
     for t in range(T):
-        pc = per_camera_reproj_error(rt, kp3d_by_frame[t], kp2d_by_frame[t], vis_by_frame[t])
-        per_cam_all.extend(pc.values())
         lo = loo_reproj(rt, kp2d_by_frame[t], vis_by_frame[t])
         if lo["n"]:
             loo_all.append(lo["median"])
-        sr = mesh_mask_iou_report(rt, mesh_by_frame[t], masks_by_frame[t])
-        if np.isfinite(sr["hard_mean"]):
-            iou_hard_all.append(sr["hard_mean"])
-        if np.isfinite(sr["soft_mean"]):
-            iou_soft_all.append(sr["soft_mean"])
 
     def _agg(xs):
         # nanmedian, not median: per_cam_all/loo_all/iou_*_all should no

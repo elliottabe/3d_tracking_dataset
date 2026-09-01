@@ -11,6 +11,15 @@
 out: ${paths.processed_root}/${dataset.name}/${recording.name}/${basename:${recording.session_dir}}/pose
 overlay: true
 overlay_fps: 30
+# How many per-camera reprojection overlay videos to render at once. Each one is
+# an isolated subprocess (jarvis_jax.tracking.reproj_video.render_camera_overlays)
+# holding one decoded frame + one Agg canvas + one ffmpeg pipe, ~300 MB and one
+# core of matplotlib plus libx264's own threads. Measured on Session0 bout 28
+# (7 cameras x 2007 frames, 1936x448): 685 s sequential before this existed,
+# 72 s per camera after the renderer's own speedups. Raise it toward the camera
+# count on an idle node; 1 renders strictly sequentially, in-process. The mp4s
+# are byte-identical at any setting.
+overlay_workers: 4
 mesh_subset: fps_500+wing        # for output h5 verts
 # Standard per-(bout,fly) QC side-by-side video: raw video+SAM mask+2D skeleton |
 # MuJoCo IK render + 3D sites. Generated as a pipeline stage (viz.views.sidebyside,

@@ -1,0 +1,80 @@
+{
+  "after_one_camera_inprocess_s": 71.68128252029419,
+  "after_7cam_7workers_s": 195.2273874282837,
+  "after_7cam_4workers_s": 200.97254514694214,
+  "byte_rows": [
+    {
+      "cam": "Cam2012630",
+      "old_bytes": 14356600,
+      "new_bytes": 14356600,
+      "md5_old": "ff21a59ab4888c3a22bd197efc6a19d2",
+      "md5_new": "ff21a59ab4888c3a22bd197efc6a19d2",
+      "identical": true,
+      "par4_matches_par7": true
+    },
+    {
+      "cam": "Cam2012631",
+      "old_bytes": 8292708,
+      "new_bytes": 8292708,
+      "md5_old": "8f20d2e70a83d38feb605d886f19116a",
+      "md5_new": "8f20d2e70a83d38feb605d886f19116a",
+      "identical": true,
+      "par4_matches_par7": true
+    },
+    {
+      "cam": "Cam2012853",
+      "old_bytes": 12737464,
+      "new_bytes": 12737464,
+      "md5_old": "be05e2d0c2d18ebd171399da9f3f8927",
+      "md5_new": "be05e2d0c2d18ebd171399da9f3f8927",
+      "identical": true,
+      "par4_matches_par7": true
+    },
+    {
+      "cam": "Cam2012855",
+      "old_bytes": 10735421,
+      "new_bytes": 10735421,
+      "md5_old": "23936596996983d44e3d49a6767abf00",
+      "md5_new": "23936596996983d44e3d49a6767abf00",
+      "identical": true,
+      "par4_matches_par7": true
+    },
+    {
+      "cam": "Cam2012857",
+      "old_bytes": 8864341,
+      "new_bytes": 8864341,
+      "md5_old": "10182879bdfa29fef8c1b341d075787a",
+      "md5_new": "10182879bdfa29fef8c1b341d075787a",
+      "identical": true,
+      "par4_matches_par7": true
+    },
+    {
+      "cam": "Cam2012861",
+      "old_bytes": 6601734,
+      "new_bytes": 6601734,
+      "md5_old": "9b0ccb6d299494e0efda990a145d6010",
+      "md5_new": "9b0ccb6d299494e0efda990a145d6010",
+      "identical": true,
+      "par4_matches_par7": true
+    },
+    {
+      "cam": "Cam2012862",
+      "old_bytes": 12722197,
+      "new_bytes": 12722197,
+      "md5_old": "3d08cede5b1d0db04c27676e99f13cf2",
+      "md5_new": "3d08cede5b1d0db04c27676e99f13cf2",
+      "identical": true,
+      "par4_matches_par7": true
+    }
+  ],
+  "pixel_checks": {
+    "Cam2012630": {
+      "max_abs_delta": 0,
+      "sampled": 11
+    },
+    "Cam2012855": {
+      "max_abs_delta": 0,
+      "sampled": 11
+    }
+  }
+}

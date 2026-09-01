@@ -24,6 +24,17 @@ ReprojectionTool(calib_dir)
     .reconstruct_point(points2d, cams_to_use=None) : (3,) float64
                             DLT triangulation via SVD of the ray-constraint
                             matrix; dehomogenize the last right-singular vector.
+    .reproject_points(p3d) : (..., num_cam, 2) float64
+                            BATCHED reproject_point over any leading shape.
+                            BIT-IDENTICAL to stacking reproject_point (same
+                            float64 matrices, same 4-term dot order via
+                            np.einsum -- NOT a BLAS matmul, which reassociates
+                            and drifts ~1e-13). See reproject_points.
+    .reconstruct_points(points2d, cams) : (N, 3) float64
+                            BATCHED reconstruct_point for N systems that all
+                            use the SAME NUMBER of cameras. Bit-identical to
+                            the per-point loop (numpy's stacked SVD calls the
+                            same LAPACK routine per matrix).
 """
 
 import os
@@ -87,6 +98,14 @@ class ReprojectionTool:
         )
         for i, cam in enumerate(self._camera_list):
             self.camera_matrices[i] = cam.cameraMatrix.T.astype(np.float32)
+
+        # float64 (num_cam, 3, 4) stack for the batched reproject_points /
+        # reconstruct_points below. Deliberately NOT `camera_matrices`, which is
+        # float32: reproject_point does its dot in the cameras' native float64,
+        # so reusing the float32 stack would move every reprojection by ~1e-2 px
+        # and silently change every QC number that goes through it.
+        self._cam_mats_f64: np.ndarray = np.stack(
+            [cam.cameraMatrix for cam in self._camera_list]).astype(np.float64)
 
     # ------------------------------------------------------------------
     # Public API
@@ -173,3 +192,78 @@ class ReprojectionTool:
         X_h = Vh[-1]          # (4,) homogeneous 3D point
         X_h = X_h / X_h[3]   # dehomogenize
         return X_h[:3]
+
+    # ------------------------------------------------------------------
+    # Batched forms of the two primitives above.
+    #
+    # Both are BIT-IDENTICAL to looping the scalar version -- verified on this
+    # rig's real calibration and asserted in
+    # tests/test_reprojection_tool_batched.py -- because the QC report is a
+    # continuous time series across runs: an optimisation that moved these by
+    # one ulp would show up as a (tiny, unexplained) drift in every bout's
+    # qc.json.  The per-point loops were the pipeline's single biggest QC cost
+    # (7M scalar reproject_point calls per bout in jarvis_jax.tracking.qc).
+    # ------------------------------------------------------------------
+
+    def reproject_points(self, p3d: np.ndarray) -> np.ndarray:
+        """Project a batch of 3D points onto all cameras.
+
+        Parameters
+        ----------
+        p3d : (..., 3) array_like
+            3D points in world coordinates (any leading shape).
+
+        Returns
+        -------
+        pts2d : ndarray (..., num_cam, 2) float64
+            Pixel coordinates, perspective-divided.  Equals
+            ``np.stack([self.reproject_point(p) for p in p3d])`` exactly
+            (non-finite input propagates the same way).
+
+        Uses ``np.einsum`` and NOT ``@``/``np.tensordot``: einsum evaluates the
+        4-term dot in the same order as ``M.dot(p_h)``, while the BLAS-backed
+        products reassociate and disagree by ~1e-13 px.
+        """
+        p3d = np.asarray(p3d, dtype=np.float64)
+        ph = np.concatenate([p3d, np.ones((*p3d.shape[:-1], 1))], axis=-1)
+        proj = np.einsum('...k,cjk->...cj', ph, self._cam_mats_f64)
+        return proj[..., :2] / proj[..., 2:3]
+
+    def reconstruct_points(
+        self,
+        points2d: np.ndarray,
+        cams: np.ndarray,
+    ) -> np.ndarray:
+        """Triangulate N points, each from the same NUMBER of cameras.
+
+        Parameters
+        ----------
+        points2d : (N, n, 2) array_like
+            Observed 2-D pixel coordinates; ``points2d[i, k]`` is point i as
+            seen by camera ``cams[i, k]``.
+        cams : (N, n) int array_like
+            Camera indices per system, in the order the DLT rows should be
+            stacked (``reconstruct_point``'s ``cams_to_use`` order).
+
+        Returns
+        -------
+        X : ndarray (N, 3) float64
+            Same values as ``[reconstruct_point(obs_i, cams_to_use=cams[i])]``.
+            ``n < 2`` returns zeros, matching ``reconstruct_point``.
+
+        A non-finite observation makes LAPACK fail to converge and raises
+        ``numpy.linalg.LinAlgError`` -- exactly as the scalar version does on
+        the same input, just for the whole batch at once.
+        """
+        points2d = np.asarray(points2d, dtype=np.float64)
+        cams = np.asarray(cams, dtype=int)
+        N, n = cams.shape
+        if n < 2:
+            return np.zeros((N, 3), dtype=np.float64)
+        P = self._cam_mats_f64[cams]                      # (N, n, 3, 4)
+        # [u*P[2] - P[0]; v*P[2] - P[1]] per camera, same expression as the loop
+        rows = points2d[..., None] * P[:, :, 2:3, :] - P[:, :, 0:2, :]  # (N,n,2,4)
+        A = rows.reshape(N, 2 * n, 4)
+        Vh = np.linalg.svd(A)[2]
+        X_h = Vh[:, -1, :]
+        return X_h[:, :3] / X_h[:, 3:4]

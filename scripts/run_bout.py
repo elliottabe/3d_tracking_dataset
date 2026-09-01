@@ -37,6 +37,7 @@ import sys
 import glob
 import json
 import re
+import time
 
 from pathlib import Path
 
@@ -60,9 +61,9 @@ from jarvis_jax.tracking.stac import fit_offsets_once, ik_only_bout
 from jarvis_jax.tracking.bridge import compute_bridges
 from jarvis_jax.tracking.outputs import build_fly_outputs
 from jarvis_jax.tracking.qc import qc_report
-from jarvis_jax.tracking.reproj_video import write_camera_video
+from jarvis_jax.tracking.reproj_video import render_camera_overlays
 from jarvis_jax.predict.sam3_driver import parse_bouts, session_tag_for, masks_are_stale
-from jarvis_jax.predict.synced_reader import load_plan, read_window, read_one_cam
+from jarvis_jax.predict.synced_reader import load_plan, read_window
 try:
     from scripts.scale_keypoints import resolve_scale_keypoints
 except ModuleNotFoundError:  # direct invocation: sys.path[0] is scripts/, not repo root
@@ -485,26 +486,6 @@ def arrays_to_bridges(s, R, t, ok):
     """Inverse of bridges_to_arrays: rebuild the length-T list of (s,R,t)|None."""
     return [(float(s[i]), np.asarray(R[i]), np.asarray(t[i])) if ok[i] else None
             for i in range(len(ok))]
-
-
-def atomic_write_mp4(path, write_fn):
-    """Like resume.atomic_write, but keeps the '.mp4' suffix on the
-    temp file: imageio's writer picks its backend by sniffing the URI's
-    extension, so a bare '<path>.tmp' (no '.mp4') makes it fall back to the
-    wrong plugin (e.g. TIFF) and crash on the 'fps' kwarg."""
-    tmp = path[:-4] + ".tmp.mp4" if path.endswith(".mp4") else path + ".tmp"
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    write_fn(tmp)
-    if not os.path.exists(tmp):
-        # imageio never creates the file when zero frames are appended (e.g. a
-        # bout whose frame window runs past the end of the source video), so
-        # os.replace would crash with FileNotFoundError. This artifact is
-        # cosmetic QC -- warn and skip rather than fail the bout.
-        print(f"[atomic_write_mp4] WARNING: writer produced no file for {path} "
-              f"(0 frames?) -- skipping this video.")
-        return None
-    os.replace(tmp, path)
-    return path
 
 
 # ---------------------------------------------------------------------------
@@ -1650,6 +1631,18 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
              for c in range(C)}
             for t in range(T)
         ]
+        # qc.json and qc_perframe.npz need the SAME per-(frame, camera)
+        # mesh-vs-mask IoU + keypoint reprojection error, and computing them
+        # twice was the single largest cost in each stage (3m39s + 2m52s of a
+        # ~35 min bout, both dominated by these two metrics). Compute once here
+        # and hand the result to both; each function still computes its own
+        # when the kwarg is omitted, so nothing else changes.
+        from jarvis_jax.tracking.qc import frame_metrics as _qc_frame_metrics
+        _fm = _qc_frame_metrics(rt, kp3d_by_frame=kp3d_by_frame,
+                                mesh_by_frame=mesh_by_frame,
+                                kp2d_by_frame=kp2d_by_frame,
+                                vis_by_frame=vis_by_frame,
+                                masks_by_frame=masks_by_frame)
         if not stage_done(qc_json_path):
             # ik_reproj metric (additive qc.json key): FITTED (kp3d_by_frame,
             # the FK'd outputs.h5 sites above) vs MEASURED -- the RAW
@@ -1704,7 +1697,8 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
                      kp2d_by_frame=kp2d_by_frame, vis_by_frame=vis_by_frame,
                      masks_by_frame=masks_by_frame, out_json=qc_json_path,
                      kp3d_measured_by_frame=kp3d_measured_by_frame,
-                     kp_names=kp_names, group_defs=group_defs)
+                     kp_names=kp_names, group_defs=group_defs,
+                     frame_metrics=_fm)
 
         # -- per-frame QC (Gate A inputs): soft/hard silhouette IoU, marker
         #    reproj, n_cams, one row per frame -- next to qc.json. Reuses the
@@ -1713,7 +1707,7 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
             from jarvis_jax.tracking.qc_perframe import per_frame_qc
             pf = per_frame_qc(rt, mesh_by_frame=mesh_by_frame, kp3d_by_frame=kp3d_by_frame,
                               kp2d_by_frame=kp2d_by_frame, vis_by_frame=vis_by_frame,
-                              masks_by_frame=masks_by_frame)
+                              masks_by_frame=masks_by_frame, frame_metrics=_fm)
             atomic_save_npz(qc_perframe_path, **pf)
 
     # -- overlays: project the per-frame ARTICULATED mesh into each camera,
@@ -1729,6 +1723,19 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
         mesh_mm_all = np.asarray(d_out["mesh_mm"])   # (T,Kmesh,3) FK'd world-mm mesh subset
         overlay_dir = os.path.join(bout_dir, "overlays")
         start = bout_start_frame(cfg, bout_idx)
+        # Build one render JOB per missing camera, then render them
+        # CONCURRENTLY -- jarvis_jax.tracking.reproj_video.render_camera_overlays
+        # runs one ISOLATED SUBPROCESS per camera (same pattern as Stage F's
+        # `python -m viz sidebyside` below, and for the same reason: fork is
+        # unsafe while this process holds jax's threads, and multiprocessing's
+        # spawn would re-import THIS module -- jax, mujoco, hydra, stac_mjx --
+        # in every worker). The cameras share nothing, and the per-frame cost is
+        # ~60 ms of matplotlib-rasterise + h264 that no vectorisation can
+        # remove, so concurrency is the only large win here that leaves every
+        # output byte untouched. cfg.outputs.overlay_workers (default 4) caps
+        # it: raise it to 7 on an idle node, set it to 1 for strictly
+        # sequential, in-process rendering.
+        jobs = []
         for ci, cam in enumerate(cameras):
             overlay_path = os.path.join(overlay_dir, f"{cam}_reproj.mp4")
             if stage_done(overlay_path):
@@ -1756,30 +1763,28 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
                 _cap.release()
                 if H <= 0 or W <= 0:
                     H, W = 1080, 1920  # last-resort fallback; normally valid
-
-                def _frames_rgb(cam=cam, H=H, W=W):
-                    # read_one_cam yields (frame_rgb (H,W,3)|None, present); a dropped
-                    # slot (frame None) still needs a placeholder frame so
-                    # write_camera_video's frame-count bookkeeping stays in lockstep
-                    # with mesh2d_by_frame/kp2d_by_frame_overlay (one entry per T).
-                    # The placeholder must match the real (H,W) -- imageio's ffmpeg
-                    # writer raises "All images in a movie should have same size"
-                    # if any yielded frame's shape differs from the first.
-                    for _fr, _present in read_one_cam(
-                            cfg.recording.session_dir, cam, sync_plan, start, T):
-                        yield _fr if _fr is not None else np.zeros((H, W, 3), np.uint8)
-
-                def _write(tmp, mesh2d_by_frame=mesh2d_by_frame,
-                          kp2d_by_frame_overlay=kp2d_by_frame_overlay):
-                    write_camera_video(
-                        tmp, frames_rgb_iter=_frames_rgb(),
-                        mesh2d_by_frame=mesh2d_by_frame, kp2d_by_frame=kp2d_by_frame_overlay,
-                        fps=int(cfg.outputs.overlay_fps))
-
-                atomic_write_mp4(overlay_path, _write)
+                # The worker re-derives the sync plan with the same
+                # load_plan(session_dir) this function used (SyncPlan objects
+                # are not worth pickling), so its reads are the same slots.
+                jobs.append(dict(cam=cam, session_dir=str(cfg.recording.session_dir),
+                                 start=int(start), T=int(T), H=H, W=W,
+                                 mesh2d=mesh2d_by_frame, kp2d=kp2d_by_frame_overlay,
+                                 out_path=overlay_path,
+                                 fps=int(cfg.outputs.overlay_fps)))
             except Exception as e:  # noqa: BLE001 -- QC artifact, never fatal
                 print(f"[overlay] WARNING: bout {bout_idx} fly{fly} cam {cam} "
-                      f"reproj overlay failed ({type(e).__name__}: {e}) -- skipping.")
+                      f"reproj overlay setup failed ({type(e).__name__}: {e}) -- skipping.")
+        if jobs:
+            _t_ov = time.time()
+            _errs = render_camera_overlays(
+                jobs, max_workers=int(cfg.outputs.get("overlay_workers", 4)))
+            for cam, err in _errs.items():
+                if err:
+                    print(f"[overlay] WARNING: bout {bout_idx} fly{fly} cam {cam} "
+                          f"reproj overlay failed ({err}) -- skipping.")
+            print(f"[overlay] bout {bout_idx} fly{fly}: {len(jobs)} camera(s) in "
+                  f"{time.time() - _t_ov:.0f}s "
+                  f"({sum(1 for e in _errs.values() if e is None)} written)", flush=True)
 
     # -- Stage F: standard QC side-by-side video (raw video + SAM mask + ViTPose
     #    2-D skeleton  |  MuJoCo IK render + 3-D sites). Auto-generated per
