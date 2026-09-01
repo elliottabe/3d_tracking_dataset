@@ -345,10 +345,20 @@ def test_nan_targets_contribute_zero():
 
 
 def test_gradient_flows_to_the_wing_vertices():
+    """A descent step must move the vertex TOWARD the target.
+
+    The gradient itself is POSITIVE here: the cost is the distance from the
+    target to the nearest vertex, so pushing the vertex further right (away)
+    raises it. Descent (`v -= lr * grad`) therefore moves the vertex left,
+    toward the target at x=0. Verified: cost 4.0/5.0/6.0 at x=4/5/6, analytic
+    grad +1.0, finite-difference +0.99993.
+    """
     import jax
     tgt = jnp.asarray([[0.0, 0.0]])
     g = jax.grad(lambda v: coverage_residual(tgt, v)[0])(jnp.asarray([[5.0, 0.0]]))
-    assert float(g[0, 0]) < 0.0, "the wing vertex should be pulled toward the target"
+    assert float(g[0, 0]) > 0.0, "cost must rise as the vertex moves away"
+    step = 5.0 - 0.5 * float(g[0, 0])
+    assert step < 5.0, "a descent step must move the vertex toward the target"
 ```
 
 - [ ] **Step 3: Run; expect ImportError**
