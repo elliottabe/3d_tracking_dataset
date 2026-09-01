@@ -506,7 +506,14 @@ def test_the_step_loop_compiles_once_not_per_chunk():
 
 
 def test_only_the_wing_vertices_are_fk_d():
-    """FK over all 139 353 vertices per step per frame is a ~1400x waste."""
+    """Only the wing vertices should be gathered.
+
+    NOTE the original "~1400x waste" premise was WRONG, measured: fk.py runs
+    full `mjx.kinematics` regardless of `indices`, so the selection saves the
+    per-vertex gather and the downstream projection, not the kinematics. 100 vs
+    2000 verts measured under 1 s. Keep the selection -- it is still right --
+    but do not expect a large speedup from it.
+    """
     q0, kw = _tiny_problem()
     assert len(kw["wing_vert_idx"]) < 400, "wing selection must be the fps subset"
 ```
@@ -563,6 +570,12 @@ optimise <c> s. A single jitted fori_loop, vmapped over frames, FK-ing only the
 wing_mask_fit:
   enabled: false
   containment_weight: 0.3
+  # MEASURED, Task 5: at coverage_weight == containment_weight the coverage sum
+  # (128 targets x 7 cameras of squared raw-px distances) dwarfs the containment
+  # sum (100 wing verts, ~79% of them exactly zero) by ~100x, so 0.3/0.3 is
+  # effectively coverage-only and the fit gets WORSE on both metrics. The fix is
+  # per-target-count normalisation plus huber_delta > 0, not zeroing the term.
+  # Task 7 sweeps this on BOTH flies; Task 8 sets the final value.
   coverage_weight: 0.3
   smooth_weight: 0.005
   limit_weight: 10.0
