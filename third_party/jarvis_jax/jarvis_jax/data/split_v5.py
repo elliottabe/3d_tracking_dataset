@@ -195,6 +195,16 @@ def write_derived(merged: dict, split: dict, out_root: str) -> None:
     with open(os.path.join(ann_dir, "split.json"), "w") as f:
         json.dump(split, f, indent=2)
 
+    # keypoint_names.json is the ONLY artifact that lets
+    # jarvis_jax.tracking.predict_2d.verify_detector_kp_order actually verify
+    # a checkpoint's keypoint order instead of merely warning: it resolves
+    # ckpt -> .hydra/overrides.yaml -> paths.data_root -> this file. A root
+    # built without it silently downgrades that guard to warn-only, which is
+    # how a keypoint-order bug stayed invisible before. The names are already
+    # in `merged`, so there is no reason to make it a manual copy step.
+    with open(os.path.join(ann_dir, "keypoint_names.json"), "w") as f:
+        json.dump(merged["keypoint_names"], f, indent=2)
+
     by_id = {a["id"]: a for a in merged["annotations"]}
     img_by_id = {i["id"]: i for i in merged["images"]}
     for name in ("train", "val"):

@@ -183,3 +183,26 @@ def test_write_derived_survives_none_ann_ids(tmp_path):
     ann_ids_out = [a["id"] for a in out["annotations"]]
     assert ann_ids_out == [0]
     assert None not in ann_ids_out
+
+
+def test_write_derived_emits_keypoint_names_json(tmp_path):
+    """The detector order guard (predict_2d.verify_detector_kp_order) resolves
+    ckpt -> overrides.yaml -> data_root -> annotations/keypoint_names.json.
+    A root built without that file downgrades the guard to warn-only, so
+    write_derived must emit it rather than leaving it a manual copy step --
+    building red_data_3d_v5_valfix without it is exactly what broke the
+    two-fly eval on 2026-08-31."""
+    names = ["head", "thorax", "T1L_FeTi"]
+    merged = {
+        "keypoint_names": names, "skeleton": [],
+        "categories": [{"id": 1, "name": "fly"}],
+        "images": [{"id": 0, "file_name": "rec_a/Cam1/Frame_000000.jpg"}],
+        "annotations": [{"id": 0, "image_id": 0, "fly_id": 0}],
+        "framesets": {"rec_a/Frame_000000/fly0": {
+            "recording": "rec_a", "fly_id": 0, "frames": [0], "ann_ids": [0]}},
+    }
+    write_derived(merged, {"rec_a/Frame_000000/fly0": "train"}, str(tmp_path))
+
+    p = tmp_path / "annotations" / "keypoint_names.json"
+    assert p.exists(), "guard would silently degrade to warn-only"
+    assert json.loads(p.read_text()) == names
