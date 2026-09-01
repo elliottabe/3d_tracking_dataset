@@ -281,6 +281,49 @@ def test_it_recovers_a_known_pitch_offset_at_the_springref_rest_attitude():
     assert err1 < 0.5 * err0, f"rest-attitude pitch error {err0:.3f} -> {err1:.3f} rad"
 
 
+def test_at_the_rest_attitude_the_coverage_term_earns_its_place():
+    """The cell the sweep left unpinned, and the ONLY measured justification for
+    shipping `coverage_weight > 0` at all.
+
+    At the springref REST attitude 48-80% of the blade is hidden inside the body
+    silhouette. That is where containment's documented degeneracy (minimise it
+    by tucking the wing further IN) and the coverage term's bias meet, so it is
+    the cell that decides whether the second term is worth its cost.
+
+    MEASURED 2026-09-01 at the SHIPPED `huber_delta=8.0`, from a 25 deg
+    perturbation (docs/benchmark/2026-09-01-wing-mask-fit/):
+
+        both terms         1.14 deg
+        containment only   2.49 deg
+        coverage only     43.49 deg   <- ALONE, 18 deg WORSE than doing nothing
+
+    So the term is neither "insurance" nor "a tie": it is a COMPLEMENT that
+    halves the error here, and it must never be relied on by itself. Only that
+    load-bearing half is asserted. It matters because on the real bout the term
+    is INERT -- Session0 bout 28 fly0 and fly1 give the same pose to three
+    significant figures at coverage 0.0 and 0.3 -- so without this cell there is
+    no measurement anywhere that distinguishes the two.
+
+    `huber_delta` is passed explicitly: the module default is 0.0, at which the
+    chamfer is an unrobustified L2 and this comparison is 1.63 vs 2.49 rather
+    than 1.14 vs 2.49.
+    """
+    from jarvis_jax.tracking.wing_mask_refine import refine_wing_pitch
+    q_true, q_pert, kw = _synthetic_from_model(pitch_offset_deg=25.0, rest=True)
+    m = np.asarray(kw["opt_mask"])
+    err = {}
+    for tag, over in (("both", dict(huber_delta=8.0)),
+                      ("containment", dict(huber_delta=8.0, coverage_weight=0.0))):
+        q1 = np.asarray(refine_wing_pitch(q_pert, **dict(kw, **over)))
+        err[tag] = float(np.abs(q1[:, m] - q_true[:, m]).mean())
+    assert err["both"] < 0.8 * err["containment"], (
+        f"at the springref rest attitude the coverage term must IMPROVE on "
+        f"containment alone -- that is the whole reason it ships at a non-zero "
+        f"weight, since on the real bout it changes nothing: "
+        f"both {np.degrees(err['both']):.2f} deg vs containment-only "
+        f"{np.degrees(err['containment']):.2f} deg")
+
+
 # --------------------------------------------------------------------------
 # structural properties that stand in for a (flaky) wall-clock assert
 # --------------------------------------------------------------------------
