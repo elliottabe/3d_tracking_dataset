@@ -21,6 +21,7 @@ Both are checked directly on synthetic heatmaps, not asserted from prose.
 """
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
 from jarvis_jax.data.device import render_heatmaps
 from jarvis_jax.train.losses import centerdetect_instance_mse
@@ -137,16 +138,42 @@ def test_fixing_one_instance_reduces_batch_loss_by_the_same_amount_regardless_of
         "if it does, this test is not actually distinguishing the two schemes")
 
 
-def test_perfect_prediction_gives_zero_fg_and_bg_loss():
+@pytest.mark.parametrize("amplitude", [1.0, 255.0])
+def test_perfect_prediction_gives_zero_fg_and_bg_loss(amplitude):
+    """A prediction equal to the target must score zero -- AT THE TARGET'S OWN
+    AMPLITUDE. Parameterised because the amplitude is the whole point: the
+    default is 255.0 to match JARVIS (`255.0*np.exp(...)`), whose trained
+    CenterDetect emits peaks of ~240."""
     centers = jnp.asarray([[[16.0, 16.0], [4.0, 4.0]]], dtype=jnp.float32)
     valid = jnp.asarray([[True, True]])
     gt = render_heatmaps(centers, valid, heatmap_size=H, sigma=SIGMA)
-    gt_merged = jnp.max(gt, axis=-1)
+    gt_merged = amplitude * jnp.max(gt, axis=-1)
     total, fg, bg = centerdetect_instance_mse(gt_merged, centers, valid,
-                                              heatmap_size=H, sigma=SIGMA)
+                                              heatmap_size=H, sigma=SIGMA,
+                                              amplitude=amplitude)
     assert float(total) < 1e-8
     assert float(fg) < 1e-8
     assert float(bg) < 1e-8
+
+
+def test_amplitude_mismatch_is_catastrophic_not_subtle():
+    """Regression guard for the bug this parameter fixes: scoring a 255-scale
+    prediction (what the warm-started checkpoint emits) against 1.0-scale
+    targets must produce a HUGE loss, not a slightly worse one. Training that
+    way forces the model to crush its own outputs ~240x and destroys the
+    pretrained representation."""
+    centers = jnp.asarray([[[16.0, 16.0], [4.0, 4.0]]], dtype=jnp.float32)
+    valid = jnp.asarray([[True, True]])
+    gt = render_heatmaps(centers, valid, heatmap_size=H, sigma=SIGMA)
+    pred_ckpt_scale = 255.0 * jnp.max(gt, axis=-1)
+    matched, _, _ = centerdetect_instance_mse(pred_ckpt_scale, centers, valid,
+                                              heatmap_size=H, sigma=SIGMA,
+                                              amplitude=255.0)
+    mismatched, _, _ = centerdetect_instance_mse(pred_ckpt_scale, centers, valid,
+                                                 heatmap_size=H, sigma=SIGMA,
+                                                 amplitude=1.0)
+    assert float(matched) < 1e-8
+    assert float(mismatched) > 1e3
 
 
 def test_zero_valid_instances_is_finite_not_nan():

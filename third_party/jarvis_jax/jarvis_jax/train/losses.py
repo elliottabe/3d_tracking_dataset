@@ -30,7 +30,8 @@ def heatmap_mse(pred, gt, vis, bg_weight=0.1, fg_thresh=0.01, eps=1e-6,
 
 
 def centerdetect_instance_mse(pred, centers_xy, valid, *, heatmap_size, sigma,
-                              fg_thresh=0.01, bg_weight=0.1, eps=1e-6):
+                              fg_thresh=0.01, bg_weight=0.1, eps=1e-6,
+                              amplitude=255.0):
     """Per-INSTANCE-normalised heatmap MSE for CenterDetect (multi-animal,
     single output channel).
 
@@ -86,6 +87,24 @@ def centerdetect_instance_mse(pred, centers_xy, valid, *, heatmap_size, sigma,
         fg_thresh: per-instance foreground threshold on the UNMERGED
             per-instance Gaussian (default matches ``heatmap_mse``).
         bg_weight: background term weight (default matches ``heatmap_mse``).
+        amplitude: PEAK VALUE of the regression target. MUST be 255.0 to match
+            JARVIS, which renders targets as ``255.0*np.exp(...)``
+            (``dataset2D.py:420,432``) -- so its trained CenterDetect emits
+            peaks of ~240 (measured: the port's own parity fixture has
+            ``res2.max() == 240.119``). ``render_heatmaps`` produces peak-1.0
+            Gaussians, the jarvis_jax convention for the KEYPOINT path, and
+            training a 255-scale warm-started checkpoint against 1.0-scale
+            targets is not merely a slower start -- it is actively harmful,
+            because the model must first crush its own outputs ~240x, which
+            destroys the pretrained representation. Measured before this
+            argument existed: epoch-1 train_loss 840.8 collapsing to 0.59 by
+            epoch 2, then a from-scratch relearn that had still not produced a
+            SINGLE two-peak hit by epoch 12 (median_dist 495 -> 300 px against
+            a 40 px capture radius), while the PyTorch fine-tune from the SAME
+            checkpoint reached an 80% two-peak rate by epoch 10.
+            Note `fg_thresh` stays relative to the UNSCALED peak-1.0 Gaussian
+            below, so it keeps its meaning as a fraction of peak and does not
+            need rescaling alongside this.
 
     Returns:
         (total, fg_loss, bg_loss) -- three JAX scalars; `total` is what a
@@ -98,7 +117,9 @@ def centerdetect_instance_mse(pred, centers_xy, valid, *, heatmap_size, sigma,
 
     gt_inst = render_heatmaps(centers_xy, valid, heatmap_size=heatmap_size,
                               sigma=sigma)                            # (B,H,W,K)
-    gt_merged = jnp.max(gt_inst, axis=-1)                             # (B,H,W)
+    # fg_mask (below) is computed on the UNSCALED peak-1.0 gt_inst so fg_thresh
+    # stays a fraction-of-peak; only the regression TARGET carries amplitude.
+    gt_merged = amplitude * jnp.max(gt_inst, axis=-1)                 # (B,H,W)
 
     se = (pred2d - gt_merged) ** 2                                    # (B,H,W)
 
