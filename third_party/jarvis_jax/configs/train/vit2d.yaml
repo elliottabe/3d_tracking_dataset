@@ -37,6 +37,26 @@ mask_ablation: false
 # at the TARGET fly's own bbox center, replacing the SAM mask, instead of
 # zeroing it (mask_ablation above). Mutually exclusive with mask_ablation.
 # See jarvis_jax/data/center_channel.py and train/train.py::TrainConfig.
+# Replace the 4th input channel with a Gaussian at the target fly's OWN centre
+# instead of its SAM mask (jarvis_jax.data.center_channel). KEEP FALSE.
+#
+# Measured 2026-08-31 on red_data_3d_v5_valfix, matched steps, val MPJPE
+# overall / female (px):
+#         step   4ch RGB+mask   3ch RGB     4ch RGB+centreG
+#         2000   24.75 / 52.20  24.16/49.83  30.62 / 51.05
+#         4000   12.30 / 37.99  12.34/35.64  18.91 / 45.14
+#         6000    8.32 / 34.79   8.41/31.62  14.47 / 45.42
+#         8000    6.78 / 28.82   6.66/23.32  12.08 / 36.02
+# Killed at step 9400/30000: 1.81x worse than plain RGB and the gap was WIDENING
+# (1.27x at step 2000 -> 1.81x at 8000), so it was not a slow start.
+#
+# It loses even though it is handed the GROUND-TRUTH centre at both train and
+# eval time -- this is the idea's best case, and a real CenterDetect centre
+# (which misses a wall-adjacent fly entirely) could only be worse.
+#
+# Read together with the mask ablation, whose winner is 3-channel RGB
+# (5.28px overall / 9.74px female, vs 5.49 / 18.72 with the mask channel):
+# NEITHER extra channel earns its place. Feed the detector RGB.
 center_channel_input: false
 # Gaussian target sigma in heatmap px. MUST STAY 7.0: the 2026-08-29
 # resolution analysis argued for 2.0 and the 2026-08-30 retrain measured a 6.5x

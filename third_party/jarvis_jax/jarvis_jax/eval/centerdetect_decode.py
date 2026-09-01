@@ -102,3 +102,88 @@ def two_peak_hit(peaks_full_xy, gt_centers_xy, *, capture_radius_px=40.0):
                  and nearest_dist[0] <= capture_radius_px
                  and nearest_dist[1] <= capture_radius_px)
     return is_hit, nearest_dist, nearest_idx
+
+
+def grayfill_peaks(forward, imgs_u8, *, n_peaks=2, gray_radius_xy=(34, 46),
+                   fill="mean", return_heatmaps=False):
+    """Find `n_peaks` centres by ERASING each one from the IMAGE and re-running.
+
+    ``extract_top_k_peaks`` suppresses a disk in the HEATMAP, which cannot
+    raise a peak the network declined to commit to: the first fly is still in
+    the input, still competing, so a second fly it half-saw stays half-seen.
+    Measured on real courtship bouts, that is the actual failure -- the second
+    peak's LOCATION is often right (11-44 px) while its confidence collapses
+    (conf2/conf1 0.02-0.05 when the pair sits near a frame edge).
+
+    This instead gray-fills the found animal out of the RGB input and asks
+    again, so each subsequent animal is detected on a frame where it is the
+    ONLY animal and can take the full confidence of a first peak. It is the
+    same trick JARVIS already uses for the KEYPOINT detector, where the
+    distractor fly's mask pixels are replaced by the crop mean
+    (``predict.session_frameset``) -- applied here to centre detection, and
+    without needing masks: the erased region is an ellipse around the peak.
+
+    Cost is `n_peaks` forward passes instead of one, which is still far
+    cheaper than a SAM pass over the same frames.
+
+    Args:
+        forward: callable (B,H,W,3) float32 image batch -> (B,h,w[,1]) heatmap.
+            Must apply whatever normalisation the model expects.
+        imgs_u8: (B,H,W,3) uint8 model-input-sized images.
+        n_peaks: how many animals to find -- JARVIS's ``num_animals``. 1
+            reduces to a plain argmax; there is no upper limit beyond cost.
+        gray_radius_xy: (rx, ry) ellipse semi-axes IN MODEL-INPUT PIXELS for
+            the erased region. Default (34, 46) covers one fly in a 1936x448
+            frame squashed to 320x320 (the squash is anisotropic -- ~6.0x in x
+            but ~1.4x in y -- so a circle in model space is badly wrong; this
+            is a circle in REAL space).
+        fill: "mean" (JARVIS's convention) or "median", computed per image over
+            the pixels not yet erased.
+
+    Returns:
+        (peaks_xy (B,n_peaks,2) in HEATMAP coords, conf (B,n_peaks)); each
+        conf is that animal's own first-peak confidence, not a residual.
+        With `return_heatmaps`, also a list of the per-pass heatmaps.
+    """
+    imgs = np.asarray(imgs_u8)
+    if imgs.ndim != 4 or imgs.shape[-1] != 3:
+        raise ValueError(f"imgs_u8 must be (B,H,W,3), got {imgs.shape}")
+    if int(n_peaks) < 1:
+        raise ValueError(f"n_peaks must be >= 1, got {n_peaks}")
+    rx, ry = (float(gray_radius_xy[0]), float(gray_radius_xy[1]))
+    if rx <= 0 or ry <= 0:
+        raise ValueError(f"gray_radius_xy must be positive, got {gray_radius_xy}")
+
+    b, H, W = imgs.shape[:3]
+    work = imgs.astype(np.float32).copy()
+    erased = np.zeros((b, H, W), dtype=bool)
+    iyy, ixx = np.mgrid[0:H, 0:W].astype(np.float32)
+
+    peaks = np.zeros((b, int(n_peaks), 2), dtype=np.float32)
+    conf = np.zeros((b, int(n_peaks)), dtype=np.float32)
+    hms = []
+    for j in range(int(n_peaks)):
+        hm = np.asarray(forward(work))
+        if hm.ndim == 4:
+            hm = hm[..., 0]
+        hms.append(hm)
+        hh, hw = hm.shape[1:3]
+        flat = hm.reshape(b, hh * hw)
+        m = flat.argmax(axis=1)
+        py, px = (m // hw).astype(np.float32), (m % hw).astype(np.float32)
+        peaks[:, j, 0], peaks[:, j, 1] = px, py
+        conf[:, j] = flat[np.arange(b), m]
+        if j == int(n_peaks) - 1:
+            break
+        # Erase this animal from the INPUT, in image coords.
+        cx = px * (W / float(hw))
+        cy = py * (H / float(hh))
+        for i in range(b):
+            disk = (((ixx - cx[i]) / rx) ** 2 + ((iyy - cy[i]) / ry) ** 2) <= 1.0
+            keep = ~erased[i]
+            src = work[i][keep] if keep.any() else work[i].reshape(-1, 3)
+            val = (src.mean(axis=0) if fill == "mean"
+                   else np.median(src.reshape(-1, 3), axis=0))
+            work[i][disk] = val
+            erased[i] |= disk
+    return (peaks, conf, hms) if return_heatmaps else (peaks, conf)
