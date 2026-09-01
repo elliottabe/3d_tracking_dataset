@@ -14,6 +14,30 @@ def load_outputs(run_root, bout, fly):
     return {"kp3d_mm": np.asarray(d["kp3d_mm"]), "mesh_mm": np.asarray(d["mesh_mm"]),
             "kp_names": [str(n) for n in np.asarray(d["kp_names"]).tolist()]}
 
+def outputs_pose_source(run_root, bout, fly):
+    """The `pose_source` stamped into outputs.h5, or None if absent/unreadable.
+
+    outputs.h5 is the AUTHORITY on which pose a run committed to: run_bout
+    stamps it there in the same breath as writing the mesh and the fitted sites.
+    Deliberately duplicated from `scripts/run_bout.py` rather than imported --
+    viz has no dependency on the pipeline driver, which pulls in jax, mujoco,
+    stac_mjx and hydra at import time. Read via h5py, one dataset, because the
+    file also carries (T, Kmesh, 3) mesh_mm.
+    """
+    import h5py
+    path = os.path.join(fly_dir(run_root, bout, fly), "outputs.h5")
+    if not os.path.exists(path):
+        return None
+    try:
+        with h5py.File(path, "r") as f:
+            if "pose_source" not in f:
+                return None
+            v = f["pose_source"][()]
+    except OSError:
+        return None
+    return v.decode() if isinstance(v, bytes) else str(v)
+
+
 def load_qpos(run_root, bout, fly, source="auto"):
     """(qpos (T,nq) float, source_filename) for a bout-fly.
 
@@ -26,15 +50,25 @@ def load_qpos(run_root, bout, fly, source="auto"):
     before/after comparison.
 
     `source`:
-      'auto'    (default) the wing fit when it exists AND carries a readable
-                `wing_mask_fit_sig`; otherwise the STAC/bridge pose. No
-                signature means no provenance -- the file could be from any
-                config -- so 'auto' declines to prefer it.
+      'auto'    (default) the wing fit when it carries a readable
+                `wing_mask_fit_sig` AND that signature is the one outputs.h5
+                says this run committed to; otherwise the STAC/bridge pose.
       'wingfit' require the wing fit; raise if it is absent.
       'refined' always the STAC/bridge pose.
 
+    'auto' AGREES WITH outputs.h5 rather than merely with what is on disk, and
+    that is load-bearing: the rigcam panel draws `rig_world` from outputs.h5's
+    kp3d_mm (the fitted sites) and the MuJoCo mesh from this qpos, so if the two
+    disagree the drawn markers sit off the rendered wings -- indistinguishable
+    from an IK failure. After a disable-after-enable, outputs.h5 has been
+    rebuilt from the STAC pose and stamped "none" while qpos_wingfit.npz is
+    still sitting in the directory; preferring it because it EXISTS would draw
+    exactly that mismatch. An unstamped fit is likewise declined: no signature
+    means no provenance, so the file could be from any config.
+
     The two explicit values are what lets a caller render BOTH arms
-    deliberately rather than hope 'auto' picked the one it meant. The returned
+    deliberately rather than hope 'auto' picked the one it meant -- an A/B
+    driver that patches the pose itself must pass 'refined'. The returned
     filename is meant to be LABELLED on the figure, not just logged.
     """
     if source not in ("auto", "wingfit", "refined"):
@@ -59,10 +93,10 @@ def load_qpos(run_root, bout, fly, source="auto"):
     if os.path.exists(wing):
         try:
             with np.load(wing) as z:
-                stamped = "wing_mask_fit_sig" in z.files
+                sig = str(z["wing_mask_fit_sig"]) if "wing_mask_fit_sig" in z.files else None
         except (OSError, ValueError):
-            stamped = False
-        if stamped:
+            sig = None
+        if sig is not None and sig == outputs_pose_source(run_root, bout, fly):
             return _read(wing), "qpos_wingfit.npz"
     return _read(refined), "qpos_refined.npz"
 

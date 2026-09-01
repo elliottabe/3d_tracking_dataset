@@ -171,6 +171,23 @@ def _band(width, text):
     return layout.banner(width, [(text, (255, 255, 255))])
 
 
+def check_pose_mode(right_mode, pose):
+    """Refuse a --pose override the chosen right panel cannot honour.
+
+    `--right mujoco` renders `qpos` straight out of stac_ik.h5 -- the PRE-BRIDGE
+    STAC pose -- so it cannot show run_bout's wing-mask fit at all, and it never
+    consults `load_qpos`. Silently ignoring the flag there is the worst of the
+    three options: the render looks fine and answers a question it did not ask.
+    """
+    if right_mode == "mujoco" and pose != "auto":
+        raise ValueError(
+            f"--right mujoco cannot honour --pose {pose}: that panel renders "
+            f"qpos straight from stac_ik.h5 (the pre-bridge STAC pose) and "
+            f"never reads qpos_refined.npz or qpos_wingfit.npz. Use "
+            f"--right rigcam, which is the view-matched render and is what "
+            f"--pose selects the pose for.")
+
+
 def run(args):
     # Opt-in multi-view mode (--views left,top,right ...): a completely
     # separate code path below (_run_multiview), so the single-view flow that
@@ -272,6 +289,7 @@ def run(args):
     if out_dir:
         os.makedirs(out_dir, exist_ok=True)
 
+    check_pose_mode(right_mode, getattr(args, "pose", "auto"))
     mesh_mm = fitted_mm = None
     mj_render_path = None
     rframes = None
@@ -356,6 +374,10 @@ def run(args):
     # is a throwaway intermediate; keep a clean name (no double .mp4) and delete
     # it after the final side-by-side is written.
     if right_mode == "mujoco":
+        # No `pose source` line above this one: this panel draws stac_ik.h5's
+        # own qpos, before the model->mm bridge and before any wing fit.
+        print(f"[sidebyside] bout {bout} fly{fly}: right panel = MuJoCo render "
+              f"of stac_ik.h5 (pre-bridge STAC pose; --pose does not apply)")
         mj_render_path = (out_path[:-4] if out_path.endswith(".mp4") else out_path) + ".mjrender.mp4"
         rframes = list(stac.render(
             qpos, kp_data, offsets, n_frames=N,

@@ -80,7 +80,7 @@ def test_write_video_avc1_writes_nonzero_reopenable_mp4(tmp_path):
     assert ok and frame is not None
 
 
-def _fly(tmp_path, refined=True, wingfit=None):
+def _fly(tmp_path, refined=True, wingfit=None, outputs="SIG"):
     d = tmp_path / "bouts" / "bout_00001" / "fly0"
     d.mkdir(parents=True, exist_ok=True)
     if refined:
@@ -91,6 +91,11 @@ def _fly(tmp_path, refined=True, wingfit=None):
         if wingfit:                       # wingfit is the signature, or "" for none
             kw["wing_mask_fit_sig"] = wingfit
         np.savez(d / "qpos_wingfit.npz", **kw)
+    (d / "outputs.h5").unlink(missing_ok=True)
+    if outputs is not None:
+        ioh5.save(str(d / "outputs.h5"),
+                  {"kp3d_mm": np.zeros((4, 5, 3), np.float32),
+                   "pose_source": np.asarray(str(outputs)).astype("S")})
     return d
 
 
@@ -133,3 +138,45 @@ def test_load_qpos_source_override(tmp_path):
         io.load_qpos(str(tmp_path), 1, 0, source="wingfit")
     with pytest.raises(ValueError, match="source"):
         io.load_qpos(str(tmp_path), 1, 0, source="nonsense")
+
+
+def test_load_qpos_auto_defers_to_the_pose_outputs_h5_committed_to(tmp_path):
+    """`auto` must agree with outputs.h5, not merely with what is on disk.
+
+    The rigcam panel draws TWO things from TWO sources: `rig_world` from
+    outputs.h5's kp3d_mm (the fitted sites) and `rig_qpos` from load_qpos (which
+    drives the MuJoCo mesh). If those disagree the drawn markers sit off the
+    rendered wings -- visually indistinguishable from an IK failure. So
+    preferring a stamped qpos_wingfit.npz merely because it EXISTS is wrong:
+    after a disable-after-enable, outputs.h5 has been rebuilt from the STAC pose
+    and stamped "none" while the wing fit is still on disk.
+    """
+    _fly(tmp_path, wingfit="SIG", outputs="SIG")
+    assert io.load_qpos(str(tmp_path), 1, 0)[1] == "qpos_wingfit.npz"
+
+    # disable-after-enable: outputs.h5 rebuilt from the STAC pose
+    _fly(tmp_path, wingfit="SIG", outputs="none")
+    assert io.load_qpos(str(tmp_path), 1, 0)[1] == "qpos_refined.npz", \
+        "auto must not draw a pose outputs.h5 does not hold"
+
+    # a fit from a DIFFERENT config than the one outputs.h5 was built from
+    _fly(tmp_path, wingfit="OTHER", outputs="SIG")
+    assert io.load_qpos(str(tmp_path), 1, 0)[1] == "qpos_refined.npz"
+
+    # no outputs.h5 at all -> nothing authoritative to agree with
+    _fly(tmp_path, wingfit="SIG", outputs=None)
+    assert io.load_qpos(str(tmp_path), 1, 0)[1] == "qpos_refined.npz"
+
+    # an explicit override still wins, so an A/B can force either arm
+    _fly(tmp_path, wingfit="SIG", outputs="none")
+    assert io.load_qpos(str(tmp_path), 1, 0, source="wingfit")[1] == "qpos_wingfit.npz"
+
+
+def test_outputs_pose_source_reads_the_stamp_or_none(tmp_path):
+    d = _fly(tmp_path, outputs="SIG")
+    assert io.outputs_pose_source(str(tmp_path), 1, 0) == "SIG"
+    ioh5.save(str(d / "outputs.h5"), {"kp3d_mm": np.zeros((4, 5, 3), np.float32)})
+    assert io.outputs_pose_source(str(tmp_path), 1, 0) is None, \
+        "an outputs.h5 predating the stamp has no provenance"
+    (d / "outputs.h5").unlink()
+    assert io.outputs_pose_source(str(tmp_path), 1, 0) is None

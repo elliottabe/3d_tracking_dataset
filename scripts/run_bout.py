@@ -578,6 +578,29 @@ def npz_pose_source(path):
         return None
 
 
+def overlay_pose_sources(path):
+    """{camera: pose_source} recorded for the per-camera overlay videos.
+
+    PER CAMERA, not per group. The first version stamped the group only when
+    EVERY camera's mp4 existed -- but an overlay failure is caught and logged
+    non-fatally, so one camera that keeps erroring left the group permanently
+    stale and re-rendered the six good cameras on every resumed run (~60 ms per
+    frame per camera), where before this feature each existing mp4 was simply
+    skipped. Missing file, unreadable file, or the old flat group format all
+    read as {} -- i.e. nothing is current, which re-renders once and then
+    settles.
+    """
+    if not stage_done(path):
+        return {}
+    try:
+        with open(path) as f:
+            obj = json.load(f) or {}
+    except (OSError, ValueError):
+        return {}
+    cams = obj.get("cameras")
+    return {str(k): str(v) for k, v in cams.items()} if isinstance(cams, dict) else {}
+
+
 def stamp_json_pose_source(path, pose_source):
     """Add `pose_source` to a JSON artifact another writer just produced.
 
@@ -907,7 +930,14 @@ def _backfill_qc_perframe(cfg, bout_idx: int, fly: int, bout_dir: str) -> None:
     pf = per_frame_qc(rt, mesh_by_frame=mesh_by_frame, kp3d_by_frame=kp3d_by_frame,
                       kp2d_by_frame=kp2d_by_frame, vis_by_frame=vis_by_frame,
                       masks_by_frame=masks_by_frame)
-    atomic_save_npz(qc_perframe_path, **pf)
+    # Stamp what this was rebuilt FROM. Everything above comes out of
+    # outputs.h5, so its own stamp is the answer -- inventing "none" here would
+    # claim a plain STAC pose for a file rebuilt from a wing-refined one. This
+    # writer lives outside process_bout_fly, so the AST guard over the stage
+    # guards cannot see it; tests/test_run_bout_pipeline_structure.py covers it
+    # separately.
+    _bf_pose = outputs_pose_source(outputs_h5_path) or "none"
+    atomic_save_npz(qc_perframe_path, pose_source=_bf_pose, **pf)
     print(f"[courtship] bout {bout_idx} fly{fly}: backfilled qc_perframe.npz "
           f"for already-DONE bout -> {qc_perframe_path}")
 
@@ -2172,14 +2202,16 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
         mesh_mm_all = np.asarray(d_out["mesh_mm"])   # (T,Kmesh,3) FK'd world-mm mesh subset
         overlay_dir = os.path.join(bout_dir, "overlays")
         start = bout_start_frame(cfg, bout_idx)
-        # An .mp4 cannot carry a stamp, so the GROUP gets one sidecar, written
-        # only once every camera's file exists. These are FK'd from outputs.h5's
-        # mesh_mm, so after a refit they would otherwise keep showing the
-        # previous wings -- the per-camera `stage_done` skip below is exactly
-        # the "plausible artifact, stale content" failure the stamps exist for.
+        # An .mp4 cannot carry a stamp, so one sidecar records the pose PER
+        # CAMERA. These are FK'd from outputs.h5's mesh_mm, so after a refit
+        # they would otherwise keep showing the previous wings -- the
+        # `stage_done` skip below is exactly the "plausible artifact, stale
+        # content" failure the stamps exist for. Per camera rather than per
+        # group because an overlay failure is non-fatal: a group stamp written
+        # only when all 7 exist meant one permanently-failing camera re-rendered
+        # the other six on every resume, forever.
         overlay_stamp_path = os.path.join(overlay_dir, "pose_source.json")
-        _overlays_stale = pose_artifact_stale(
-            json_pose_source(overlay_stamp_path), _pose_sig)
+        _overlay_srcs = overlay_pose_sources(overlay_stamp_path)
         # Build one render JOB per missing camera, then render them
         # CONCURRENTLY -- jarvis_jax.tracking.reproj_video.render_camera_overlays
         # runs one ISOLATED SUBPROCESS per camera (same pattern as Stage F's
@@ -2195,7 +2227,8 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
         jobs = []
         for ci, cam in enumerate(cameras):
             overlay_path = os.path.join(overlay_dir, f"{cam}_reproj.mp4")
-            if stage_done(overlay_path) and not _overlays_stale:
+            _overlay_stale = _overlay_srcs.get(cam) != _pose_sig
+            if stage_done(overlay_path) and not _overlay_stale:
                 continue
             # Per-camera overlays are cosmetic QC and outputs.h5 is already
             # written above -- a render failure on one camera must never fail
@@ -2242,12 +2275,12 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
             print(f"[overlay] bout {bout_idx} fly{fly}: {len(jobs)} camera(s) in "
                   f"{time.time() - _t_ov:.0f}s "
                   f"({sum(1 for e in _errs.values() if e is None)} written)", flush=True)
-        # Stamp the group only when it is complete. A partial render (a camera
-        # errored, or the job was preempted) leaves the sidecar stale, so the
-        # next run re-renders rather than declaring the set current.
-        if all(stage_done(os.path.join(overlay_dir, f"{c}_reproj.mp4"))
-               for c in cameras):
-            atomic_save_json(overlay_stamp_path, {"pose_source": _pose_sig})
+            # Stamp exactly the cameras that rendered. One that failed keeps no
+            # entry, so it retries next run while the others stay skipped.
+            for _j in jobs:
+                if _errs.get(_j["cam"]) is None and stage_done(_j["out_path"]):
+                    _overlay_srcs[_j["cam"]] = _pose_sig
+            atomic_save_json(overlay_stamp_path, {"cameras": _overlay_srcs})
 
     # -- Stage F: standard QC side-by-side video (raw video + SAM mask + ViTPose
     #    2-D skeleton  |  MuJoCo IK render + 3-D sites). Auto-generated per

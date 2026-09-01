@@ -866,19 +866,25 @@ def test_every_pose_derived_artifact_is_gated_on_the_pose_stamp():
             ("_outputs_stale", "outputs_pose_source", "outputs_h5_path"),
             ("_qc_stale", "json_pose_source", "qc_json_path"),
             ("_qcpf_stale", "npz_pose_source", "qc_perframe_path"),
-            ("_overlays_stale", "json_pose_source", "overlay_stamp_path"),
             ("_sbs_stale", "json_pose_source", "sbs_stamp_path")):
         want = f"{stale}=pose_artifact_stale({reader}({path}),_pose_sig)"
         assert want in flat, (
             f"{stale} must be read from {path}'s own stamp via {reader}; "
             f"sharing another artifact's term reintroduces the preemption hole")
 
+    # the overlays are the one PER-CAMERA case: an .mp4 cannot carry a stamp and
+    # a group stamp made one permanently-failing camera re-render the others on
+    # every resume, so the sidecar maps camera -> pose and the skip is per camera
+    assert "_overlay_srcs=overlay_pose_sources(overlay_stamp_path)" in flat
+    assert "_overlay_stale=_overlay_srcs.get(cam)!=_pose_sig" in flat, \
+        "the overlay skip must be decided per camera, from that camera's stamp"
+
     # every stamp that is READ must also be WRITTEN, or the artifact rebuilds on
     # every single run instead of once
     for write in ("pose_source=_pose_sig",                       # build_fly_outputs
                   "stamp_json_pose_source(qc_json_path,_pose_sig)",
                   "atomic_save_npz(qc_perframe_path,pose_source=_pose_sig",
-                  'atomic_save_json(overlay_stamp_path,{"pose_source":_pose_sig})',
+                  'atomic_save_json(overlay_stamp_path,{"cameras":_overlay_srcs})',
                   'atomic_save_json(sbs_stamp_path,{"pose_source":_pose_sig})'):
         assert write in flat, f"nothing writes the stamp: {write}"
 
@@ -948,3 +954,93 @@ def test_outputs_h5_carries_the_pose_it_was_built_from():
     i = body.index("build_fly_outputs(")
     assert "pose_source=_pose_sig" in body[i:i + 500], \
         "Stage E must stamp the pose provenance it is writing"
+
+
+# ---------------------------------------------------------------------------
+# Task 6 fix round 3
+# ---------------------------------------------------------------------------
+
+def test_overlay_stamps_are_per_camera_not_per_group(tmp_path):
+    """F2 (cost): the group sidecar was written only when EVERY camera's mp4
+    existed, and overlay failures are caught non-fatally -- so one camera that
+    keeps erroring left the group stale forever and re-rendered the six good
+    cameras on every resumed run, minutes each time, where previously each
+    existing mp4 was simply skipped."""
+    import ast as _ast
+    import json as _json
+    read, = _run_bout_helpers("overlay_pose_sources")
+
+    assert read(str(tmp_path / "nope.json")) == {}
+    p = tmp_path / "pose_source.json"
+    p.write_text(_json.dumps({"cameras": {"Cam1": "SIG"}}))
+    assert read(str(p)) == {"Cam1": "SIG"}
+    p.write_text(_json.dumps({"pose_source": "SIG"}))    # the old group format
+    assert read(str(p)) == {}, "the old group stamp must not read as any camera"
+
+    src = RUN_BOUT.read_text()
+    fn = next(n for n in _ast.parse(src).body
+              if isinstance(n, _ast.FunctionDef) and n.name == "process_bout_fly")
+    flat = "".join(_ast.get_source_segment(src, fn).split())
+    assert "_overlay_srcs.get(cam)" in flat.replace('"', "'") or \
+           "_overlay_srcs.get(cam)" in flat, "the skip must be decided per camera"
+    assert "all(stage_done(os.path.join(overlay_dir" not in flat, \
+        "the all-cameras group gate is what made one bad camera cost every run"
+
+    # ... and a camera may only be stamped if it ACTUALLY rendered. Stamping
+    # every job unconditionally is the same bug pointing the other way: a camera
+    # whose render failed would be recorded as current and never retried, so its
+    # missing or stale mp4 is declared fine forever.
+    loops = [n for n in _ast.walk(fn)
+             if isinstance(n, _ast.For)
+             and getattr(n.iter, "id", None) == "jobs"
+             and any(getattr(t, "value", None) is not None
+                     and getattr(getattr(t, "value", None), "id", None) == "_overlay_srcs"
+                     for a in _ast.walk(n) if isinstance(a, _ast.Assign)
+                     for t in a.targets)]
+    assert loops, "could not find the loop that stamps the rendered cameras"
+    guarded = [any(isinstance(st, _ast.If)
+                   and "_errs" in _ast.dump(st.test)
+                   and "stage_done" in _ast.dump(st.test)
+                   for st in _ast.walk(lp))
+               for lp in loops]
+    assert all(guarded), (
+        "a camera is stamped without checking that its render succeeded and its "
+        "mp4 exists -- a failing camera would then never be retried")
+
+
+def test_backfill_qc_perframe_stamps_the_pose_it_rebuilt_from():
+    """F5: `_backfill_qc_perframe` writes qc_perframe.npz from outputs.h5, and
+    it lives OUTSIDE process_bout_fly, so the AST guard above cannot see it. It
+    was the one writer of a stamped artifact that did not stamp."""
+    import ast as _ast
+    src = RUN_BOUT.read_text()
+    fn = next(n for n in _ast.parse(src).body
+              if isinstance(n, _ast.FunctionDef) and n.name == "_backfill_qc_perframe")
+    flat = "".join(_ast.get_source_segment(src, fn).split())
+    assert "atomic_save_npz(qc_perframe_path,pose_source=" in flat, (
+        "the backfill must stamp the pose it rebuilt from -- it is rebuilding "
+        "from outputs.h5, whose own stamp says which pose that is")
+    assert "outputs_pose_source(outputs_h5_path)" in flat, \
+        "and that value must come from outputs.h5, not be invented"
+
+
+def test_the_ab_render_script_pins_the_pose_it_patched():
+    """F1, second half. scripts/viz/render_prior_sidebyside.py builds each A/B
+    arm by COPYING outputs.h5/qpos_refined.npz/stac_ik.h5 and SYMLINKING
+    everything else, then patches only qpos_refined.npz and
+    outputs.h5[qpos, kp3d_mm]. A qpos_wingfit.npz would follow the symlink into
+    both arms, and it invoked `viz sidebyside` with no --pose -- so once any
+    bout has a wing fit, both arms render the SAME wing-fit pose and the
+    comparison silently shows nothing. Latent only because the stage has never
+    run, and Task 7 is about to run it."""
+    from pathlib import Path as _P
+    src = (_P(__file__).resolve().parents[1] / "scripts" / "viz"
+           / "render_prior_sidebyside.py").read_text()
+    flat = "".join(src.split())
+    assert '"--pose","refined"' in flat, (
+        "each arm's pose is the qpos_refined.npz this script patched, so the "
+        "render must be pinned to it")
+    assert '"pose_source"' in flat, \
+        "the patched outputs.h5 must not keep a stamp that lies about its contents"
+    assert '"qpos_wingfit.npz"' in flat, \
+        "a wing fit must not be symlinked into an arm whose pose was patched"

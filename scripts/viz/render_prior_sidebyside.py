@@ -143,6 +143,12 @@ def main():
         os.makedirs(fly_dst, exist_ok=True)
         for fn in os.listdir(src):
             s, dst = os.path.join(src, fn), os.path.join(fly_dst, fn)
+            # qpos_wingfit.npz is deliberately NOT carried across. Each arm's
+            # pose is the qpos_refined.npz patched below; symlinking the wing
+            # fit into both arms let `viz sidebyside` pick it for BOTH and the
+            # comparison silently showed nothing.
+            if fn == "qpos_wingfit.npz":
+                continue
             if os.path.isfile(s) and not os.path.exists(dst):
                 (shutil.copy2 if fn in ("stac_ik.h5", "outputs.h5", "qpos_refined.npz")
                  else os.symlink)(s, dst)
@@ -160,6 +166,13 @@ def main():
         with h5py.File(os.path.join(fly_dst, "outputs.h5"), "r+") as f:
             f["qpos"][...] = q
             f["kp3d_mm"][...] = kp3d
+            # This copy now holds the PATCHED pose, so its provenance stamp must
+            # say so. Leaving the source run's `pose_source` in place would make
+            # the file claim a wing-fit pose it no longer contains, and
+            # viz.core.io.load_qpos trusts that stamp to decide what to draw.
+            if "pose_source" in f:
+                del f["pose_source"]
+            f["pose_source"] = np.asarray("none").astype("S")
         d2 = dict(qref)
         d2["qpos"] = q
         if br_ab is not None:
@@ -173,7 +186,11 @@ def main():
                "--session-dir", args.session_dir,
                "--predictions-dir", args.predictions_dir,
                "--start-frame", str(args.start_frame), "--fps", str(args.fps),
-               "--right", "rigcam", "--out", out_mp4]
+               "--right", "rigcam",
+               # Each arm IS the qpos_refined.npz patched above; pin the render
+               # to it rather than let 'auto' choose.
+               "--pose", "refined",
+               "--out", out_mp4]
         print("+", " ".join(cmd), flush=True)
         r = subprocess.run(cmd, cwd=REPO, capture_output=True, text=True,
                            env={**os.environ, "MUJOCO_GL": "egl", "JAX_PLATFORMS": "cpu"})
