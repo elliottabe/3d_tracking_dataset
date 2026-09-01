@@ -1,0 +1,62 @@
+{
+  "EXTENDED (qpos0)|both terms": {
+    "start_deg": 25.00000012650595,
+    "end_deg": 1.8837390657762483,
+    "ratio": 0.07534956224976322
+  },
+  "EXTENDED (qpos0)|containment only": {
+    "start_deg": 25.00000012650595,
+    "end_deg": 0.5254706253154404,
+    "ratio": 0.021018824906257363
+  },
+  "EXTENDED (qpos0)|coverage only": {
+    "start_deg": 25.00000012650595,
+    "end_deg": 6.615862529612805,
+    "ratio": 0.26463449984539866
+  },
+  "EXTENDED (qpos0)|coverage only h8": {
+    "start_deg": 25.00000012650595,
+    "end_deg": 7.447152473777186,
+    "ratio": 0.2978860974437129
+  },
+  "EXTENDED (qpos0)|both h8": {
+    "start_deg": 25.00000012650595,
+    "end_deg": 1.6315019939966757,
+    "ratio": 0.06526007942963549
+  },
+  "EXTENDED (qpos0)|containment only h8": {
+    "start_deg": 25.00000012650595,
+    "end_deg": 0.525472332862733,
+    "ratio": 0.021018893208148717
+  },
+  "REST (springref)|both terms": {
+    "start_deg": 25.00000012650595,
+    "end_deg": 1.6250784145256902,
+    "ratio": 0.06500313625209626
+  },
+  "REST (springref)|containment only": {
+    "start_deg": 25.00000012650595,
+    "end_deg": 2.4913678488228035,
+    "ratio": 0.09965471344863558
+  },
+  "REST (springref)|coverage only": {
+    "start_deg": 25.00000012650595,
+    "end_deg": 43.49435435160147,
+    "ratio": 1.7397741652603878
+  },
+  "REST (springref)|coverage only h8": {
+    "start_deg": 25.00000012650595,
+    "end_deg": 42.75206305298283,
+    "ratio": 1.7100825134658886
+  },
+  "REST (springref)|both h8": {
+    "start_deg": 25.00000012650595,
+    "end_deg": 1.1440032184025393,
+    "ratio": 0.04576012850454443
+  },
+  "REST (springref)|containment only h8": {
+    "start_deg": 25.00000012650595,
+    "end_deg": 2.4914846023689283,
+    "ratio": 0.09965938359045694
+  }
+}

@@ -1,0 +1,2528 @@
+{
+  "_what": "Acceptance A/B for the post-STAC wing-pitch refinement against the SAM masks (Stage D2). Session0/2025_10_20_13_20_04 bout 28, frames 0-1499, both flies. Control = the run's own qpos_refined.npz (verified bit-identical to stac_ik.h5:qpos); treatment = scripts/run_bout.py::wing_mask_fit_bout, the production stage worker.",
+  "_spec": "docs/specs/2026-09-01-wing-orientation-from-masks-design.md",
+  "_notes": "docs/benchmark/2026-09-01-wing-mask-fit/notes.md",
+  "_figures": "figures/2026-09-01-wing-mask-fit/ (gitignored; commands in notes.md)",
+  "_gates": "Ratios to THIS run's own control. The spec's absolute 'control 0.3615' belongs to wing_pitch_rest_prior_ab.py's own weight-0 re-solve at smooth_weight=0.1, not to the shipped pipeline pose -- see notes.md section 7.",
+  "_first_real_log_lines": [
+    "[wing-mask-fit] bout 28 fly0: fit; refined 1755/2007 frames; 252 left at the STAC pose (252 unsolved by STAC, 0 seen by fewer than 3 mask cameras, 0 non-finite pose); median wing_pitch change L -24.51 deg / R -27.26 deg",
+    "[wing-mask-fit] bout 28 fly1: fit; refined 2007/2007 frames; 0 left at the STAC pose (0 unsolved by STAC, 0 seen by fewer than 3 mask cameras, 0 non-finite pose); median wing_pitch change L -12.85 deg / R -20.29 deg"
+  ],
+  "coverage_weight_sweep": {
+    "fly0": {
+      "singing_wing": "left",
+      "folded_wing": "right",
+      "control_song_absmean_deg": 3.5170397758483887,
+      "window": [
+        0,
+        1500
+      ],
+      "fs_hz": 800.0,
+      "mask_metric_frames": 24,
+      "arms": {
+        "control": {
+          "pitch_median_deg": {
+            "wing_pitch_left": -8.364343643188477,
+            "wing_pitch_right": -7.811456203460693
+          },
+          "pitch_hp_rms": {
+            "wing_pitch_left": 0.27868322406444956,
+            "wing_pitch_right": 0.1511625058146333
+          },
+          "delta_pitch_hp_rms": {},
+          "song_absmean_deg": 3.5170388221740723,
+          "song_pulse": {
+            "hp_rms": 0.7578527857472334,
+            "kurtosis": 59.571341986387004,
+            "n_peaks": 29
+          },
+          "penetration_median": {
+            "left": -0.04441869348750354,
+            "right": -0.04514566979274122
+          },
+          "wing_resid_median": 0.014667658511514824,
+          "blade_normal_deg": {
+            "left": 34.36303448926836,
+            "right": 30.747744472549854
+          },
+          "v12v13_rigid_len": {
+            "left": {
+              "median": 0.058344895061035636,
+              "cv": 2.033554277025976e-15
+            },
+            "right": {
+              "median": 0.05830151525739624,
+              "cv": 1.0482182140816608e-15
+            }
+          },
+          "max_abs_change_frozen_dofs": null,
+          "mask": {
+            "inside_pct": 86.41071428571429,
+            "explained_pct": 38.60437357183446,
+            "n_samples": 168
+          }
+        },
+        "cov0": {
+          "pitch_median_deg": {
+            "wing_pitch_left": -32.370849609375,
+            "wing_pitch_right": -35.45452117919922
+          },
+          "pitch_hp_rms": {
+            "wing_pitch_left": 2.5187706408663493,
+            "wing_pitch_right": 2.965812939034575
+          },
+          "delta_pitch_hp_rms": {
+            "wing_pitch_left": 2.520025375618799,
+            "wing_pitch_right": 2.9620879068537835
+          },
+          "song_absmean_deg": 3.5170388221740723,
+          "song_pulse": {
+            "hp_rms": 0.7578527857472334,
+            "kurtosis": 59.571341986387004,
+            "n_peaks": 29
+          },
+          "penetration_median": {
+            "left": -0.031424056118403,
+            "right": -0.02671655518833817
+          },
+          "wing_resid_median": 0.011493862875802445,
+          "blade_normal_deg": {
+            "left": 10.375325980596463,
+            "right": 5.9278907546230695
+          },
+          "v12v13_rigid_len": {
+            "left": {
+              "median": 0.058344895061035636,
+              "cv": 2.5041654896224037e-15
+            },
+            "right": {
+              "median": 0.05830151525739624,
+              "cv": 8.188073185639814e-16
+            }
+          },
+          "max_abs_change_frozen_dofs": 0.0,
+          "mask": {
+            "inside_pct": 92.32142857142857,
+            "explained_pct": 45.68479969143788,
+            "n_samples": 168
+          }
+        },
+        "cov0.1": {
+          "pitch_median_deg": {
+            "wing_pitch_left": -32.338138580322266,
+            "wing_pitch_right": -35.42095947265625
+          },
+          "pitch_hp_rms": {
+            "wing_pitch_left": 2.5395159710754855,
+            "wing_pitch_right": 2.9566273117794073
+          },
+          "delta_pitch_hp_rms": {
+            "wing_pitch_left": 2.5411715506533965,
+            "wing_pitch_right": 2.953245056948906
+          },
+          "song_absmean_deg": 3.5170388221740723,
+          "song_pulse": {
+            "hp_rms": 0.7578527857472334,
+            "kurtosis": 59.571341986387004,
+            "n_peaks": 29
+          },
+          "penetration_median": {
+            "left": -0.031338516242786794,
+            "right": -0.02680580765706092
+          },
+          "wing_resid_median": 0.011461716858476304,
+          "blade_normal_deg": {
+            "left": 10.463621559499593,
+            "right": 5.908266049515514
+          },
+          "v12v13_rigid_len": {
+            "left": {
+              "median": 0.058344895061035636,
+              "cv": 2.2614364062077273e-15
+            },
+            "right": {
+              "median": 0.05830151525739624,
+              "cv": 8.405638821538671e-16
+            }
+          },
+          "max_abs_change_frozen_dofs": 0.0,
+          "mask": {
+            "inside_pct": 92.32142857142857,
+            "explained_pct": 45.68642901458021,
+            "n_samples": 168
+          }
+        },
+        "cov0.3": {
+          "pitch_median_deg": {
+            "wing_pitch_left": -32.41515350341797,
+            "wing_pitch_right": -35.196922302246094
+          },
+          "pitch_hp_rms": {
+            "wing_pitch_left": 2.5784548199667356,
+            "wing_pitch_right": 2.8803733765075012
+          },
+          "delta_pitch_hp_rms": {
+            "wing_pitch_left": 2.579549285916283,
+            "wing_pitch_right": 2.8799478288427647
+          },
+          "song_absmean_deg": 3.5170388221740723,
+          "song_pulse": {
+            "hp_rms": 0.7578527857472334,
+            "kurtosis": 59.571341986387004,
+            "n_peaks": 29
+          },
+          "penetration_median": {
+            "left": -0.03154308775498994,
+            "right": -0.027461332755944656
+          },
+          "wing_resid_median": 0.011361807075583187,
+          "blade_normal_deg": {
+            "left": 10.435418133383688,
+            "right": 5.94508182297098
+          },
+          "v12v13_rigid_len": {
+            "left": {
+              "median": 0.05834489506103563,
+              "cv": 2.3765016864897677e-15
+            },
+            "right": {
+              "median": 0.05830151525739624,
+              "cv": 8.144824999869149e-16
+            }
+          },
+          "max_abs_change_frozen_dofs": 0.0,
+          "mask": {
+            "inside_pct": 92.34523809523809,
+            "explained_pct": 45.81086808147048,
+            "n_samples": 168
+          }
+        },
+        "cov1": {
+          "pitch_median_deg": {
+            "wing_pitch_left": -36.42127990722656,
+            "wing_pitch_right": -30.650409698486328
+          },
+          "pitch_hp_rms": {
+            "wing_pitch_left": 5.090099857705103,
+            "wing_pitch_right": 5.110969598647398
+          },
+          "delta_pitch_hp_rms": {
+            "wing_pitch_left": 5.093036296930721,
+            "wing_pitch_right": 5.1202562844747
+          },
+          "song_absmean_deg": 3.5170388221740723,
+          "song_pulse": {
+            "hp_rms": 0.7578527857472334,
+            "kurtosis": 59.571341986387004,
+            "n_peaks": 29
+          },
+          "penetration_median": {
+            "left": -0.02777202088915221,
+            "right": -0.030946078051763585
+          },
+          "wing_resid_median": 0.011623538444560023,
+          "blade_normal_deg": {
+            "left": 8.911938972653115,
+            "right": 10.700125030247701
+          },
+          "v12v13_rigid_len": {
+            "left": {
+              "median": 0.058344895061035636,
+              "cv": 2.400916865735698e-15
+            },
+            "right": {
+              "median": 0.05830151525739624,
+              "cv": 8.876069449212527e-16
+            }
+          },
+          "max_abs_change_frozen_dofs": 0.0,
+          "mask": {
+            "inside_pct": 91.61904761904763,
+            "explained_pct": 46.38823717680135,
+            "n_samples": 168
+          }
+        }
+      },
+      "acceptance": {
+        "cov0": {
+          "1_song_pitch_dynamics": {
+            "verdict": "N/A",
+            "reason": "no wing extension: this fly is not singing"
+          },
+          "2_song_unchanged": {
+            "control_absmean_deg": 3.5170388221740723,
+            "treatment_absmean_deg": 3.5170388221740723,
+            "hp_rms_ratio": 1.0,
+            "n_peaks": [
+              29,
+              29
+            ],
+            "max_abs_yaw_change_rad": 0.0,
+            "verdict": "PASS"
+          },
+          "3_penetration": {
+            "control_vs_treatment": {
+              "left": [
+                -0.04441869348750354,
+                -0.031424056118403
+              ],
+              "right": [
+                -0.04514566979274122,
+                -0.02671655518833817
+              ]
+            },
+            "target": -0.0013,
+            "verdict": "PASS"
+          },
+          "4_marker_residual": {
+            "control": 0.014667658511514824,
+            "treatment": 0.011493862875802445,
+            "ratio": 0.783619475922432,
+            "verdict": "PASS"
+          },
+          "5_folded_pitch": {
+            "wing": "right",
+            "treatment_deg": -35.45452117919922,
+            "control_deg": -7.811456203460693,
+            "mask_optimum_deg": [
+              -40.0,
+              -20.0
+            ],
+            "springref_deg": -57.29578,
+            "verdict": "PASS"
+          },
+          "invariants": {
+            "max_abs_change_frozen_dofs": 0.0,
+            "v12v13_len_drift": {
+              "left": 0.0,
+              "right": 0.0
+            },
+            "verdict": "PASS"
+          },
+          "7_blade_normal_reported_not_gated": {
+            "left": 10.375325980596463,
+            "right": 5.9278907546230695
+          }
+        },
+        "cov0.1": {
+          "1_song_pitch_dynamics": {
+            "verdict": "N/A",
+            "reason": "no wing extension: this fly is not singing"
+          },
+          "2_song_unchanged": {
+            "control_absmean_deg": 3.5170388221740723,
+            "treatment_absmean_deg": 3.5170388221740723,
+            "hp_rms_ratio": 1.0,
+            "n_peaks": [
+              29,
+              29
+            ],
+            "max_abs_yaw_change_rad": 0.0,
+            "verdict": "PASS"
+          },
+          "3_penetration": {
+            "control_vs_treatment": {
+              "left": [
+                -0.04441869348750354,
+                -0.031338516242786794
+              ],
+              "right": [
+                -0.04514566979274122,
+                -0.02680580765706092
+              ]
+            },
+            "target": -0.0013,
+            "verdict": "PASS"
+          },
+          "4_marker_residual": {
+            "control": 0.014667658511514824,
+            "treatment": 0.011461716858476304,
+            "ratio": 0.78142785022424,
+            "verdict": "PASS"
+          },
+          "5_folded_pitch": {
+            "wing": "right",
+            "treatment_deg": -35.42095947265625,
+            "control_deg": -7.811456203460693,
+            "mask_optimum_deg": [
+              -40.0,
+              -20.0
+            ],
+            "springref_deg": -57.29578,
+            "verdict": "PASS"
+          },
+          "invariants": {
+            "max_abs_change_frozen_dofs": 0.0,
+            "v12v13_len_drift": {
+              "left": 0.0,
+              "right": 0.0
+            },
+            "verdict": "PASS"
+          },
+          "7_blade_normal_reported_not_gated": {
+            "left": 10.463621559499593,
+            "right": 5.908266049515514
+          }
+        },
+        "cov0.3": {
+          "1_song_pitch_dynamics": {
+            "verdict": "N/A",
+            "reason": "no wing extension: this fly is not singing"
+          },
+          "2_song_unchanged": {
+            "control_absmean_deg": 3.5170388221740723,
+            "treatment_absmean_deg": 3.5170388221740723,
+            "hp_rms_ratio": 1.0,
+            "n_peaks": [
+              29,
+              29
+            ],
+            "max_abs_yaw_change_rad": 0.0,
+            "verdict": "PASS"
+          },
+          "3_penetration": {
+            "control_vs_treatment": {
+              "left": [
+                -0.04441869348750354,
+                -0.03154308775498994
+              ],
+              "right": [
+                -0.04514566979274122,
+                -0.027461332755944656
+              ]
+            },
+            "target": -0.0013,
+            "verdict": "PASS"
+          },
+          "4_marker_residual": {
+            "control": 0.014667658511514824,
+            "treatment": 0.011361807075583187,
+            "ratio": 0.7746162802102065,
+            "verdict": "PASS"
+          },
+          "5_folded_pitch": {
+            "wing": "right",
+            "treatment_deg": -35.196922302246094,
+            "control_deg": -7.811456203460693,
+            "mask_optimum_deg": [
+              -40.0,
+              -20.0
+            ],
+            "springref_deg": -57.29578,
+            "verdict": "PASS"
+          },
+          "invariants": {
+            "max_abs_change_frozen_dofs": 0.0,
+            "v12v13_len_drift": {
+              "left": 6.938893903907228e-18,
+              "right": 0.0
+            },
+            "verdict": "PASS"
+          },
+          "7_blade_normal_reported_not_gated": {
+            "left": 10.435418133383688,
+            "right": 5.94508182297098
+          }
+        },
+        "cov1": {
+          "1_song_pitch_dynamics": {
+            "verdict": "N/A",
+            "reason": "no wing extension: this fly is not singing"
+          },
+          "2_song_unchanged": {
+            "control_absmean_deg": 3.5170388221740723,
+            "treatment_absmean_deg": 3.5170388221740723,
+            "hp_rms_ratio": 1.0,
+            "n_peaks": [
+              29,
+              29
+            ],
+            "max_abs_yaw_change_rad": 0.0,
+            "verdict": "PASS"
+          },
+          "3_penetration": {
+            "control_vs_treatment": {
+              "left": [
+                -0.04441869348750354,
+                -0.02777202088915221
+              ],
+              "right": [
+                -0.04514566979274122,
+                -0.030946078051763585
+              ]
+            },
+            "target": -0.0013,
+            "verdict": "PASS"
+          },
+          "4_marker_residual": {
+            "control": 0.014667658511514824,
+            "treatment": 0.011623538444560023,
+            "ratio": 0.7924603941000523,
+            "verdict": "PASS"
+          },
+          "5_folded_pitch": {
+            "wing": "right",
+            "treatment_deg": -30.650409698486328,
+            "control_deg": -7.811456203460693,
+            "mask_optimum_deg": [
+              -40.0,
+              -20.0
+            ],
+            "springref_deg": -57.29578,
+            "verdict": "PASS"
+          },
+          "invariants": {
+            "max_abs_change_frozen_dofs": 0.0,
+            "v12v13_len_drift": {
+              "left": 0.0,
+              "right": 0.0
+            },
+            "verdict": "PASS"
+          },
+          "7_blade_normal_reported_not_gated": {
+            "left": 8.911938972653115,
+            "right": 10.700125030247701
+          }
+        }
+      },
+      "stage_stats": {}
+    },
+    "fly1": {
+      "singing_wing": "left",
+      "folded_wing": "right",
+      "control_song_absmean_deg": 28.065265655517578,
+      "window": [
+        0,
+        1500
+      ],
+      "fs_hz": 800.0,
+      "mask_metric_frames": 24,
+      "arms": {
+        "control": {
+          "pitch_median_deg": {
+            "wing_pitch_left": -5.726801872253418,
+            "wing_pitch_right": -11.100286483764648
+          },
+          "pitch_hp_rms": {
+            "wing_pitch_left": 0.600214022686875,
+            "wing_pitch_right": 0.5580189811897271
+          },
+          "delta_pitch_hp_rms": {},
+          "song_absmean_deg": 28.065263748168945,
+          "song_pulse": {
+            "hp_rms": 2.1187747712605924,
+            "kurtosis": 3.0537022300690557,
+            "n_peaks": 45
+          },
+          "penetration_median": {
+            "left": -0.023005445657259965,
+            "right": -0.03324306122593504
+          },
+          "wing_resid_median": 0.011061641344988257,
+          "blade_normal_deg": {
+            "left": 12.23299992201298,
+            "right": 15.849459113248756
+          },
+          "v12v13_rigid_len": {
+            "left": {
+              "median": 0.058344895061035636,
+              "cv": 2.8113040015468314e-15
+            },
+            "right": {
+              "median": 0.05830151525739624,
+              "cv": 2.1903726259190076e-15
+            }
+          },
+          "max_abs_change_frozen_dofs": null,
+          "mask": {
+            "inside_pct": 84.07738095238093,
+            "explained_pct": 43.81403739735904,
+            "n_samples": 168
+          }
+        },
+        "cov0": {
+          "pitch_median_deg": {
+            "wing_pitch_left": -18.925968170166016,
+            "wing_pitch_right": -31.9990234375
+          },
+          "pitch_hp_rms": {
+            "wing_pitch_left": 2.3534158396065363,
+            "wing_pitch_right": 0.7500565216726874
+          },
+          "delta_pitch_hp_rms": {
+            "wing_pitch_left": 2.2106985817122835,
+            "wing_pitch_right": 0.8915619133582079
+          },
+          "song_absmean_deg": 28.065263748168945,
+          "song_pulse": {
+            "hp_rms": 2.1187747712605924,
+            "kurtosis": 3.0537022300690557,
+            "n_peaks": 45
+          },
+          "penetration_median": {
+            "left": -0.006946540777641506,
+            "right": -0.01235586174328528
+          },
+          "wing_resid_median": 0.011192322467352273,
+          "blade_normal_deg": {
+            "left": 8.14372981620842,
+            "right": 2.2138142355521317
+          },
+          "v12v13_rigid_len": {
+            "left": {
+              "median": 0.05834489506103563,
+              "cv": 2.7409244642227897e-15
+            },
+            "right": {
+              "median": 0.05830151525739624,
+              "cv": 2.0897139253587253e-15
+            }
+          },
+          "max_abs_change_frozen_dofs": 0.0,
+          "mask": {
+            "inside_pct": 92.41071428571429,
+            "explained_pct": 47.592975671519014,
+            "n_samples": 168
+          }
+        },
+        "cov0.1": {
+          "pitch_median_deg": {
+            "wing_pitch_left": -18.97549057006836,
+            "wing_pitch_right": -31.999916076660156
+          },
+          "pitch_hp_rms": {
+            "wing_pitch_left": 2.3593423606685517,
+            "wing_pitch_right": 0.7572347462073871
+          },
+          "delta_pitch_hp_rms": {
+            "wing_pitch_left": 2.215378900830068,
+            "wing_pitch_right": 0.8949852808703683
+          },
+          "song_absmean_deg": 28.065263748168945,
+          "song_pulse": {
+            "hp_rms": 2.1187747712605924,
+            "kurtosis": 3.0537022300690557,
+            "n_peaks": 45
+          },
+          "penetration_median": {
+            "left": -0.006945675244930338,
+            "right": -0.012529145162025274
+          },
+          "wing_resid_median": 0.011192957696643573,
+          "blade_normal_deg": {
+            "left": 8.081168016180705,
+            "right": 2.220512783316269
+          },
+          "v12v13_rigid_len": {
+            "left": {
+              "median": 0.058344895061035636,
+              "cv": 2.7349750241697592e-15
+            },
+            "right": {
+              "median": 0.05830151525739624,
+              "cv": 2.108496357921401e-15
+            }
+          },
+          "max_abs_change_frozen_dofs": 0.0,
+          "mask": {
+            "inside_pct": 92.44047619047619,
+            "explained_pct": 47.60697641184105,
+            "n_samples": 168
+          }
+        },
+        "cov0.3": {
+          "pitch_median_deg": {
+            "wing_pitch_left": -19.053016662597656,
+            "wing_pitch_right": -32.004310607910156
+          },
+          "pitch_hp_rms": {
+            "wing_pitch_left": 2.313254994367445,
+            "wing_pitch_right": 0.7516133543699494
+          },
+          "delta_pitch_hp_rms": {
+            "wing_pitch_left": 2.163912172137131,
+            "wing_pitch_right": 0.8938428679504954
+          },
+          "song_absmean_deg": 28.065263748168945,
+          "song_pulse": {
+            "hp_rms": 2.1187747712605924,
+            "kurtosis": 3.0537022300690557,
+            "n_peaks": 45
+          },
+          "penetration_median": {
+            "left": -0.006895230139514248,
+            "right": -0.012354609720615771
+          },
+          "wing_resid_median": 0.011180739085883032,
+          "blade_normal_deg": {
+            "left": 7.719898416334116,
+            "right": 2.209109116913857
+          },
+          "v12v13_rigid_len": {
+            "left": {
+              "median": 0.058344895061035615,
+              "cv": 2.7597671554164854e-15
+            },
+            "right": {
+              "median": 0.05830151525739624,
+              "cv": 2.0482220030701942e-15
+            }
+          },
+          "max_abs_change_frozen_dofs": 0.0,
+          "mask": {
+            "inside_pct": 92.48809523809524,
+            "explained_pct": 47.68143460880275,
+            "n_samples": 168
+          }
+        },
+        "cov1": {
+          "pitch_median_deg": {
+            "wing_pitch_left": -19.64267921447754,
+            "wing_pitch_right": -31.895986557006836
+          },
+          "pitch_hp_rms": {
+            "wing_pitch_left": 2.311023184377616,
+            "wing_pitch_right": 0.98366190873058
+          },
+          "delta_pitch_hp_rms": {
+            "wing_pitch_left": 2.172494099723678,
+            "wing_pitch_right": 1.1016448895098736
+          },
+          "song_absmean_deg": 28.065263748168945,
+          "song_pulse": {
+            "hp_rms": 2.1187747712605924,
+            "kurtosis": 3.0537022300690557,
+            "n_peaks": 45
+          },
+          "penetration_median": {
+            "left": -0.006936696379021178,
+            "right": -0.012984688030307034
+          },
+          "wing_resid_median": 0.011193780586280747,
+          "blade_normal_deg": {
+            "left": 7.465213835927633,
+            "right": 2.1571072059865006
+          },
+          "v12v13_rigid_len": {
+            "left": {
+              "median": 0.058344895061035636,
+              "cv": 2.7211215349841116e-15
+            },
+            "right": {
+              "median": 0.05830151525739624,
+              "cv": 2.1090695598422147e-15
+            }
+          },
+          "max_abs_change_frozen_dofs": 0.0,
+          "mask": {
+            "inside_pct": 92.51190476190477,
+            "explained_pct": 48.000387344385246,
+            "n_samples": 168
+          }
+        }
+      },
+      "acceptance": {
+        "cov0": {
+          "1_song_pitch_dynamics": {
+            "dof": "wing_pitch_left",
+            "control": 0.600214022686875,
+            "treatment": 2.3534158396065363,
+            "ratio": 3.9209611082916793,
+            "delta_hp_rms": 2.2106985817122835,
+            "direction": "jitter ADDED",
+            "verdict": "FAIL"
+          },
+          "2_song_unchanged": {
+            "control_absmean_deg": 28.065263748168945,
+            "treatment_absmean_deg": 28.065263748168945,
+            "hp_rms_ratio": 1.0,
+            "n_peaks": [
+              45,
+              45
+            ],
+            "max_abs_yaw_change_rad": 0.0,
+            "verdict": "PASS"
+          },
+          "3_penetration": {
+            "control_vs_treatment": {
+              "left": [
+                -0.023005445657259965,
+                -0.006946540777641506
+              ],
+              "right": [
+                -0.03324306122593504,
+                -0.01235586174328528
+              ]
+            },
+            "target": -0.0013,
+            "verdict": "PASS"
+          },
+          "4_marker_residual": {
+            "control": 0.011061641344988257,
+            "treatment": 0.011192322467352273,
+            "ratio": 1.011813899790127,
+            "verdict": "PASS"
+          },
+          "5_folded_pitch": {
+            "wing": "right",
+            "treatment_deg": -31.9990234375,
+            "control_deg": -11.100286483764648,
+            "mask_optimum_deg": [
+              -40.0,
+              -20.0
+            ],
+            "springref_deg": -57.29578,
+            "verdict": "PASS"
+          },
+          "invariants": {
+            "max_abs_change_frozen_dofs": 0.0,
+            "v12v13_len_drift": {
+              "left": 6.938893903907228e-18,
+              "right": 0.0
+            },
+            "verdict": "PASS"
+          },
+          "7_blade_normal_reported_not_gated": {
+            "left": 8.14372981620842,
+            "right": 2.2138142355521317
+          }
+        },
+        "cov0.1": {
+          "1_song_pitch_dynamics": {
+            "dof": "wing_pitch_left",
+            "control": 0.600214022686875,
+            "treatment": 2.3593423606685517,
+            "ratio": 3.9308351212903845,
+            "delta_hp_rms": 2.215378900830068,
+            "direction": "jitter ADDED",
+            "verdict": "FAIL"
+          },
+          "2_song_unchanged": {
+            "control_absmean_deg": 28.065263748168945,
+            "treatment_absmean_deg": 28.065263748168945,
+            "hp_rms_ratio": 1.0,
+            "n_peaks": [
+              45,
+              45
+            ],
+            "max_abs_yaw_change_rad": 0.0,
+            "verdict": "PASS"
+          },
+          "3_penetration": {
+            "control_vs_treatment": {
+              "left": [
+                -0.023005445657259965,
+                -0.006945675244930338
+              ],
+              "right": [
+                -0.03324306122593504,
+                -0.012529145162025274
+              ]
+            },
+            "target": -0.0013,
+            "verdict": "PASS"
+          },
+          "4_marker_residual": {
+            "control": 0.011061641344988257,
+            "treatment": 0.011192957696643573,
+            "ratio": 1.0118713261043137,
+            "verdict": "PASS"
+          },
+          "5_folded_pitch": {
+            "wing": "right",
+            "treatment_deg": -31.999916076660156,
+            "control_deg": -11.100286483764648,
+            "mask_optimum_deg": [
+              -40.0,
+              -20.0
+            ],
+            "springref_deg": -57.29578,
+            "verdict": "PASS"
+          },
+          "invariants": {
+            "max_abs_change_frozen_dofs": 0.0,
+            "v12v13_len_drift": {
+              "left": 0.0,
+              "right": 0.0
+            },
+            "verdict": "PASS"
+          },
+          "7_blade_normal_reported_not_gated": {
+            "left": 8.081168016180705,
+            "right": 2.220512783316269
+          }
+        },
+        "cov0.3": {
+          "1_song_pitch_dynamics": {
+            "dof": "wing_pitch_left",
+            "control": 0.600214022686875,
+            "treatment": 2.313254994367445,
+            "ratio": 3.854050233635152,
+            "delta_hp_rms": 2.163912172137131,
+            "direction": "jitter ADDED",
+            "verdict": "FAIL"
+          },
+          "2_song_unchanged": {
+            "control_absmean_deg": 28.065263748168945,
+            "treatment_absmean_deg": 28.065263748168945,
+            "hp_rms_ratio": 1.0,
+            "n_peaks": [
+              45,
+              45
+            ],
+            "max_abs_yaw_change_rad": 0.0,
+            "verdict": "PASS"
+          },
+          "3_penetration": {
+            "control_vs_treatment": {
+              "left": [
+                -0.023005445657259965,
+                -0.006895230139514248
+              ],
+              "right": [
+                -0.03324306122593504,
+                -0.012354609720615771
+              ]
+            },
+            "target": -0.0013,
+            "verdict": "PASS"
+          },
+          "4_marker_residual": {
+            "control": 0.011061641344988257,
+            "treatment": 0.011180739085883032,
+            "ratio": 1.010766733180039,
+            "verdict": "PASS"
+          },
+          "5_folded_pitch": {
+            "wing": "right",
+            "treatment_deg": -32.004310607910156,
+            "control_deg": -11.100286483764648,
+            "mask_optimum_deg": [
+              -40.0,
+              -20.0
+            ],
+            "springref_deg": -57.29578,
+            "verdict": "PASS"
+          },
+          "invariants": {
+            "max_abs_change_frozen_dofs": 0.0,
+            "v12v13_len_drift": {
+              "left": 2.0816681711721685e-17,
+              "right": 0.0
+            },
+            "verdict": "PASS"
+          },
+          "7_blade_normal_reported_not_gated": {
+            "left": 7.719898416334116,
+            "right": 2.209109116913857
+          }
+        },
+        "cov1": {
+          "1_song_pitch_dynamics": {
+            "dof": "wing_pitch_left",
+            "control": 0.600214022686875,
+            "treatment": 2.311023184377616,
+            "ratio": 3.85033187667335,
+            "delta_hp_rms": 2.172494099723678,
+            "direction": "jitter ADDED",
+            "verdict": "FAIL"
+          },
+          "2_song_unchanged": {
+            "control_absmean_deg": 28.065263748168945,
+            "treatment_absmean_deg": 28.065263748168945,
+            "hp_rms_ratio": 1.0,
+            "n_peaks": [
+              45,
+              45
+            ],
+            "max_abs_yaw_change_rad": 0.0,
+            "verdict": "PASS"
+          },
+          "3_penetration": {
+            "control_vs_treatment": {
+              "left": [
+                -0.023005445657259965,
+                -0.006936696379021178
+              ],
+              "right": [
+                -0.03324306122593504,
+                -0.012984688030307034
+              ]
+            },
+            "target": -0.0013,
+            "verdict": "PASS"
+          },
+          "4_marker_residual": {
+            "control": 0.011061641344988257,
+            "treatment": 0.011193780586280747,
+            "ratio": 1.011945717382381,
+            "verdict": "PASS"
+          },
+          "5_folded_pitch": {
+            "wing": "right",
+            "treatment_deg": -31.895986557006836,
+            "control_deg": -11.100286483764648,
+            "mask_optimum_deg": [
+              -40.0,
+              -20.0
+            ],
+            "springref_deg": -57.29578,
+            "verdict": "PASS"
+          },
+          "invariants": {
+            "max_abs_change_frozen_dofs": 0.0,
+            "v12v13_len_drift": {
+              "left": 0.0,
+              "right": 0.0
+            },
+            "verdict": "PASS"
+          },
+          "7_blade_normal_reported_not_gated": {
+            "left": 7.465213835927633,
+            "right": 2.1571072059865006
+          }
+        }
+      },
+      "stage_stats": {}
+    }
+  },
+  "smooth_weight_probe_fly1_coarse": {
+    "arms": {
+      "control": {
+        "pitch_median_deg": {
+          "wing_pitch_left": -5.726801872253418,
+          "wing_pitch_right": -11.100286483764648
+        },
+        "pitch_hp_rms": {
+          "wing_pitch_left": 0.600214022686875,
+          "wing_pitch_right": 0.5580189811897271
+        },
+        "delta_pitch_hp_rms": {},
+        "song_absmean_deg": 28.065263748168945,
+        "song_pulse": {
+          "hp_rms": 2.1187747712605924,
+          "kurtosis": 3.0537022300690557,
+          "n_peaks": 45
+        },
+        "penetration_median": {
+          "left": -0.023005445657259965,
+          "right": -0.03324306122593504
+        },
+        "wing_resid_median": 0.011061641344988257,
+        "blade_normal_deg": {
+          "left": 12.23299992201298,
+          "right": 15.849459113248756
+        },
+        "v12v13_rigid_len": {
+          "left": {
+            "median": 0.058344895061035636,
+            "cv": 2.8113040015468314e-15
+          },
+          "right": {
+            "median": 0.05830151525739624,
+            "cv": 2.1903726259190076e-15
+          }
+        },
+        "max_abs_change_frozen_dofs": null,
+        "mask": {
+          "inside_pct": 84.07738095238093,
+          "explained_pct": 43.81403739735904,
+          "n_samples": 168
+        }
+      },
+      "sm0.005": {
+        "pitch_median_deg": {
+          "wing_pitch_left": -19.055198669433594,
+          "wing_pitch_right": -32.004302978515625
+        },
+        "pitch_hp_rms": {
+          "wing_pitch_left": 2.31382162767318,
+          "wing_pitch_right": 0.7516468918711261
+        },
+        "delta_pitch_hp_rms": {
+          "wing_pitch_left": 2.1645750290983754,
+          "wing_pitch_right": 0.8939461242019379
+        },
+        "song_absmean_deg": 28.065263748168945,
+        "song_pulse": {
+          "hp_rms": 2.1187747712605924,
+          "kurtosis": 3.0537022300690557,
+          "n_peaks": 45
+        },
+        "penetration_median": {
+          "left": -0.006893936830886368,
+          "right": -0.012354609862759589
+        },
+        "wing_resid_median": 0.011179864085419629,
+        "blade_normal_deg": {
+          "left": 7.7199019319061515,
+          "right": 2.2089442558800183
+        },
+        "v12v13_rigid_len": {
+          "left": {
+            "median": 0.05834489506103564,
+            "cv": 2.839415020800789e-15
+          },
+          "right": {
+            "median": 0.058301515257396234,
+            "cv": 2.0478208461320427e-15
+          }
+        },
+        "max_abs_change_frozen_dofs": 0.0,
+        "mask": {
+          "inside_pct": 92.48809523809524,
+          "explained_pct": 47.68091754355331,
+          "n_samples": 168
+        }
+      },
+      "sm0.5": {
+        "pitch_median_deg": {
+          "wing_pitch_left": -19.05321502685547,
+          "wing_pitch_right": -32.00484848022461
+        },
+        "pitch_hp_rms": {
+          "wing_pitch_left": 2.3143284551107595,
+          "wing_pitch_right": 0.7514537796491785
+        },
+        "delta_pitch_hp_rms": {
+          "wing_pitch_left": 2.164031208680298,
+          "wing_pitch_right": 0.8937376783733811
+        },
+        "song_absmean_deg": 28.065263748168945,
+        "song_pulse": {
+          "hp_rms": 2.1187747712605924,
+          "kurtosis": 3.0537022300690557,
+          "n_peaks": 45
+        },
+        "penetration_median": {
+          "left": -0.006892858771864307,
+          "right": -0.01235399864997334
+        },
+        "wing_resid_median": 0.011179649606530105,
+        "blade_normal_deg": {
+          "left": 7.719264034077044,
+          "right": 2.20872076258607
+        },
+        "v12v13_rigid_len": {
+          "left": {
+            "median": 0.058344895061035636,
+            "cv": 2.7973633484642215e-15
+          },
+          "right": {
+            "median": 0.05830151525739624,
+            "cv": 2.0698693941897325e-15
+          }
+        },
+        "max_abs_change_frozen_dofs": 0.0,
+        "mask": {
+          "inside_pct": 92.48214285714286,
+          "explained_pct": 47.681650717989484,
+          "n_samples": 168
+        }
+      },
+      "sm5": {
+        "pitch_median_deg": {
+          "wing_pitch_left": -19.010705947875977,
+          "wing_pitch_right": -31.994173049926758
+        },
+        "pitch_hp_rms": {
+          "wing_pitch_left": 2.026496030725418,
+          "wing_pitch_right": 0.7354748594551944
+        },
+        "delta_pitch_hp_rms": {
+          "wing_pitch_left": 1.8845498858760479,
+          "wing_pitch_right": 0.8822652093295369
+        },
+        "song_absmean_deg": 28.065263748168945,
+        "song_pulse": {
+          "hp_rms": 2.1187747712605924,
+          "kurtosis": 3.0537022300690557,
+          "n_peaks": 45
+        },
+        "penetration_median": {
+          "left": -0.007089693908609739,
+          "right": -0.012353710373023852
+        },
+        "wing_resid_median": 0.01117537266790446,
+        "blade_normal_deg": {
+          "left": 7.728573456195277,
+          "right": 2.2111121162119685
+        },
+        "v12v13_rigid_len": {
+          "left": {
+            "median": 0.058344895061035636,
+            "cv": 2.8125346859991396e-15
+          },
+          "right": {
+            "median": 0.058301515257396234,
+            "cv": 2.0270399657858056e-15
+          }
+        },
+        "max_abs_change_frozen_dofs": 0.0,
+        "mask": {
+          "inside_pct": 92.4761904761905,
+          "explained_pct": 47.68328718186975,
+          "n_samples": 168
+        }
+      },
+      "sm50": {
+        "pitch_median_deg": {
+          "wing_pitch_left": -18.723876953125,
+          "wing_pitch_right": -31.336341857910156
+        },
+        "pitch_hp_rms": {
+          "wing_pitch_left": 0.3684504372111161,
+          "wing_pitch_right": 0.33721035431256124
+        },
+        "delta_pitch_hp_rms": {
+          "wing_pitch_left": 0.6063655248838933,
+          "wing_pitch_right": 0.6257879117389267
+        },
+        "song_absmean_deg": 28.065263748168945,
+        "song_pulse": {
+          "hp_rms": 2.1187747712605924,
+          "kurtosis": 3.0537022300690557,
+          "n_peaks": 45
+        },
+        "penetration_median": {
+          "left": -0.006659589415172237,
+          "right": -0.012414568352273718
+        },
+        "wing_resid_median": 0.011118250194375292,
+        "blade_normal_deg": {
+          "left": 7.630501045122379,
+          "right": 2.174859106285023
+        },
+        "v12v13_rigid_len": {
+          "left": {
+            "median": 0.05834489506103563,
+            "cv": 2.790926116522477e-15
+          },
+          "right": {
+            "median": 0.05830151525739624,
+            "cv": 2.0601997629527516e-15
+          }
+        },
+        "max_abs_change_frozen_dofs": 0.0,
+        "mask": {
+          "inside_pct": 92.4761904761905,
+          "explained_pct": 47.68626901595712,
+          "n_samples": 168
+        }
+      }
+    },
+    "acceptance": {
+      "sm0.005": {
+        "1_song_pitch_dynamics": {
+          "dof": "wing_pitch_left",
+          "control": 0.600214022686875,
+          "treatment": 2.31382162767318,
+          "ratio": 3.854994285730434,
+          "delta_hp_rms": 2.1645750290983754,
+          "direction": "jitter ADDED",
+          "verdict": "FAIL"
+        },
+        "2_song_unchanged": {
+          "control_absmean_deg": 28.065263748168945,
+          "treatment_absmean_deg": 28.065263748168945,
+          "hp_rms_ratio": 1.0,
+          "n_peaks": [
+            45,
+            45
+          ],
+          "max_abs_yaw_change_rad": 0.0,
+          "verdict": "PASS"
+        },
+        "3_penetration": {
+          "control_vs_treatment": {
+            "left": [
+              -0.023005445657259965,
+              -0.006893936830886368
+            ],
+            "right": [
+              -0.03324306122593504,
+              -0.012354609862759589
+            ]
+          },
+          "target": -0.0013,
+          "verdict": "PASS"
+        },
+        "4_marker_residual": {
+          "control": 0.011061641344988257,
+          "treatment": 0.011179864085419629,
+          "ratio": 1.010687630953153,
+          "verdict": "PASS"
+        },
+        "5_folded_pitch": {
+          "wing": "right",
+          "treatment_deg": -32.004302978515625,
+          "control_deg": -11.100286483764648,
+          "mask_optimum_deg": [
+            -40.0,
+            -20.0
+          ],
+          "springref_deg": -57.29578,
+          "verdict": "PASS"
+        },
+        "invariants": {
+          "max_abs_change_frozen_dofs": 0.0,
+          "v12v13_len_drift": {
+            "left": 6.938893903907228e-18,
+            "right": 6.938893903907228e-18
+          },
+          "verdict": "PASS"
+        },
+        "7_blade_normal_reported_not_gated": {
+          "left": 7.7199019319061515,
+          "right": 2.2089442558800183
+        }
+      },
+      "sm0.5": {
+        "1_song_pitch_dynamics": {
+          "dof": "wing_pitch_left",
+          "control": 0.600214022686875,
+          "treatment": 2.3143284551107595,
+          "ratio": 3.8558386969211464,
+          "delta_hp_rms": 2.164031208680298,
+          "direction": "jitter ADDED",
+          "verdict": "FAIL"
+        },
+        "2_song_unchanged": {
+          "control_absmean_deg": 28.065263748168945,
+          "treatment_absmean_deg": 28.065263748168945,
+          "hp_rms_ratio": 1.0,
+          "n_peaks": [
+            45,
+            45
+          ],
+          "max_abs_yaw_change_rad": 0.0,
+          "verdict": "PASS"
+        },
+        "3_penetration": {
+          "control_vs_treatment": {
+            "left": [
+              -0.023005445657259965,
+              -0.006892858771864307
+            ],
+            "right": [
+              -0.03324306122593504,
+              -0.01235399864997334
+            ]
+          },
+          "target": -0.0013,
+          "verdict": "PASS"
+        },
+        "4_marker_residual": {
+          "control": 0.011061641344988257,
+          "treatment": 0.011179649606530105,
+          "ratio": 1.0106682415259571,
+          "verdict": "PASS"
+        },
+        "5_folded_pitch": {
+          "wing": "right",
+          "treatment_deg": -32.00484848022461,
+          "control_deg": -11.100286483764648,
+          "mask_optimum_deg": [
+            -40.0,
+            -20.0
+          ],
+          "springref_deg": -57.29578,
+          "verdict": "PASS"
+        },
+        "invariants": {
+          "max_abs_change_frozen_dofs": 0.0,
+          "v12v13_len_drift": {
+            "left": 0.0,
+            "right": 0.0
+          },
+          "verdict": "PASS"
+        },
+        "7_blade_normal_reported_not_gated": {
+          "left": 7.719264034077044,
+          "right": 2.20872076258607
+        }
+      },
+      "sm5": {
+        "1_song_pitch_dynamics": {
+          "dof": "wing_pitch_left",
+          "control": 0.600214022686875,
+          "treatment": 2.026496030725418,
+          "ratio": 3.3762890471198115,
+          "delta_hp_rms": 1.8845498858760479,
+          "direction": "jitter ADDED",
+          "verdict": "FAIL"
+        },
+        "2_song_unchanged": {
+          "control_absmean_deg": 28.065263748168945,
+          "treatment_absmean_deg": 28.065263748168945,
+          "hp_rms_ratio": 1.0,
+          "n_peaks": [
+            45,
+            45
+          ],
+          "max_abs_yaw_change_rad": 0.0,
+          "verdict": "PASS"
+        },
+        "3_penetration": {
+          "control_vs_treatment": {
+            "left": [
+              -0.023005445657259965,
+              -0.007089693908609739
+            ],
+            "right": [
+              -0.03324306122593504,
+              -0.012353710373023852
+            ]
+          },
+          "target": -0.0013,
+          "verdict": "PASS"
+        },
+        "4_marker_residual": {
+          "control": 0.011061641344988257,
+          "treatment": 0.01117537266790446,
+          "ratio": 1.0102815955941051,
+          "verdict": "PASS"
+        },
+        "5_folded_pitch": {
+          "wing": "right",
+          "treatment_deg": -31.994173049926758,
+          "control_deg": -11.100286483764648,
+          "mask_optimum_deg": [
+            -40.0,
+            -20.0
+          ],
+          "springref_deg": -57.29578,
+          "verdict": "PASS"
+        },
+        "invariants": {
+          "max_abs_change_frozen_dofs": 0.0,
+          "v12v13_len_drift": {
+            "left": 0.0,
+            "right": 6.938893903907228e-18
+          },
+          "verdict": "PASS"
+        },
+        "7_blade_normal_reported_not_gated": {
+          "left": 7.728573456195277,
+          "right": 2.2111121162119685
+        }
+      },
+      "sm50": {
+        "1_song_pitch_dynamics": {
+          "dof": "wing_pitch_left",
+          "control": 0.600214022686875,
+          "treatment": 0.3684504372111161,
+          "ratio": 0.6138650935906784,
+          "delta_hp_rms": 0.6063655248838933,
+          "direction": "dynamics LOST",
+          "verdict": "FAIL"
+        },
+        "2_song_unchanged": {
+          "control_absmean_deg": 28.065263748168945,
+          "treatment_absmean_deg": 28.065263748168945,
+          "hp_rms_ratio": 1.0,
+          "n_peaks": [
+            45,
+            45
+          ],
+          "max_abs_yaw_change_rad": 0.0,
+          "verdict": "PASS"
+        },
+        "3_penetration": {
+          "control_vs_treatment": {
+            "left": [
+              -0.023005445657259965,
+              -0.006659589415172237
+            ],
+            "right": [
+              -0.03324306122593504,
+              -0.012414568352273718
+            ]
+          },
+          "target": -0.0013,
+          "verdict": "PASS"
+        },
+        "4_marker_residual": {
+          "control": 0.011061641344988257,
+          "treatment": 0.011118250194375292,
+          "ratio": 1.0051175813445337,
+          "verdict": "PASS"
+        },
+        "5_folded_pitch": {
+          "wing": "right",
+          "treatment_deg": -31.336341857910156,
+          "control_deg": -11.100286483764648,
+          "mask_optimum_deg": [
+            -40.0,
+            -20.0
+          ],
+          "springref_deg": -57.29578,
+          "verdict": "PASS"
+        },
+        "invariants": {
+          "max_abs_change_frozen_dofs": 0.0,
+          "v12v13_len_drift": {
+            "left": 6.938893903907228e-18,
+            "right": 0.0
+          },
+          "verdict": "PASS"
+        },
+        "7_blade_normal_reported_not_gated": {
+          "left": 7.630501045122379,
+          "right": 2.174859106285023
+        }
+      }
+    },
+    "stage_stats": {
+      "sm0.005": {
+        "n_frames": 2007,
+        "n_refined": 2007,
+        "n_skipped": 0,
+        "n_thin_frames": 0,
+        "n_no_bridge_frames": 0,
+        "n_nonfinite_pose_frames": 0,
+        "min_present_cameras": 3,
+        "dpitch_left_deg": -12.850601784199368,
+        "dpitch_right_deg": -20.289521745592573,
+        "wall_s": 92.3,
+        "overrides": [
+          "wing_mask_fit.smooth_weight=0.005"
+        ]
+      },
+      "sm0.5": {
+        "n_frames": 2007,
+        "n_refined": 2007,
+        "n_skipped": 0,
+        "n_thin_frames": 0,
+        "n_no_bridge_frames": 0,
+        "n_nonfinite_pose_frames": 0,
+        "min_present_cameras": 3,
+        "dpitch_left_deg": -12.846484887677143,
+        "dpitch_right_deg": -20.289644688997633,
+        "wall_s": 92.0,
+        "overrides": [
+          "wing_mask_fit.smooth_weight=0.5"
+        ]
+      },
+      "sm5": {
+        "n_frames": 2007,
+        "n_refined": 2007,
+        "n_skipped": 0,
+        "n_thin_frames": 0,
+        "n_no_bridge_frames": 0,
+        "n_nonfinite_pose_frames": 0,
+        "min_present_cameras": 3,
+        "dpitch_left_deg": -12.914112298196732,
+        "dpitch_right_deg": -20.28930830218101,
+        "wall_s": 97.2,
+        "overrides": [
+          "wing_mask_fit.smooth_weight=5.0"
+        ]
+      },
+      "sm50": {
+        "n_frames": 2007,
+        "n_refined": 2007,
+        "n_skipped": 0,
+        "n_thin_frames": 0,
+        "n_no_bridge_frames": 0,
+        "n_nonfinite_pose_frames": 0,
+        "min_present_cameras": 3,
+        "dpitch_left_deg": -12.795251852156289,
+        "dpitch_right_deg": -20.343018348493054,
+        "wall_s": 92.3,
+        "overrides": [
+          "wing_mask_fit.smooth_weight=50.0"
+        ]
+      }
+    }
+  },
+  "smooth_weight_fine": {
+    "fly0": {
+      "arms": {
+        "control": {
+          "pitch_median_deg": {
+            "wing_pitch_left": -8.364343643188477,
+            "wing_pitch_right": -7.811456203460693
+          },
+          "pitch_hp_rms": {
+            "wing_pitch_left": 0.27868322406444956,
+            "wing_pitch_right": 0.1511625058146333
+          },
+          "delta_pitch_hp_rms": {},
+          "song_absmean_deg": 3.5170388221740723,
+          "song_pulse": {
+            "hp_rms": 0.7578527857472334,
+            "kurtosis": 59.571341986387004,
+            "n_peaks": 29
+          },
+          "penetration_median": {
+            "left": -0.04441869348750354,
+            "right": -0.04514566979274122
+          },
+          "wing_resid_median": 0.014667658511514824,
+          "blade_normal_deg": {
+            "left": 34.36303448926836,
+            "right": 30.747744472549854
+          },
+          "v12v13_rigid_len": {
+            "left": {
+              "median": 0.058344895061035636,
+              "cv": 2.033554277025976e-15
+            },
+            "right": {
+              "median": 0.05830151525739624,
+              "cv": 1.0482182140816608e-15
+            }
+          },
+          "max_abs_change_frozen_dofs": null,
+          "mask": {
+            "inside_pct": 86.41071428571429,
+            "explained_pct": 38.60437357183446,
+            "n_samples": 168
+          }
+        },
+        "sm10": {
+          "pitch_median_deg": {
+            "wing_pitch_left": -32.421112060546875,
+            "wing_pitch_right": -35.38604736328125
+          },
+          "pitch_hp_rms": {
+            "wing_pitch_left": 1.5982609063998285,
+            "wing_pitch_right": 1.2233592263320845
+          },
+          "delta_pitch_hp_rms": {
+            "wing_pitch_left": 1.6019746068438223,
+            "wing_pitch_right": 1.223306986419392
+          },
+          "song_absmean_deg": 3.5170388221740723,
+          "song_pulse": {
+            "hp_rms": 0.7578527857472334,
+            "kurtosis": 59.571341986387004,
+            "n_peaks": 29
+          },
+          "penetration_median": {
+            "left": -0.03143412886522985,
+            "right": -0.027030628172289555
+          },
+          "wing_resid_median": 0.011329129316880522,
+          "blade_normal_deg": {
+            "left": 10.354153983018355,
+            "right": 5.375591529814168
+          },
+          "v12v13_rigid_len": {
+            "left": {
+              "median": 0.05834489506103563,
+              "cv": 2.3985415706239553e-15
+            },
+            "right": {
+              "median": 0.05830151525739624,
+              "cv": 7.879993587173293e-16
+            }
+          },
+          "max_abs_change_frozen_dofs": 0.0,
+          "mask": {
+            "inside_pct": 92.55357142857142,
+            "explained_pct": 46.11074129732503,
+            "n_samples": 168
+          }
+        },
+        "sm20": {
+          "pitch_median_deg": {
+            "wing_pitch_left": -32.59929656982422,
+            "wing_pitch_right": -35.3477668762207
+          },
+          "pitch_hp_rms": {
+            "wing_pitch_left": 1.1580712741808095,
+            "wing_pitch_right": 0.5922838455507983
+          },
+          "delta_pitch_hp_rms": {
+            "wing_pitch_left": 1.1728909971761974,
+            "wing_pitch_right": 0.5913133397774495
+          },
+          "song_absmean_deg": 3.5170388221740723,
+          "song_pulse": {
+            "hp_rms": 0.7578527857472334,
+            "kurtosis": 59.571341986387004,
+            "n_peaks": 29
+          },
+          "penetration_median": {
+            "left": -0.03133026321048571,
+            "right": -0.027165264994225714
+          },
+          "wing_resid_median": 0.011254467007980731,
+          "blade_normal_deg": {
+            "left": 10.229967140112272,
+            "right": 5.273429443972143
+          },
+          "v12v13_rigid_len": {
+            "left": {
+              "median": 0.05834489506103563,
+              "cv": 2.353836894022594e-15
+            },
+            "right": {
+              "median": 0.05830151525739624,
+              "cv": 8.065773457072804e-16
+            }
+          },
+          "max_abs_change_frozen_dofs": 0.0,
+          "mask": {
+            "inside_pct": 92.69642857142857,
+            "explained_pct": 46.22466934487558,
+            "n_samples": 168
+          }
+        },
+        "sm30": {
+          "pitch_median_deg": {
+            "wing_pitch_left": -32.66854476928711,
+            "wing_pitch_right": -35.30580139160156
+          },
+          "pitch_hp_rms": {
+            "wing_pitch_left": 0.8112396144749997,
+            "wing_pitch_right": 0.4292462603137369
+          },
+          "delta_pitch_hp_rms": {
+            "wing_pitch_left": 0.8262945571517295,
+            "wing_pitch_right": 0.43292310124457173
+          },
+          "song_absmean_deg": 3.5170388221740723,
+          "song_pulse": {
+            "hp_rms": 0.7578527857472334,
+            "kurtosis": 59.571341986387004,
+            "n_peaks": 29
+          },
+          "penetration_median": {
+            "left": -0.03136763724591584,
+            "right": -0.027255253437700765
+          },
+          "wing_resid_median": 0.011250625095222837,
+          "blade_normal_deg": {
+            "left": 10.184519665086182,
+            "right": 5.280546710776975
+          },
+          "v12v13_rigid_len": {
+            "left": {
+              "median": 0.058344895061035636,
+              "cv": 2.41703388615821e-15
+            },
+            "right": {
+              "median": 0.05830151525739624,
+              "cv": 8.117357960583465e-16
+            }
+          },
+          "max_abs_change_frozen_dofs": 0.0,
+          "mask": {
+            "inside_pct": 92.69047619047616,
+            "explained_pct": 46.24121345652837,
+            "n_samples": 168
+          }
+        }
+      },
+      "acceptance": {
+        "sm10": {
+          "1_song_pitch_dynamics": {
+            "verdict": "N/A",
+            "reason": "no wing extension: this fly is not singing"
+          },
+          "2_song_unchanged": {
+            "control_absmean_deg": 3.5170388221740723,
+            "treatment_absmean_deg": 3.5170388221740723,
+            "hp_rms_ratio": 1.0,
+            "n_peaks": [
+              29,
+              29
+            ],
+            "max_abs_yaw_change_rad": 0.0,
+            "verdict": "PASS"
+          },
+          "3_penetration": {
+            "control_vs_treatment": {
+              "left": [
+                -0.04441869348750354,
+                -0.03143412886522985
+              ],
+              "right": [
+                -0.04514566979274122,
+                -0.027030628172289555
+              ]
+            },
+            "target": -0.0013,
+            "verdict": "PASS"
+          },
+          "4_marker_residual": {
+            "control": 0.014667658511514824,
+            "treatment": 0.011329129316880522,
+            "ratio": 0.772388401869774,
+            "verdict": "PASS"
+          },
+          "5_folded_pitch": {
+            "wing": "right",
+            "treatment_deg": -35.38604736328125,
+            "control_deg": -7.811456203460693,
+            "mask_optimum_deg": [
+              -40.0,
+              -20.0
+            ],
+            "springref_deg": -57.29578,
+            "verdict": "PASS"
+          },
+          "invariants": {
+            "max_abs_change_frozen_dofs": 0.0,
+            "v12v13_len_drift": {
+              "left": 6.938893903907228e-18,
+              "right": 0.0
+            },
+            "verdict": "PASS"
+          },
+          "7_blade_normal_reported_not_gated": {
+            "left": 10.354153983018355,
+            "right": 5.375591529814168
+          }
+        },
+        "sm20": {
+          "1_song_pitch_dynamics": {
+            "verdict": "N/A",
+            "reason": "no wing extension: this fly is not singing"
+          },
+          "2_song_unchanged": {
+            "control_absmean_deg": 3.5170388221740723,
+            "treatment_absmean_deg": 3.5170388221740723,
+            "hp_rms_ratio": 1.0,
+            "n_peaks": [
+              29,
+              29
+            ],
+            "max_abs_yaw_change_rad": 0.0,
+            "verdict": "PASS"
+          },
+          "3_penetration": {
+            "control_vs_treatment": {
+              "left": [
+                -0.04441869348750354,
+                -0.03133026321048571
+              ],
+              "right": [
+                -0.04514566979274122,
+                -0.027165264994225714
+              ]
+            },
+            "target": -0.0013,
+            "verdict": "PASS"
+          },
+          "4_marker_residual": {
+            "control": 0.014667658511514824,
+            "treatment": 0.011254467007980731,
+            "ratio": 0.7672981341326858,
+            "verdict": "PASS"
+          },
+          "5_folded_pitch": {
+            "wing": "right",
+            "treatment_deg": -35.3477668762207,
+            "control_deg": -7.811456203460693,
+            "mask_optimum_deg": [
+              -40.0,
+              -20.0
+            ],
+            "springref_deg": -57.29578,
+            "verdict": "PASS"
+          },
+          "invariants": {
+            "max_abs_change_frozen_dofs": 0.0,
+            "v12v13_len_drift": {
+              "left": 6.938893903907228e-18,
+              "right": 0.0
+            },
+            "verdict": "PASS"
+          },
+          "7_blade_normal_reported_not_gated": {
+            "left": 10.229967140112272,
+            "right": 5.273429443972143
+          }
+        },
+        "sm30": {
+          "1_song_pitch_dynamics": {
+            "verdict": "N/A",
+            "reason": "no wing extension: this fly is not singing"
+          },
+          "2_song_unchanged": {
+            "control_absmean_deg": 3.5170388221740723,
+            "treatment_absmean_deg": 3.5170388221740723,
+            "hp_rms_ratio": 1.0,
+            "n_peaks": [
+              29,
+              29
+            ],
+            "max_abs_yaw_change_rad": 0.0,
+            "verdict": "PASS"
+          },
+          "3_penetration": {
+            "control_vs_treatment": {
+              "left": [
+                -0.04441869348750354,
+                -0.03136763724591584
+              ],
+              "right": [
+                -0.04514566979274122,
+                -0.027255253437700765
+              ]
+            },
+            "target": -0.0013,
+            "verdict": "PASS"
+          },
+          "4_marker_residual": {
+            "control": 0.014667658511514824,
+            "treatment": 0.011250625095222837,
+            "ratio": 0.7670362032488383,
+            "verdict": "PASS"
+          },
+          "5_folded_pitch": {
+            "wing": "right",
+            "treatment_deg": -35.30580139160156,
+            "control_deg": -7.811456203460693,
+            "mask_optimum_deg": [
+              -40.0,
+              -20.0
+            ],
+            "springref_deg": -57.29578,
+            "verdict": "PASS"
+          },
+          "invariants": {
+            "max_abs_change_frozen_dofs": 0.0,
+            "v12v13_len_drift": {
+              "left": 0.0,
+              "right": 0.0
+            },
+            "verdict": "PASS"
+          },
+          "7_blade_normal_reported_not_gated": {
+            "left": 10.184519665086182,
+            "right": 5.280546710776975
+          }
+        }
+      },
+      "stage_stats": {
+        "sm10": {
+          "n_frames": 2007,
+          "n_refined": 1755,
+          "n_skipped": 252,
+          "n_thin_frames": 0,
+          "n_no_bridge_frames": 252,
+          "n_nonfinite_pose_frames": 0,
+          "min_present_cameras": 3,
+          "dpitch_left_deg": -24.497010481874224,
+          "dpitch_right_deg": -27.37907795782645,
+          "wall_s": 83.6,
+          "overrides": [
+            "wing_mask_fit.smooth_weight=10.0"
+          ]
+        },
+        "sm20": {
+          "n_frames": 2007,
+          "n_refined": 1755,
+          "n_skipped": 252,
+          "n_thin_frames": 0,
+          "n_no_bridge_frames": 252,
+          "n_nonfinite_pose_frames": 0,
+          "min_present_cameras": 3,
+          "dpitch_left_deg": -24.592896092537448,
+          "dpitch_right_deg": -27.344367790238092,
+          "wall_s": 84.1,
+          "overrides": [
+            "wing_mask_fit.smooth_weight=20.0"
+          ]
+        },
+        "sm30": {
+          "n_frames": 2007,
+          "n_refined": 1755,
+          "n_skipped": 252,
+          "n_thin_frames": 0,
+          "n_no_bridge_frames": 252,
+          "n_nonfinite_pose_frames": 0,
+          "min_present_cameras": 3,
+          "dpitch_left_deg": -24.718965162916604,
+          "dpitch_right_deg": -27.30491832513939,
+          "wall_s": 84.9,
+          "overrides": [
+            "wing_mask_fit.smooth_weight=30.0"
+          ]
+        }
+      }
+    },
+    "fly1": {
+      "arms": {
+        "control": {
+          "pitch_median_deg": {
+            "wing_pitch_left": -5.726801872253418,
+            "wing_pitch_right": -11.100286483764648
+          },
+          "pitch_hp_rms": {
+            "wing_pitch_left": 0.600214022686875,
+            "wing_pitch_right": 0.5580189811897271
+          },
+          "delta_pitch_hp_rms": {},
+          "song_absmean_deg": 28.065263748168945,
+          "song_pulse": {
+            "hp_rms": 2.1187747712605924,
+            "kurtosis": 3.0537022300690557,
+            "n_peaks": 45
+          },
+          "penetration_median": {
+            "left": -0.023005445657259965,
+            "right": -0.03324306122593504
+          },
+          "wing_resid_median": 0.011061641344988257,
+          "blade_normal_deg": {
+            "left": 12.23299992201298,
+            "right": 15.849459113248756
+          },
+          "v12v13_rigid_len": {
+            "left": {
+              "median": 0.058344895061035636,
+              "cv": 2.8113040015468314e-15
+            },
+            "right": {
+              "median": 0.05830151525739624,
+              "cv": 2.1903726259190076e-15
+            }
+          },
+          "max_abs_change_frozen_dofs": null,
+          "mask": {
+            "inside_pct": 84.07738095238093,
+            "explained_pct": 43.81403739735904,
+            "n_samples": 168
+          }
+        },
+        "sm10": {
+          "pitch_median_deg": {
+            "wing_pitch_left": -18.965106964111328,
+            "wing_pitch_right": -31.96485137939453
+          },
+          "pitch_hp_rms": {
+            "wing_pitch_left": 1.5759456166908774,
+            "wing_pitch_right": 0.6878670178863184
+          },
+          "delta_pitch_hp_rms": {
+            "wing_pitch_left": 1.4529530357187126,
+            "wing_pitch_right": 0.8472952274723254
+          },
+          "song_absmean_deg": 28.065263748168945,
+          "song_pulse": {
+            "hp_rms": 2.1187747712605924,
+            "kurtosis": 3.0537022300690557,
+            "n_peaks": 45
+          },
+          "penetration_median": {
+            "left": -0.00684789762463003,
+            "right": -0.012336080366971758
+          },
+          "wing_resid_median": 0.011174024919756335,
+          "blade_normal_deg": {
+            "left": 7.720292438908371,
+            "right": 2.1907028643749813
+          },
+          "v12v13_rigid_len": {
+            "left": {
+              "median": 0.058344895061035636,
+              "cv": 2.8984348712860992e-15
+            },
+            "right": {
+              "median": 0.05830151525739624,
+              "cv": 2.104394312625042e-15
+            }
+          },
+          "max_abs_change_frozen_dofs": 0.0,
+          "mask": {
+            "inside_pct": 92.46428571428572,
+            "explained_pct": 47.70676653865865,
+            "n_samples": 168
+          }
+        },
+        "sm20": {
+          "pitch_median_deg": {
+            "wing_pitch_left": -18.907123565673828,
+            "wing_pitch_right": -31.869985580444336
+          },
+          "pitch_hp_rms": {
+            "wing_pitch_left": 0.9015315297832073,
+            "wing_pitch_right": 0.5756744841953324
+          },
+          "delta_pitch_hp_rms": {
+            "wing_pitch_left": 0.8803921222895575,
+            "wing_pitch_right": 0.7694436524020278
+          },
+          "song_absmean_deg": 28.065263748168945,
+          "song_pulse": {
+            "hp_rms": 2.1187747712605924,
+            "kurtosis": 3.0537022300690557,
+            "n_peaks": 45
+          },
+          "penetration_median": {
+            "left": -0.006609424397185336,
+            "right": -0.012223006159067464
+          },
+          "wing_resid_median": 0.011148958386588364,
+          "blade_normal_deg": {
+            "left": 7.61746710570856,
+            "right": 2.1418529062341083
+          },
+          "v12v13_rigid_len": {
+            "left": {
+              "median": 0.058344895061035636,
+              "cv": 2.742198770170836e-15
+            },
+            "right": {
+              "median": 0.05830151525739624,
+              "cv": 2.081355126716519e-15
+            }
+          },
+          "max_abs_change_frozen_dofs": 0.0,
+          "mask": {
+            "inside_pct": 92.48214285714286,
+            "explained_pct": 47.67917560375276,
+            "n_samples": 168
+          }
+        },
+        "sm30": {
+          "pitch_median_deg": {
+            "wing_pitch_left": -18.820053100585938,
+            "wing_pitch_right": -31.68401336669922
+          },
+          "pitch_hp_rms": {
+            "wing_pitch_left": 0.6087729109205302,
+            "wing_pitch_right": 0.4736712893921422
+          },
+          "delta_pitch_hp_rms": {
+            "wing_pitch_left": 0.69430735257957,
+            "wing_pitch_right": 0.7005285899857245
+          },
+          "song_absmean_deg": 28.065263748168945,
+          "song_pulse": {
+            "hp_rms": 2.1187747712605924,
+            "kurtosis": 3.0537022300690557,
+            "n_peaks": 45
+          },
+          "penetration_median": {
+            "left": -0.006517332415833412,
+            "right": -0.012447203946947299
+          },
+          "wing_resid_median": 0.011127836130760124,
+          "blade_normal_deg": {
+            "left": 7.612067851701804,
+            "right": 2.1577111073493898
+          },
+          "v12v13_rigid_len": {
+            "left": {
+              "median": 0.05834489506103562,
+              "cv": 2.843254695646671e-15
+            },
+            "right": {
+              "median": 0.05830151525739624,
+              "cv": 2.079691595583376e-15
+            }
+          },
+          "max_abs_change_frozen_dofs": 0.0,
+          "mask": {
+            "inside_pct": 92.4761904761905,
+            "explained_pct": 47.70276438170977,
+            "n_samples": 168
+          }
+        }
+      },
+      "acceptance": {
+        "sm10": {
+          "1_song_pitch_dynamics": {
+            "dof": "wing_pitch_left",
+            "control": 0.600214022686875,
+            "treatment": 1.5759456166908774,
+            "ratio": 2.6256394504682055,
+            "delta_hp_rms": 1.4529530357187126,
+            "direction": "jitter ADDED",
+            "verdict": "FAIL"
+          },
+          "2_song_unchanged": {
+            "control_absmean_deg": 28.065263748168945,
+            "treatment_absmean_deg": 28.065263748168945,
+            "hp_rms_ratio": 1.0,
+            "n_peaks": [
+              45,
+              45
+            ],
+            "max_abs_yaw_change_rad": 0.0,
+            "verdict": "PASS"
+          },
+          "3_penetration": {
+            "control_vs_treatment": {
+              "left": [
+                -0.023005445657259965,
+                -0.00684789762463003
+              ],
+              "right": [
+                -0.03324306122593504,
+                -0.012336080366971758
+              ]
+            },
+            "target": -0.0013,
+            "verdict": "PASS"
+          },
+          "4_marker_residual": {
+            "control": 0.011061641344988257,
+            "treatment": 0.011174024919756335,
+            "ratio": 1.0101597557960054,
+            "verdict": "PASS"
+          },
+          "5_folded_pitch": {
+            "wing": "right",
+            "treatment_deg": -31.96485137939453,
+            "control_deg": -11.100286483764648,
+            "mask_optimum_deg": [
+              -40.0,
+              -20.0
+            ],
+            "springref_deg": -57.29578,
+            "verdict": "PASS"
+          },
+          "invariants": {
+            "max_abs_change_frozen_dofs": 0.0,
+            "v12v13_len_drift": {
+              "left": 0.0,
+              "right": 0.0
+            },
+            "verdict": "PASS"
+          },
+          "7_blade_normal_reported_not_gated": {
+            "left": 7.720292438908371,
+            "right": 2.1907028643749813
+          }
+        },
+        "sm20": {
+          "1_song_pitch_dynamics": {
+            "dof": "wing_pitch_left",
+            "control": 0.600214022686875,
+            "treatment": 0.9015315297832073,
+            "ratio": 1.5020167735293422,
+            "delta_hp_rms": 0.8803921222895575,
+            "direction": "jitter ADDED",
+            "verdict": "FAIL"
+          },
+          "2_song_unchanged": {
+            "control_absmean_deg": 28.065263748168945,
+            "treatment_absmean_deg": 28.065263748168945,
+            "hp_rms_ratio": 1.0,
+            "n_peaks": [
+              45,
+              45
+            ],
+            "max_abs_yaw_change_rad": 0.0,
+            "verdict": "PASS"
+          },
+          "3_penetration": {
+            "control_vs_treatment": {
+              "left": [
+                -0.023005445657259965,
+                -0.006609424397185336
+              ],
+              "right": [
+                -0.03324306122593504,
+                -0.012223006159067464
+              ]
+            },
+            "target": -0.0013,
+            "verdict": "PASS"
+          },
+          "4_marker_residual": {
+            "control": 0.011061641344988257,
+            "treatment": 0.011148958386588364,
+            "ratio": 1.0078936786031005,
+            "verdict": "PASS"
+          },
+          "5_folded_pitch": {
+            "wing": "right",
+            "treatment_deg": -31.869985580444336,
+            "control_deg": -11.100286483764648,
+            "mask_optimum_deg": [
+              -40.0,
+              -20.0
+            ],
+            "springref_deg": -57.29578,
+            "verdict": "PASS"
+          },
+          "invariants": {
+            "max_abs_change_frozen_dofs": 0.0,
+            "v12v13_len_drift": {
+              "left": 0.0,
+              "right": 0.0
+            },
+            "verdict": "PASS"
+          },
+          "7_blade_normal_reported_not_gated": {
+            "left": 7.61746710570856,
+            "right": 2.1418529062341083
+          }
+        },
+        "sm30": {
+          "1_song_pitch_dynamics": {
+            "dof": "wing_pitch_left",
+            "control": 0.600214022686875,
+            "treatment": 0.6087729109205302,
+            "ratio": 1.0142597272142047,
+            "delta_hp_rms": 0.69430735257957,
+            "direction": "jitter ADDED",
+            "verdict": "PASS"
+          },
+          "2_song_unchanged": {
+            "control_absmean_deg": 28.065263748168945,
+            "treatment_absmean_deg": 28.065263748168945,
+            "hp_rms_ratio": 1.0,
+            "n_peaks": [
+              45,
+              45
+            ],
+            "max_abs_yaw_change_rad": 0.0,
+            "verdict": "PASS"
+          },
+          "3_penetration": {
+            "control_vs_treatment": {
+              "left": [
+                -0.023005445657259965,
+                -0.006517332415833412
+              ],
+              "right": [
+                -0.03324306122593504,
+                -0.012447203946947299
+              ]
+            },
+            "target": -0.0013,
+            "verdict": "PASS"
+          },
+          "4_marker_residual": {
+            "control": 0.011061641344988257,
+            "treatment": 0.011127836130760124,
+            "ratio": 1.0059841739311008,
+            "verdict": "PASS"
+          },
+          "5_folded_pitch": {
+            "wing": "right",
+            "treatment_deg": -31.68401336669922,
+            "control_deg": -11.100286483764648,
+            "mask_optimum_deg": [
+              -40.0,
+              -20.0
+            ],
+            "springref_deg": -57.29578,
+            "verdict": "PASS"
+          },
+          "invariants": {
+            "max_abs_change_frozen_dofs": 0.0,
+            "v12v13_len_drift": {
+              "left": 1.3877787807814457e-17,
+              "right": 0.0
+            },
+            "verdict": "PASS"
+          },
+          "7_blade_normal_reported_not_gated": {
+            "left": 7.612067851701804,
+            "right": 2.1577111073493898
+          }
+        }
+      },
+      "stage_stats": {
+        "sm10": {
+          "n_frames": 2007,
+          "n_refined": 2007,
+          "n_skipped": 0,
+          "n_thin_frames": 0,
+          "n_no_bridge_frames": 0,
+          "n_nonfinite_pose_frames": 0,
+          "min_present_cameras": 3,
+          "dpitch_left_deg": -12.923410426812941,
+          "dpitch_right_deg": -20.26851293747926,
+          "wall_s": 92.9,
+          "overrides": [
+            "wing_mask_fit.smooth_weight=10.0"
+          ]
+        },
+        "sm20": {
+          "n_frames": 2007,
+          "n_refined": 2007,
+          "n_skipped": 0,
+          "n_thin_frames": 0,
+          "n_no_bridge_frames": 0,
+          "n_nonfinite_pose_frames": 0,
+          "min_present_cameras": 3,
+          "dpitch_left_deg": -12.899144792404295,
+          "dpitch_right_deg": -20.3348989611172,
+          "wall_s": 92.4,
+          "overrides": [
+            "wing_mask_fit.smooth_weight=20.0"
+          ]
+        },
+        "sm30": {
+          "n_frames": 2007,
+          "n_refined": 2007,
+          "n_skipped": 0,
+          "n_thin_frames": 0,
+          "n_no_bridge_frames": 0,
+          "n_nonfinite_pose_frames": 0,
+          "min_present_cameras": 3,
+          "dpitch_left_deg": -12.851313404533519,
+          "dpitch_right_deg": -20.312991129354383,
+          "wall_s": 93.7,
+          "overrides": [
+            "wing_mask_fit.smooth_weight=30.0"
+          ]
+        }
+      }
+    }
+  },
+  "synthetic_fixture_cells_deg": {
+    "EXTENDED (qpos0)|both terms": {
+      "start_deg": 25.00000012650595,
+      "end_deg": 1.8837390657762483,
+      "ratio": 0.07534956224976322
+    },
+    "EXTENDED (qpos0)|containment only": {
+      "start_deg": 25.00000012650595,
+      "end_deg": 0.5254706253154404,
+      "ratio": 0.021018824906257363
+    },
+    "EXTENDED (qpos0)|coverage only": {
+      "start_deg": 25.00000012650595,
+      "end_deg": 6.615862529612805,
+      "ratio": 0.26463449984539866
+    },
+    "EXTENDED (qpos0)|coverage only h8": {
+      "start_deg": 25.00000012650595,
+      "end_deg": 7.447152473777186,
+      "ratio": 0.2978860974437129
+    },
+    "EXTENDED (qpos0)|both h8": {
+      "start_deg": 25.00000012650595,
+      "end_deg": 1.6315019939966757,
+      "ratio": 0.06526007942963549
+    },
+    "EXTENDED (qpos0)|containment only h8": {
+      "start_deg": 25.00000012650595,
+      "end_deg": 0.525472332862733,
+      "ratio": 0.021018893208148717
+    },
+    "REST (springref)|both terms": {
+      "start_deg": 25.00000012650595,
+      "end_deg": 1.6250784145256902,
+      "ratio": 0.06500313625209626
+    },
+    "REST (springref)|containment only": {
+      "start_deg": 25.00000012650595,
+      "end_deg": 2.4913678488228035,
+      "ratio": 0.09965471344863558
+    },
+    "REST (springref)|coverage only": {
+      "start_deg": 25.00000012650595,
+      "end_deg": 43.49435435160147,
+      "ratio": 1.7397741652603878
+    },
+    "REST (springref)|coverage only h8": {
+      "start_deg": 25.00000012650595,
+      "end_deg": 42.75206305298283,
+      "ratio": 1.7100825134658886
+    },
+    "REST (springref)|both h8": {
+      "start_deg": 25.00000012650595,
+      "end_deg": 1.1440032184025393,
+      "ratio": 0.04576012850454443
+    },
+    "REST (springref)|containment only h8": {
+      "start_deg": 25.00000012650595,
+      "end_deg": 2.4914846023689283,
+      "ratio": 0.09965938359045694
+    }
+  },
+  "pitch_step_stats_deg": {
+    "fly0/wing_pitch_left": {
+      "q_control": {
+        "median_step_deg": 0.04751300811767578,
+        "p99_step_deg": 1.3883635997772217,
+        "max_step_deg": 7.879556655883789
+      },
+      "q_cov0": {
+        "median_step_deg": 0.8703689575195312,
+        "p99_step_deg": 21.662094116210938,
+        "max_step_deg": 33.8678092956543
+      },
+      "q_cov0.3": {
+        "median_step_deg": 0.9947996139526367,
+        "p99_step_deg": 23.721885681152344,
+        "max_step_deg": 36.302616119384766
+      },
+      "q_cov1": {
+        "median_step_deg": 2.2012290954589844,
+        "p99_step_deg": 26.71434211730957,
+        "max_step_deg": 40.39027404785156
+      }
+    },
+    "fly0/wing_pitch_right": {
+      "q_control": {
+        "median_step_deg": 0.039246559143066406,
+        "p99_step_deg": 0.7357537746429443,
+        "max_step_deg": 2.449770212173462
+      },
+      "q_cov0": {
+        "median_step_deg": 1.1364631652832031,
+        "p99_step_deg": 25.13705062866211,
+        "max_step_deg": 39.18195343017578
+      },
+      "q_cov0.3": {
+        "median_step_deg": 1.2140426635742188,
+        "p99_step_deg": 25.6241397857666,
+        "max_step_deg": 31.68304443359375
+      },
+      "q_cov1": {
+        "median_step_deg": 1.9527206420898438,
+        "p99_step_deg": 30.911266326904297,
+        "max_step_deg": 45.47024917602539
+      }
+    },
+    "fly1/wing_pitch_left": {
+      "q_control": {
+        "median_step_deg": 0.35821351408958435,
+        "p99_step_deg": 2.329134225845337,
+        "max_step_deg": 3.1544766426086426
+      },
+      "q_cov0": {
+        "median_step_deg": 1.0302410125732422,
+        "p99_step_deg": 12.55420207977295,
+        "max_step_deg": 30.00176429748535
+      },
+      "q_cov0.3": {
+        "median_step_deg": 1.056732177734375,
+        "p99_step_deg": 11.502079963684082,
+        "max_step_deg": 27.910722732543945
+      },
+      "q_cov1": {
+        "median_step_deg": 1.0916862487792969,
+        "p99_step_deg": 11.430814743041992,
+        "max_step_deg": 28.269716262817383
+      }
+    },
+    "fly1/wing_pitch_right": {
+      "q_control": {
+        "median_step_deg": 0.2466893196105957,
+        "p99_step_deg": 2.0219852924346924,
+        "max_step_deg": 2.8555684089660645
+      },
+      "q_cov0": {
+        "median_step_deg": 0.5479793548583984,
+        "p99_step_deg": 2.6961748600006104,
+        "max_step_deg": 4.4672698974609375
+      },
+      "q_cov0.3": {
+        "median_step_deg": 0.5454292297363281,
+        "p99_step_deg": 2.5980100631713867,
+        "max_step_deg": 4.451507568359375
+      },
+      "q_cov1": {
+        "median_step_deg": 0.6519927978515625,
+        "p99_step_deg": 3.7310104370117188,
+        "max_step_deg": 4.904254913330078
+      }
+    }
+  }
+}
