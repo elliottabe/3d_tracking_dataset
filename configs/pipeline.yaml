@@ -23,6 +23,14 @@ seed: 0
 # windows across a brand-new recording without spending any GPU time on IK.
 pipeline:
   stop_after: null   # null | 'triangulate'
+  # Accept an existing kp3d.npz even if it was produced under different Stage-B
+  # gates. Stage B's gates (view-conf, mask-agreement, wing-collapse,
+  # rigid-repair) only run when kp3d.npz is (re)computed, so a resumed run with
+  # a stale file silently ignores the current config -- measured on Session0
+  # bout 28, where fly1 re-ran with rigid-repair and fly0 kept a pre-gate
+  # kp3d.npz and was never reprocessed, with no warning. Default false: the run
+  # refuses and names the artifacts to delete.
+  allow_stale_kp3d: false
 
 # Minimal inline keys so `paths.data_dir` (and other groups' `${dataset.name}`/
 # `${version}` interpolations, e.g. stac/default.yaml's save_path) resolve.
@@ -271,3 +279,31 @@ wing_collapse:
   # than a biased one. Swept 3/4/5; 3 helps the male more (13 -> 4) but wrecks
   # the female, 5 is safe but weaker. 4 is the balance.
   min_views_kept: 4
+
+# RIGID-INVARIANT repair, applied to the triangulated 3-D. Deletes frames whose
+# rigid segment length is physically impossible and interpolates the short gap.
+#
+# Why this and not a length projection: the residual wing defect is ANGULAR --
+# a landmark sits a whole wing away, so forcing the right LENGTH slides it along
+# a wrong direction (measured: WingL_V12's 13 jumps stayed 13). And the fit
+# hides it: the model's wing is rigid, so outputs.h5 reports a perfect vein
+# length while qpos[7] swings ~40 deg and the fitted site jumps 13-17 mm against
+# a 0.33 mm baseline.
+#
+# This is NOT smoothing (wings are excluded from Stage B2 to protect the song):
+# only frames the invariant FLAGS are touched, every other frame is returned
+# byte-identical, and a run longer than max_gap or touching a bout edge is left
+# NaN rather than invented.
+rigid_repair:
+  enabled: false
+  # restrict to edges whose endpoints match these substrings ([] = all rigid
+  # edges in courtship_skeleton_edges). Wings are the measured failure.
+  edges_containing: [Wing]
+  rel_tol: 0.5      # flag |L - target|/target > this. The flip is ~350% off and
+                    # a healthy vein measures CV ~3%, so 0.5 separates cleanly.
+  max_gap: 5        # longer than this is a regime, not a spike -> left NaN
+  max_cv: 0.20      # refuse to derive a target from a non-rigid edge (the
+                    # female's V12-V13 measures CV 69-123% and gets no target)
+  min_conf: 0.5
+  min_frames: 50
+  also_nan: []      # extra keypoints to drop on a flagged frame

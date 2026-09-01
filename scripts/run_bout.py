@@ -366,6 +366,44 @@ def _import_segment_calibration():
     return optimize_segment_scales, build_segment_map
 
 
+def stage_b_gate_signature(cfg):
+    """A stable string naming every setting that changes what kp3d.npz contains.
+
+    Stage B's gates (view-conf, mask-agreement, wing-collapse, rigid-repair)
+    all run INSIDE `if not stage_done(kp3d_path)`, so on a resumed run an
+    existing kp3d.npz silently bypasses them: turning a gate on in the config
+    does nothing and the log shows no line for it. Measured on Session0 bout 28
+    -- fly1 re-ran and got `[rigid-repair] ... frames [3, 10, 11]`, fly0 kept a
+    kp3d.npz from a run predating the gate and was never reprocessed, with no
+    warning. Recording the signature makes that detectable.
+    """
+    def _plain(v):
+        """OmegaConf ListConfig is NOT a list/tuple instance, so an isinstance
+        check lets it reach json.dumps unconverted and raises. Coerce anything
+        iterable-but-not-a-string."""
+        if v is not None and not isinstance(v, (str, bytes)) and hasattr(v, "__iter__"):
+            return [_plain(x) for x in v]
+        return v
+
+    _wc = cfg.get("wing_collapse") or {}
+    _rr = cfg.get("rigid_repair") or {}
+    _mk = cfg.get("masks") or {}
+    return json.dumps({
+        "conf_thresh": float(cfg.detector.conf_thresh),
+        "view_conf_thresh": cfg.detector.get("view_conf_thresh", None),
+        "reproj_resid_px": cfg.detector.get("reproj_resid_px", None),
+        "kp_mask_agree_fly_lengths": _mk.get("kp_mask_agree_fly_lengths", None),
+        "min_views": _mk.get("min_views", None),
+        "wing_collapse": ({k: _plain(_wc.get(k)) for k in
+                           ("enabled", "abs_floor", "rel_frac", "min_views_kept")}
+                          if _wc.get("enabled", False) else {"enabled": False}),
+        "rigid_repair": ({k: _plain(_rr.get(k))
+                          for k in ("enabled", "edges_containing", "rel_tol",
+                                    "max_gap", "max_cv", "min_conf", "min_frames")}
+                         if _rr.get("enabled", False) else {"enabled": False}),
+    }, sort_keys=True)
+
+
 def compute_segment_scales(cfg, kp3d, kp_names, scale, run_root):
     """Per-segment (per-limb) SHAPE calibration M-step (the validated recipe).
 
@@ -1033,6 +1071,34 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
         kp2d, conf = z["kp2d"], z["conf"]
 
     # -- Stage B: DLT triangulation ----------------------------------------------
+    _gate_sig = stage_b_gate_signature(cfg)
+    if stage_done(kp3d_path) and not bool(
+            (cfg.get("pipeline") or {}).get("allow_stale_kp3d", False)):
+        with np.load(kp3d_path) as _z:
+            _prev = str(_z["gates"]) if "gates" in _z.files else None
+        if _prev != _gate_sig:
+            # REFUSE rather than silently reuse, and rather than auto-deleting a
+            # 12-minute STAC solve. Same contract as the stac_ik.h5 T-mismatch
+            # check below: name the artifacts and let the operator remove them.
+            _what = ("carries no gate signature (written before this check "
+                     "existed)" if _prev is None else
+                     f"was produced under DIFFERENT Stage-B gates\n  stored:  {_prev}")
+            raise RuntimeError(
+                f"bout {bout_idx} fly{fly}: {kp3d_path} {_what}\n"
+                f"  current: {_gate_sig}\n"
+                f"Stage B's gates (view-conf, mask-agreement, wing-collapse, "
+                f"rigid-repair) only run when kp3d.npz is (re)computed, so "
+                f"reusing this file would silently ignore the current config. "
+                f"Delete these and rerun this bout/fly:\n"
+                f"    rm -f {os.path.join(bout_dir, 'kp3d.npz')} "
+                f"{os.path.join(bout_dir, 'kp3d_filt.npz')} "
+                f"{os.path.join(bout_dir, 'stac_ik.h5')} "
+                f"{os.path.join(bout_dir, 'qpos_refined.npz')} "
+                f"{os.path.join(bout_dir, 'outputs.h5')} "
+                f"{os.path.join(bout_dir, 'qc.json')} "
+                f"{os.path.join(bout_dir, 'DONE')}\n"
+                f"(or set pipeline.allow_stale_kp3d=true to accept the stored "
+                f"file as-is, which is only right if you know the gates match.)")
     if not stage_done(kp3d_path):
         # Per-view confidence gate: drop a whole (frame, camera) whose median
         # keypoint confidence says the crop probably does not contain the fly.
@@ -1111,6 +1177,49 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
         kp3d, conf3d = triangulate_keypoints(
             kp2d, conf, cam_mats, conf_thresh=float(cfg.detector.conf_thresh),
             view_conf_thresh=_view_thresh, reproj_resid_px=_resid_px)
+        # RIGID-INVARIANT repair. The collapse gate above cuts the wing L/R
+        # flip from 11 frames to 3 on Session0 bout 28 fly1, but the survivors
+        # reach the IK: qpos[7] swings 0.7 rad (~40 deg) and the fitted wing
+        # site jumps 13-17 mm against a 0.33 mm baseline. The FIT cannot show
+        # it (the model's wing is rigid, so outputs.h5 reports a perfect vein
+        # length while the POSE is wrong), and no length projection can fix it
+        # because the error is angular. So delete the frames the invariant
+        # proves impossible and interpolate the short gap; a run longer than
+        # max_gap, or one touching a bout edge, is left NaN rather than
+        # invented. Absent config is a strict no-op.
+        _rr = cfg.get("rigid_repair") or {}
+        if bool(_rr.get("enabled", False)):
+            from jarvis_jax.tracking.filter import courtship_skeleton_edges
+            from jarvis_jax.tracking.rigid_lengths import (
+                estimate_bone_lengths, repair_flipped_segments)
+            _names = list(cfg.model.KP_NAMES)
+            _edges = courtship_skeleton_edges(_names)
+            _only = [n for n in (_rr.get("edges_containing") or [])]
+            if _only:
+                _edges = np.array([e for e in _edges
+                                   if any(p in _names[e[0]] or p in _names[e[1]]
+                                          for p in _only)])
+            _tg, _trep = estimate_bone_lengths(
+                kp3d, conf3d, _names, _edges,
+                min_conf=float(_rr.get("min_conf", 0.5)),
+                min_frames=int(_rr.get("min_frames", 50)),
+                max_cv=float(_rr.get("max_cv", 0.20)))
+            kp3d, _rrep = repair_flipped_segments(
+                kp3d, conf3d, _names, _edges, _tg,
+                rel_tol=float(_rr.get("rel_tol", 0.5)),
+                max_gap=int(_rr.get("max_gap", 5)),
+                also_nan=tuple(_rr.get("also_nan") or ()))
+            for _e, _r in _rrep.items():
+                print(f"[rigid-repair] bout {bout_idx} fly{fly}: {_e} target "
+                      f"{_r['target']:.2f}u -- flagged {_r['n_flagged']} frames "
+                      f"in {_r['n_runs']} run(s), interpolated "
+                      f"{_r['n_interpolated']}, left NaN {_r['n_left_nan']}; "
+                      f"frames {_r['frames'][:12]}", flush=True)
+            if not _rrep:
+                print(f"[rigid-repair] bout {bout_idx} fly{fly}: no rigid "
+                      f"violations over {len(_tg)} edges "
+                      f"({sum(v is not None for v in _tg.values())} measurable)",
+                      flush=True)
         # Gate frames with too few valid-camera masks to NaN instead of
         # triangulating from too few views (see mask-coverage comment above
         # masks_dict). cfg.masks.min_views absent (_min_views_cfg is None)
@@ -1121,7 +1230,8 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
         if _min_views_cfg is not None:
             print(f"[mask-coverage] bout {bout_idx} fly{fly}: gated {_n_gated}/{T} frames "
                   f"below min_views={_min_views_cfg} (too few valid camera masks)")
-        atomic_save_npz(kp3d_path, kp3d=kp3d, conf3d=conf3d)
+        atomic_save_npz(kp3d_path, kp3d=kp3d, conf3d=conf3d,
+                        gates=np.asarray(_gate_sig))
     with np.load(kp3d_path) as z:
         kp3d, conf3d = z["kp3d"], z["conf3d"]
 

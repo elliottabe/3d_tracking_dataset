@@ -163,3 +163,80 @@ def segment_length_report(kp3d, kp_names, edges):
             out[f"{kp_names[a]}->{kp_names[b]}"] = (float(L.mean()),
                                                     float(L.std() / L.mean()))
     return out
+
+
+def repair_flipped_segments(kp3d, conf3d, kp_names, edges, targets, *,
+                            rel_tol=0.5, max_gap=5, also_nan=()):
+    """NaN frames whose rigid segment length is impossible, then interpolate.
+
+    This is the narrow companion to `enforce_bone_lengths`, and it exists
+    because that one CANNOT fix the failure it was built for. The residual wing
+    defect on Session0 bout 28 fly1 is an ANGULAR error: on frames 3/10/11 the
+    3-D WingL_V12-V13 length reads ~21.6u against a measured 4.8u, because a
+    landmark sits a whole wing away. Projecting onto the right LENGTH just
+    slides it along a wrong direction (measured: WingL_V12's 13 jumps stayed
+    13). And the fit cannot reveal it either -- the model's wing is rigid, so
+    outputs.h5 reports a perfect vein length while qpos[7] swings 0.7 rad
+    (~40 deg) and the fitted site jumps 13-17 mm against a 0.33 mm baseline.
+
+    So: do not try to correct those frames, DELETE them. A frame whose rigid
+    length is off by `rel_tol` is not a measurement, and 3 bad frames bracketed
+    by good neighbours is exactly what interpolation is for.
+
+    Deliberately narrow, because wings are excluded from the Stage-B2 smoothing
+    (`preserve_raw_patterns`) to protect the song and this must not smuggle
+    smoothing back in:
+      * only frames FLAGGED by the invariant are touched; every other frame is
+        returned byte-identical;
+      * only the endpoints of the violating edge (plus `also_nan`) move;
+      * a run longer than `max_gap` is REFUSED, not interpolated -- a long
+        violation is a regime, not a spike, and filling it would fabricate
+        data. Those frames are left NaN so downstream sees a gap, not a guess;
+      * a run touching the start or end of the bout has no bracket and is also
+        left NaN.
+
+    Returns (kp3d_repaired, report).
+    """
+    kp3d = np.asarray(kp3d, float).copy()
+    T = kp3d.shape[0]
+    report = {}
+    for ei, (a, b) in enumerate(np.asarray(edges)):
+        L = targets.get(ei)
+        if L is None or L <= 0:
+            continue
+        cur = np.linalg.norm(kp3d[:, a] - kp3d[:, b], axis=-1)
+        bad = np.isfinite(cur) & (np.abs(cur - L) / L > rel_tol)
+        if not bad.any():
+            continue
+        name = f"{kp_names[a]}->{kp_names[b]}"
+        idxs = [kp_names.index(n) for n in also_nan] + [int(a), int(b)]
+        # contiguous runs of flagged frames
+        runs, s = [], None
+        for t in range(T + 1):
+            f = bool(bad[t]) if t < T else False
+            if f and s is None:
+                s = t
+            elif not f and s is not None:
+                runs.append((s, t)); s = None
+        filled = refused = 0
+        for (s0, s1) in runs:
+            n = s1 - s0
+            if n > max_gap or s0 == 0 or s1 >= T:
+                # no bracket, or too long to be a spike -> leave NaN
+                for i in idxs:
+                    kp3d[s0:s1, i] = np.nan
+                refused += n
+                continue
+            for i in idxs:
+                lo, hi = kp3d[s0 - 1, i], kp3d[s1, i]
+                if not (np.isfinite(lo).all() and np.isfinite(hi).all()):
+                    kp3d[s0:s1, i] = np.nan
+                    continue
+                w = (np.arange(1, n + 1) / (n + 1.0))[:, None]
+                kp3d[s0:s1, i] = lo[None, :] * (1 - w) + hi[None, :] * w
+            filled += n
+        report[name] = dict(n_flagged=int(bad.sum()), n_runs=len(runs),
+                            n_interpolated=int(filled), n_left_nan=int(refused),
+                            target=float(L), rel_tol=float(rel_tol),
+                            frames=np.flatnonzero(bad).tolist()[:40])
+    return kp3d, report

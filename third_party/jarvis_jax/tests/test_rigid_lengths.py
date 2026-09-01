@@ -160,3 +160,69 @@ def test_unknown_split_is_rejected():
     kp, conf = _chain()
     with pytest.raises(ValueError, match="distal.*confidence"):
         enforce_bone_lengths(kp, conf, NAMES, EDGES, {2: 1.0}, split="magic")
+
+
+NAMES6 = ["Scutellum", "WingL_base", "WingL_V12", "WingL_V13"]
+EDGES6 = np.array([[2, 3]])
+
+
+def _flip_series(T=20, flip_at=(5, 6), good=1.0, bad=4.0):
+    """V12-V13 at `good` length, except `flip_at` where it is `bad` (the
+    measured signature: 21.6u against a 4.8u baseline)."""
+    kp = np.zeros((T, 4, 3), float)
+    kp[:, 2, 0] = 0.0
+    kp[:, 3, 0] = good
+    for t in flip_at:
+        kp[t, 3, 0] = bad
+    return kp, np.ones((T, 4), float)
+
+
+def test_flipped_frames_are_interpolated_and_others_untouched():
+    from jarvis_jax.tracking.rigid_lengths import repair_flipped_segments
+    kp, conf = _flip_series()
+    orig = kp.copy()
+    out, rep = repair_flipped_segments(kp, conf, NAMES6, EDGES6, {0: 1.0})
+    r = rep["WingL_V12->WingL_V13"]
+    assert r["n_flagged"] == 2 and r["n_interpolated"] == 2 and r["n_left_nan"] == 0
+    L = np.linalg.norm(out[:, 2] - out[:, 3], axis=-1)
+    assert np.allclose(L, 1.0, atol=1e-9), L
+    keep = [t for t in range(20) if t not in (5, 6)]
+    assert np.array_equal(out[keep], orig[keep]), "unflagged frames must be byte-identical"
+
+
+def test_a_long_violation_is_refused_not_invented():
+    """A long run is a regime, not a spike; filling it would fabricate data."""
+    from jarvis_jax.tracking.rigid_lengths import repair_flipped_segments
+    kp, conf = _flip_series(T=30, flip_at=tuple(range(5, 20)))
+    out, rep = repair_flipped_segments(kp, conf, NAMES6, EDGES6, {0: 1.0}, max_gap=5)
+    r = rep["WingL_V12->WingL_V13"]
+    assert r["n_interpolated"] == 0 and r["n_left_nan"] == 15
+    assert np.isnan(out[5:20, 3]).all(), "refused frames must be NaN, not guessed"
+
+
+def test_a_violation_at_the_bout_edge_has_no_bracket_and_is_left_nan():
+    from jarvis_jax.tracking.rigid_lengths import repair_flipped_segments
+    kp, conf = _flip_series(T=12, flip_at=(0, 1))
+    out, rep = repair_flipped_segments(kp, conf, NAMES6, EDGES6, {0: 1.0})
+    assert rep["WingL_V12->WingL_V13"]["n_left_nan"] == 2
+    assert np.isnan(out[0:2, 3]).all()
+
+
+def test_normal_variation_is_not_flagged():
+    """Wing veins measure CV ~3% on a good bout; rel_tol=0.5 must ignore that,
+    or this becomes a smoother."""
+    from jarvis_jax.tracking.rigid_lengths import repair_flipped_segments
+    rng = np.random.default_rng(0)
+    kp = np.zeros((200, 4, 3)); kp[:, 3, 0] = 1.0 + rng.normal(0, 0.03, 200)
+    out, rep = repair_flipped_segments(kp, np.ones((200, 4)), NAMES6, EDGES6, {0: 1.0})
+    assert rep == {}, rep
+    assert np.array_equal(out, kp)
+
+
+def test_also_nan_carries_the_whole_wing():
+    from jarvis_jax.tracking.rigid_lengths import repair_flipped_segments
+    kp, conf = _flip_series(flip_at=(7,))
+    kp[:, 1, 1] = 5.0                              # WingL_base offset
+    out, _ = repair_flipped_segments(kp, conf, NAMES6, EDGES6, {0: 1.0},
+                                     also_nan=("WingL_base",))
+    assert np.isfinite(out[7, 1]).all() and abs(out[7, 1, 1] - 5.0) < 1e-9

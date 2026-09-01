@@ -159,3 +159,71 @@ def test_stage_b_locals_are_not_bound_only_inside_stage_a(tree):
         "these names are bound ONLY inside the Stage A block but read by a later "
         f"stage, so resuming with kp2d.npz present raises UnboundLocalError: "
         f"{sorted(only_in_stage_a)}")
+
+
+def test_stage_b_gate_signature_changes_with_every_gate():
+    """Stage B's gates only run when kp3d.npz is (re)computed, so a resumed run
+    with a stale file silently ignores the current config. The signature is what
+    makes that detectable, so it must actually move when any gate moves.
+    Measured cause: on Session0 bout 28, fly1 re-ran and got rigid-repair while
+    fly0 kept a pre-gate kp3d.npz and was never reprocessed, with no warning.
+    """
+    import importlib.util
+    from omegaconf import OmegaConf
+    spec = importlib.util.spec_from_file_location("_rb", str(RUN_BOUT))
+    # run_bout imports heavy deps at module level; read the function out instead
+    src = RUN_BOUT.read_text()
+    ns = {}
+    import ast as _ast
+    tree = _ast.parse(src)
+    fn = next(n for n in tree.body
+              if isinstance(n, _ast.FunctionDef) and n.name == "stage_b_gate_signature")
+    exec(compile(_ast.Module(body=[fn], type_ignores=[]), "<sig>", "exec"),
+         {"json": __import__("json")}, ns)
+    sig = ns["stage_b_gate_signature"]
+
+    base = OmegaConf.create({
+        "detector": {"conf_thresh": 0.3, "view_conf_thresh": 0.6,
+                     "reproj_resid_px": 10.0},
+        "masks": {"kp_mask_agree_fly_lengths": 3.0, "min_views": 3},
+        "wing_collapse": {"enabled": False},
+        "rigid_repair": {"enabled": False},
+    })
+    b = sig(base)
+    assert isinstance(b, str) and "wing_collapse" in b
+
+    variants = {
+        "conf": {"detector": {"conf_thresh": 0.4}},
+        "resid": {"detector": {"reproj_resid_px": 12.0}},
+        "maskagree": {"masks": {"kp_mask_agree_fly_lengths": 4.0}},
+        "collapse_on": {"wing_collapse": {"enabled": True, "abs_floor": 0.6,
+                                          "rel_frac": 0.35, "min_views_kept": 4}},
+        "repair_on": {"rigid_repair": {"enabled": True, "edges_containing": ["Wing"],
+                                       "rel_tol": 0.5, "max_gap": 5, "max_cv": 0.2,
+                                       "min_conf": 0.5, "min_frames": 50}},
+    }
+    for name, patch in variants.items():
+        c = OmegaConf.merge(base, OmegaConf.create(patch))
+        assert sig(c) != b, f"signature did not change for {name}"
+
+    # and a gate's PARAMETER must move it too, not just its enabled flag
+    on = OmegaConf.merge(base, OmegaConf.create(variants["repair_on"]))
+    tweaked = OmegaConf.merge(on, OmegaConf.create(
+        {"rigid_repair": {"rel_tol": 0.7}}))
+    assert sig(on) != sig(tweaked), "rel_tol change must invalidate kp3d.npz"
+
+
+def test_run_bout_refuses_a_kp3d_written_under_other_gates():
+    """The refusal must name the artifacts to delete and must NOT auto-delete a
+    12-minute STAC solve -- same contract as the stac_ik.h5 T-mismatch check."""
+    src = RUN_BOUT.read_text()
+    # the CALL site, not the def -- an earlier version of this test matched the
+    # definition and passed vacuously
+    i = src.index("_gate_sig = stage_b_gate_signature(cfg)")
+    blk = src[i:i + 2600]
+    assert "raise RuntimeError" in blk, "a mismatch must refuse, not warn"
+    assert "rm -f" in blk, "the refusal must tell the operator what to delete"
+    assert "allow_stale_kp3d" in blk, "there must be a documented escape hatch"
+    # it must not silently delete anything itself
+    assert "os.remove" not in blk and "shutil.rmtree" not in blk, \
+        "must not auto-delete downstream artifacts"
