@@ -639,17 +639,26 @@ and nobody had named it).
 
 **Files:**
 - Profile script: scratchpad (throwaway)
-- Modify: `third_party/jarvis_jax/jarvis_jax/tracking/stac_ik.py` (and/or the
-  `JaxlsBatchSolver` call site) — only where the profile points
+- Modify: `third_party/jarvis_jax/jarvis_jax/tracking/stac.py` (`fit_offsets_once`
+  / `ik_only_bout` — what Stage C actually calls) and/or
+  `third_party/jarvis_jax/jarvis_jax/tracking/ik_solve.py` (`solve_ik`, the
+  de-risked `JaxlsBatchSolver` wrapper) — only where the profile points.
+- **`stac-mjx/stac_mjx/stac_core_jaxls.py` holds the actual LM solve, and
+  `stac-mjx` is a GIT SUBMODULE.** A change there is a commit in a separate
+  repo: commit it locally in the submodule and say so in your report, but do
+  NOT push the submodule — that is the controller's call.
 - Create: `docs/benchmark/2026-09-01-stac-ik-speedup/notes.md`
 
 - [ ] **Step 1: Profile it before touching anything**
 
 Instrument one real bout-fly (2007 frames): time spent in JIT compilation vs.
-solve, per `jaxls` batch; iterations actually taken vs. `max_iterations`; and
-whether the solver **recompiles per batch** (2007 frames at 600 per batch = 4
-batches, and the last is a different shape — if that re-traces, a quarter of the
-compile cost is pure waste, the same trap Task 5 pins a test against).
+solve, per `jaxls` batch; iterations actually taken vs. `n_iter` (default 50 in
+`solve_ik`); and **whether the pipeline chunks the clip at all**. Establish that
+by reading the code, not by assuming: `solve_trajectory` is handed the whole
+clip, and the 600-frame figure appearing in this repo's analysis output is the
+`--nt` default of `scripts/analysis/wing_pitch_rest_prior_ab.py`, not a pipeline
+batch size. If it does chunk and the last chunk differs in shape, that re-trace
+is free to fix — the trap Task 5 pins a test against.
 
 Report a table before proposing any change. Record it in `notes.md` even if the
 answer is "it is genuinely solve-bound", because that result decides Step 2.
@@ -680,7 +689,7 @@ A speedup that moves the fit is a different change and needs its own A/B.
 - [ ] **Step 4: Commit**
 
 ```bash
-git add third_party/jarvis_jax/jarvis_jax/tracking/stac_ik.py \
+git add <the files the profile actually led you to> \
         docs/benchmark/2026-09-01-stac-ik-speedup/notes.md
 git commit -m "perf(stac-ik): <what the profile actually showed> -- 746 s -> <X> s
 
@@ -692,9 +701,9 @@ qpos <bit-identical | max abs delta ...>. Rejected: <candidates> because <measur
 ### Task 10: Stop materialising 12.2 GB of masks
 
 **Files:**
-- Modify: `third_party/jarvis_jax/jarvis_jax/tracking/masks_io.py` (`load_bout_masks`)
+- Modify: `third_party/jarvis_jax/jarvis_jax/tracking/bout_masks.py` (`load_bout_masks`)
 - Modify: `scripts/run_bout.py` (Stage E and the new wing-fit stage)
-- Test: `third_party/jarvis_jax/tests/test_masks_io_streaming.py`
+- Test: `third_party/jarvis_jax/tests/test_bout_masks_streaming.py`
 
 This is a **throughput** task, not a latency one, and it may be worth more than
 either: Stage E peaks near 27 GB RSS, which is why concurrent pipelines are
@@ -704,7 +713,13 @@ capped at ~4 on a 128 GB-cgroup node. Halving peak RSS raises the cap.
   `tracemalloc`, or `/proc/self/status` VmHWM sampled in a thread) so the win is
   a number, not an argument.
 
-- [ ] **Step 2: Add a streaming accessor** — `iter_bout_masks(...)` yielding
+**The real signature** (verified — do not trust any sketch over the file):
+`load_bout_masks(npz_path, fly, *, expected_cameras=None) -> dict`, keys
+`masks (T,C,H,W) bool`, `valid (T,C)`, `centroids (T,C,2)`, `T/C/H/W`. It returns
+a **dict**, not an object, and raises `ValueError` on a camera mismatch — the
+`CameraOrderError` in `viz/core/bout_artifacts.py` is a different layer.
+
+- [ ] **Step 2: Add a streaming accessor** — `iter_bout_masks(npz_path, fly, *, expected_cameras=None)` yielding
   `(t, {cam: mask})` in canonical camera order, with the SAME name-based
   reordering `load_bout_masks(..., expected_cameras=…)` does. **Keep the
   reorder-by-name**: this is the camera-order trap, and a streaming path that
@@ -714,15 +729,15 @@ capped at ~4 on a 128 GB-cgroup node. Halving peak RSS raises the cap.
 
 ```python
 def test_streaming_matches_bulk_in_canonical_camera_order():
-    bulk = load_bout_masks(bout, expected_cameras=cams)
-    for t, per_cam in iter_bout_masks(bout, expected_cameras=cams):
+    bulk = load_bout_masks(npz, fly, expected_cameras=cams)      # a dict
+    for t, per_cam in iter_bout_masks(npz, fly, expected_cameras=cams):
         for ci, cam in enumerate(cams):
-            assert (per_cam[cam] == bulk.masks[t, ci]).all(), (t, cam)
+            assert (per_cam[cam] == bulk["masks"][t, ci]).all(), (t, cam)
 
 
 def test_streaming_refuses_a_camera_list_it_cannot_satisfy():
-    with pytest.raises(CameraOrderError):
-        next(iter(iter_bout_masks(bout, expected_cameras=cams[::-1] + ["nope"])))
+    with pytest.raises(ValueError):        # bout_masks raises ValueError
+        next(iter(iter_bout_masks(npz, fly, expected_cameras=cams + ["nope"])))
 ```
 
 - [ ] **Step 4: Convert the consumers** — Stage E's QC (already reads each mask
@@ -734,8 +749,8 @@ def test_streaming_refuses_a_camera_list_it_cannot_satisfy():
 - [ ] **Step 6: Commit**
 
 ```bash
-git add third_party/jarvis_jax/jarvis_jax/tracking/masks_io.py scripts/run_bout.py \
-        third_party/jarvis_jax/tests/test_masks_io_streaming.py
+git add third_party/jarvis_jax/jarvis_jax/tracking/bout_masks.py scripts/run_bout.py \
+        third_party/jarvis_jax/tests/test_bout_masks_streaming.py
 git commit -m "perf(masks): stream masks instead of a 12.2 GB (T,C,H,W) array
 
 Peak RSS <before> -> <after> GB. qc.json bit-identical. The streaming path keeps
