@@ -64,6 +64,20 @@ from jarvis_jax.data.v5_2d import _resolve_sex
 K_MAX = 2
 
 
+
+def _available_bytes():
+    """Available RAM in bytes, or None if it cannot be determined (in which
+    case the caller should not silently assume there is room)."""
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) * 1024
+    except OSError:
+        pass
+    return None
+
+
 class V5CenterDetectDataset:
     """One row per IMAGE. ``__getitem__(i)`` returns:
         img       (image_size, image_size, 3) uint8 RGB, aspect-distorting
@@ -80,7 +94,8 @@ class V5CenterDetectDataset:
     v5 loader).
     """
 
-    def __init__(self, root, split, *, image_size=320, recordings=None):
+    def __init__(self, root, split, *, image_size=320, recordings=None,
+                 cache_images=True, cache_max_frac=0.25):
         self.root = root
         self.split = split
         self.image_size = int(image_size)
@@ -156,6 +171,34 @@ class V5CenterDetectDataset:
                   f"{self.n_dropped_zero_ann} zero-annotation image(s) "
                   "(unannotated, not empty -- not used as negatives)")
 
+        # ---- RAM image cache -------------------------------------------------
+        # Measured 2026-08-31 on this node: training was I/O-BOUND, not
+        # compute-bound. GPUs sat at 0% utilisation with all 8 holding memory,
+        # CPU under one core, 478 threads blocked -- reading 22,040 JPEGs per
+        # epoch as symlinks onto shared GPFS through 8 workers. `__getitem__`
+        # is a PURE function of the file (decode + fixed square resize, no crop
+        # or jitter), so the decoded array is safely cacheable, and the whole
+        # train split is 22,040 * 320^2 * 3 = 6.77 GB against 1,382 GB free.
+        # Raising num_workers only HIDES the latency; caching removes it after
+        # the first epoch.
+        self._cache = None
+        if cache_images:
+            need = len(self.file_names) * self.image_size * self.image_size * 3
+            avail = _available_bytes()
+            if avail is not None and need > cache_max_frac * avail:
+                import warnings
+                warnings.warn(
+                    f"V5CenterDetectDataset({split!r}): image cache would need "
+                    f"{need/1e9:.2f} GB, more than {cache_max_frac:.0%} of the "
+                    f"{avail/1e9:.1f} GB available -- caching DISABLED. Pass "
+                    f"cache_images=False to silence, or raise cache_max_frac if "
+                    f"you know the headroom is there.", stacklevel=2)
+            else:
+                self._cache = {}
+                print(f"[V5CenterDetectDataset:{split}] RAM image cache ON "
+                      f"({need/1e9:.2f} GB projected for {len(self.file_names)} "
+                      f"images @ {self.image_size}px)")
+
     def __len__(self):
         return len(self.file_names)
 
@@ -178,14 +221,26 @@ class V5CenterDetectDataset:
         single-fly false positives is not a gain)."""
         return [i for i, n in enumerate(self.num_flies) if n == "1"]
 
-    def __getitem__(self, i):
-        fn = self.file_names[i]
-        img_w, img_h = self.img_wh[i]
-        img_path = os.path.join(self.root, "images", fn)
+    def _decode(self, i):
+        """Decode + resize one image. A PURE function of the file -- no crop,
+        no jitter, no randomness -- which is what makes it cacheable."""
+        img_path = os.path.join(self.root, "images", self.file_names[i])
         with Image.open(img_path) as pil:
             pil = pil.convert("RGB").resize(
                 (self.image_size, self.image_size), Image.BILINEAR)
-            img = np.asarray(pil, dtype=np.uint8)
+            return np.asarray(pil, dtype=np.uint8)
+
+    def __getitem__(self, i):
+        img_w, img_h = self.img_wh[i]
+        if self._cache is None:
+            img = self._decode(i)
+        else:
+            img = self._cache.get(i)
+            if img is None:
+                img = self._decode(i)
+                # dict get/set is atomic under the GIL, so concurrent worker
+                # threads are safe; worst case two decode the same row once.
+                self._cache[i] = img
 
         sx = self.image_size / float(img_w)
         sy = self.image_size / float(img_h)
