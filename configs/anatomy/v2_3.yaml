@@ -187,6 +187,31 @@ model:
   # apart and close-interaction splits), so it stays off. Regenerate the
   # comparison with scripts/benchmark/run_variant.py -- the scorecards it
   # writes are untracked artifacts, not files in the repo.
+  #
+  # 2026-08-31: THAT VERDICT IS VOID -- do not cite it. The benchmark scores
+  # outputs.h5's kp3d_mm (scripts/benchmark/metrics.py), which comes from
+  # Stage-E FK via silhouette_ik_solve.build_solver_inputs -- and until
+  # commit 6044d28 that rebuilt the FK model from the XML alone, never
+  # applying SEGMENT_SCALES. So the ON arm solved qpos against the MORPHED
+  # skeleton and was then scored on the UNMORPHED one. The ON arm was
+  # measuring a qpos/skeleton mismatch, not per-segment calibration, and
+  # "OFF was better" is what a broken ON arm looks like. Re-run the A/B
+  # before drawing any conclusion.
+  #
+  # STILL BROKEN for a segment-calibrated run: outputs.h5's mesh_mm (and
+  # every mesh render / silhouette-polish cost built on it) comes from
+  # silhouette_ik.load_anatomy, which does MjModel.from_xml_path + the mesh
+  # npz's vertices_local -- neither morphed. So kp3d_mm is now morphed while
+  # mesh_mm is not, and a sidebyside of a segment-calibrated run will show
+  # fitted markers detaching from the mesh as an ARTIFACT. Fix that before
+  # reading any mesh figure of an ON run.
+  #
+  # Independently measured 2026-08-31 (pooled quality-gated male fit, 20
+  # bouts): IK site-error 0.0077 -> 0.0069 model-units (~10%, not the
+  # "halves the error" this comment claims above), and the trunk-vs-leg
+  # disagreement it was meant to close went 12.26% -> 12.65%, i.e. slightly
+  # WORSE -- the 3 thorax-plate pairs are not in build_segment_map's
+  # calibratable set at all, so no leg calibration can reach them.
   segment_calibration: false
 
   N_FRAMES_PER_CLIP: 500 # 1000 environments
