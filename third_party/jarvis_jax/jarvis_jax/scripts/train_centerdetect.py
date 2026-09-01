@@ -111,7 +111,7 @@ def build_model(*, warm_start_pth=None, seed=0):
                           rngs=nnx.Rngs(seed))
 
 
-def make_train_step(*, bg_weight=0.1, lr=3e-4, weight_decay=0.05,
+def make_train_step(*, bg_weight=0.1, focal_alpha=2.0, lr=3e-4, weight_decay=0.05,
                     warmup_steps=100, total_steps=2000, backbone_lr_mult=1.0):
     """Returns (step_fn, make_opt_fn). `step_fn(model, opt, img_u8, centers_xy,
     valid) -> (total_loss, fg1, bg1, fg2, bg2)`. No augmentation, no aug-key
@@ -138,10 +138,10 @@ def make_train_step(*, bg_weight=0.1, lr=3e-4, weight_decay=0.05,
         res1, res2 = model.forward_both(img)
         t1, fg1, bg1 = centerdetect_instance_mse(
             res1, centers_xy * scale1, valid, heatmap_size=OUT1, sigma=SIGMA1,
-            bg_weight=bg_weight)
+            bg_weight=bg_weight, focal_alpha=focal_alpha)
         t2, fg2, bg2 = centerdetect_instance_mse(
             res2, centers_xy * scale2, valid, heatmap_size=OUT2, sigma=SIGMA2,
-            bg_weight=bg_weight)
+            bg_weight=bg_weight, focal_alpha=focal_alpha)
         return t1 + t2, (fg1, bg1, fg2, bg2)
 
     @nnx.jit
@@ -322,7 +322,8 @@ def eval_single_fly_false_positive(model, val_ds, single_fly_idx, *, batch_size=
 
 
 def run_training(root, run_dir, *, epochs=30, batch_size=32, lr=3e-4,
-                 bg_weight=0.1, seed=0, num_workers=8, warm_start_pth=None,
+                 bg_weight=0.1, focal_alpha=2.0, seed=0, num_workers=8,
+                 warm_start_pth=None,
                  balance_alpha=0.5, max_repeat=20.0, image_size=IMAGE_SIZE,
                  log_every=50, copy_paste_p=0.0, copy_paste_sep_low=None,
                  copy_paste_sep_high=None, copy_paste_near_boundary=None,
@@ -389,7 +390,8 @@ def run_training(root, run_dir, *, epochs=30, batch_size=32, lr=3e-4,
     steps_per_epoch = len(train_ds) // batch_size
     total_steps = steps_per_epoch * epochs
     model = build_model(warm_start_pth=warm_start_pth, seed=seed)
-    step, make_opt = make_train_step(bg_weight=bg_weight, lr=lr,
+    step, make_opt = make_train_step(bg_weight=bg_weight,
+                                     focal_alpha=focal_alpha, lr=lr,
                                      total_steps=total_steps)
     opt = make_opt(model)
 
@@ -565,6 +567,16 @@ def main():
     ap.add_argument("--warm-start-pth", default=None)
     ap.add_argument("--balance-alpha", type=float, default=0.5)
     ap.add_argument("--max-repeat", type=float, default=20.0)
+    ap.add_argument("--focal-alpha", type=float, default=2.0,
+                    help="CornerNet-style penalty-reduced background term: "
+                         "each background pixel is weighted by "
+                         "(pred/amplitude)**focal_alpha and normalised by the "
+                         "SUM OF WEIGHTS, so a confident phantom peak is not "
+                         "diluted by 25k quiet pixels. 0.0 restores the plain "
+                         "pixel-count-normalised background term. NOTE: raising "
+                         "this lowers fp@0.5 largely by rescaling ALL confidences "
+                         "-- judge it by the threshold-free AUC of conf2/conf1 "
+                         "(single-fly vs two-fly), not by fp@0.5.")
     ap.add_argument("--copy-paste-p", type=float, default=0.0,
                     help="Probability a single-fly TRAIN draw is turned into a "
                     "synthetic two-fly composite (0.0 = off, this script's "
@@ -595,6 +607,7 @@ def main():
 
     run_training(args.root, args.run_dir, epochs=args.epochs,
                  batch_size=args.batch_size, lr=args.lr, bg_weight=args.bg_weight,
+                 focal_alpha=args.focal_alpha,
                  seed=args.seed, num_workers=args.num_workers,
                  warm_start_pth=args.warm_start_pth,
                  balance_alpha=args.balance_alpha, max_repeat=args.max_repeat,
