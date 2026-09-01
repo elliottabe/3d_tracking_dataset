@@ -531,7 +531,16 @@ optimise <c> s. A single jitted fori_loop, vmapped over frames, FK-ing only the
 ### Task 6: Wire into `run_bout` as an opt-in stage
 
 **Files:**
-- Modify: `scripts/run_bout.py` (after Stage C `stac_ik.h5`, before Stage D bridge)
+- Modify: `scripts/run_bout.py` — **AFTER Stage D's bridges exist, not before.**
+  The original plan said "after Stage C, before Stage D"; that is wrong and Task
+  5 proved it: the refinement maps model->mm with the per-frame bridge
+  (`br_s * (verts @ br_R.T) + br_t`), so it cannot run before the bridge is
+  computed. Order the stage: Stage C -> `compute_bridges` -> **wing-mask fit** ->
+  the rest of Stage D. Reuse those same bridges rather than recomputing after
+  refinement, and say so in a comment: the bridge is a similarity fitted to the
+  KEYPOINTS, and refining wing pitch moves the two wing markers only, so the
+  refit would be a no-op to within noise. If you cannot reuse them cleanly,
+  recompute and report the delta rather than assuming.
 - Modify: `configs/pipeline.yaml`
 - Modify: `tests/test_run_bout_pipeline_structure.py`
 
@@ -559,6 +568,9 @@ wing_mask_fit:
   limit_weight: 10.0
   n_steps: 300
   lr: 0.01
+  # Task 5 measured on a 46 GB card: 256 is what the real bout wants.
+  # The module default of 64 is safe but slower.
+  frame_chunk: 256
   out_hw: [128, 128]
   bbox_margin: 0.4
   n_target_points: 128
