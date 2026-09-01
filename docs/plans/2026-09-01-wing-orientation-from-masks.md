@@ -382,11 +382,29 @@ otherwise be minimised by tucking the wing inside the body silhouette."
 - Consumes: `mask_sdf.sdf_stack_from_masks`, `mask_containment.containment_residual`, `wing_coverage.*`, `appendage_dof.*`, `fk.make_fk_repose`.
 - Produces: `refine_wing_pitch(q_init, *, fk_repose, wing_vert_idx, body_vert_idx, cam_Ms, cam_ts, sdf, grid_scale, grid_offset, present, masks, bridge_s, bridge_R, bridge_t, opt_mask, lb, ub, containment_weight=0.3, coverage_weight=0.3, smooth_weight=0.005, limit_weight=10.0, n_steps=300, lr=1e-2, chunk_size=32) -> (T, nq)`.
 
+**What the recovered code ALREADY does** (verified at `0bc36fe^` — do not
+rebuild these, and do not "fix" them into something else):
+- `_frame_cost` computes containment + chamfer-coverage for ONE frame: FK once
+  via `fk_repose(q_t, 1.0, idx)` with vertex selection, bridge model->mm, then
+  cameras iterated by `jax.lax.scan`. This is the right shape already.
+- `refine_appendages_adam` vmaps `_frame_cost` over frames, runs the Adam steps
+  in a `jax.lax.scan` (NOT a Python loop), gates gradients AND updates by
+  `opt_mask` (`g = g * opt_mask[None,:]`, `q0 + where(opt_mask, dq, 0)`), and
+  builds `lb_row`/`ub_row` with +-inf on frozen DOFs.
+
+**`chunk_size` DOES NOT MEAN frames.** In the recovered code it is passed down
+into `chamfer_residual` as its memory chunk over TARGET POINTS. An earlier draft
+of this plan misread it as a frame chunk. Keep `chunk_size` with its real
+meaning and add a SEPARATE `frame_chunk` parameter for the new frame batching.
+
 **Performance requirements (part of the interface, not a later pass):**
-- One `jax.jit` of the whole `n_steps` loop via `jax.lax.fori_loop`, compiled
-  ONCE per bout -- never a Python loop over steps, and never a re-trace per
-  frame chunk. Pad the last chunk to a constant shape and pass the pad as a
-  mask, so the shape never changes and only one trace happens.
+- The `lax.scan` over `n_steps` already gives one trace per call — keep it.
+  Do NOT rewrite it as `fori_loop`; `scan` also returns the loss history free.
+- **Frame chunking is genuinely absent and must be added.** Today the whole
+  `(T, nq)` trajectory goes in one call: at T=2007 x 7 cameras x 128x128 f32 the
+  SDF stack alone is ~920 MB. Chunk over frames with `frame_chunk`, pad the last
+  chunk to a constant shape, and pass the pad as a mask so all chunks share one
+  trace.
 - `jax.vmap` over frames inside a chunk. Frames are independent apart from the
   smoothness term, which applies within a chunk with an overlap of 1.
 - float32 throughout the refinement. This is a pixel-scale cost, not a
@@ -468,10 +486,10 @@ structural properties instead:
 
 ```python
 def test_the_step_loop_compiles_once_not_per_chunk():
-    """A re-trace per chunk is the difference between 40 s and 20 minutes."""
+    """A re-trace per FRAME chunk is the difference between 40 s and 20 minutes."""
     from jarvis_jax.tracking import wing_mask_refine as R
-    q0, kw = _tiny_problem(n_frames=40)          # 3 chunks at chunk_size=16
-    kw["chunk_size"] = 16
+    q0, kw = _tiny_problem(n_frames=40)          # 3 chunks at frame_chunk=16
+    kw["frame_chunk"] = 16
     with _count_traces(R, "_refine_chunk") as n:
         R.refine_wing_pitch(q0, **kw)
     assert n.value == 1, f"retraced {n.value}x -- pad chunks to a constant shape"
