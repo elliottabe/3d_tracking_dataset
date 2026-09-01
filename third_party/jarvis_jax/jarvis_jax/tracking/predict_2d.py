@@ -176,7 +176,7 @@ def _forward(vit, crops4_u8, *, decode_sharpen=1.0):
 def predict_bout_2d(vitpose, frames_iter, masks, centroids, valid, cam_mats,
                     *, crop: int = 448, batch: int = 64, decode_sharpen: float = 1.0,
                     distractor_masks=None, distractor_dilate=0,
-                    target_protect=None):
+                    target_protect=None, zero_mask_channel: bool = False):
     """Per (frame,cam): crop -> ViTPose -> full-frame 2-D kp + conf.
 
     frames_iter: iterable of length T, each -> (C,H,W,3) uint8 RGB (all cameras
@@ -189,6 +189,15 @@ def predict_bout_2d(vitpose, frames_iter, masks, centroids, valid, cam_mats,
     BODY only, so limbs survive the fill and the crop keeps a fly-shaped object
     the detector prefers when the real target is small or edge-on. 0 = previous
     behaviour.
+
+    zero_mask_channel: zero the 4th (SAM-mask) channel of every crop before
+    the forward pass. REQUIRED for a checkpoint trained with
+    train.mask_ablation=true, whose 4th channel was always 0 during training
+    (e.g. v5vf_maskoff: 5.29px overall / 9.93px female val MPJPE, vs 5.49 /
+    19.08 for the same recipe WITH the mask channel -- the channel roughly
+    doubled female error). Feeding a real mask to such a checkpoint raises no
+    error and simply degrades accuracy, so this must be set from the same
+    config block that names the ckpt.
 
     distractor_masks (T,C,H,W) bool | None: the OTHER animal(s)' masks. Passed
     through to build_frameset, which replaces those pixels with the crop mean
@@ -220,6 +229,16 @@ def predict_bout_2d(vitpose, frames_iter, masks, centroids, valid, cam_mats,
     kp2d = conf = None
     if crops:
         allc = np.concatenate(crops, 0)             # (n_valid_frames*C, 448,448,4)
+        if zero_mask_channel:
+            # This checkpoint was TRAINED with channel 3 == 0
+            # (train.mask_ablation=true / data.mask_zero.ZeroMaskDataset), so it
+            # has never seen a SAM mask there. Feeding one is silently OOD --
+            # no shape error, just degraded keypoints -- which is why the flag
+            # lives beside `ckpt` in configs/detector/*.yaml and travels with
+            # it. The mask is still USED, for the crop centre and the
+            # distractor gray-fill above; only the 4th CHANNEL is zeroed.
+            allc = allc.copy()
+            allc[..., 3] = 0
         outs_kp, outs_cf = [], []
         for i in range(0, allc.shape[0], batch):
             k, cf = _forward(vitpose, allc[i:i + batch], decode_sharpen=decode_sharpen)
