@@ -250,11 +250,11 @@ def test_wing_vertex_selection_is_wing_only_BOTH_wings():
     idx = np.asarray(appendage_vertex_indices(npz, subset="fps_300", include=("wing",)))
     hit = sorted({id2name[int(vseg[int(v)])] for v in idx})
     assert hit == ["wing_left", "wing_right"], hit
-    assert len(idx) > 20, f"only {len(idx)} wing vertices in fps_300"
+    assert len(idx) == 100, f"expected 100 wing verts in fps_300, got {len(idx)}"
 
 
 def test_returned_indices_are_FULL_array_space_not_subset_space():
-    """The recovered docstring warns these are full-array indices (0..61665),
+    """The recovered docstring warns these are full-array indices (0..139352),
     unlike wing_side_vertices which returns fps-subset indices. Mixing them
     silently selects the wrong vertices."""
     mj, c = _model()
@@ -391,7 +391,9 @@ otherwise be minimised by tucking the wing inside the body silhouette."
   smoothness term, which applies within a chunk with an overlap of 1.
 - float32 throughout the refinement. This is a pixel-scale cost, not a
   reprojection identity, so unlike Task 9's rules f32 is the correct choice here.
-- FK only the wing vertices -- ~100 of 61 666 -- selected once outside the loop.
+- FK only the wing vertices -- exactly 100 of 139 353 (`fps_300` holds 100 wing
+  verts, and a dedicated `fps_wing` subset of the same 100 exists) -- selected
+  once outside the loop.
 - Build the next chunk's SDF on the CPU while the current chunk optimises on the
   GPU (`ThreadPoolExecutor(1)`; `distance_transform_edt` releases the GIL).
 
@@ -476,7 +478,7 @@ def test_the_step_loop_compiles_once_not_per_chunk():
 
 
 def test_only_the_wing_vertices_are_fk_d():
-    """FK over all 61 666 vertices per step per frame is a ~600x waste."""
+    """FK over all 139 353 vertices per step per frame is a ~1400x waste."""
     q0, kw = _tiny_problem()
     assert len(kw["wing_vert_idx"]) < 400, "wing selection must be the fps subset"
 ```
