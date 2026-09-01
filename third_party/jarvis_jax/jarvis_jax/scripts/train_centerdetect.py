@@ -310,6 +310,7 @@ def run_training(root, run_dir, *, epochs=30, batch_size=32, lr=3e-4,
     import orbax.checkpoint as ocp
     from jarvis_jax.data.v5_centerdetect import V5CenterDetectDataset, batches
     from jarvis_jax.sharding import data_parallel_mesh, replicate, shard_batch
+    from jarvis_jax.data.prefetch import prefetch
 
     os.makedirs(run_dir, exist_ok=True)
     ckpt_root = os.path.join(run_dir, "ckpt")
@@ -378,20 +379,29 @@ def run_training(root, run_dir, *, epochs=30, batch_size=32, lr=3e-4,
         model.train()
         t0 = time.time()
         losses = []
-        for img_u8, centers_xy, valid in batches(
-                train_ds, batch_size, shuffle=True, seed=seed + epoch,
-                weights=weights, num_workers=num_workers):
-            img_d = shard_batch(jax_asarray(img_u8), mesh)
-            c_d = shard_batch(jax_asarray(centers_xy), mesh)
-            v_d = shard_batch(jax_asarray(valid), mesh)
+        # Two things here are deliberate and both were measured:
+        #
+        # 1. `prefetch` (same helper train_keypoints.py uses) moves host->device
+        #    transfer and sharding onto a background thread, so batch assembly
+        #    overlaps device compute instead of serialising with it.
+        # 2. losses are accumulated as DEVICE arrays -- never `float(loss)`
+        #    per step. A per-step float() is a blocking device->host sync that
+        #    defeats JAX's async dispatch entirely: the loop degenerates to
+        #    assemble -> compute -> WAIT -> assemble, and the GPU idles through
+        #    every host turn. Materialise once per epoch (and at the log
+        #    cadence, which is rare enough not to matter).
+        host_stream = batches(train_ds, batch_size, shuffle=True,
+                              seed=seed + epoch, weights=weights,
+                              num_workers=num_workers)
+        for img_d, c_d, v_d in prefetch(host_stream, mesh, depth=2):
             loss, aux = step(model, opt, img_d, c_d, v_d)
-            losses.append(float(loss))
+            losses.append(loss)                      # device array, NOT float()
             global_step += 1
             if global_step % log_every == 0:
                 fg1, bg1, fg2, bg2 = (float(x) for x in aux)
                 print(f"  step {global_step}/{total_steps} loss={float(loss):.5f} "
                       f"(fg1={fg1:.4f} bg1={bg1:.4f} fg2={fg2:.4f} bg2={bg2:.4f})")
-        train_loss = float(np.mean(losses)) if losses else float("nan")
+        train_loss = float(np.mean([float(x) for x in losses])) if losses else float("nan")
 
         two_peak = eval_two_peak_rate(model, val_ds, two_fly_idx, batch_size=batch_size)
         false_pos = eval_single_fly_false_positive(model, val_ds, single_fly_idx,
