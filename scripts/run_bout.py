@@ -378,6 +378,18 @@ def stage_b_gate_signature(cfg):
     -- fly1 re-ran and got `[rigid-repair] ... frames [3, 10, 11]`, fly0 kept a
     kp3d.npz from a run predating the gate and was never reprocessed, with no
     warning. Recording the signature makes that detectable.
+
+    ONLY Stage-B settings belong here, and the boundary is load-bearing rather
+    than tidy. This string is stored INSIDE kp3d.npz and a mismatch REFUSES the
+    bout, telling the operator to delete kp3d.npz, stac_ik.h5, qpos_refined.npz
+    and the rest -- a re-triangulation plus a 12-minute STAC solve per bout-fly.
+    Enrolling a setting that cannot change kp3d.npz therefore charges that price
+    for nothing: `wing_mask_fit` (Stage D2) was tried here and removed, because
+    it rewrites qpos AFTER the bridges and provably cannot alter kp3d.npz or
+    stac_ik.h5, yet toggling it would have forced ~5.2 h of re-solving per sweep
+    point on the 13-bout benchmark. Post-STAC stages carry their OWN provenance
+    in their own artifact instead -- see `wing_mask_fit_signature` /
+    `wing_fit_action`.
     """
     def _plain(v):
         """OmegaConf ListConfig is NOT a list/tuple instance, so an isinstance
@@ -390,8 +402,7 @@ def stage_b_gate_signature(cfg):
     _wc = cfg.get("wing_collapse") or {}
     _rr = cfg.get("rigid_repair") or {}
     _mk = cfg.get("masks") or {}
-    _wf = cfg.get("wing_mask_fit") or {}
-    sig = {
+    return json.dumps({
         "conf_thresh": float(cfg.detector.conf_thresh),
         "view_conf_thresh": cfg.detector.get("view_conf_thresh", None),
         "reproj_resid_px": cfg.detector.get("reproj_resid_px", None),
@@ -404,24 +415,7 @@ def stage_b_gate_signature(cfg):
                           for k in ("enabled", "edges_containing", "rel_tol",
                                     "max_gap", "max_cv", "min_conf", "min_frames")}
                          if _rr.get("enabled", False) else {"enabled": False}),
-    }
-    # The opt-in post-STAC wing-pitch refinement (Stage D2). It does NOT change
-    # kp3d.npz, but it is recorded here for the same reason the Stage-B gates
-    # are: it runs inside a `stage_done` guard, so a resumed run would reuse a
-    # qpos_wingfit.npz fitted under different weights with no warning. The
-    # refusal at the call site names qpos_wingfit.npz among the artifacts to
-    # delete.
-    #
-    # DELIBERATE ASYMMETRY with wing_collapse/rigid_repair, which emit a bare
-    # {"enabled": False} when off: this key is OMITTED ENTIRELY when the block
-    # is absent or disabled. The signature is stored inside kp3d.npz and a
-    # mismatch REFUSES the bout, so always emitting the key would have changed
-    # the string for every config in existence and refused every kp3d.npz
-    # already on disk -- a re-triangulation plus a 12-minute STAC re-solve per
-    # bout-fly, to adopt a stage that is off. Absent must be a strict no-op.
-    if _wf.get("enabled", False):
-        sig["wing_mask_fit"] = {k: _plain(_wf.get(k)) for k in sorted(_wf)}
-    return json.dumps(sig, sort_keys=True)
+    }, sort_keys=True)
 
 
 def wing_mask_fit_enabled(cfg) -> bool:
@@ -433,6 +427,89 @@ def wing_mask_fit_enabled(cfg) -> bool:
     written when this is False.
     """
     return bool((cfg.get("wing_mask_fit") or {}).get("enabled", False))
+
+
+def wing_mask_fit_signature(cfg):
+    """Provenance for ``qpos_wingfit.npz``: every ``wing_mask_fit`` setting that
+    changes the FITTED POSE, and nothing that only changes how fast it computes.
+
+    Stage D2 runs inside a ``stage_done`` guard, so without this a resumed run
+    silently reuses a fit made under different weights. This is deliberately NOT
+    folded into ``stage_b_gate_signature`` (see that function's docstring): the
+    wing fit cannot change kp3d.npz or stac_ik.h5, so invalidating them would
+    charge a 12-minute STAC re-solve per bout-fly for nothing. It is stored in,
+    and invalidates, only its own artifact -- plus outputs.h5/qc.json, which DO
+    consume the refined qpos.
+
+    THE KEYS ARE ENUMERATED, not taken as ``sorted(wf)``. `frame_chunk` is a
+    pure performance knob (frames per device call; the YAML says so) and
+    enrolling it would invalidate a perfectly good fit merely for moving to a
+    smaller GPU. A blanket ``sorted(wf)`` would also auto-enrol any key added
+    later, including a future ``prefetch``. The exact-partition test in
+    tests/test_run_bout_pipeline_structure.py fails if a new YAML key is neither
+    listed here nor declared performance-only, so the choice cannot be skipped.
+
+    Returns a JSON string whose KEYS are exactly the semantic set (the tests
+    read them back from it rather than duplicating the list).
+    """
+    def _plain(v):
+        """Same coercion as stage_b_gate_signature: an OmegaConf ListConfig is
+        not a list instance and would reach json.dumps unconverted."""
+        if v is not None and not isinstance(v, (str, bytes)) and hasattr(v, "__iter__"):
+            return [_plain(x) for x in v]
+        return v
+
+    semantic = ("bbox_margin", "body_vertex_stride", "containment_weight",
+                "coverage_normalize", "coverage_weight", "dilate_px",
+                "exclude_cameras", "huber_delta", "limit_weight", "lr",
+                "min_present_cameras", "n_steps", "n_target_points", "out_hw",
+                "smooth_weight")
+    wf = cfg.get("wing_mask_fit") or {}
+    return json.dumps({k: _plain(wf.get(k)) for k in semantic}, sort_keys=True)
+
+
+def stored_wing_fit_signature(wingfit_path):
+    """The `wing_mask_fit_sig` recorded in ``qpos_wingfit.npz``, or None.
+
+    None means "no fit on disk, or one whose provenance is unknown" -- which
+    includes a file written before this record existed. Unknown is treated as
+    stale by `wing_fit_action`, which is the safe direction: the fit is ~75 s,
+    not a 12-minute STAC solve.
+    """
+    if not stage_done(wingfit_path):
+        return None
+    with np.load(wingfit_path) as z:
+        return str(z["wing_mask_fit_sig"]) if "wing_mask_fit_sig" in z.files else None
+
+
+def wing_fit_action(cfg, stored_sig, outputs_exist):
+    """What Stage D2 must do. Returns ``(action, want_sig)``.
+
+    ``stored_sig`` is the ``wing_mask_fit_sig`` entry of an existing
+    ``qpos_wingfit.npz``, or None when there is no such file (or when it
+    predates this provenance record -- those are treated as unknown, hence
+    refitted). ``outputs_exist`` is ``stage_done(outputs.h5)``.
+
+    ``'off'``     the stage is off and nothing on disk came from it: no-op.
+    ``'fit'``     (re)compute. outputs.h5/qc.json MUST be rebuilt from it --
+                  they are guarded by ``stage_done`` and would otherwise skip,
+                  so the fit would be computed, written, logged with a plausible
+                  ``[wing-mask-fit]`` line, and never reach a single consumer.
+    ``'reuse'``   the stored fit was made under exactly this config.
+    ``'refuse'``  the stage is OFF but a fit AND an outputs.h5 are on disk, so
+                  outputs.h5 may have been built from the fit and nothing
+                  records which. The symmetric case to 'fit'; failing loudly is
+                  the only honest answer, and it is one `rm` to resolve.
+
+    Three reachable routes make this necessary even though the kp3d gate exists:
+    deleting kp3d.npz by hand (the ordinary "just re-triangulate this bout"),
+    ``pipeline.allow_stale_kp3d=true``, and scripts/analysis/stage_b_restage.py.
+    In all three the kp3d refusal never fires.
+    """
+    if not wing_mask_fit_enabled(cfg):
+        return ("refuse" if (stored_sig is not None and outputs_exist) else "off"), None
+    want = wing_mask_fit_signature(cfg)
+    return ("reuse" if stored_sig == want else "fit"), want
 
 
 def wing_mask_fit_refine_kwargs(wf):
@@ -516,7 +593,12 @@ def wing_mask_fit_bout(cfg, qpos, bridge_s, bridge_R, bridge_t, bridge_ok,
     masks = np.asarray(masks_dict["masks"])
     valid = np.array(masks_dict["valid"], bool, copy=True)          # (T,C)
     # A frame with no bridge has no model->mm map, hence no usable geometry.
-    valid &= np.asarray(bridge_ok, bool)[:, None]
+    # Kept as its OWN reason: these are the frames STAC could not solve, which
+    # is a completely different diagnosis from "the fly was seen by too few
+    # cameras", and reporting them as the latter sent the reader looking at SAM
+    # coverage for a solver problem.
+    no_bridge = ~np.asarray(bridge_ok, bool)                        # (T,)
+    valid &= ~no_bridge[:, None]
     # Cameras excluded for the WINGS specifically: Cam2012631's masks are
     # truncated (the right wing is inside them on only 43-46% of frames), so its
     # silhouette would pull the blade in rather than out.
@@ -537,8 +619,11 @@ def wing_mask_fit_bout(cfg, qpos, bridge_s, bridge_R, bridge_t, bridge_ok,
     # triangulation. An all-False `present` row freezes that frame at its STAC
     # pose inside refine_wing_pitch (its "no evidence means no change" gate).
     _min_cams = int(wf["min_present_cameras"])
-    _thin = present.sum(axis=1) < _min_cams
-    present[_thin] = False
+    _few = present.sum(axis=1) < _min_cams
+    present[_few] = False
+    # `_few` also catches every no-bridge frame (its `valid` row was just zeroed
+    # above), so subtract them out to keep the two counts disjoint.
+    _thin = _few & ~no_bridge
 
     anat = load_anatomy(str(cfg.ik.xml), str(cfg.ik.mesh_npz))
     lb, ub = qpos_limits(anat["m"])
@@ -572,6 +657,7 @@ def wing_mask_fit_bout(cfg, qpos, bridge_s, bridge_R, bridge_t, bridge_ok,
         "n_refined": int(moved.sum()),
         "n_skipped": int(q0.shape[0] - moved.sum()),
         "n_thin_frames": int(_thin.sum()),
+        "n_no_bridge_frames": int(no_bridge.sum()),
         "min_present_cameras": _min_cams,
         "dpitch_left_deg": float(np.median(d[:, adr["wing_pitch_left"]])) if moved.any() else 0.0,
         "dpitch_right_deg": float(np.median(d[:, adr["wing_pitch_right"]])) if moved.any() else 0.0,
@@ -1245,10 +1331,7 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
                 f"  current: {_gate_sig}\n"
                 f"Stage B's gates (view-conf, mask-agreement, wing-collapse, "
                 f"rigid-repair) only run when kp3d.npz is (re)computed, so "
-                f"reusing this file would silently ignore the current config "
-                f"-- as would reusing a qpos_wingfit.npz fitted under a "
-                f"different wing_mask_fit block, which the same signature "
-                f"covers. "
+                f"reusing this file would silently ignore the current config. "
                 f"Delete these and rerun this bout/fly:\n"
                 f"    rm -f {os.path.join(bout_dir, 'kp3d.npz')} "
                 f"{os.path.join(bout_dir, 'kp3d_filt.npz')} "
@@ -1811,15 +1894,45 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
     #
     #    Off by default; an absent wing_mask_fit block is a strict no-op that
     #    imports nothing and writes nothing.
-    if wing_mask_fit_enabled(cfg):
-        if not stage_done(wingfit_path):
-            _q_wf, _wf_stats = wing_mask_fit_bout(
-                cfg, qpos_refined, bridge_s, bridge_R, bridge_t, bridge_ok,
-                masks_dict, cameras)
-            atomic_save_npz(wingfit_path, qpos=_q_wf, **_wf_stats)
+    #
+    #    PROVENANCE. The fit records the config it was made under INSIDE
+    #    qpos_wingfit.npz and `wing_fit_action` compares it, rather than relying
+    #    on the Stage-B gate signature: the wing fit cannot change kp3d.npz or
+    #    stac_ik.h5, so putting it there would charge a re-triangulation plus a
+    #    12-minute STAC solve per bout-fly for a change that provably cannot
+    #    alter either -- and the escape hatch (allow_stale_kp3d) removes the
+    #    check altogether, which is worse. Three routes reach a stale reuse with
+    #    the kp3d gate never firing: deleting kp3d.npz by hand,
+    #    allow_stale_kp3d=true, and scripts/analysis/stage_b_restage.py.
+    _wing_fit_rebuilt = False       # -> Stage E and QC must rebuild (see below)
+    _action, _wf_sig = wing_fit_action(cfg, stored_wing_fit_signature(wingfit_path),
+                                       stage_done(outputs_h5_path))
+    if _action == "refuse":
+        raise RuntimeError(
+            f"bout {bout_idx} fly{fly}: wing_mask_fit is DISABLED but "
+            f"{wingfit_path} exists alongside {outputs_h5_path}, and nothing "
+            f"records which pose outputs.h5 was built from -- it may hold the "
+            f"wing-refined pose while the config says the stage is off. "
+            f"Delete these and rerun this bout/fly:\n"
+            f"    rm -f {wingfit_path} {outputs_h5_path} {qc_json_path} "
+            f"{os.path.join(bout_dir, 'qc_perframe.npz')} "
+            f"{os.path.join(bout_dir, 'DONE')}\n"
+            f"(or re-enable wing_mask_fit to keep using the fit.)")
+    if _action == "fit":
+        _q_wf, _wf_stats = wing_mask_fit_bout(
+            cfg, qpos_refined, bridge_s, bridge_R, bridge_t, bridge_ok,
+            masks_dict, cameras)
+        atomic_save_npz(wingfit_path, qpos=_q_wf, wing_mask_fit_sig=_wf_sig,
+                        **_wf_stats)
+        # outputs.h5 and qc.json are guarded by `stage_done`, so without this a
+        # newly-computed or newly-changed fit is written, logged with a
+        # plausible line, and never reaches a single consumer.
+        _wing_fit_rebuilt = True
+    if _action in ("fit", "reuse"):
         with np.load(wingfit_path) as zw:
             qpos_refined = zw["qpos"]
-            _st = {k: zw[k] for k in zw.files if k != "qpos"}
+            _st = {k: zw[k] for k in zw.files
+                   if k not in ("qpos", "wing_mask_fit_sig")}
         # Same contract as the stac_ik.h5 T-mismatch check above: a resumed
         # artifact from a differently-trimmed run would silently desync Stage E
         # from masks_dict, and build_fly_outputs would fail later with a bare
@@ -1832,16 +1945,23 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
                 f"this bout/fly.")
         # Printed on a resumed run too (the stats live in the npz), so the log
         # of a re-run says what the reused fit did rather than going silent.
-        print(f"[wing-mask-fit] bout {bout_idx} fly{fly}: refined "
+        print(f"[wing-mask-fit] bout {bout_idx} fly{fly}: {_action}; refined "
               f"{int(_st['n_refined'])}/{int(_st['n_frames'])} frames; "
               f"{int(_st['n_skipped'])} left at the STAC pose "
-              f"({int(_st['n_thin_frames'])} of them seen by fewer than "
+              f"({int(_st['n_no_bridge_frames'])} unsolved by STAC, "
+              f"{int(_st['n_thin_frames'])} seen by fewer than "
               f"{int(_st['min_present_cameras'])} mask cameras); median "
               f"wing_pitch change L {float(_st['dpitch_left_deg']):+.2f} deg / "
               f"R {float(_st['dpitch_right_deg']):+.2f} deg", flush=True)
 
     # -- Stage E: outputs.h5 + qc.json ---------------------------------------------
-    if not stage_done(outputs_h5_path):
+    #    `_wing_fit_rebuilt` forces a rebuild: outputs.h5/qc.json/qc_perframe.npz
+    #    are the ONLY consumers of the refined qpos, and they are guarded by
+    #    `stage_done`, so enabling Stage D2 on a bout that already has an
+    #    outputs.h5 would otherwise compute the fit, write it, log it, and change
+    #    nothing any consumer reads. Both writes overwrite atomically
+    #    (stac_mjx.io_dict_to_hdf5.save / atomic_save_npz), so nothing is deleted.
+    if not stage_done(outputs_h5_path) or _wing_fit_rebuilt:
         build_fly_outputs(
             cfg.recording, ik_h5=stac_h5_path, model_xml=cfg.ik.xml,
             mesh_npz=cfg.ik.mesh_npz, qpos=qpos_refined, bridges=bridges,
@@ -1851,7 +1971,8 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
     # matching qc_json_path -- qc_perframe_path is a sibling, NOT another
     # nested fly{fly} segment.
     qc_perframe_path = os.path.join(bout_dir, "qc_perframe.npz")
-    if not stage_done(qc_json_path) or not stage_done(qc_perframe_path):
+    if (not stage_done(qc_json_path) or not stage_done(qc_perframe_path)
+            or _wing_fit_rebuilt):
         d = ioh5.load(outputs_h5_path)
         kp3d_mm = np.asarray(d["kp3d_mm"])                  # (T,K,3) FK'd world-mm sites
         mesh_mm = np.asarray(d["mesh_mm"])                  # (T,Kmesh,3) FK'd world-mm mesh subset
@@ -1877,7 +1998,7 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
                                 kp2d_by_frame=kp2d_by_frame,
                                 vis_by_frame=vis_by_frame,
                                 masks_by_frame=masks_by_frame)
-        if not stage_done(qc_json_path):
+        if not stage_done(qc_json_path) or _wing_fit_rebuilt:
             # ik_reproj metric (additive qc.json key): FITTED (kp3d_by_frame,
             # the FK'd outputs.h5 sites above) vs MEASURED -- the RAW
             # triangulated kp3d.npz, reloaded explicitly here rather than
@@ -1937,7 +2058,7 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
         # -- per-frame QC (Gate A inputs): soft/hard silhouette IoU, marker
         #    reproj, n_cams, one row per frame -- next to qc.json. Reuses the
         #    same *_by_frame locals built for qc_report above.
-        if not stage_done(qc_perframe_path):
+        if not stage_done(qc_perframe_path) or _wing_fit_rebuilt:
             from jarvis_jax.tracking.qc_perframe import per_frame_qc
             pf = per_frame_qc(rt, mesh_by_frame=mesh_by_frame, kp3d_by_frame=kp3d_by_frame,
                               kp2d_by_frame=kp2d_by_frame, vis_by_frame=vis_by_frame,

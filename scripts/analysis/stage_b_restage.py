@@ -34,9 +34,13 @@ import shutil
 import time
 
 # artifacts downstream of Stage B, in dependency order. kp2d.npz is NOT here.
+# qpos_wingfit.npz (Stage D2, opt-in) belongs here for the same reason
+# qpos_refined.npz does: it is solved against the stac_ik.h5 this tool moves
+# aside, so leaving it behind rebuilds outputs.h5 from a wing fit made against a
+# STAC solve that no longer exists.
 BOUT_ARTIFACTS = ["DONE", "kp3d.npz", "kp3d_filt.npz", "stac_ik.h5", "outputs.h5",
-                  "qpos_refined.npz", "qc.json", "qc_perframe.npz",
-                  "unsolvable.json", "track_qc.json"]
+                  "qpos_refined.npz", "qpos_wingfit.npz", "qc.json",
+                  "qc_perframe.npz", "unsolvable.json", "track_qc.json"]
 RECORDING_ARTIFACTS = ["offsets.h5", "scale.json", "segment_scales.json"]
 # Commit c4bdaa8 ("consensus outlier-view rejection in triangulation, on by
 # default"). Derived from git rather than hardcoded -- a hand-typed epoch here

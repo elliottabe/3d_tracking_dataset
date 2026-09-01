@@ -231,7 +231,6 @@ def test_stage_b_gate_signature_changes_with_every_gate():
         "masks": {"kp_mask_agree_fly_lengths": 3.0, "min_views": 3},
         "wing_collapse": {"enabled": False},
         "rigid_repair": {"enabled": False},
-        "wing_mask_fit": {"enabled": False},
     })
     b = sig(base)
     assert isinstance(b, str) and "wing_collapse" in b
@@ -245,7 +244,6 @@ def test_stage_b_gate_signature_changes_with_every_gate():
         "repair_on": {"rigid_repair": {"enabled": True, "edges_containing": ["Wing"],
                                        "rel_tol": 0.5, "max_gap": 5, "max_cv": 0.2,
                                        "min_conf": 0.5, "min_frames": 50}},
-        "wingfit_on": {"wing_mask_fit": dict(WING_MASK_FIT_ON)},
     }
     for name, patch in variants.items():
         c = OmegaConf.merge(base, OmegaConf.create(patch))
@@ -256,19 +254,6 @@ def test_stage_b_gate_signature_changes_with_every_gate():
     tweaked = OmegaConf.merge(on, OmegaConf.create(
         {"rigid_repair": {"rel_tol": 0.7}}))
     assert sig(on) != sig(tweaked), "rel_tol change must invalidate kp3d.npz"
-
-    # ... including the wing-mask fit's, which is the whole point of recording
-    # it: re-running with a different coverage weight must not silently reuse a
-    # qpos_wingfit.npz fitted under the old one.
-    wf_on = OmegaConf.merge(base, OmegaConf.create(variants["wingfit_on"]))
-    wf_tweaked = OmegaConf.merge(wf_on, OmegaConf.create(
-        {"wing_mask_fit": {"coverage_weight": 0.03}}))
-    assert sig(wf_on) != sig(wf_tweaked), \
-        "coverage_weight change must invalidate the wing-mask fit"
-    wf_tweaked2 = OmegaConf.merge(wf_on, OmegaConf.create(
-        {"wing_mask_fit": {"exclude_cameras": []}}))
-    assert sig(wf_on) != sig(wf_tweaked2), \
-        "exclude_cameras change must invalidate the wing-mask fit"
 
 
 def test_run_bout_refuses_a_kp3d_written_under_other_gates():
@@ -316,15 +301,18 @@ def test_wing_mask_fit_is_off_and_absent_is_a_strict_no_op():
     assert enabled(OmegaConf.create({"wing_mask_fit": WING_MASK_FIT_ON})) is True
 
 
-def test_absent_wing_mask_fit_does_not_move_the_stage_b_gate_signature():
-    """Back-compat, and the second half of "absent is a strict no-op".
+def test_wing_mask_fit_never_enters_the_stage_b_gate_signature():
+    """The Stage-B signature is "every setting that changes what kp3d.npz
+    contains", it is stored INSIDE kp3d.npz, and a mismatch REFUSES the bout --
+    telling the operator to delete kp3d.npz, stac_ik.h5 and the rest.
 
-    The signature is stored INSIDE kp3d.npz and a mismatch REFUSES the bout.
-    `wing_collapse`/`rigid_repair` emit a bare {"enabled": False} when off, so
-    mirroring that shape here would have changed the signature string for every
-    config in existence and refused every kp3d.npz already on disk -- forcing a
-    re-triangulation plus a 12-minute STAC re-solve per bout-fly to adopt a
-    stage that is off. So the wing-mask-fit block is emitted ONLY when enabled.
+    The wing fit rewrites qpos AFTER the bridges and provably cannot alter
+    kp3d.npz or stac_ik.h5, so enrolling it charged a re-triangulation plus a
+    12-minute STAC solve per bout-fly per sweep point (~5.2 h on the 13-bout
+    benchmark) for nothing -- and the only escape, allow_stale_kp3d, disables
+    the comparison altogether, leaving the fit with NO staleness protection.
+    Its provenance lives in its own artifact instead (wing_mask_fit_signature).
+    Toggling or retuning the block must therefore leave this string untouched.
     """
     from omegaconf import OmegaConf
     sig = _run_bout_helper("stage_b_gate_signature")
@@ -336,17 +324,15 @@ def test_absent_wing_mask_fit_does_not_move_the_stage_b_gate_signature():
         "rigid_repair": {"enabled": False},
     })
     absent = sig(base)
-    off = sig(OmegaConf.merge(base, OmegaConf.create(
-        {"wing_mask_fit": {"enabled": False}})))
-    assert absent == off, (
-        "adding a disabled wing_mask_fit block changed the Stage-B gate "
-        "signature -- every kp3d.npz on disk would now be refused")
-    assert "wing_mask_fit" not in absent, (
-        "the signature names wing_mask_fit even when it is off, which moves "
-        "the string for every pre-feature config")
-    on = sig(OmegaConf.merge(base, OmegaConf.create(
-        {"wing_mask_fit": WING_MASK_FIT_ON})))
-    assert "wing_mask_fit" in on and on != absent
+    assert "wing_mask_fit" not in absent
+    for label, patch in (("off", {"enabled": False}),
+                         ("on", WING_MASK_FIT_ON),
+                         ("retuned", {**WING_MASK_FIT_ON, "coverage_weight": 0.03})):
+        got = sig(OmegaConf.merge(base, OmegaConf.create({"wing_mask_fit": patch})))
+        assert got == absent, (
+            f"wing_mask_fit={label} moved the Stage-B gate signature; that "
+            f"refuses every kp3d.npz on disk and forces a STAC re-solve for a "
+            f"stage that cannot change either artifact")
 
 
 def test_every_wing_mask_fit_yaml_key_reaches_the_refinement():
@@ -582,17 +568,23 @@ def test_wing_mask_fit_bout_gates_frames_and_cameras(monkeypatch):
     present = rec["refine_wing_pitch"]["kwargs"]["present"]
     assert not present[0].any(), "frame 0 must be frozen at its STAC pose"
     assert present[1:].sum(axis=1).tolist() == [4] * 4
+    # "STAC could not solve it" and "too few mask cameras" are DIFFERENT
+    # diagnoses -- one sends you to the solver, the other to SAM coverage -- so
+    # frame 0 (bridge_ok=False) must not be counted as camera-starved.
     # left is at qpos 12 (+0.25 rad) and right at qpos 9 (+0.5 rad) -- reported
     # BY JOINT NAME, so a positional read of opt_mask would swap these two.
     assert stats == {"n_frames": 5, "n_refined": 4, "n_skipped": 1,
-                     "n_thin_frames": 1, "min_present_cameras": 3,
+                     "n_thin_frames": 0, "n_no_bridge_frames": 1,
+                     "min_present_cameras": 3,
                      "dpitch_left_deg": pytest.approx(np.rad2deg(0.25)),
                      "dpitch_right_deg": pytest.approx(np.rad2deg(0.5))}
 
     # raise the bar above what the kept cameras can supply -> nothing is refined
     cfg.wing_mask_fit.min_present_cameras = 5
     _, stats2 = fit(cfg, qpos, bs, bR, bt, bok, masks_dict, cameras)
-    assert stats2["n_refined"] == 0 and stats2["n_thin_frames"] == 5
+    # 4 camera-starved + the 1 bridge-less frame = 5 skipped, still disjoint
+    assert stats2["n_refined"] == 0
+    assert stats2["n_thin_frames"] == 4 and stats2["n_no_bridge_frames"] == 1
 
 
 def test_wing_mask_fit_bout_refuses_a_non_canonical_mask_camera_axis(monkeypatch):
@@ -616,3 +608,168 @@ def test_wing_mask_fit_bout_refuses_a_non_canonical_mask_camera_axis(monkeypatch
     cfg.wing_mask_fit.exclude_cameras = ["CamNotOnTheRig"]
     with pytest.raises(ValueError, match="CamNotOnTheRig"):
         fit(cfg, qpos, bs, bR, bt, bok, masks_dict, cameras)
+
+
+# ---------------------------------------------------------------------------
+# Task 6 fix round 1: the wing fit carries its OWN provenance
+# ---------------------------------------------------------------------------
+
+def test_wing_mask_fit_signature_covers_the_semantic_keys_and_only_those():
+    """The fit's provenance must move for anything that changes the POSE and
+    stay put for anything that only changes speed.
+
+    `frame_chunk` is documented in the YAML as a pure performance knob (frames
+    per device call), so enrolling it would invalidate a perfectly good fit
+    merely for moving to a smaller GPU. A blanket `sorted(wf)` would also
+    auto-enrol any key added later, including a future `prefetch` -- hence the
+    exact partition below, which fails if a new YAML key is neither semantic nor
+    declared performance-only.
+    """
+    import json as _json
+    from omegaconf import OmegaConf
+    sig = _run_bout_helper("wing_mask_fit_signature")
+    wf = _pipeline_wing_mask_fit()
+
+    on = OmegaConf.create({"wing_mask_fit": WING_MASK_FIT_ON})
+    base = sig(on)
+    keys = set(_json.loads(base))
+
+    perf_only = {"frame_chunk"}
+    assert keys | perf_only | {"enabled"} == set(wf), (
+        f"wing_mask_fit keys are neither in the signature nor declared "
+        f"performance-only: {sorted(set(wf) - keys - perf_only - {'enabled'})}")
+    assert not (keys & perf_only), f"performance-only keys enrolled: {keys & perf_only}"
+
+    def _moved(patch):
+        return sig(OmegaConf.merge(on, OmegaConf.create({"wing_mask_fit": patch}))) != base
+
+    # performance knobs must NOT move it
+    assert not _moved({"frame_chunk": 64}), \
+        "frame_chunk is a perf knob; moving GPU must not invalidate the fit"
+    # every semantic knob must
+    for k, v in (("coverage_weight", 0.03), ("huber_delta", 0.0), ("n_steps", 50),
+                 ("lr", 0.05), ("containment_weight", 1.0), ("smooth_weight", 0.5),
+                 ("limit_weight", 1.0), ("dilate_px", 3), ("body_vertex_stride", 20),
+                 ("bbox_margin", 0.2), ("n_target_points", 64),
+                 ("min_present_cameras", 5), ("coverage_normalize", False),
+                 ("out_hw", [64, 64]), ("exclude_cameras", [])):
+        assert _moved({k: v}), f"{k} changes the fitted pose but not its signature"
+
+
+def test_wing_fit_action_reuses_refits_and_refuses():
+    """The whole staleness contract for qpos_wingfit.npz, as a pure function.
+
+    Three reachable routes make this necessary even though the Stage-B gate
+    exists, and in ALL THREE that gate never fires: deleting kp3d.npz by hand
+    (the ordinary "just re-triangulate this bout"), pipeline.allow_stale_kp3d,
+    and scripts/analysis/stage_b_restage.py.
+    """
+    from omegaconf import OmegaConf
+    action, sig = (_run_bout_helpers("wing_fit_action", "wing_mask_fit_signature",
+                                     "wing_mask_fit_enabled"))[:2]
+
+    off = OmegaConf.create({"wing_mask_fit": {"enabled": False}})
+    on = OmegaConf.create({"wing_mask_fit": WING_MASK_FIT_ON})
+    retuned = OmegaConf.merge(on, OmegaConf.create(
+        {"wing_mask_fit": {"coverage_weight": 0.03}}))
+    faster = OmegaConf.merge(on, OmegaConf.create(
+        {"wing_mask_fit": {"frame_chunk": 64}}))
+    s_on = sig(on)
+
+    # off, nothing on disk -> strict no-op
+    assert action(off, None, False) == ("off", None)
+    assert action(OmegaConf.create({}), None, True) == ("off", None)
+    # off, an orphan fit but no outputs.h5 -> still a no-op (nothing consumed it)
+    assert action(off, s_on, False) == ("off", None)
+    # off, a fit AND an outputs.h5 -> nothing records which pose outputs.h5 holds
+    assert action(off, s_on, True)[0] == "refuse"
+    # on, nothing on disk -> fit
+    assert action(on, None, False) == ("fit", s_on)
+    # on, a file with NO provenance (written before this record existed) -> refit
+    assert action(on, None, True) == ("fit", s_on)
+    # on, matching provenance -> reuse
+    assert action(on, s_on, True) == ("reuse", s_on)
+    # on, provenance from a different weight -> refit
+    assert action(retuned, s_on, True)[0] == "fit"
+    # on, same weights but a different frame_chunk -> reuse (perf-only)
+    assert action(faster, s_on, True) == ("reuse", s_on)
+
+
+def test_the_wing_fit_records_its_signature_in_its_own_artifact():
+    """It is written into qpos_wingfit.npz, read back on resume, and the read
+    is what drives the decision -- not the file's mere existence."""
+    import ast as _ast
+    src = RUN_BOUT.read_text()
+    fn = next(n for n in _ast.parse(src).body
+              if isinstance(n, _ast.FunctionDef) and n.name == "process_bout_fly")
+    body = _ast.get_source_segment(src, fn)
+    assert "atomic_save_npz(wingfit_path" in body
+    i = body.index("atomic_save_npz(wingfit_path")
+    assert "wing_mask_fit_sig=" in body[i:i + 300], \
+        "the fit must record the config it was made under"
+    assert "stored_wing_fit_signature(wingfit_path)" in body, \
+        "the decision must read the stored provenance, not just os.path.exists"
+    assert "stage_done(wingfit_path)" not in body, \
+        "existence alone must not gate the fit -- that is the stale-reuse bug"
+
+
+def test_a_new_or_changed_wing_fit_invalidates_outputs_and_qc():
+    """F3: outputs.h5/qc.json/qc_perframe.npz are the ONLY consumers of the
+    refined qpos and every one is guarded by `stage_done`. Enabling the stage on
+    a bout that already has them would otherwise compute the fit, write it, log
+    a plausible `[wing-mask-fit]` line, and change nothing anyone reads.
+
+    Checked structurally over EVERY such guard, so a guard added later without
+    the flag is caught too.
+    """
+    import ast as _ast
+    src = RUN_BOUT.read_text()
+    fn = next(n for n in _ast.parse(src).body
+              if isinstance(n, _ast.FunctionDef) and n.name == "process_bout_fly")
+    consumers = ("outputs_h5_path", "qc_json_path", "qc_perframe_path")
+    guards = []
+    for node in _ast.walk(fn):
+        if not isinstance(node, _ast.If):
+            continue
+        test = _ast.dump(node.test)
+        if "stage_done" in test and any(c in test for c in consumers):
+            guards.append((node.lineno, test))
+    assert guards, "could not find the Stage E / QC stage_done guards"
+    missing = [ln for ln, t in guards if "_wing_fit_rebuilt" not in t]
+    assert not missing, (
+        f"these stage_done guards on the refined-qpos consumers do not honour "
+        f"_wing_fit_rebuilt, so a newly-run wing fit never reaches them: "
+        f"lines {missing}")
+
+    # ... and the flag must actually be RAISED by the branch that (re)fits,
+    # otherwise every guard above honours a flag that is always False.
+    fit_branch = [n for n in _ast.walk(fn)
+                  if isinstance(n, _ast.If) and "'fit'" in _ast.dump(n.test)
+                  and "_action" in _ast.dump(n.test)]
+    assert fit_branch, "could not find the `if _action == 'fit':` branch"
+    raised = any(isinstance(st, _ast.Assign)
+                 and any(getattr(t, "id", None) == "_wing_fit_rebuilt"
+                         for t in st.targets)
+                 and getattr(st.value, "value", None) is True
+                 for b in fit_branch for st in _ast.walk(b))
+    assert raised, ("the branch that computes the fit must set "
+                    "_wing_fit_rebuilt = True, or the guards never fire")
+
+
+def test_stage_b_restage_moves_the_wing_fit_aside():
+    """F4: stage_b_restage.py moves the STAC solve aside to force a re-run. A
+    qpos_wingfit.npz left behind was solved against the stac_ik.h5 it just
+    removed, and outputs.h5 would be rebuilt from it."""
+    import ast as _ast
+    from pathlib import Path as _P
+    src = (_P(__file__).resolve().parents[1] / "scripts" / "analysis"
+           / "stage_b_restage.py").read_text()
+    node = next(n for n in _ast.parse(src).body
+                if isinstance(n, _ast.Assign)
+                and any(getattr(t, "id", None) == "BOUT_ARTIFACTS" for t in n.targets))
+    artifacts = [e.value for e in node.value.elts]
+    assert "qpos_wingfit.npz" in artifacts, (
+        f"BOUT_ARTIFACTS moves the STAC solve aside but leaves the wing fit "
+        f"solved against it: {artifacts}")
+    # it must sit with the other pose artifacts, not after DONE-only entries
+    assert artifacts.index("qpos_wingfit.npz") > artifacts.index("stac_ik.h5")
