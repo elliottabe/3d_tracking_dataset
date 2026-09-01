@@ -1481,6 +1481,18 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
                 _repo = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
                 if _repo not in sys.path:
                     sys.path.insert(0, _repo)
+                # scripts/viz/ (unrelated one-off viz scripts, no `core`
+                # submodule) sits on sys.path AHEAD of the repo root in this
+                # direct-invocation case (sys.path[0] == scripts/) and gets
+                # bound into sys.modules['viz'] as an empty namespace package
+                # by the failing attempt above; inserting the repo root
+                # afterwards does not retroactively fix that already-cached
+                # binding, so the retry below would fail identically
+                # (ModuleNotFoundError: No module named 'viz.core') without
+                # dropping it first and letting Python re-resolve `viz` fresh.
+                for _m in list(sys.modules):
+                    if _m == "viz" or _m.startswith("viz."):
+                        del sys.modules[_m]
                 from viz.core.colors import keypoint_groups
             _kg = keypoint_groups(kp_names)
             _wings_idx = [i for i in _kg["thorax"] if kp_names[i].startswith("Wing")]

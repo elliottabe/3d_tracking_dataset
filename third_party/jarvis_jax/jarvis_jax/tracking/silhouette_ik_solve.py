@@ -85,6 +85,7 @@ def _build_keypoint_sites(
     xml_path: str,
     keypoint_model_pairs: dict,
     keypoint_initial_offsets: dict,
+    segment_scales=None,
 ) -> mujoco.MjModel:
     """Compile ``xml_path`` with one <site> per keypoint added, STAC-style.
 
@@ -92,6 +93,18 @@ def _build_keypoint_sites(
     add a site (named after the keypoint) to the model body it registers to,
     at the config's initial offset. The site's final offset is set later from
     the ik h5's fitted ``offsets`` via stac_mjx.utils.set_site_pos.
+
+    ``segment_scales`` (optional, e.g. a resolved ``config.model.SEGMENT_SCALES``):
+    applies ``stac_mjx.rescale.rescale_per_segment`` BEFORE compiling, same as
+    ``Stac._create_body_sites`` does when solving. Without this, a caller that
+    rebuilds the model from ``xml_path`` alone (as every caller of
+    ``build_solver_inputs`` -- i.e. every Stage-E FK -- did until this fix)
+    silently FK's a segment-calibrated qpos through the UNMORPHED base
+    skeleton: qpos was solved against the morphed model (Stac.__init__ DOES
+    read SEGMENT_SCALES) but re-FK'd here on the plain one, so the two
+    disagree. No-op when ``segment_scales`` is falsy (absent/empty), which is
+    every existing config (``segment_calibration: false`` is the default) --
+    byte-for-byte unchanged for all of them.
     """
     spec = mujoco.MjSpec.from_file(str(xml_path))
     for kp_name, body_name in keypoint_model_pairs.items():
@@ -106,6 +119,15 @@ def _build_keypoint_sites(
             pos=pos,
             group=3,
         )
+    if segment_scales:
+        from stac_mjx import rescale
+        entries = (segment_scales.values() if hasattr(segment_scales, "values")
+                   else segment_scales)
+        seg_list = [{"geom_body": e["geom_body"], "length_body": e["length_body"],
+                    "scale": float(e["scale"]),
+                    "scale_sites_on_body": e.get("scale_sites_on_body", "")}
+                   for e in entries]
+        rescale.rescale_per_segment(spec, seg_list)
     return spec.compile()
 
 
@@ -138,7 +160,8 @@ def build_solver_inputs(ik_h5: str, model_xml: str) -> dict:
     )
 
     mj_model = _build_keypoint_sites(
-        model_xml, keypoint_model_pairs, keypoint_initial_offsets
+        model_xml, keypoint_model_pairs, keypoint_initial_offsets,
+        segment_scales=config.model.get("SEGMENT_SCALES", None),
     )
 
     nq = int(mj_model.nq)
