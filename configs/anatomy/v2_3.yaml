@@ -178,6 +178,16 @@ model:
   MJCF_PATH: ${anatomy.mjcf_path}
   name: 'fruitfly_V2_3'
 
+  # OFF, AND IT STAYS OFF UNLESS SOMEONE TURNS IT ON DELIBERATELY (user
+  # decision, 2026-08-31). The objection is structural, not empirical: this
+  # morphs every calibratable segment by its own free scale factor, an
+  # unbounded change to the body model with nothing holding the result near a
+  # real fly. A better reprojection number bought that way is not evidence the
+  # anatomy got better -- it is the same failure mode as marker offsets
+  # absorbing a 38x body-scale error. Body size belongs in the ONE trunk scale
+  # (scale.json, per fly per recording); shape does not belong to the fitter.
+  # run_bout warns loudly if it is ever enabled.
+  #
   # Per-segment (per-limb) SHAPE calibration for courtship (see v1.yaml for the
   # rationale). run_bout computes per-segment scales ONCE per session
   # (Adam MJX M-step), persists to <run_root>/segment_scales.json, and sets

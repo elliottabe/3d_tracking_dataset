@@ -1278,7 +1278,25 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
     #    morphed N body segments"). CRITICAL: this must run BEFORE the offsets fit
     #    so the real offsets.h5 is fit on the MORPHED model. Gated by
     #    cfg.model.segment_calibration (anatomy config).
-    if bool(cfg.model.get("segment_calibration", True)):
+    #
+    #    OPT-IN ONLY, and the absent-key default is False (user decision,
+    #    2026-08-31). It used to default TRUE when the key was missing, so any
+    #    anatomy config that simply did not declare `segment_calibration`
+    #    silently morphed the body -- the opposite of opt-in. The objection is
+    #    structural: this gives every calibratable segment its own free scale,
+    #    an unbounded change to the body model with nothing holding the result
+    #    near a real fly, so a better reprojection number is not evidence the
+    #    anatomy improved. Measured 2026-08-31 it buys ~10% site error and
+    #    makes the trunk-vs-leg disagreement slightly WORSE (12.26 -> 12.65%).
+    if bool(cfg.model.get("segment_calibration", False)):
+        print("=" * 78, flush=True)
+        print("[segment-calibration] ENABLED -- the body model will be MORPHED "
+              "per segment.\n  This is opt-in and off by default: each segment "
+              "gets its own free scale, an\n  unbounded change to the anatomy. "
+              "Reprojection/site-error gains from this are\n  NOT evidence the "
+              "anatomy is more correct. See configs/anatomy/v1.yaml.",
+              flush=True)
+        print("=" * 78, flush=True)
         seg_scales_path = os.path.join(run_root, "segment_scales.json")
         if not stage_done(seg_scales_path):
             seg_entries = compute_segment_scales(cfg, kp3d, kp_names, scale, run_root)
