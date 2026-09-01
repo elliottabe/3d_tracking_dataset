@@ -6,7 +6,7 @@ For a bout index and each fly (``range(cfg.recording.num_animals)``), runs:
   A  ViTPose 2-D on SAM3-masked crops                       -> kp2d.npz
   B  DLT triangulation                                      -> kp3d.npz
   C  STAC ik_only (offsets fit once, shared across bouts)   -> stac_ik.h5
-  D  silhouette-containment polish                          -> qpos_refined.npz
+  D  model->mm bridge (per-frame s,R,t)                     -> qpos_refined.npz
   E  FK outputs.h5 + qc.json + qc_perframe.npz + per-camera reprojection overlay videos
 
 Every artifact is written atomically (tmp -> os.replace) and every stage is
@@ -57,7 +57,7 @@ from jarvis_jax.tracking.triangulate import (triangulate_keypoints,
 from jarvis_jax.tracking.filter import filter_bout_kp3d
 from jarvis_jax.tracking.scale import compute_trunk_scale
 from jarvis_jax.tracking.stac import fit_offsets_once, ik_only_bout
-from jarvis_jax.tracking.polish import polish_bout
+from jarvis_jax.tracking.bridge import compute_bridges
 from jarvis_jax.tracking.outputs import build_fly_outputs
 from jarvis_jax.tracking.qc import qc_report
 from jarvis_jax.tracking.reproj_video import write_camera_video
@@ -1075,6 +1075,39 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
                   f"(frame,camera) views whose keypoints missed their own mask by "
                   f">{_agree_len} fly-lengths; agreeing views/frame median "
                   f"{int(np.median(views_per_frame))}")
+        # Per-view WING L/R COLLAPSE gate. A view that puts BOTH wing labels on
+        # the SAME wing carries no left/right information, and consensus cannot
+        # help when it is the MAJORITY doing it: measured on Session0 bout 28
+        # fly1, on the 11 frames whose 3-D WingL_V12-V13 length flips from ~4.8u
+        # to ~21.6u, FOUR of seven views collapse |WingL_V12 - WingR_V12| to
+        # 0.30-0.54 body lengths while 630/853/862 hold 2.0-2.6 -- so the
+        # reproj_resid_px gate above discards the three CORRECT views. Dropping
+        # the collapsed views for the WING keypoints only: WingL_V12 jumps
+        # 13 -> 6, WingL_V13 7 -> 2, frames 300+ unchanged, no new NaNs.
+        # min_views_kept is the guard that makes this safe on a folded-wing fly
+        # (the female's wings genuinely superpose in most views); absent config
+        # is a strict no-op. See jarvis_jax.tracking.wing_lr_assign.
+        _wc = cfg.get("wing_collapse") or {}
+        if bool(_wc.get("enabled", False)):
+            from jarvis_jax.tracking.wing_lr_assign import (
+                detect_wing_lr_collapse, mask_collapsed_wing_views)
+            _collapsed, _cinfo = detect_wing_lr_collapse(
+                kp2d, conf, list(cfg.model.KP_NAMES),
+                abs_floor=float(_wc.get("abs_floor", 0.6)),
+                rel_frac=float(_wc.get("rel_frac", 0.35)),
+                conf_thresh=float(cfg.detector.conf_thresh))
+            conf, _minfo = mask_collapsed_wing_views(
+                conf, _collapsed, list(cfg.model.KP_NAMES),
+                min_views_kept=int(_wc.get("min_views_kept", 4)))
+            print(f"[wing-collapse] bout {bout_idx} fly{fly}: masked wings in "
+                  f"{_minfo['views_masked']} (frame,camera) views over "
+                  f"{_minfo['frames_masked']}/{T} frames; left "
+                  f"{_minfo['frames_left_alone_too_few_views']} frames alone "
+                  f"(<{_minfo['min_views_kept']} views would survive); "
+                  f"per-camera collapse rate "
+                  + ", ".join(f"{cameras[i][-3:]}={100*r:.0f}%"
+                              for i, r in _cinfo['per_camera_collapse_rate'].items()),
+                  flush=True)
         kp3d, conf3d = triangulate_keypoints(
             kp2d, conf, cam_mats, conf_thresh=float(cfg.detector.conf_thresh),
             view_conf_thresh=_view_thresh, reproj_resid_px=_resid_px)
@@ -1175,7 +1208,7 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
                     bout_kp3d_paths, estimate_run_root)
             _rec = OmegaConf.create({
                 "model": {"KP_NAMES": list(kp_names)},
-                "mjcf_path": str(cfg.silhouette.xml)})
+                "mjcf_path": str(cfg.ik.xml)})
             _est = None
             try:
                 _est = estimate_run_root(
@@ -1205,7 +1238,7 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
                 # triangulated). Record HOW MANY bouts backed the number so a
                 # later run can tell this apart from a real pooled estimate.
                 _pair_scales = per_bout_segment_scale(
-                    kp3d, kp_names, cfg.silhouette.xml)
+                    kp3d, kp_names, cfg.ik.xml)
                 _payload = {
                     "scale": float(np.median(_pair_scales)),
                     "scale_by_fly": None,
@@ -1227,7 +1260,7 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
             atomic_save_json(scale_path, _payload)
         else:
             _scale = compute_trunk_scale(
-                kp3d, kp_names, cfg.silhouette.xml,
+                kp3d, kp_names, cfg.ik.xml,
                 trunk_names=scale_names,
                 estimator=cfg.scaling.estimator,
                 robust_stat=cfg.scaling.robust_stat,
@@ -1246,6 +1279,33 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
     if _scale_by_fly and str(fly) in _scale_by_fly:
         scale = float(_scale_by_fly[str(fly)])
     else:
+        # No per-fly scale: BOTH flies get one number. Body size is constant
+        # per individual, and the male and female differ measurably (0.011617
+        # vs 0.011744 on Session0/2025_10_20_13_20_04), so this is a real
+        # approximation, not a formality -- and until now it happened SILENTLY.
+        # It has two causes, and they need different fixes, so name which:
+        #   identity != canonical -> some bout lacks sex.json; fly0/fly1 is not
+        #     a stable individual label and pooling per slot would blend the
+        #     two animals. Fix: scripts/apply_id_review.py.
+        #   n_bout_flies < 2      -> one arbitrary bout-fly defined the whole
+        #     recording. That is the scale-from-first-bout defect (measured
+        #     15.5% low, the 8th percentile of 59 bout-flies). Fix: triangulate
+        #     more bouts before the scale stage runs.
+        _ident = _scale_data.get("identity")
+        _n_pooled = _scale_data.get("n_bout_flies")
+        if not bool(cfg.scaling.get("allow_shared_scale", False)):
+            raise RuntimeError(
+                f"bout {bout_idx} fly{fly}: refusing a SHARED body scale. "
+                f"{scale_path} has scale_by_fly={_scale_by_fly!r}, "
+                f"identity={_ident!r} ({_scale_data.get('identity_reason')}), "
+                f"n_bout_flies={_n_pooled!r}. Both flies would be fitted at one "
+                f"size. Fix the cause (apply_id_review.py for identity; more "
+                f"triangulated bouts for pooling), or set "
+                f"scaling.allow_shared_scale=true to accept it deliberately.")
+        print(f"[scale] WARNING bout {bout_idx} fly{fly}: SHARED scale "
+              f"(identity={_ident!r}, n_bout_flies={_n_pooled!r}) -- both flies "
+              f"fitted at one body size, allowed by scaling.allow_shared_scale",
+              flush=True)
         scale = float(_scale_data["scale"])
 
     # Physical sanity gate: whatever branch/mode produced `scale` above (fresh
@@ -1264,7 +1324,7 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
     except ModuleNotFoundError:  # direct invocation: sys.path[0] is scripts/, not repo root
         from estimate_recording_scale import assert_plausible_body_scale
     assert_plausible_body_scale(
-        scale, cfg.silhouette.xml, context=f"bout {bout_idx} fly{fly} ({scale_path})")
+        scale, cfg.ik.xml, context=f"bout {bout_idx} fly{fly} ({scale_path})")
 
     # -- segment_scales.json: per-segment (per-limb) SHAPE calibration. Like
     #    scale.json, this is a per-fly-constant morph computed ONCE per session
@@ -1434,12 +1494,21 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
             f"masks T={T} ({stac_h5_path} vs {bout_npz}); stale/mismatched "
             f"resumed artifact -- delete it and rerun this bout/fly.")
 
-    # -- Stage D: silhouette-containment polish -----------------------------------
+    # -- Stage D: model->mm bridge --------------------------------------------------
+    #    Was "silhouette-containment polish". The polish was dead -- with
+    #    silhouette_weight == containment_weight == 0 (the shipped default) it
+    #    early-returned q = q_init, measured equal to the STAC qpos at
+    #    maxabsdiff 0.0 on both flies of Session0 bout 28 -- but the same call
+    #    computed the BRIDGE, which is not optional (Stage E maps model units
+    #    to mm through it, and a None bridge is the "this frame is NaN"
+    #    contract). The bridge was extracted to tracking.bridge and the
+    #    silhouette deleted around it. Under the default bridge_mode
+    #    'keypoint' no masks are read at all.
     if not stage_done(qpos_path):
-        qpos_refined, bridges = polish_bout(
-            stac_h5_path, cfg, kp3d, conf3d, masks_dict, cfg.recording.calib_dir,
-            kp_scale=scale, bridge_mode=str(cfg.silhouette.get("bridge_mode", "mask")))
-        bs, bR, bt, bok = bridges_to_arrays(bridges)
+        qpos_refined, bs, bR, bt, bok = compute_bridges(
+            stac_h5_path, cfg.ik.xml, kp3d, conf3d, cfg.recording.calib_dir,
+            kp_scale=scale, bridge_mode=str(cfg.ik.get("bridge_mode", "keypoint")),
+            masks_dict=masks_dict)
         atomic_save_npz(qpos_path, qpos=qpos_refined,
                         bridge_s=bs, bridge_R=bR, bridge_t=bt, bridge_ok=bok)
     with np.load(qpos_path) as zq:
@@ -1449,8 +1518,8 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
     # -- Stage E: outputs.h5 + qc.json ---------------------------------------------
     if not stage_done(outputs_h5_path):
         build_fly_outputs(
-            cfg.recording, ik_h5=stac_h5_path, model_xml=cfg.silhouette.xml,
-            mesh_npz=cfg.silhouette.mesh_npz, qpos=qpos_refined, bridges=bridges,
+            cfg.recording, ik_h5=stac_h5_path, model_xml=cfg.ik.xml,
+            mesh_npz=cfg.ik.mesh_npz, qpos=qpos_refined, bridges=bridges,
             out_path=outputs_h5_path, mesh_subset=str(cfg.outputs.mesh_subset))
 
     # NOTE: bout_dir already ends in f"fly{fly}" (see its construction above),
@@ -1651,6 +1720,13 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
             # MuJoCo/EGL (a small GL context, fine alongside the parent) and needs
             # no jax-GPU, so force jax onto CPU for the subprocess.
             sbs_env = {**os.environ, "JAX_PLATFORMS": "cpu"}
+            # One row per view: three real camera views beside three
+            # view-matched MuJoCo renders. Roles resolve from THIS recording's
+            # calibration (viz.core.rigviews), so the same setting works for
+            # Session0 and Session1. Empty string -> the old single-view render.
+            _views = str(cfg.outputs.get("sidebyside_views", "") or "").strip()
+            if _views:
+                cmd += ["--views", _views]
             r = subprocess.run(cmd, capture_output=True, text=True, env=sbs_env)
             if r.returncode != 0:
                 print(f"[courtship] bout {bout_idx} fly{fly}: sidebyside viz FAILED "
