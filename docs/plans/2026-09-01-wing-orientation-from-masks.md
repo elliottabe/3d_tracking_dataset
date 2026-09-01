@@ -577,6 +577,18 @@ wing_mask_fit:
   # per-target-count normalisation plus huber_delta > 0, not zeroing the term.
   # Task 7 sweeps this on BOTH flies; Task 8 sets the final value.
   coverage_weight: 0.3
+  # NOTE the module normalises coverage per (frame, camera) target count by
+  # default, so coverage_weight: 0.3 here is ~ the OLD un-normalised 0.03.
+  coverage_normalize: true
+  # MUST be > 0. At huber_delta 0 the chamfer is an unrobustified L2 whose
+  # gradient scales with distance, so SAM halo and body-silhouette crescents
+  # dominate and the term loses on its own metric. 8.0 is the measured corner.
+  huber_delta: 8.0
+  # Body basis for "what the body already explains". Density MATTERS on real
+  # masks (stride 20->4 with dilate_px 3->8 recovered 1.3 pt); the synthetic
+  # fixture could not show this because there the mask IS the mesh silhouette.
+  body_vertex_stride: 4
+  dilate_px: 8
   smooth_weight: 0.005
   limit_weight: 10.0
   n_steps: 300
