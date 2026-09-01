@@ -7,6 +7,7 @@ For a bout index and each fly (``range(cfg.recording.num_animals)``), runs:
   B  DLT triangulation                                      -> kp3d.npz
   C  STAC ik_only (offsets fit once, shared across bouts)   -> stac_ik.h5
   D  model->mm bridge (per-frame s,R,t)                     -> qpos_refined.npz
+  D2 wing-pitch vs the SAM masks (OPT-IN, off by default)   -> qpos_wingfit.npz
   E  FK outputs.h5 + qc.json + qc_perframe.npz + per-camera reprojection overlay videos
 
 Every artifact is written atomically (tmp -> os.replace) and every stage is
@@ -389,7 +390,8 @@ def stage_b_gate_signature(cfg):
     _wc = cfg.get("wing_collapse") or {}
     _rr = cfg.get("rigid_repair") or {}
     _mk = cfg.get("masks") or {}
-    return json.dumps({
+    _wf = cfg.get("wing_mask_fit") or {}
+    sig = {
         "conf_thresh": float(cfg.detector.conf_thresh),
         "view_conf_thresh": cfg.detector.get("view_conf_thresh", None),
         "reproj_resid_px": cfg.detector.get("reproj_resid_px", None),
@@ -402,7 +404,179 @@ def stage_b_gate_signature(cfg):
                           for k in ("enabled", "edges_containing", "rel_tol",
                                     "max_gap", "max_cv", "min_conf", "min_frames")}
                          if _rr.get("enabled", False) else {"enabled": False}),
-    }, sort_keys=True)
+    }
+    # The opt-in post-STAC wing-pitch refinement (Stage D2). It does NOT change
+    # kp3d.npz, but it is recorded here for the same reason the Stage-B gates
+    # are: it runs inside a `stage_done` guard, so a resumed run would reuse a
+    # qpos_wingfit.npz fitted under different weights with no warning. The
+    # refusal at the call site names qpos_wingfit.npz among the artifacts to
+    # delete.
+    #
+    # DELIBERATE ASYMMETRY with wing_collapse/rigid_repair, which emit a bare
+    # {"enabled": False} when off: this key is OMITTED ENTIRELY when the block
+    # is absent or disabled. The signature is stored inside kp3d.npz and a
+    # mismatch REFUSES the bout, so always emitting the key would have changed
+    # the string for every config in existence and refused every kp3d.npz
+    # already on disk -- a re-triangulation plus a 12-minute STAC re-solve per
+    # bout-fly, to adopt a stage that is off. Absent must be a strict no-op.
+    if _wf.get("enabled", False):
+        sig["wing_mask_fit"] = {k: _plain(_wf.get(k)) for k in sorted(_wf)}
+    return json.dumps(sig, sort_keys=True)
+
+
+def wing_mask_fit_enabled(cfg) -> bool:
+    """True only when the opt-in ``wing_mask_fit`` block exists AND is enabled.
+
+    An absent block (a config predating the stage) or an explicit null is a
+    strict no-op returning False -- same contract as
+    ``should_stop_after_triangulate``. Nothing is imported and no artifact is
+    written when this is False.
+    """
+    return bool((cfg.get("wing_mask_fit") or {}).get("enabled", False))
+
+
+def wing_mask_fit_refine_kwargs(wf):
+    """``refine_wing_pitch`` kwargs from the ``wing_mask_fit`` config block.
+
+    EVERY knob is passed explicitly and none is allowed to fall back to the
+    module default, because the module defaults are NOT the measured-best
+    configuration: `huber_delta` defaults to 0.0, at which the coverage term is
+    an unrobustified L2 whose gradient grows with distance, so SAM halo and
+    body-silhouette crescents dominate and the term loses on its own metric
+    (Task 5 measured huber_delta=8 better at every coverage weight tried).
+    A missing key raises rather than silently taking the default.
+
+    Keys the CALLER consumes instead of the refiner -- `out_hw`/`bbox_margin`
+    (the SDF stack), `body_vertex_stride` (the body basis), `exclude_cameras`
+    and `min_present_cameras` (the per-frame camera gate) -- are handled in
+    `wing_mask_fit_bout`; `tests/test_run_bout_pipeline_structure.py` pins that
+    the two sets partition the YAML block exactly.
+    """
+    keys = (("containment_weight", float), ("coverage_weight", float),
+            ("coverage_normalize", bool), ("huber_delta", float),
+            ("smooth_weight", float), ("limit_weight", float),
+            ("n_steps", int), ("lr", float), ("frame_chunk", int),
+            ("n_target_points", int), ("dilate_px", int))
+    missing = [k for k, _ in keys if k not in wf]
+    if missing:
+        raise KeyError(
+            f"wing_mask_fit is enabled but the block is missing {missing}; "
+            f"copy the full block from configs/pipeline.yaml -- these are not "
+            f"allowed to fall back to refine_wing_pitch's defaults (huber_delta "
+            f"defaults to 0.0, which measurably degrades the fit)")
+    return {k: cast(wf[k]) for k, cast in keys}
+
+
+def wing_mask_fit_bout(cfg, qpos, bridge_s, bridge_R, bridge_t, bridge_ok,
+                       masks_dict, cameras):
+    """Refine wing pitch against the SAM masks. Returns ``(qpos_refined, stats)``.
+
+    Everything but the two wing-pitch DOFs comes back bit-identical, and a frame
+    with no usable mask evidence (or no bridge) is handed back at its STAC pose.
+
+    CAMERA ORDER -- the trap this whole pipeline has been bitten by twice. The
+    mask camera axis and the DLT projection matrices must be in the SAME order,
+    and `refine_wing_pitch` only checks the camera COUNT, so a PERMUTATION is
+    invisible to it: it would project one camera's wing onto another camera's
+    mask and the residual would still look plausible. Both axes are therefore
+    built BY NAME off the single canonical list `cameras` (==
+    `cfg.recording.cameras`): `load_bout_masks(expected_cameras=cameras)`
+    reordered the mask axis before this was called, and
+    `affine_cameras_by_name(calib_dir, cameras)` selects the matrices out of
+    ReprojectionTool's name-keyed dict. The assertion below re-checks the mask
+    side rather than trusting the convention, and a legacy sam3_masks.npz with
+    no `cameras` name array (whose axis order cannot be checked by name at all)
+    is refused outright.
+    """
+    from jarvis_jax.tracking.appendage_dof import appendage_vertex_indices
+    from jarvis_jax.tracking.fk import load_anatomy, make_fk_repose
+    from jarvis_jax.tracking.mask_sdf import sdf_stack_from_masks
+    from jarvis_jax.tracking.wing_mask_refine import (
+        affine_cameras_by_name, body_vertex_indices, qpos_limits,
+        refine_wing_pitch, wing_pitch_dof_mask)
+    import mujoco
+
+    wf = cfg.get("wing_mask_fit") or {}
+    cameras = [str(c) for c in cameras]
+
+    if "cameras" not in masks_dict:
+        raise RuntimeError(
+            "wing_mask_fit needs a name-labelled mask camera axis, but this "
+            "sam3_masks.npz predates the `cameras` array, so its camera order "
+            "cannot be verified by name -- and a permutation would silently "
+            "project each wing onto the wrong camera's mask. Re-run SAM3 for "
+            "this bout, or leave wing_mask_fit.enabled=false.")
+    if list(masks_dict["cameras"]) != cameras:
+        raise RuntimeError(
+            f"mask camera axis {list(masks_dict['cameras'])} != canonical "
+            f"{cameras}; load_bout_masks(expected_cameras=...) must be given "
+            f"the SAME list that builds the projection matrices")
+    cam_Ms, cam_ts = affine_cameras_by_name(cfg.recording.calib_dir, cameras)
+
+    masks = np.asarray(masks_dict["masks"])
+    valid = np.array(masks_dict["valid"], bool, copy=True)          # (T,C)
+    # A frame with no bridge has no model->mm map, hence no usable geometry.
+    valid &= np.asarray(bridge_ok, bool)[:, None]
+    # Cameras excluded for the WINGS specifically: Cam2012631's masks are
+    # truncated (the right wing is inside them on only 43-46% of frames), so its
+    # silhouette would pull the blade in rather than out.
+    _excl = [str(c) for c in (wf.get("exclude_cameras") or [])]
+    _unknown = [c for c in _excl if c not in cameras]
+    if _unknown:
+        raise ValueError(f"wing_mask_fit.exclude_cameras names camera(s) "
+                         f"{_unknown} that are not in cfg.recording.cameras "
+                         f"{cameras}")
+    for c in _excl:
+        valid[:, cameras.index(c)] = False                          # BY NAME
+
+    sdf, grid_scale, grid_offset, present = sdf_stack_from_masks(
+        masks, valid,
+        out_hw=tuple(int(v) for v in wf["out_hw"]),
+        bbox_margin=float(wf["bbox_margin"]))
+    # Too few views is ill-conditioned for a silhouette fit exactly as it is for
+    # triangulation. An all-False `present` row freezes that frame at its STAC
+    # pose inside refine_wing_pitch (its "no evidence means no change" gate).
+    _min_cams = int(wf["min_present_cameras"])
+    _thin = present.sum(axis=1) < _min_cams
+    present[_thin] = False
+
+    anat = load_anatomy(str(cfg.ik.xml), str(cfg.ik.mesh_npz))
+    lb, ub = qpos_limits(anat["m"])
+    opt_mask = wing_pitch_dof_mask(anat["m"])       # raises if the joints moved
+    q_ref = refine_wing_pitch(
+        qpos,
+        fk_repose=make_fk_repose(anat),
+        wing_vert_idx=appendage_vertex_indices(
+            str(cfg.ik.mesh_npz), subset=str(cfg.ik.mesh_subset), include=("wing",)),
+        body_vert_idx=body_vertex_indices(
+            str(cfg.ik.mesh_npz), stride=int(wf["body_vertex_stride"])),
+        cam_Ms=cam_Ms, cam_ts=cam_ts,
+        sdf=sdf, grid_scale=grid_scale, grid_offset=grid_offset,
+        present=present, masks=masks,
+        bridge_s=bridge_s, bridge_R=bridge_R, bridge_t=bridge_t,
+        opt_mask=opt_mask, lb=lb, ub=ub,
+        **wing_mask_fit_refine_kwargs(wf))
+
+    # Report the two wings by NAME, never by array position: which qpos address
+    # is left and which is right is a property of the XML, and `opt_mask` is
+    # just a sorted boolean over addresses.
+    adr = {}
+    for _name in ("wing_pitch_left", "wing_pitch_right"):
+        _jid = mujoco.mj_name2id(anat["m"], mujoco.mjtObj.mjOBJ_JOINT, _name)
+        adr[_name] = int(anat["m"].jnt_qposadr[_jid])
+    q0 = np.asarray(qpos, np.float32)
+    moved = present.any(axis=1) & np.isfinite(q0).all(axis=1)
+    d = np.rad2deg(np.asarray(q_ref, np.float64)[moved] - q0[moved].astype(np.float64))
+    stats = {
+        "n_frames": int(q0.shape[0]),
+        "n_refined": int(moved.sum()),
+        "n_skipped": int(q0.shape[0] - moved.sum()),
+        "n_thin_frames": int(_thin.sum()),
+        "min_present_cameras": _min_cams,
+        "dpitch_left_deg": float(np.median(d[:, adr["wing_pitch_left"]])) if moved.any() else 0.0,
+        "dpitch_right_deg": float(np.median(d[:, adr["wing_pitch_right"]])) if moved.any() else 0.0,
+    }
+    return q_ref, stats
 
 
 def compute_segment_scales(cfg, kp3d, kp_names, scale, run_root):
@@ -920,6 +1094,7 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
     kp3d_filt_path = os.path.join(bout_dir, "kp3d_filt.npz")
     stac_h5_path = os.path.join(bout_dir, "stac_ik.h5")
     qpos_path = os.path.join(bout_dir, "qpos_refined.npz")
+    wingfit_path = os.path.join(bout_dir, "qpos_wingfit.npz")
     outputs_h5_path = os.path.join(bout_dir, "outputs.h5")
     qc_json_path = os.path.join(bout_dir, "qc.json")
     offsets_path = os.path.join(run_root, "offsets.h5")
@@ -943,7 +1118,8 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
         print(f"[sync] bout {bout_idx} fly{fly}: masks stale for plan "
               f"status={getattr(sync_plan, 'status', None)} -- invalidating downstream artifacts")
         for _p in (kp2d_path, kp3d_path, kp3d_filt_path, stac_h5_path, qpos_path,
-                   outputs_h5_path, qc_json_path, os.path.join(bout_dir, "qc_perframe.npz")):
+                   wingfit_path, outputs_h5_path, qc_json_path,
+                   os.path.join(bout_dir, "qc_perframe.npz")):
             try:
                 if os.path.exists(_p):
                     os.remove(_p)
@@ -1069,12 +1245,16 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
                 f"  current: {_gate_sig}\n"
                 f"Stage B's gates (view-conf, mask-agreement, wing-collapse, "
                 f"rigid-repair) only run when kp3d.npz is (re)computed, so "
-                f"reusing this file would silently ignore the current config. "
+                f"reusing this file would silently ignore the current config "
+                f"-- as would reusing a qpos_wingfit.npz fitted under a "
+                f"different wing_mask_fit block, which the same signature "
+                f"covers. "
                 f"Delete these and rerun this bout/fly:\n"
                 f"    rm -f {os.path.join(bout_dir, 'kp3d.npz')} "
                 f"{os.path.join(bout_dir, 'kp3d_filt.npz')} "
                 f"{os.path.join(bout_dir, 'stac_ik.h5')} "
                 f"{os.path.join(bout_dir, 'qpos_refined.npz')} "
+                f"{os.path.join(bout_dir, 'qpos_wingfit.npz')} "
                 f"{os.path.join(bout_dir, 'outputs.h5')} "
                 f"{os.path.join(bout_dir, 'qc.json')} "
                 f"{os.path.join(bout_dir, 'DONE')}\n"
@@ -1604,7 +1784,61 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
                         bridge_s=bs, bridge_R=bR, bridge_t=bt, bridge_ok=bok)
     with np.load(qpos_path) as zq:
         qpos_refined = zq["qpos"]
-        bridges = arrays_to_bridges(zq["bridge_s"], zq["bridge_R"], zq["bridge_t"], zq["bridge_ok"])
+        bridge_s, bridge_R = zq["bridge_s"], zq["bridge_R"]
+        bridge_t, bridge_ok = zq["bridge_t"], zq["bridge_ok"]
+    bridges = arrays_to_bridges(bridge_s, bridge_R, bridge_t, bridge_ok)
+
+    # -- Stage D2: wing-pitch refinement against the SAM masks (OPT-IN) -------------
+    #    Wing pitch is 99.6% of the marker Jacobian's null direction (per-column
+    #    sensitivity yaw 0.271 / roll 0.344 / pitch 0.042): each wing body
+    #    carries only two markers and WingX_base maps to the THORAX, so nothing
+    #    in the keypoint solve constrains the blade and STAC rotates it into the
+    #    abdomen. The masks DO contain wing pixels, so pitch -- and only pitch --
+    #    is recovered here. Yaw carries the courtship song and roll is the
+    #    best-observed wing DOF; both stay with the marker solve.
+    #
+    #    ORDER. This sits AFTER compute_bridges and before Stage E, not between
+    #    Stages C and D as the design first said: the refinement projects the
+    #    wing mesh onto the masks through the per-frame bridge
+    #    (br_s * (v @ br_R.T) + br_t), so the bridge must already exist.
+    #    Those SAME bridges are REUSED rather than refitted afterwards -- the
+    #    bridge is a similarity fitted by Umeyama to the KEYPOINTS, and
+    #    refining wing pitch moves only the two wing markers of the full marker
+    #    set (and only the two markers whose Jacobian columns are the null
+    #    direction the bridge is least sensitive to), so a refit is a no-op to
+    #    within noise. If that ever stops being true, recompute here and report
+    #    the delta rather than assuming.
+    #
+    #    Off by default; an absent wing_mask_fit block is a strict no-op that
+    #    imports nothing and writes nothing.
+    if wing_mask_fit_enabled(cfg):
+        if not stage_done(wingfit_path):
+            _q_wf, _wf_stats = wing_mask_fit_bout(
+                cfg, qpos_refined, bridge_s, bridge_R, bridge_t, bridge_ok,
+                masks_dict, cameras)
+            atomic_save_npz(wingfit_path, qpos=_q_wf, **_wf_stats)
+        with np.load(wingfit_path) as zw:
+            qpos_refined = zw["qpos"]
+            _st = {k: zw[k] for k in zw.files if k != "qpos"}
+        # Same contract as the stac_ik.h5 T-mismatch check above: a resumed
+        # artifact from a differently-trimmed run would silently desync Stage E
+        # from masks_dict, and build_fly_outputs would fail later with a bare
+        # `assert scale.shape[0] == T`. Refuse here, where it can be explained.
+        if qpos_refined.shape[0] != T:
+            raise RuntimeError(
+                f"bout {bout_idx} fly{fly}: qpos_wingfit.npz qpos T="
+                f"{qpos_refined.shape[0]} != masks T={T} ({wingfit_path}); "
+                f"stale/mismatched resumed artifact -- delete it and rerun "
+                f"this bout/fly.")
+        # Printed on a resumed run too (the stats live in the npz), so the log
+        # of a re-run says what the reused fit did rather than going silent.
+        print(f"[wing-mask-fit] bout {bout_idx} fly{fly}: refined "
+              f"{int(_st['n_refined'])}/{int(_st['n_frames'])} frames; "
+              f"{int(_st['n_skipped'])} left at the STAC pose "
+              f"({int(_st['n_thin_frames'])} of them seen by fewer than "
+              f"{int(_st['min_present_cameras'])} mask cameras); median "
+              f"wing_pitch change L {float(_st['dpitch_left_deg']):+.2f} deg / "
+              f"R {float(_st['dpitch_right_deg']):+.2f} deg", flush=True)
 
     # -- Stage E: outputs.h5 + qc.json ---------------------------------------------
     if not stage_done(outputs_h5_path):

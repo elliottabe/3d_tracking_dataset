@@ -307,3 +307,52 @@ rigid_repair:
   min_conf: 0.5
   min_frames: 50
   also_nan: []      # extra keypoints to drop on a flagged frame
+
+# Post-STAC refinement of WING PITCH against the SAM masks. Wing pitch is 99.6%
+# of the marker Jacobian's null direction (per-column sensitivity yaw 0.271 /
+# roll 0.344 / pitch 0.042), because each wing body carries only two markers --
+# WingX_base maps to the THORAX. Unconstrained, the blade rotates into the
+# abdomen. The masks DO contain wing pixels (wing landmarks project inside them
+# on 75-91% of frames), and sweeping pitch shows a real silhouette optimum.
+# Yaw and roll are NOT touched: yaw carries the song, roll is the
+# strongest-observed wing DOF.
+# Runs between Stage D's compute_bridges and Stage E (it needs the per-frame
+# model->mm bridge to project onto the masks) and writes qpos_wingfit.npz.
+# See docs/specs/2026-09-01-wing-orientation-from-masks-design.md
+wing_mask_fit:
+  enabled: false
+  containment_weight: 0.3
+  # MEASURED, Task 5: at coverage_weight == containment_weight the coverage sum
+  # (128 targets x 7 cameras of squared raw-px distances) dwarfs the containment
+  # sum (100 wing verts, ~79% of them exactly zero) by ~100x, so 0.3/0.3 is
+  # effectively coverage-only and the fit gets WORSE on both metrics. The fix is
+  # per-target-count normalisation plus huber_delta > 0, not zeroing the term.
+  # Task 7 sweeps this on BOTH flies; Task 8 sets the final value.
+  coverage_weight: 0.3
+  # NOTE the module normalises coverage per (frame, camera) target count by
+  # default, so coverage_weight: 0.3 here is ~ the OLD un-normalised 0.03.
+  coverage_normalize: true
+  # MUST be > 0. At huber_delta 0 the chamfer is an unrobustified L2 whose
+  # gradient scales with distance, so SAM halo and body-silhouette crescents
+  # dominate and the term loses on its own metric. 8.0 is the measured corner.
+  huber_delta: 8.0
+  # Body basis for "what the body already explains". Density MATTERS on real
+  # masks (stride 20->4 with dilate_px 3->8 recovered 1.3 pt); the synthetic
+  # fixture could not show this because there the mask IS the mesh silhouette.
+  body_vertex_stride: 4
+  dilate_px: 8
+  smooth_weight: 0.005
+  limit_weight: 10.0
+  n_steps: 300
+  lr: 0.01
+  # Task 5 measured on a 46 GB card: 256 is what the real bout wants.
+  # The module default of 64 is safe but slower.
+  frame_chunk: 256
+  out_hw: [128, 128]
+  bbox_margin: 0.4
+  n_target_points: 128
+  # a frame with fewer than this many present cameras is left at its STAC pose
+  min_present_cameras: 3
+  # cameras to exclude for wings. Cam2012631 has the right wing inside its mask
+  # on only 43-46% of frames (Abd_tip 20%), i.e. truncated masks.
+  exclude_cameras: [Cam2012631]

@@ -17,6 +17,48 @@ from pathlib import Path
 import pytest
 
 RUN_BOUT = Path(__file__).resolve().parents[1] / "scripts" / "run_bout.py"
+PIPELINE_YAML = Path(__file__).resolve().parents[1] / "configs" / "pipeline.yaml"
+
+
+def _pipeline_wing_mask_fit():
+    """The shipped `wing_mask_fit:` block, read straight out of configs/pipeline.yaml.
+
+    Read as raw YAML rather than composed by hydra so this stays a cheap,
+    import-free structure test; the block has no ${} interpolations.
+    """
+    import yaml
+    cfg = yaml.safe_load(PIPELINE_YAML.read_text())
+    assert "wing_mask_fit" in cfg, (
+        "configs/pipeline.yaml has no `wing_mask_fit:` block -- the opt-in "
+        "wing-pitch refinement stage is unreachable from the shipped config")
+    return cfg["wing_mask_fit"]
+
+
+# The shipped block with the opt-in flag flipped: what a real enabling run sees.
+WING_MASK_FIT_ON = {**_pipeline_wing_mask_fit(), "enabled": True}
+
+
+def _run_bout_helpers(*names):
+    """exec the named module-level functions out of run_bout.py, without
+    importing it, sharing one globals dict so they can call each other.
+
+    run_bout imports jax/mujoco/hydra/stac_mjx at module level; these guards
+    must stay cheap and AST-based (same trick as test_stage_b_gate_signature_*).
+    """
+    import ast as _ast
+    import json as _json
+    import numpy as _np
+    body = [n for n in _ast.parse(RUN_BOUT.read_text()).body
+            if isinstance(n, _ast.FunctionDef) and n.name in names]
+    got = {n.name for n in body}
+    assert got == set(names), f"run_bout.py is missing {sorted(set(names) - got)}"
+    g = {"json": _json, "np": _np}
+    exec(compile(_ast.Module(body=body, type_ignores=[]), "<rb>", "exec"), g)
+    return tuple(g[n] for n in names)
+
+
+def _run_bout_helper(name):
+    return _run_bout_helpers(name)[0]
 
 
 @pytest.fixture(scope="module")
@@ -58,6 +100,7 @@ def test_no_unreachable_code_after_return():
     "Stage E: outputs",
     "stac_ik.h5",
     "mark_done(",
+    "[wing-mask-fit]",
 ])
 def test_every_stage_lives_inside_process_bout_fly(tree, marker):
     """The stages must be in the function the bout loop actually calls."""
@@ -188,6 +231,7 @@ def test_stage_b_gate_signature_changes_with_every_gate():
         "masks": {"kp_mask_agree_fly_lengths": 3.0, "min_views": 3},
         "wing_collapse": {"enabled": False},
         "rigid_repair": {"enabled": False},
+        "wing_mask_fit": {"enabled": False},
     })
     b = sig(base)
     assert isinstance(b, str) and "wing_collapse" in b
@@ -201,6 +245,7 @@ def test_stage_b_gate_signature_changes_with_every_gate():
         "repair_on": {"rigid_repair": {"enabled": True, "edges_containing": ["Wing"],
                                        "rel_tol": 0.5, "max_gap": 5, "max_cv": 0.2,
                                        "min_conf": 0.5, "min_frames": 50}},
+        "wingfit_on": {"wing_mask_fit": dict(WING_MASK_FIT_ON)},
     }
     for name, patch in variants.items():
         c = OmegaConf.merge(base, OmegaConf.create(patch))
@@ -211,6 +256,19 @@ def test_stage_b_gate_signature_changes_with_every_gate():
     tweaked = OmegaConf.merge(on, OmegaConf.create(
         {"rigid_repair": {"rel_tol": 0.7}}))
     assert sig(on) != sig(tweaked), "rel_tol change must invalidate kp3d.npz"
+
+    # ... including the wing-mask fit's, which is the whole point of recording
+    # it: re-running with a different coverage weight must not silently reuse a
+    # qpos_wingfit.npz fitted under the old one.
+    wf_on = OmegaConf.merge(base, OmegaConf.create(variants["wingfit_on"]))
+    wf_tweaked = OmegaConf.merge(wf_on, OmegaConf.create(
+        {"wing_mask_fit": {"coverage_weight": 0.03}}))
+    assert sig(wf_on) != sig(wf_tweaked), \
+        "coverage_weight change must invalidate the wing-mask fit"
+    wf_tweaked2 = OmegaConf.merge(wf_on, OmegaConf.create(
+        {"wing_mask_fit": {"exclude_cameras": []}}))
+    assert sig(wf_on) != sig(wf_tweaked2), \
+        "exclude_cameras change must invalidate the wing-mask fit"
 
 
 def test_run_bout_refuses_a_kp3d_written_under_other_gates():
@@ -227,3 +285,334 @@ def test_run_bout_refuses_a_kp3d_written_under_other_gates():
     # it must not silently delete anything itself
     assert "os.remove" not in blk and "shutil.rmtree" not in blk, \
         "must not auto-delete downstream artifacts"
+    # the wing-mask fit is covered by the same signature, so its artifact must
+    # be named too -- deleting everything else and leaving qpos_wingfit.npz
+    # behind would silently reuse a fit made under the old gates.
+    assert "qpos_wingfit.npz" in blk, \
+        "the refusal must name qpos_wingfit.npz among the artifacts to delete"
+
+
+# ---------------------------------------------------------------------------
+# Task 6: the opt-in post-STAC wing-pitch refinement against the SAM masks
+# ---------------------------------------------------------------------------
+
+def test_wing_mask_fit_is_off_and_absent_is_a_strict_no_op():
+    """`wing_mask_fit` is opt-in, and a config that has never heard of it must
+    behave exactly as before -- no crash, no stage, no signature change."""
+    from omegaconf import OmegaConf
+    enabled = _run_bout_helper("wing_mask_fit_enabled")
+
+    assert _pipeline_wing_mask_fit()["enabled"] is False, \
+        "the shipped default must be OFF -- this stage is opt-in"
+
+    # absent block: the pre-feature config
+    assert enabled(OmegaConf.create({"detector": {}})) is False
+    assert enabled({}) is False
+    # present but off
+    assert enabled(OmegaConf.create({"wing_mask_fit": {"enabled": False}})) is False
+    # explicit null block (hydra `wing_mask_fit: null`)
+    assert enabled(OmegaConf.create({"wing_mask_fit": None})) is False
+    # on
+    assert enabled(OmegaConf.create({"wing_mask_fit": WING_MASK_FIT_ON})) is True
+
+
+def test_absent_wing_mask_fit_does_not_move_the_stage_b_gate_signature():
+    """Back-compat, and the second half of "absent is a strict no-op".
+
+    The signature is stored INSIDE kp3d.npz and a mismatch REFUSES the bout.
+    `wing_collapse`/`rigid_repair` emit a bare {"enabled": False} when off, so
+    mirroring that shape here would have changed the signature string for every
+    config in existence and refused every kp3d.npz already on disk -- forcing a
+    re-triangulation plus a 12-minute STAC re-solve per bout-fly to adopt a
+    stage that is off. So the wing-mask-fit block is emitted ONLY when enabled.
+    """
+    from omegaconf import OmegaConf
+    sig = _run_bout_helper("stage_b_gate_signature")
+    base = OmegaConf.create({
+        "detector": {"conf_thresh": 0.3, "view_conf_thresh": 0.6,
+                     "reproj_resid_px": 10.0},
+        "masks": {"kp_mask_agree_fly_lengths": 3.0, "min_views": 3},
+        "wing_collapse": {"enabled": False},
+        "rigid_repair": {"enabled": False},
+    })
+    absent = sig(base)
+    off = sig(OmegaConf.merge(base, OmegaConf.create(
+        {"wing_mask_fit": {"enabled": False}})))
+    assert absent == off, (
+        "adding a disabled wing_mask_fit block changed the Stage-B gate "
+        "signature -- every kp3d.npz on disk would now be refused")
+    assert "wing_mask_fit" not in absent, (
+        "the signature names wing_mask_fit even when it is off, which moves "
+        "the string for every pre-feature config")
+    on = sig(OmegaConf.merge(base, OmegaConf.create(
+        {"wing_mask_fit": WING_MASK_FIT_ON})))
+    assert "wing_mask_fit" in on and on != absent
+
+
+def test_every_wing_mask_fit_yaml_key_reaches_the_refinement():
+    """No YAML key may be silently dropped, and none may fall back to a module
+    default.
+
+    `refine_wing_pitch`'s own defaults are NOT the measured-best configuration
+    -- `huber_delta` defaults to 0.0, at which the coverage term is an
+    unrobustified L2 that measurably degrades the fit (Task 5). So every knob in
+    the block is passed explicitly, and this pins that: the YAML keys must
+    partition exactly into (the refine_wing_pitch kwargs) + (the keys the caller
+    consumes itself) + enabled.
+    """
+    import ast as _ast
+    import importlib.util
+
+    wf = _pipeline_wing_mask_fit()
+    refine_kwargs = _run_bout_helper("wing_mask_fit_refine_kwargs")(wf)
+
+    # 1. every kwarg we pass is a real parameter of refine_wing_pitch (parsed
+    #    from source: importing it would pull in jax).
+    origin = importlib.util.find_spec(
+        "jarvis_jax.tracking.wing_mask_refine").origin
+    fn = next(n for n in _ast.parse(Path(origin).read_text()).body
+              if isinstance(n, _ast.FunctionDef) and n.name == "refine_wing_pitch")
+    params = {a.arg for a in fn.args.kwonlyargs} | {a.arg for a in fn.args.args}
+    unknown = sorted(set(refine_kwargs) - params)
+    assert not unknown, f"not parameters of refine_wing_pitch: {unknown}"
+
+    # 2. the values reaching it are the YAML's, not the module's defaults.
+    for k, v in refine_kwargs.items():
+        assert v == wf[k], f"{k}: passed {v!r}, YAML says {wf[k]!r}"
+    assert refine_kwargs["huber_delta"] == 8.0, (
+        "huber_delta must reach the module as the measured 8.0; its default "
+        "0.0 makes the coverage term an unrobustified L2")
+    assert refine_kwargs["coverage_normalize"] is True
+
+    # 3. the keys the caller consumes itself (they configure the SDF stack, the
+    #    body-vertex basis and the per-frame camera gate, not the refiner) must
+    #    each be read in the stage body -- nothing may be quietly ignored.
+    src = RUN_BOUT.read_text()
+    stage = _ast.get_source_segment(src, next(
+        n for n in _ast.parse(src).body
+        if isinstance(n, _ast.FunctionDef) and n.name == "wing_mask_fit_bout"))
+    caller_keys = {"out_hw", "bbox_margin", "body_vertex_stride",
+                   "min_present_cameras", "exclude_cameras"}
+    for k in caller_keys:
+        assert f'"{k}"' in stage or f"'{k}'" in stage, \
+            f"wing_mask_fit.{k} is in the YAML but never read by the stage"
+
+    # 4. and the partition is exact -- a new YAML key cannot be added without
+    #    being wired somewhere.
+    assert set(wf) == set(refine_kwargs) | caller_keys | {"enabled"}, (
+        f"wing_mask_fit YAML keys are not fully wired: "
+        f"unwired={sorted(set(wf) - set(refine_kwargs) - caller_keys - {'enabled'})}, "
+        f"wired-but-absent-from-YAML="
+        f"{sorted((set(refine_kwargs) | caller_keys) - set(wf))}")
+
+
+def test_wing_mask_fit_runs_after_the_bridges_and_reuses_them():
+    """ORDER: the refinement maps model units to mm with the per-frame bridge,
+    so it cannot run before `compute_bridges`. And it must REUSE those bridges
+    rather than triggering a refit."""
+    import ast as _ast
+    src = RUN_BOUT.read_text()
+    fn = next(n for n in _ast.parse(src).body
+              if isinstance(n, _ast.FunctionDef) and n.name == "process_bout_fly")
+    body = _ast.get_source_segment(src, fn)
+    i_bridge = body.index("compute_bridges(")
+    i_fit = body.index("[wing-mask-fit]")
+    i_outputs = body.index("Stage E: outputs")
+    assert i_bridge < i_fit < i_outputs, (
+        "the wing-mask fit must sit between compute_bridges and Stage E "
+        f"(compute_bridges@{i_bridge}, fit@{i_fit}, Stage E@{i_outputs})")
+    assert body.count("compute_bridges(") == 1, \
+        "the bridges must be reused, not refitted after the wing fit"
+
+    # and a stale resumed qpos_wingfit.npz must be refused, not silently fed to
+    # Stage E -- same contract as the stac_ik.h5 T-mismatch check.
+    blk = body[i_fit - 3000:i_outputs]
+    assert "qpos_wingfit.npz qpos T=" in blk and "raise RuntimeError" in blk, \
+        "the wing-fit stage must refuse a T-mismatched resumed artifact"
+
+
+class _Rec(dict):
+    """A recorder that stands in for one jarvis_jax entry point."""
+
+    def __init__(self, ret):
+        super().__init__()
+        self._ret = ret
+
+    def __call__(self, *a, **kw):
+        self["args"], self["kwargs"] = a, kw
+        return self._ret(*a, **kw) if callable(self._ret) else self._ret
+
+
+def _stub_wing_mask_fit(monkeypatch, n_frames, cameras):
+    """Install fake jarvis_jax/mujoco entry points for wing_mask_fit_bout.
+
+    Only the WIRING is under test here. The real `refine_wing_pitch` runs
+    `mjx.kinematics` on an 87-joint model, measured at 1739 s to COMPILE on the
+    XLA CPU backend against 6.4 s on an L40S (Task 5), so calling it for real is
+    a GPU-only Task-7 concern -- but the config plumbing, the camera axes, the
+    per-frame gating and the stats are all exercised for real below.
+    """
+    import sys
+    import types
+    import numpy as np
+
+    C = len(cameras)
+    rec = {}
+
+    def _sdf(masks, valid, *, out_hw, bbox_margin):
+        rec["sdf"] = {"valid": np.array(valid, bool, copy=True),
+                      "out_hw": out_hw, "bbox_margin": bbox_margin}
+        T = masks.shape[0]
+        return (np.zeros((T, C) + tuple(out_hw), np.float32),
+                np.ones((T, C, 2), np.float32),
+                np.zeros((T, C, 2), np.float32),
+                np.array(valid, bool, copy=True))       # present == valid
+
+    rec["sdf_fn"] = _sdf
+    # DELIBERATE: joint 0 is wing_pitch_RIGHT at qpos 9 and joint 1 is
+    # wing_pitch_LEFT at qpos 12, i.e. left comes SECOND in address order. A
+    # stats read that takes np.flatnonzero(opt_mask) positionally instead of
+    # resolving each joint by name therefore reports the two wings swapped, and
+    # the assertions below catch it.
+    fake_m = types.SimpleNamespace(jnt_qposadr=np.array([9, 12], np.int32))
+    delta = np.zeros(14, np.float32)
+    delta[9], delta[12] = 0.5, 0.25          # right +0.5 rad, left +0.25 rad
+    stubs = {
+        "jarvis_jax.tracking.mask_sdf": {"sdf_stack_from_masks": _sdf},
+        "jarvis_jax.tracking.fk": {
+            "load_anatomy": lambda xml, npz: {"m": fake_m, "xml": xml, "npz": npz},
+            "make_fk_repose": lambda anat: "FK"},
+        "jarvis_jax.tracking.appendage_dof": {
+            "appendage_vertex_indices": _Rec(np.arange(4, dtype=np.int32))},
+        "jarvis_jax.tracking.wing_mask_refine": {
+            "affine_cameras_by_name": _Rec(
+                (np.zeros((C, 2, 3), np.float32), np.zeros((C, 2), np.float32))),
+            "body_vertex_indices": _Rec(np.arange(8, dtype=np.int32)),
+            "qpos_limits": lambda m: (np.full(14, -np.inf, np.float32),
+                                      np.full(14, np.inf, np.float32)),
+            "wing_pitch_dof_mask": lambda m: np.isin(np.arange(14), [9, 12]),
+            "refine_wing_pitch": _Rec(
+                lambda q, **kw: np.array(q, np.float32) + delta)},
+        "mujoco": {"mjtObj": types.SimpleNamespace(mjOBJ_JOINT=3),
+                   "mj_name2id": lambda m, obj, nm: {"wing_pitch_left": 1,
+                                                     "wing_pitch_right": 0}[nm]},
+    }
+    for name, attrs in stubs.items():
+        mod = types.ModuleType(name)
+        for k, v in attrs.items():
+            setattr(mod, k, v)
+            if isinstance(v, _Rec):
+                rec[k] = v
+        monkeypatch.setitem(sys.modules, name, mod)
+    return rec
+
+
+def _wing_fit_fixture(n_frames=5):
+    """(cfg, masks_dict, qpos, bridge arrays) for wing_mask_fit_bout."""
+    import numpy as np
+    from omegaconf import OmegaConf
+    cameras = ["Cam2012630", "Cam2012631", "Cam2012853", "Cam2012855", "Cam2012857"]
+    cfg = OmegaConf.create({
+        "recording": {"calib_dir": "/nonexistent/calib", "cameras": cameras},
+        "ik": {"xml": "/nonexistent/model.xml", "mesh_npz": "/nonexistent/mesh.npz",
+               "mesh_subset": "fps_300"},
+        "wing_mask_fit": WING_MASK_FIT_ON,
+    })
+    masks_dict = {"masks": np.zeros((n_frames, len(cameras), 4, 4), bool),
+                  "valid": np.ones((n_frames, len(cameras)), bool),
+                  "cameras": list(cameras), "T": n_frames, "C": len(cameras)}
+    qpos = np.zeros((n_frames, 14), np.float32)
+    bs = np.ones(n_frames, np.float32)
+    bR = np.broadcast_to(np.eye(3, dtype=np.float32), (n_frames, 3, 3)).copy()
+    bt = np.zeros((n_frames, 3), np.float32)
+    bok = np.ones(n_frames, bool)
+    bok[0] = False                       # frame 0: STAC could not solve it
+    return cfg, cameras, masks_dict, qpos, bs, bR, bt, bok
+
+
+def test_wing_mask_fit_bout_forwards_every_config_knob(monkeypatch):
+    """Behavioural counterpart to the structural key test: the YAML values must
+    actually ARRIVE at refine_wing_pitch / the SDF stack / the body basis, not
+    merely be assembled into a dict, and the module's own defaults must not win.
+    """
+    import numpy as np
+    cfg, cameras, masks_dict, qpos, bs, bR, bt, bok = _wing_fit_fixture()
+    rec = _stub_wing_mask_fit(monkeypatch, len(qpos), cameras)
+    fit = _run_bout_helpers("wing_mask_fit_bout", "wing_mask_fit_refine_kwargs")[0]
+
+    q_ref, stats = fit(cfg, qpos, bs, bR, bt, bok, masks_dict, cameras)
+
+    kw = rec["refine_wing_pitch"]["kwargs"]
+    assert kw["containment_weight"] == 0.3
+    assert kw["coverage_weight"] == 0.3
+    assert kw["coverage_normalize"] is True
+    assert kw["huber_delta"] == 8.0, "the module default 0.0 must not win"
+    assert kw["smooth_weight"] == 0.005
+    assert kw["limit_weight"] == 10.0
+    assert kw["n_steps"] == 300
+    assert kw["lr"] == 0.01
+    assert kw["frame_chunk"] == 256, "the module default 64 must not win"
+    assert kw["n_target_points"] == 128
+    assert kw["dilate_px"] == 8, "the module default 3 must not win"
+    # the caller-side knobs
+    assert rec["sdf"]["out_hw"] == (128, 128) and rec["sdf"]["bbox_margin"] == 0.4
+    assert rec["body_vertex_indices"]["kwargs"]["stride"] == 4
+    assert rec["appendage_vertex_indices"]["kwargs"] == {
+        "subset": "fps_300", "include": ("wing",)}
+    # and the pose actually handed on is the refined one
+    assert np.allclose(q_ref[:, 9], qpos[:, 9] + 0.5)
+    assert np.allclose(q_ref[:, 12], qpos[:, 12] + 0.25)
+
+
+def test_wing_mask_fit_bout_gates_frames_and_cameras(monkeypatch):
+    """exclude_cameras, bridge_ok and min_present_cameras must each actually
+    remove evidence -- an all-False `present` row is what leaves a frame at its
+    STAC pose inside refine_wing_pitch."""
+    import numpy as np
+    cfg, cameras, masks_dict, qpos, bs, bR, bt, bok = _wing_fit_fixture()
+    rec = _stub_wing_mask_fit(monkeypatch, len(qpos), cameras)
+    fit = _run_bout_helpers("wing_mask_fit_bout", "wing_mask_fit_refine_kwargs")[0]
+
+    _, stats = fit(cfg, qpos, bs, bR, bt, bok, masks_dict, cameras)
+
+    valid = rec["sdf"]["valid"]
+    i631 = cameras.index("Cam2012631")
+    assert not valid[:, i631].any(), "wing_mask_fit.exclude_cameras had no effect"
+    assert not valid[0].any(), "a frame with bridge_ok=False has no model->mm map"
+    present = rec["refine_wing_pitch"]["kwargs"]["present"]
+    assert not present[0].any(), "frame 0 must be frozen at its STAC pose"
+    assert present[1:].sum(axis=1).tolist() == [4] * 4
+    # left is at qpos 12 (+0.25 rad) and right at qpos 9 (+0.5 rad) -- reported
+    # BY JOINT NAME, so a positional read of opt_mask would swap these two.
+    assert stats == {"n_frames": 5, "n_refined": 4, "n_skipped": 1,
+                     "n_thin_frames": 1, "min_present_cameras": 3,
+                     "dpitch_left_deg": pytest.approx(np.rad2deg(0.25)),
+                     "dpitch_right_deg": pytest.approx(np.rad2deg(0.5))}
+
+    # raise the bar above what the kept cameras can supply -> nothing is refined
+    cfg.wing_mask_fit.min_present_cameras = 5
+    _, stats2 = fit(cfg, qpos, bs, bR, bt, bok, masks_dict, cameras)
+    assert stats2["n_refined"] == 0 and stats2["n_thin_frames"] == 5
+
+
+def test_wing_mask_fit_bout_refuses_a_non_canonical_mask_camera_axis(monkeypatch):
+    """The camera-order trap. `refine_wing_pitch` only checks the camera COUNT,
+    so a PERMUTATION is invisible to it -- it would project each camera's wing
+    onto another camera's mask and still produce a plausible residual. Both axes
+    are built by name off `cfg.recording.cameras`; this pins the check that says
+    so, and the refusal of a legacy npz that carries no camera names at all."""
+    cfg, cameras, masks_dict, qpos, bs, bR, bt, bok = _wing_fit_fixture()
+    _stub_wing_mask_fit(monkeypatch, len(qpos), cameras)
+    fit = _run_bout_helpers("wing_mask_fit_bout", "wing_mask_fit_refine_kwargs")[0]
+
+    permuted = dict(masks_dict, cameras=list(reversed(cameras)))
+    with pytest.raises(RuntimeError, match="canonical"):
+        fit(cfg, qpos, bs, bR, bt, bok, permuted, cameras)
+
+    legacy = {k: v for k, v in masks_dict.items() if k != "cameras"}
+    with pytest.raises(RuntimeError, match="cannot be verified by name"):
+        fit(cfg, qpos, bs, bR, bt, bok, legacy, cameras)
+
+    cfg.wing_mask_fit.exclude_cameras = ["CamNotOnTheRig"]
+    with pytest.raises(ValueError, match="CamNotOnTheRig"):
+        fit(cfg, qpos, bs, bR, bt, bok, masks_dict, cameras)
