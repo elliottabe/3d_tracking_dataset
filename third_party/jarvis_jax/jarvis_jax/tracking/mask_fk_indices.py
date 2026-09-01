@@ -16,8 +16,8 @@ def mask_fk_indices(mesh_npz, subset: str = "fps_300", exclude_seg_ids=None):
     indices INTO the full ``vertices``/``vertex_geom`` arrays (values
     0..len(vertices)-1, e.g. 0..139352 for fly_v1_visual_canonical_wings.npz),
     so they are ALREADY full-array space and can be passed straight to
-    ``silhouette_ik.make_fk_repose(indices=...)``. In contrast,
-    ``silhouette_landmarks.wing_side_vertices`` /
+    ``fk.make_fk_repose(indices=...)``. In contrast,
+    ``wing_landmarks.wing_side_vertices`` /
     ``active_parts.excluded_fps_indices`` return indices INTO the fps subset
     (0..299) -- those MUST be bridged via ``fps[idx]`` before FK, or they
     silently select the wrong vertices (verified thorax-vertex bug in

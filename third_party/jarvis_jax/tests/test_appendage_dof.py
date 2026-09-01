@@ -2,12 +2,12 @@ import os
 
 import numpy as np
 import mujoco
-import pytest
 from hydra import initialize_config_dir, compose
 from omegaconf import OmegaConf
 
 from jarvis_jax.tracking.appendage_dof import (build_appendage_dof_mask,
                                                appendage_vertex_indices)
+from jarvis_jax.tracking.mask_fk_indices import mask_fk_indices
 
 CFG_DIR = "/gscratch/portia/eabe/Research/MyRepos/3d_tracking_dataset/configs"
 
@@ -55,7 +55,7 @@ def test_wing_vertex_selection_is_wing_only_BOTH_wings():
     seg_names is positional (0..66). Indexing seg_names by a vertex_segment
     value is off by one and made an earlier check report 'abdomen, wing_right'.
     Build the map by zipping seg_ids with seg_names."""
-    mj, c = _model()
+    _, c = _model()
     npz = c.anatomy.cse_mesh_npz
     z = np.load(npz, allow_pickle=True)
     id2name = dict(zip(np.asarray(z["seg_ids"]).tolist(),
@@ -71,9 +71,25 @@ def test_returned_indices_are_FULL_array_space_not_subset_space():
     """The recovered docstring warns these are full-array indices (0..139352),
     unlike wing_side_vertices which returns fps-subset indices. Mixing them
     silently selects the wrong vertices."""
-    mj, c = _model()
+    _, c = _model()
     npz = c.anatomy.cse_mesh_npz
     z = np.load(npz, allow_pickle=True)
     idx = np.asarray(appendage_vertex_indices(npz, subset="fps_300", include=("wing",)))
     assert idx.max() > 300, "full-array indices should exceed the subset size"
     assert idx.max() < len(z["vertex_segment"])
+
+
+def test_mask_fk_indices_with_no_filter_returns_fps_subset_unfiltered():
+    """exclude_seg_ids=None is falsy, so mask_fk_indices takes the pass-through
+    branch: the raw fps subset, unfiltered, already in full-array space (no
+    existing caller reaches this branch -- every appendage_vertex_indices call
+    builds a non-empty exclude list)."""
+    _, c = _model()
+    npz = c.anatomy.cse_mesh_npz
+    z = np.load(npz, allow_pickle=True)
+    fps = np.asarray(z["fps_300"], dtype=np.int64)
+    out = np.asarray(mask_fk_indices(npz, subset="fps_300", exclude_seg_ids=None))
+    np.testing.assert_array_equal(out, fps.astype(np.int32))
+    assert len(out) == 300
+    assert out.max() < len(z["vertex_segment"]), "must be full-array indices"
+    assert out.dtype == np.int32
