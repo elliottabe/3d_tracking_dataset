@@ -1,5 +1,5 @@
 import os, numpy as np, pytest, mujoco
-from jarvis_jax.tracking.silhouette_ik_solve import (
+from jarvis_jax.tracking.ik_solve import (
     build_solver_inputs, solve_ik, run_single_fly, run_ablation, _model_to_mm, _mm_to_model,
     _wing_fk_indices, _wing_joint_qpos_indices, _augment_wing_markers_stac_order,
     _COCO_KEYPOINT_NAMES, _STAC_WING_KP_IDX, _withhold_wing_kp,
@@ -115,7 +115,7 @@ def test_model_mm_bridge_roundtrips():
         true_R[:, -1] *= -1
     dst = true_s * (true_R @ src.T).T + true_t           # "mm frame" markers
 
-    from jarvis_jax.tracking.silhouette_ik_solve import _umeyama
+    from jarvis_jax.tracking.ik_solve import _umeyama
     s, R, t = _umeyama(src, dst)
     np.testing.assert_allclose(s, true_s, rtol=1e-6)
     np.testing.assert_allclose(R, true_R, atol=1e-6)
@@ -333,7 +333,7 @@ def test_withhold_wing_kp_nans_only_stac_indices_6_7_8_9():
 
 
 def test_stac_wing_idx_name_based_full_and_shifted():
-    from jarvis_jax.tracking.silhouette_ik_solve import _stac_wing_idx
+    from jarvis_jax.tracking.ik_solve import _stac_wing_idx
     # full STAC order: WingL_V12=6, WingL_V13=7, WingR_V12=8, WingR_V13=9.
     from jarvis_jax.tracking.active_parts import CANONICAL_KP_NAMES
     idx = _stac_wing_idx(CANONICAL_KP_NAMES)
@@ -346,7 +346,7 @@ def test_stac_wing_idx_name_based_full_and_shifted():
 
 def test_withhold_wing_kp_name_based_shifted_order():
     import numpy as np
-    from jarvis_jax.tracking.silhouette_ik_solve import _withhold_wing_kp
+    from jarvis_jax.tracking.ik_solve import _withhold_wing_kp
     from jarvis_jax.tracking.active_parts import CANONICAL_KP_NAMES
     hl = [n for n in CANONICAL_KP_NAMES if n not in ("Antenna_Base", "EyeL", "EyeR")]
     kp = np.ones((3, len(hl), 3))
@@ -361,7 +361,7 @@ def test_augment_wing_markers_writes_shifted_indices_under_headless_order():
     """Regression: the coco-slot bridge must fill the SHIFTED STAC wing indices
     (3,4,5,6) under a headless-like kp order, not the full-schema 6,7,8,9."""
     import numpy as np
-    from jarvis_jax.tracking.silhouette_ik_solve import _augment_wing_markers_stac_order
+    from jarvis_jax.tracking.ik_solve import _augment_wing_markers_stac_order
     from jarvis_jax.tracking.active_parts import CANONICAL_KP_NAMES
     hl = [n for n in CANONICAL_KP_NAMES if n not in ("Antenna_Base", "EyeL", "EyeR")]
     T = 2
@@ -474,7 +474,7 @@ def test_run_ablation_wiring(tmp_path):
 
 
 def test_ann_for_image_selects_by_ann_id_by_image():
-    from jarvis_jax.tracking.silhouette_ik_solve import _ann_for_image
+    from jarvis_jax.tracking.ik_solve import _ann_for_image
     id2ann_multi = {100: [{"id": 5, "keypoints": [1]}, {"id": 6, "keypoints": [2]}]}
     # explicit selection picks the chosen ann
     a = _ann_for_image(id2ann_multi, 100, {100: 6})
@@ -498,7 +498,7 @@ def test_triangulate_kp_mm_uses_selected_ann():
     ann chosen by ann_id_by_image, not the first one -- so fly0 and fly1 yield
     different 3-D keypoints (regression guard for identity threading)."""
     import numpy as np
-    from jarvis_jax.tracking.silhouette_ik_solve import _triangulate_kp_mm
+    from jarvis_jax.tracking.ik_solve import _triangulate_kp_mm
     from jarvis_jax.tracking.affine_camera import factor_affine, reconstruct_affine, project_affine
 
     class _FakeRT:
@@ -559,7 +559,7 @@ def test_simulated_no_phantom_t1r_off_on_normal_recording(tmp_path):
       (1) solved off-leg joints (qpos 38..48) stay at rest across ALL frames;
       (2) present-marker reproj_px is within eps of the unmasked run (the mask
           does not perturb the rest of the fly)."""
-    from jarvis_jax.tracking.silhouette_ik_solve import run_single_fly
+    from jarvis_jax.tracking.ik_solve import run_single_fly
     common = dict(ik_h5=NORM_IK, model_xml=XML, mesh_npz=MESH, root=ROOT,
                   split="val", use_silhouette=False, max_frames=8, n_iter=40,
                   out_dir=str(tmp_path))

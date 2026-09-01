@@ -16,7 +16,7 @@ frames is a single jax.vmap for the mesh subset (one XLA call).
 from __future__ import annotations
 import numpy as np
 
-from jarvis_jax.tracking.silhouette_ik import load_anatomy, make_fk_repose
+from jarvis_jax.tracking.fk import load_anatomy, make_fk_repose
 
 
 def mesh_subset_indices(anat, subset="fps_500"):
@@ -126,7 +126,7 @@ def write_outputs_h5(out_path, *, qpos, root_se3, scale, mesh_mm, kp3d_mm,
 
 def _load_solver_bits(ik_h5, model_xml):
     """Return (mjx_model, mjx_data, site_idxs, kp_names) from build_solver_inputs."""
-    from jarvis_jax.tracking.silhouette_ik_solve import build_solver_inputs
+    from jarvis_jax.tracking.ik_solve import build_solver_inputs
     inp = build_solver_inputs(ik_h5, model_xml)
     return inp["mjx_model"], inp["mjx_data"], inp["site_idxs"], list(inp["kp_names"])
 

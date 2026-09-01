@@ -19,7 +19,7 @@ import json
 import os
 
 from jarvis_jax.tracking.active_parts import derive_active_parts
-from jarvis_jax.tracking.silhouette_ik_solve import run_single_fly
+from jarvis_jax.tracking.ik_solve import run_single_fly
 
 
 def run_active_parts_ik(recording, *, cond_root, model_xml, mesh_npz, split="train",

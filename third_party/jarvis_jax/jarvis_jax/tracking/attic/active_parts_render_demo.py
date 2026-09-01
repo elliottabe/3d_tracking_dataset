@@ -13,7 +13,7 @@ inconsistent for frames where the active-parts solve differs from STAC, especial
 near the off-part): for each frame, `build_solver_inputs` gives the mjx model +
 `site_idxs` (STAC marker-site ids) + `kp_names`; running FK from the active-parts
 qpos through those sites (mirroring `run_single_fly`'s reproj_px computation in
-silhouette_ik_solve.py: `mjx_data.replace(qpos=...)` -> `stac_utils.kinematics` ->
+ik_solve.py: `mjx_data.replace(qpos=...)` -> `stac_utils.kinematics` ->
 `stac_utils.com_pos` -> `stac_utils.get_site_xpos`) gives "fitted markers" in MODEL
 frame that are consistent with the qpos being rendered. Those are Umeyama-matched
 (by NAME) to that frame's triangulated coco keypoints (present/visible only) to get
@@ -27,7 +27,7 @@ Coloring (mesh_npz's vertex_segment, same field the template uses):
 Also prints, per recording, the mean reprojection error (px) of the fitted markers
 (present markers only) against the coco 2-D keypoints, across the rendered frames'
 visible cameras -- this is the same "reproj_px" convention as
-silhouette_ik_solve.run_single_fly, but recomputed here against the active-parts
+ik_solve.run_single_fly, but recomputed here against the active-parts
 qpos + qpos-consistent bridge (rather than the solved-but-STAC-bridge value that
 run_single_fly reports internally).
 """
@@ -47,8 +47,8 @@ import stac_mjx.io_dict_to_hdf5 as ioh5
 from stac_mjx import utils as stac_utils
 
 from jarvis_jax.geometry.reprojection_tool import ReprojectionTool
-from jarvis_jax.tracking.silhouette_ik import load_anatomy, make_fk_repose
-from jarvis_jax.tracking.silhouette_ik_solve import build_solver_inputs, _umeyama, _model_to_mm
+from jarvis_jax.tracking.fk import load_anatomy, make_fk_repose
+from jarvis_jax.tracking.ik_solve import build_solver_inputs, _umeyama, _model_to_mm
 from jarvis_jax.tracking.active_parts import derive_active_parts, build_active_mask
 
 XML = "/gscratch/portia/eabe/Research/MyRepos/fruitfly_body_models/fruitfly_v1/fruitfly_v1_free.xml"
@@ -187,7 +187,7 @@ def process_condition(name, cfg):
     def fitted_markers_from_qpos(q_row):
         """qpos (nq,) -> (n_kp,3) MODEL-frame marker-site positions.
 
-        Mirrors run_single_fly's reproj_px computation in silhouette_ik_solve.py:
+        Mirrors run_single_fly's reproj_px computation in ik_solve.py:
         mjx_data.replace(qpos=...) -> stac_utils.kinematics -> stac_utils.com_pos ->
         stac_utils.get_site_xpos(., site_idxs).
         """

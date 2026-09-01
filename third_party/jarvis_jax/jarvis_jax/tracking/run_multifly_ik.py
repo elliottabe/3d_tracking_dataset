@@ -47,7 +47,7 @@ import numpy as np
 from jarvis_jax.tracking.identity_link import link_recording
 from jarvis_jax.tracking.multifly_bout import build_fly_bout
 from jarvis_jax.tracking import run_stac_bout
-from jarvis_jax.tracking.silhouette_ik_solve import (
+from jarvis_jax.tracking.ik_solve import (
     build_solver_inputs, solve_ik, run_single_fly, run_ablation,
 )
 
@@ -108,7 +108,7 @@ def _run_stac_fallback(bout_h5, fallback_ik_h5, out_h5):
     ``build_solver_inputs`` or ``solve_ik``; ``qpos``/``marker_sites`` here
     are still the shared fly's solved values, now paired with a different
     fly's keypoints. Writes a new h5 at ``out_h5`` with the same
-    io_dict_to_hdf5 layout that ``silhouette_ik_solve.build_solver_inputs``/
+    io_dict_to_hdf5 layout that ``ik_solve.build_solver_inputs``/
     ``run_single_fly`` expect (``qpos``, ``kp_data``, ``offsets``,
     ``kp_names``, ``names_qpos``, ``marker_sites``, ``config``). The actual
     per-fly pose re-solve happens downstream, inside ``run_single_fly``,
@@ -172,7 +172,7 @@ def _prepare_fly_ik(
     # 1) per-fly bout (de-collapsed triangulation). Written at
     # fly_dir/<rec>_bout.h5 so run_single_fly's/run_ablation's bout-derivation
     # (dirname(dirname(ik_h5))/<rec>_bout.h5) resolves back to it -- verified
-    # against silhouette_ik_solve's actual code (bout_h5 =
+    # against ik_solve's actual code (bout_h5 =
     # os.path.join(os.path.dirname(os.path.dirname(ik_h5)),
     # f"{recording}_bout.h5")).
     bout_h5 = os.path.join(fly_dir, f"{recording}_bout.h5")

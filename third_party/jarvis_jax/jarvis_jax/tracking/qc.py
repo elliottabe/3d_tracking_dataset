@@ -98,7 +98,7 @@ def loo_reproj(rt, kp2d_by_cam, vis_by_cam):
 
 def silhouette_iou_report(rt, mesh_mm, masks_by_cam):
     """Hard+soft IoU of the projected posed mesh subset vs SAM masks, per cam."""
-    from jarvis_jax.tracking.run_silhouette_polish import (
+    from jarvis_jax.tracking.mesh_iou import (
         iou_of_projected_verts, soft_iou_of_verts)
     mesh_mm = np.asarray(mesh_mm, float)
     hard, soft = {}, {}

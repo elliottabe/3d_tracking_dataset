@@ -165,7 +165,7 @@ def test_excluded_fps_indices_match_seg_ids():
 
 @pytest.mark.skipif(not _HAVE_MODEL, reason="V1 model / mesh not present")
 def test_wing_side_vertices_ignores_excluded_segs():
-    from jarvis_jax.tracking.silhouette_landmarks import wing_side_vertices
+    from jarvis_jax.tracking.wing_landmarks import wing_side_vertices
     base = wing_side_vertices(MESH)
     # excluding a LEG's segs must not change the WING tip/prox selection
     # (wings and that leg are disjoint) -> defensive no-op for wings.

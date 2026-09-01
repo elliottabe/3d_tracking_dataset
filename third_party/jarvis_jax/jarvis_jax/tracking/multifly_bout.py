@@ -8,7 +8,7 @@ this builds one bout h5 PER FLY by selecting that fly's chosen annotation per
 camera (via the identity map), triangulating its 50 keypoints in model order,
 and scaling to model cm with the SAME convention ``cse_labels.build_bout``
 uses -- so the downstream STAC + IK pipeline (``run_stac_bout.run``,
-``silhouette_ik_solve.build_solver_inputs``), built for single-fly bouts,
+``ik_solve.build_solver_inputs``), built for single-fly bouts,
 consumes each per-fly bout h5 unchanged.
 
 Keypoint convention (matches ``cse_labels.build_bout`` exactly)

@@ -388,12 +388,12 @@ def _triangulate_kp_mm(rt, ik_kpnames, coco_kpnames, cam2img, id2ann_multi, ann_
 def _wing_fk_indices(mesh_npz: str, exclude_seg_ids=None) -> np.ndarray:
     """Full-vertex-array indices [L-prox, L-tip, R-prox, R-tip] for FK repose.
 
-    ``silhouette_landmarks.wing_side_vertices`` returns indices into the
+    ``wing_landmarks.wing_side_vertices`` returns indices into the
     ``fps_300``-subsampled point set (i.e. positions 0..299 within
     ``z["fps_300"]``), not raw indices into the canonical mesh's full
     ``vertices``/``vertices_local``/``vertex_geom`` arrays (length ~61666)
-    that ``silhouette_ik.make_fk_repose``'s ``indices`` argument expects
-    (mirrors ``vgeom_all[indices]`` in ``silhouette_ik.make_fk_repose``,
+    that ``fk.make_fk_repose``'s ``indices`` argument expects
+    (mirrors ``vgeom_all[indices]`` in ``fk.make_fk_repose``,
     where ``vgeom_all`` is the FULL per-vertex geom array — see its
     docstring/usage in ``silhouette_render_demo.py``, which always indexes
     the full array, never the fps subset). Passing the fps-relative indices
@@ -409,7 +409,7 @@ def _wing_fk_indices(mesh_npz: str, exclude_seg_ids=None) -> np.ndarray:
     ``wing_side_vertices`` so an off-part's vertices can never be selected as
     a wing tip/prox; default None reproduces the original behavior exactly.
     """
-    from jarvis_jax.tracking.silhouette_landmarks import wing_side_vertices
+    from jarvis_jax.tracking.wing_landmarks import wing_side_vertices
 
     z = np.load(mesh_npz, allow_pickle=True)
     fps = z["fps_300"] if "fps_300" in z.files else z[f"fps_{len(z['vertex_segment'])}"]
@@ -576,7 +576,7 @@ def extract_tips_for_frames(
     ``silhouette_render_demo.py`` does:
 
       1. Repose the canonical wing tip/prox fps vertices under each frame's
-         STAC qpos via ``silhouette_ik.make_fk_repose`` -> MODEL-frame prox/tip.
+         STAC qpos via ``fk.make_fk_repose`` -> MODEL-frame prox/tip.
       2. Triangulate the recording's 50 coco keypoints for that frame into mm
          with the (possibly refined) calibration, then fit a similarity
          ``(s, R, t)`` from ``marker_sites[frame]`` -> ``kp_mm`` via
@@ -629,8 +629,8 @@ def extract_tips_for_frames(
     """
     import jax.numpy as jnp
     from jarvis_jax.geometry.reprojection_tool import ReprojectionTool
-    from jarvis_jax.tracking.silhouette_ik import load_anatomy, make_fk_repose
-    from jarvis_jax.tracking.silhouette_landmarks import triangulate_wing_tips
+    from jarvis_jax.tracking.fk import load_anatomy, make_fk_repose
+    from jarvis_jax.tracking.wing_landmarks import triangulate_wing_tips
 
     T = int(q_init.shape[0])
     assert fs_imgids.shape[0] == T, (
@@ -821,7 +821,7 @@ def run_single_fly(
     """
     import jax.numpy as jnp
     import h5py
-    from jarvis_jax.tracking.silhouette_ik import load_anatomy, make_fk_repose
+    from jarvis_jax.tracking.fk import load_anatomy, make_fk_repose
     from jarvis_jax.geometry.reprojection_tool import ReprojectionTool
     import stac_mjx.io_dict_to_hdf5 as ioh5
 
@@ -1188,7 +1188,7 @@ def run_ablation(
     """
     import jax.numpy as jnp
     import h5py
-    from jarvis_jax.tracking.silhouette_ik import load_anatomy, make_fk_repose
+    from jarvis_jax.tracking.fk import load_anatomy, make_fk_repose
     from jarvis_jax.geometry.reprojection_tool import ReprojectionTool
     import stac_mjx.io_dict_to_hdf5 as ioh5
 

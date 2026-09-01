@@ -4,7 +4,7 @@ outputs (Task 1) + QC report (Task 2) + optional overlay videos (Task 3).
 Consumes scenario qpos (single/multi/amputation/headless) -- NEVER changes any
 solver. Resolves calibration PER RECORDING (refined cse_work/calib_refined/<rec>
 if present, else factory <root>/calib_params/<rec>): the hardcoded single-recording
-_DEFAULT_*_CALIB_DIR in silhouette_ik_solve is a deploy blocker and is not used
+_DEFAULT_*_CALIB_DIR in ik_solve is a deploy blocker and is not used
 here.
 """
 from __future__ import annotations
@@ -41,7 +41,7 @@ def compute_bridges(recording, *, ik_h5, model_xml, root, split, calib_dir,
     """Per-frame model->mm Umeyama bridges, exactly as run_single_fly."""
     import stac_mjx.io_dict_to_hdf5 as ioh5
     from jarvis_jax.geometry.reprojection_tool import ReprojectionTool
-    from jarvis_jax.tracking.silhouette_ik_solve import (
+    from jarvis_jax.tracking.ik_solve import (
         build_solver_inputs, _umeyama, _triangulate_kp_mm, _cam2img_for_frame)
 
     inputs = build_solver_inputs(ik_h5, model_xml)
@@ -70,7 +70,7 @@ def gather_qc_frame_inputs(recording, *, root, split, calib_dir, fs_imgids, T,
                            ik_kpnames, ann_id_by_image=None):
     """Per-frame QC inputs aligned to ik_kpnames order: kp2d/vis/masks by cam."""
     from jarvis_jax.geometry.reprojection_tool import ReprojectionTool
-    from jarvis_jax.tracking.silhouette_ik_solve import (
+    from jarvis_jax.tracking.ik_solve import (
         _cam2img_for_frame, _ann_for_image, _load_sam_mask)
 
     rt = ReprojectionTool(calib_dir)
@@ -114,7 +114,7 @@ def run_outputs_qc(recording, *, ik_h5, model_xml, mesh_npz, root, split="val",
     from jarvis_jax.geometry.reprojection_tool import ReprojectionTool
     from jarvis_jax.tracking import outputs as outmod
     from jarvis_jax.tracking import qc as qcmod
-    from jarvis_jax.tracking.silhouette_ik_solve import build_solver_inputs
+    from jarvis_jax.tracking.ik_solve import build_solver_inputs
 
     if calib_dir is None:
         calib_dir = resolve_calib_dir(recording, root=root, cse_work_dir=cse_work_dir)
@@ -167,7 +167,7 @@ def run_outputs_qc(recording, *, ik_h5, model_xml, mesh_npz, root, split="val",
         import matplotlib.image as mpimg
         cam_names = list(rt.cameras.keys())
         _coco, id2file, _m = _load_coco(root, split)
-        from jarvis_jax.tracking.silhouette_ik_solve import _cam2img_for_frame
+        from jarvis_jax.tracking.ik_solve import _cam2img_for_frame
         for c, cam in enumerate(cam_names):
             # per-frame raw path + projected mesh/kp for this camera
             def _frames():
