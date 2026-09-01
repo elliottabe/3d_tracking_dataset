@@ -8,13 +8,13 @@ Pure-ish functions (no FK -- callers pass already-FK'd 3-D points/mesh):
     to all 50 keypoints: per kp, triangulate from all visible cams; per
     held-out cam re-triangulate from the OTHER visible cams (>=2), reproject
     into the held-out cam, pixel error vs its own 2-D.
-  * silhouette_iou_report -- reuses Phase-6 iou_of_projected_verts /
+  * mesh_mask_iou_report -- reuses Phase-6 iou_of_projected_verts /
     soft_iou_of_verts over the posed mesh subset vs SAM masks.
   * ik_reproj_report -- the metric NONE of the above three actually is: FK'd
     FITTED model sites vs. the MEASURED triangulated kp3d, both reprojected
     with the SAME calibration and compared to the SAME detected kp2d/vis
     gate. per_camera_reproj_error/loo_reproj never touch the fitted pose
-    (loo_reproj is a triangulation-only, pre-IK check); silhouette_iou is
+    (loo_reproj is a triangulation-only, pre-IK check); mesh_mask_iou is
     structurally tiny for a sparse mesh-vertex subset regardless of fit
     quality. This is the one metric that can tell "IK is bad" apart from
     "2D/triangulation is bad".
@@ -96,8 +96,25 @@ def loo_reproj(rt, kp2d_by_cam, vis_by_cam):
             "n": len(all_errs)}
 
 
-def silhouette_iou_report(rt, mesh_mm, masks_by_cam):
-    """Hard+soft IoU of the projected posed mesh subset vs SAM masks, per cam."""
+def mesh_mask_iou_report(rt, mesh_mm, masks_by_cam):
+    """Hard+soft IoU of the projected posed mesh subset vs SAM masks, per cam.
+
+    Was `silhouette_iou_report`, renamed 2026-09-01: it has nothing to do with
+    the deleted silhouette POLISH (0bc36fe) -- it is a mesh-vs-mask overlap
+    check that live QC runs on every bout, which is why mesh_iou.py survived
+    the removal. The old name kept implying the polish was still in the
+    pipeline. The qc.json key changed with it: `silhouette_iou` ->
+    `mesh_mask_iou`, and scripts/benchmark/{metrics,select_bouts}.py accept
+    EITHER, because the frozen 13-bout baseline's qc.json predates the rename.
+
+    NOT A COVERAGE FRACTION. It splats projected VERTICES of a SPARSE mesh
+    subset (fps_500), which mesh_iou.py's own docstring notes under-reports;
+    `filled_tri_iou` -- which rasterises the projected FACES -- is the honest
+    measure but needs subset faces this array does not carry. So the numbers
+    run ~0.025 hard / ~0.15 soft and always have (phase-0 baseline recorded
+    0.0287/0.0251). Treat it as a relative proxy between runs, never as
+    "2.5% of the fly is covered", and do not gate on it.
+    """
     from jarvis_jax.tracking.mesh_iou import (
         iou_of_projected_verts, soft_iou_of_verts)
     mesh_mm = np.asarray(mesh_mm, float)
@@ -231,7 +248,7 @@ def _jsonable(o):
 def qc_report(rt, *, kp3d_by_frame, mesh_by_frame, kp2d_by_frame,
               vis_by_frame, masks_by_frame, out_json=None,
               kp3d_measured_by_frame=None, kp_names=None, group_defs=None):
-    """Bundle per-camera reproj, LOO reproj, silhouette IoU, and (additive)
+    """Bundle per-camera reproj, LOO reproj, mesh-vs-mask IoU, and (additive)
     the IK reprojection metric over frames.
 
     ``kp3d_by_frame`` is the FITTED (FK'd) 3-D used by every metric here
@@ -252,7 +269,7 @@ def qc_report(rt, *, kp3d_by_frame, mesh_by_frame, kp2d_by_frame,
         lo = loo_reproj(rt, kp2d_by_frame[t], vis_by_frame[t])
         if lo["n"]:
             loo_all.append(lo["median"])
-        sr = silhouette_iou_report(rt, mesh_by_frame[t], masks_by_frame[t])
+        sr = mesh_mask_iou_report(rt, mesh_by_frame[t], masks_by_frame[t])
         if np.isfinite(sr["hard_mean"]):
             iou_hard_all.append(sr["hard_mean"])
         if np.isfinite(sr["soft_mean"]):
@@ -271,7 +288,7 @@ def qc_report(rt, *, kp3d_by_frame, mesh_by_frame, kp2d_by_frame,
     report = {
         "per_camera_reproj_px": {"median": _agg(per_cam_all), "n": len(per_cam_all)},
         "loo_reproj_px": {"median": _agg(loo_all), "n_frames": len(loo_all)},
-        "silhouette_iou": {"hard_median": _agg(iou_hard_all),
+        "mesh_mask_iou": {"hard_median": _agg(iou_hard_all),
                            "soft_median": _agg(iou_soft_all),
                            "n_frames": len(iou_hard_all)},
         "n_frames": T,

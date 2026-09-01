@@ -16,6 +16,12 @@ TRUNK_KEYPOINTS = {'Scutellum', 'WingL_base', 'WingR_base', 'Abd_A4', 'Abd_tip',
                    'Abd_A1', 'Abd_A2', 'Abd_A3'}
 
 
+def _iou(qc, field):
+    """qc.json's mesh-vs-mask IoU, under either key name (renamed 2026-09-01)."""
+    blk = qc.get("mesh_mask_iou") or qc.get("silhouette_iou") or {}
+    return blk.get(field)
+
+
 def kp_group(name: str) -> str:
     if name in TRUNK_KEYPOINTS:
         return 'trunk'
@@ -183,8 +189,12 @@ def compute_bout_metrics(bout_dir: Path, partner_dir: Path | None = None,
     scalars = {
         'reproj_px_median': qc['per_camera_reproj_px']['median'],
         'loo_px_median': qc['loo_reproj_px']['median'],
-        'soft_iou_median': qc['silhouette_iou']['soft_median'],
-        'hard_iou_median': qc['silhouette_iou']['hard_median'],
+        # qc.json key renamed silhouette_iou -> mesh_mask_iou (2026-09-01, the
+        # metric is mesh-vs-mask overlap and never was the deleted polish).
+        # Fall back so scorecards over qc.json written before the rename still
+        # read -- the frozen 13-bout baseline predates it.
+        'soft_iou_median': _iou(qc, 'soft_median'),
+        'hard_iou_median': _iou(qc, 'hard_median'),
     }
     # Raw-triangulation spike rate (pre-filter, pre-scale): the tail metric
     # median jitter/IoU cannot see -- see kp3d_spike_rate. Optional so bouts

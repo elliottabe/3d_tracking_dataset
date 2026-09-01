@@ -24,7 +24,10 @@ def scan_bout_fly(fly_dir: Path) -> dict | None:
     qc = json.loads(qc_path.read_text())
     return {"n_frames": qc.get("n_frames"),
             "reproj_px": qc.get("per_camera_reproj_px", {}).get("median"),
-            "soft_iou": qc.get("silhouette_iou", {}).get("soft_median")}
+            # key renamed silhouette_iou -> mesh_mask_iou (2026-09-01); accept
+            # both so qc.json from before the rename still reads.
+            "soft_iou": (qc.get("mesh_mask_iou") or
+                         qc.get("silhouette_iou") or {}).get("soft_median")}
 
 
 def proximity_median(bout_dir: Path) -> float | None:
