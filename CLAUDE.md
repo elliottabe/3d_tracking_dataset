@@ -42,6 +42,41 @@ fine regardless. A figure that only shows fly1/male, one easy camera, or one
 mid-bout frame overstates the change — include the female, an occlusion or
 wall frame, and more than one camera.
 
+**Never index a keypoint or camera axis by integer.** Two different index
+spaces exist for each, they disagree, and picking the wrong one produces
+confident, self-consistent, completely wrong numbers that every jitter,
+confidence and residual metric rates as GOOD. Both traps were hit in one
+sitting on 2026-08-31 and took four rounds of analysis plus a human pointing
+at the picture to find:
+
+- *Keypoint order.* `kp2d.npz`/`kp3d.npz` are written AFTER
+  `reorder_detector_to_model` (`scripts/run_bout.py`), so their keypoint axis
+  is `cfg.model.KP_NAMES` (XML/model order), NOT `cfg.detector.kp_names`. The
+  two differ. Indexed with detector indices, `WingR_base/V12/V13` (28/29/30)
+  read model `T2L_TiTa/TaT1/TaT3` — the middle-LEFT LEG. That yielded a
+  "collapsed right wing vein, 2.53u vs 21.58u, CV 4.1%, confidence 0.96":
+  a correct measurement of the wrong thing, and the *best-looking* keypoint in
+  the table.
+- *Camera order.* `kp2d`'s camera axis is the canonical
+  `cfg.recording.cameras` order (== the calibration glob order), because
+  `load_bout_masks(..., expected_cameras=...)` reorders the mask npz BY NAME.
+  The npz's own stored `cameras` array is a DIFFERENT order. Using the npz's
+  index against `kp2d` or `ReprojectionTool.camera_matrices` plots one
+  camera's keypoints on another camera's image — and the wing points still
+  looked *almost* plausible, which is what made it survive a first fix.
+
+Use `viz.core.bout_artifacts.load_bout_kp(...)`, which takes keypoints and
+cameras BY NAME and refuses a detector config; `centroids_canonical()` for
+mask-npz arrays. Guarded by `tests/test_bout_artifacts_order.py`.
+
+**Check a rigid invariant, not just smoothness.** The thing that finally
+exposed the above was that a rigid wing vein's length has to be CONSTANT.
+Jitter, spike rate, confidence and multi-view residual were all excellent on
+the mislabelled points — a collapsed pair is *smoother* than a real landmark.
+Every quantity with a known physical invariant (rigid segment lengths, bone
+lengths, left/right symmetry) should be checked against it before any
+conclusion, and reported with the invariant named.
+
 **Label with real names and units.** Reprojection error in px, positions in
 mm, angles in deg, time in frames; keypoint names (`T1L_FeTi`), camera names
 (`cam1`…`cam7`), and fly identities (`fly0`/`fly1`, male = fly1 after
