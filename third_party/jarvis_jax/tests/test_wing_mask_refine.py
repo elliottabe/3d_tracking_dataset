@@ -94,9 +94,19 @@ def _rasterise(verts_mm, M, t):
     return ndimage.binary_erosion(img, iterations=_CLOSE_PX)
 
 
-@functools.lru_cache(maxsize=4)
-def _problem_arrays(n_frames, pitch_offset_deg, base_pitch):
-    """Expensive, cacheable half of the fixture: q_true/q_pert + masks + SDF."""
+@functools.lru_cache(maxsize=6)
+def _problem_arrays(n_frames, pitch_offset_deg, base_pitch, rest):
+    """Expensive, cacheable half of the fixture: q_true/q_pert + masks + SDF.
+
+    `rest=True` puts wing YAW and ROLL at the model's spring reference
+    (`qpos_spring`: yaw +1.5 == the joint's upper stop, roll +0.7) instead of
+    qpos0's zeros. That is the regime the defect actually lives in -- wings
+    folded back over the abdomen, 48-80% of the blade hidden inside the body
+    silhouette, so pitch swings it THROUGH the body. At qpos0 the wings are
+    extended and pitch merely twists a blade that already sticks out, which is
+    the flattering case.
+    """
+    import mujoco
     from jarvis_jax.tracking.wing_mask_refine import wing_pitch_dof_mask
 
     cfg, anat, fk = _anatomy()
@@ -104,6 +114,13 @@ def _problem_arrays(n_frames, pitch_offset_deg, base_pitch):
     pitch_adr = np.flatnonzero(opt_mask)          # never hardcode 9 / 12
 
     q_true = np.tile(np.asarray(anat["qpos0"], np.float32), (n_frames, 1))
+    if rest:
+        mj = anat["m"]
+        for j in range(mj.njnt):
+            nm = mujoco.mj_id2name(mj, mujoco.mjtObj.mjOBJ_JOINT, j)
+            if nm and ("wing_yaw" in nm or "wing_roll" in nm):
+                a = int(mj.jnt_qposadr[j])
+                q_true[:, a] = mj.qpos_spring[a]
     wobble = np.linspace(-0.05, 0.05, n_frames).astype(np.float32)
     q_true[:, pitch_adr[0]] = base_pitch + wobble
     q_true[:, pitch_adr[1]] = base_pitch - wobble
@@ -122,15 +139,22 @@ def _problem_arrays(n_frames, pitch_offset_deg, base_pitch):
     return q_true, q_pert, masks, sdf, gs, go, present
 
 
+#: wing pitch at the model's spring reference, -1.0 rad = -57.3 deg -- the
+#: "rest (-57 deg)" figure the plan's acceptance criterion 5 names.
+_REST_PITCH = -1.0
+
+
 def _build_problem(*, n_frames=5, pitch_offset_deg=25.0, base_pitch=0.35,
-                   n_steps=60, frame_chunk=None, lr=2e-2):
+                   n_steps=60, frame_chunk=None, lr=2e-2, rest=False):
     from jarvis_jax.tracking.wing_mask_refine import (body_vertex_indices,
                                                       qpos_limits,
                                                       wing_pitch_dof_mask)
     cfg, anat, fk = _anatomy()
     mesh = cfg.anatomy.cse_mesh_npz
+    if rest:
+        base_pitch = _REST_PITCH
     q_true, q_pert, masks, sdf, gs, go, present = _problem_arrays(
-        n_frames, pitch_offset_deg, base_pitch)
+        n_frames, pitch_offset_deg, base_pitch, rest)
     lb, ub = qpos_limits(anat["m"])
     T = n_frames
     kw = dict(
@@ -153,9 +177,9 @@ def _tiny_problem(n_frames=5, **kw):
     return q_pert, kwargs
 
 
-def _synthetic_from_model(pitch_offset_deg=25.0):
+def _synthetic_from_model(pitch_offset_deg=25.0, rest=False):
     return _build_problem(n_frames=3, pitch_offset_deg=pitch_offset_deg,
-                          n_steps=200, lr=1e-2)
+                          n_steps=200, lr=1e-2, rest=rest)
 
 
 @contextlib.contextmanager
@@ -202,8 +226,16 @@ def test_joint_limits_are_respected():
 
 
 def test_a_frame_with_no_present_camera_is_left_at_q_init():
+    """Includes a frame whose STAC pitch is OUTSIDE the joint range. The final
+    hard clamp must be gated on having evidence too, not on opt_mask alone --
+    otherwise a no-evidence frame is silently pulled to the joint stop, which
+    is a change, and "no evidence must mean no change" is violated by the one
+    line that runs after the optimiser."""
     from jarvis_jax.tracking.wing_mask_refine import refine_wing_pitch
     q0, kw = _tiny_problem()
+    q0 = q0.copy()
+    ub = np.asarray(kw["ub"])[np.asarray(kw["opt_mask"])]
+    q0[1, np.flatnonzero(kw["opt_mask"])] = ub + 0.6      # out of range, no evidence
     kw["present"] = np.zeros_like(kw["present"])
     q1 = np.asarray(refine_wing_pitch(q0, **kw))
     assert np.allclose(q1, q0), "no evidence must mean no change"
@@ -222,6 +254,33 @@ def test_it_recovers_a_known_pitch_offset():
     assert err1 < 0.5 * err0, f"pitch error {err0:.3f} -> {err1:.3f} rad"
 
 
+def test_the_coverage_term_alone_points_the_right_way():
+    """The combined test above passes at ratio 0.25 while coverage does net
+    harm, so it would keep passing if coverage pointed almost anywhere. Pin the
+    coverage term's DIRECTION on its own: containment off, coverage must still
+    move pitch most of the way back to truth."""
+    from jarvis_jax.tracking.wing_mask_refine import refine_wing_pitch
+    q_true, q_pert, kw = _synthetic_from_model(pitch_offset_deg=25.0)
+    q1 = np.asarray(refine_wing_pitch(q_pert, **dict(kw, containment_weight=0.0)))
+    m = np.asarray(kw["opt_mask"])
+    err0 = np.abs(q_pert[:, m] - q_true[:, m]).mean()
+    err1 = np.abs(q1[:, m] - q_true[:, m]).mean()
+    assert err1 < 0.5 * err0, f"coverage-only pitch error {err0:.3f} -> {err1:.3f} rad"
+
+
+def test_it_recovers_a_known_pitch_offset_at_the_springref_rest_attitude():
+    """The HARD regime, and the one the defect lives in: wings folded back at
+    the spring reference, blade largely hidden inside the body silhouette. The
+    extended-wing fixture cannot exercise the containment degeneracy at all."""
+    from jarvis_jax.tracking.wing_mask_refine import refine_wing_pitch
+    q_true, q_pert, kw = _synthetic_from_model(pitch_offset_deg=25.0, rest=True)
+    q1 = np.asarray(refine_wing_pitch(q_pert, **kw))
+    m = np.asarray(kw["opt_mask"])
+    err0 = np.abs(q_pert[:, m] - q_true[:, m]).mean()
+    err1 = np.abs(q1[:, m] - q_true[:, m]).mean()
+    assert err1 < 0.5 * err0, f"rest-attitude pitch error {err0:.3f} -> {err1:.3f} rad"
+
+
 # --------------------------------------------------------------------------
 # structural properties that stand in for a (flaky) wall-clock assert
 # --------------------------------------------------------------------------
@@ -235,10 +294,26 @@ def test_the_step_loop_compiles_once_not_per_chunk():
     assert n.value == 1, f"retraced {n.value}x -- pad chunks to a constant shape"
 
 
-def test_only_the_wing_vertices_are_fk_d():
-    """FK over all 139 353 vertices per step per frame is a ~1400x waste."""
-    _, kw = _tiny_problem()
-    assert len(kw["wing_vert_idx"]) < 400, "wing selection must be the fps subset"
+def test_the_cost_loop_fks_only_the_wing_vertex_subset():
+    """Actually exercises refine_wing_pitch, unlike the fixture-only assertion
+    this replaces. FK inside the Adam loop must be over the wing subset, and the
+    full 139 353-vertex array must never be reached. NOTE the saving is the
+    gather and the projection, NOT the kinematics: fk_repose runs full
+    mjx.kinematics whatever `indices` says."""
+    from jarvis_jax.tracking.wing_mask_refine import refine_wing_pitch
+    q0, kw = _tiny_problem(n_frames=3, n_steps=2)
+    inner = kw["fk_repose"]
+    seen = []
+
+    def recording(qpos, scale=1.0, indices=None):
+        seen.append(None if indices is None else int(np.shape(indices)[0]))
+        return inner(qpos, scale, indices)
+
+    kw["fk_repose"] = recording
+    refine_wing_pitch(q0, **kw)
+    assert seen, "refine_wing_pitch never called fk_repose"
+    assert None not in seen, "FK was run over the FULL vertex array"
+    assert set(seen) == {len(kw["wing_vert_idx"]), len(kw["body_vert_idx"])}, seen
 
 
 def test_chunked_and_unchunked_agree():

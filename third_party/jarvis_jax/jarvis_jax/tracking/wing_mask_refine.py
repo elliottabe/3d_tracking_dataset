@@ -22,7 +22,29 @@ vertices of the `fps_300` subset:
 Containment alone is minimised perfectly by tucking the wing inside the body
 silhouette -- i.e. by the very bug this exists to fix -- so the pair is what
 makes the problem well posed. Plus temporal smoothness on the optimised joints,
-an (off by default) anchor to `q_init`, and a soft joint-limit barrier.
+and a soft joint-limit barrier.
+
+COVERAGE IS NORMALISED PER TARGET (`coverage_normalize=True`), containment is
+not, and the asymmetry is deliberate. Containment contributes ONE residual per
+wing VERTEX -- a fixed geometric quantity, ~100 of them, most of them exactly
+zero because the vertex is already inside the mask. Coverage contributes one
+residual per sampled TARGET, and that count is `n_target_points`, a free knob.
+Summing both left `coverage_weight` meaningless on its own and the two terms
+about two orders of magnitude apart: at the nominal
+`containment_weight == coverage_weight == 0.3` the objective was effectively
+coverage-only, and on Session0 bout 28 fly0 the break-even against containment
+sat near `coverage_weight = 0.03`. Taking the MEAN over the finite targets makes
+`coverage_weight` invariant to `n_target_points` and puts the two terms on one
+scale (verified: `coverage_weight=3.0` normalised reproduces the old unnormalised
+0.3 to within 0.2 of a percentage point on both real-bout metrics).
+
+RELATEDLY, `huber_delta` matters more than a robustness nicety here. At 0.0 the
+coverage term is a plain L2 on the softmin distance, whose gradient grows with
+distance, so the FARTHEST unexplained pixels dominate -- SAM halo, crescents
+where the mesh body does not register on the imaged body, an occluding second
+fly. Measured on the real bout, `huber_delta=8` improves the fit at EVERY
+coverage weight tried. (It was also unusable until 2026-09-01: `_huber_sqrt`
+returned correct values with an all-NaN gradient.)
 
 WHY ADAM, not the jaxls Gauss-Newton/LM used elsewhere: jaxls damps with a
 non-scale-invariant `lambda*I`, and the pixel-scale silhouette Jacobian has
@@ -227,7 +249,8 @@ def _body_uv_chunk(q_c, brs_c, brR_c, brt_c, *, fk_repose, body_idx, cam_Ms, cam
 # ---------------------------------------------------------------------------
 def _frame_cost(q_t, br_s, br_R, br_t, sdf_c, gsc_c, goff_c, pres_c, tgt_c, *,
                 fk_repose, wing_idx, cam_Ms, cam_ts, containment_weight,
-                coverage_weight, beta, huber_delta, margin, chunk_size):
+                coverage_weight, beta, huber_delta, margin, chunk_size,
+                coverage_normalize):
     """containment + wing coverage for ONE frame, summed over cameras.
 
     The wing vertices are FK'd ONCE in model frame, mapped to mm by the
@@ -244,8 +267,13 @@ def _frame_cost(q_t, br_s, br_R, br_t, sdf_c, gsc_c, goff_c, pres_c, tgt_c, *,
         r_cov = coverage_residual(tgt_i, proj, beta=beta, huber_delta=huber_delta,
                                   chunk_size=chunk_size)
         r_cov = jnp.where(pr_i, r_cov, 0.0)
-        c = (jnp.sum((containment_weight * r_cont) ** 2)
-             + jnp.sum((coverage_weight * r_cov) ** 2))
+        cov = jnp.sum((coverage_weight * r_cov) ** 2)
+        if coverage_normalize:
+            # MEAN over the finite targets, not a sum. Static Python `if`, like
+            # coverage_residual's huber branch. See the module docstring.
+            n_fin = jnp.maximum(jnp.sum(jnp.isfinite(tgt_i).all(axis=-1)), 1.0)
+            cov = cov / n_fin
+        c = jnp.sum((containment_weight * r_cont) ** 2) + cov
         return carry + c, None
 
     total, _ = jax.lax.scan(
@@ -257,8 +285,9 @@ def _frame_cost(q_t, br_s, br_R, br_t, sdf_c, gsc_c, goff_c, pres_c, tgt_c, *,
 def _refine_chunk(q0_c, sdf_c, gsc_c, goff_c, pres_c, tgt_c, brs_c, brR_c, brt_c,
                   real_c, q_prev, has_prev, *,
                   fk_repose, wing_idx, cam_Ms, cam_ts, opt_mask, lb_row, ub_row,
-                  containment_weight, coverage_weight, smooth_weight, anchor_weight,
-                  limit_weight, beta, huber_delta, margin, n_steps, lr, chunk_size):
+                  containment_weight, coverage_weight, smooth_weight,
+                  limit_weight, beta, huber_delta, margin, n_steps, lr, chunk_size,
+                  coverage_normalize):
     """Adam-refine ONE padded frame chunk. Returns (q_ref (F,nq), history).
 
     `real_c` marks the frames that are not padding; `q_prev`/`has_prev` carry
@@ -270,7 +299,8 @@ def _refine_chunk(q0_c, sdf_c, gsc_c, goff_c, pres_c, tgt_c, brs_c, brR_c, brt_c
         _frame_cost, fk_repose=fk_repose, wing_idx=wing_idx,
         cam_Ms=cam_Ms, cam_ts=cam_ts, containment_weight=containment_weight,
         coverage_weight=coverage_weight, beta=beta, huber_delta=huber_delta,
-        margin=margin, chunk_size=chunk_size)
+        margin=margin, chunk_size=chunk_size,
+        coverage_normalize=coverage_normalize)
 
     # A frame with no present camera carries NO mask evidence, and a padded row
     # carries none by construction: both are frozen at q_init rather than being
@@ -290,11 +320,10 @@ def _refine_chunk(q0_c, sdf_c, gsc_c, goff_c, pres_c, tgt_c, brs_c, brR_c, brt_c
         pair = (real_f[1:] * real_f[:-1])[:, None]
         d0 = (q[0] - q_prev) * opt_mask * has_prev * real_f[0]
         smooth = (smooth_weight ** 2) * (jnp.sum(pair * dj ** 2) + jnp.sum(d0 ** 2))
-        anchor = (anchor_weight ** 2) * jnp.sum((dq * upd) ** 2)
         over = jax.nn.relu(q - ub_row[None, :])
         under = jax.nn.relu(lb_row[None, :] - q)
         limit = (limit_weight ** 2) * jnp.sum(real_f[:, None] * (over ** 2 + under ** 2))
-        return mask_cost + smooth + anchor + limit
+        return mask_cost + smooth + limit
 
     opt = optax.adam(lr)
     dq0 = jnp.zeros_like(q0_c)
@@ -311,8 +340,10 @@ def _refine_chunk(q0_c, sdf_c, gsc_c, goff_c, pres_c, tgt_c, brs_c, brR_c, brt_c
     hist = jnp.concatenate([hist, objective(dq_final)[None]])
 
     q_ref = make_q(dq_final)
-    q_ref = jnp.where(opt_mask[None, :],
-                      jnp.clip(q_ref, lb_row[None, :], ub_row[None, :]), q_ref)
+    # Gated on `upd`, NOT on opt_mask: a frame with no evidence was never
+    # optimised, so clamping it would silently move a STAC pitch that happens to
+    # sit outside the joint range -- "no evidence must mean no change".
+    q_ref = jnp.where(upd, jnp.clip(q_ref, lb_row[None, :], ub_row[None, :]), q_ref)
     return q_ref, hist
 
 
@@ -340,7 +371,8 @@ def refine_wing_pitch(
     sdf, grid_scale, grid_offset, present, masks,
     bridge_s, bridge_R, bridge_t, opt_mask, lb, ub,
     containment_weight=0.3, coverage_weight=0.3, smooth_weight=0.005,
-    limit_weight=10.0, anchor_weight=0.0, beta=8.0, huber_delta=0.0, margin=0.0,
+    limit_weight=10.0, beta=8.0, huber_delta=0.0, margin=0.0,
+    coverage_normalize=True,
     n_target_points=128, dilate_px=3, target_seed=0,
     n_steps=300, lr=1e-2, chunk_size=32, frame_chunk=64, prefetch=True,
     return_history=False,
@@ -367,6 +399,10 @@ def refine_wing_pitch(
         opt_mask: (nq,) bool -- use `wing_pitch_dof_mask(model)`.
         lb, ub: (nq,) joint limits -- use `qpos_limits(model)`.
         n_target_points: coverage targets sampled per (frame, camera).
+        coverage_normalize: divide the coverage sum by the number of finite
+            targets, making it a mean. See the module docstring -- without it
+            `coverage_weight` is not comparable to `containment_weight` and
+            depends on `n_target_points`.
         chunk_size: `coverage_residual`'s memory chunk over TARGET POINTS.
         frame_chunk: FRAMES per device call. Chunks are padded to this constant
             shape so the step loop traces once.
@@ -452,10 +488,11 @@ def refine_wing_pitch(
         lb_row=jnp.asarray(lb_row), ub_row=jnp.asarray(ub_row),
         containment_weight=float(containment_weight),
         coverage_weight=float(coverage_weight),
-        smooth_weight=float(smooth_weight), anchor_weight=float(anchor_weight),
+        smooth_weight=float(smooth_weight),
         limit_weight=float(limit_weight), beta=float(beta),
         huber_delta=float(huber_delta), margin=float(margin),
-        n_steps=int(n_steps), lr=float(lr), chunk_size=int(chunk_size)))
+        n_steps=int(n_steps), lr=float(lr), chunk_size=int(chunk_size),
+        coverage_normalize=bool(coverage_normalize)))
 
     def prepare(k):
         s, e = k * F, min(T, (k + 1) * F)
@@ -484,7 +521,7 @@ def refine_wing_pitch(
         return dict(
             s=s, e=e, n=n,
             args=(jnp.asarray(qc),
-                  jnp.asarray(_pad_repeat(sdf[s:e], F)),
+                  jnp.asarray(_pad_zero(sdf[s:e], F)),
                   jnp.asarray(_pad_repeat(grid_scale[s:e], F)),
                   jnp.asarray(_pad_repeat(grid_offset[s:e], F)),
                   jnp.asarray(pres), jnp.asarray(tgt),
