@@ -60,29 +60,38 @@ def test_pose_flag_parses_for_every_view_that_draws_a_fitted_pose():
             p.parse_args(base + ["--pose", "nonsense"])
 
 
-def test_run_bout_emits_a_pose_value_this_parser_accepts():
-    """The actual binding: every literal run_bout can pass to --pose must be in
-    this parser's choices."""
+def _run_bout_fn(name):
+    """exec one self-contained module-level function out of scripts/run_bout.py.
+
+    run_bout imports jax/mujoco/stac_mjx/hydra at module level, so it cannot be
+    imported here; the AST trick keeps this a cheap parser-level test.
+    """
     import ast
     from pathlib import Path
     src = (Path(__file__).resolve().parents[2] / "scripts" / "run_bout.py").read_text()
     fn = next(n for n in ast.parse(src).body
-              if isinstance(n, ast.FunctionDef) and n.name == "process_bout_fly")
+              if isinstance(n, ast.FunctionDef) and n.name == name)
+    ns = {}
+    exec(compile(ast.Module(body=[fn], type_ignores=[]), "<rb>", "exec"), {}, ns)
+    return ns[name]
+
+
+# every value cfg.outputs.sidebyside_right can take, and every Stage-D2 action
+RIGHT_MODES = ("rigcam", "reproj", "mujoco")
+WING_ACTIONS = ("off", "fit", "reuse")
+
+
+def test_run_bout_emits_a_pose_value_this_parser_accepts():
+    """The value half of the binding: every literal run_bout can pass to --pose
+    must be in this parser's choices."""
+    pose_args = _run_bout_fn("sidebyside_pose_args")
     emitted = set()
-    for node in ast.walk(fn):
-        if not isinstance(node, ast.List):
-            continue
-        for i, el in enumerate(node.elts[:-1]):
-            if not (isinstance(el, ast.Constant) and el.value == "--pose"):
-                continue
-            val = node.elts[i + 1]
-            # only the VALUE branches -- an `X if _action in ("fit","reuse")
-            # else Y` also mentions the action names in its test, which are not
-            # things that reach argparse
-            parts = ([val.body, val.orelse] if isinstance(val, ast.IfExp) else [val])
-            for part in parts:
-                emitted |= {c.value for c in ast.walk(part)
-                            if isinstance(c, ast.Constant) and isinstance(c.value, str)}
+    for right in RIGHT_MODES:
+        for action in WING_ACTIONS:
+            a = pose_args(right, action)
+            assert a == [] or (len(a) == 2 and a[0] == "--pose"), \
+                f"unexpected argv fragment for {right}/{action}: {a}"
+            emitted |= set(a[1:])
     assert emitted, "could not read the --pose values run_bout emits"
     p = cli.build_parser()
     sub = next(a for a in p._actions if a.__class__.__name__ == "_SubParsersAction")
@@ -92,6 +101,64 @@ def test_run_bout_emits_a_pose_value_this_parser_accepts():
         f"run_bout emits --pose {sorted(emitted)} but the viz parser accepts "
         f"{sorted(choices)} -- the subprocess would exit 2, and Stage F's "
         f"failure is non-fatal, so sidebyside.mp4 would silently stop appearing")
+
+
+def test_run_bout_never_emits_a_right_pose_combination_the_renderer_refuses():
+    """The COMBINATION half, which the value check could not catch -- and a
+    combination is exactly what broke.
+
+    `outputs.sidebyside_right` is a live config knob, and run_bout used to emit
+    an explicit, never-'auto' --pose unconditionally. With `mujoco` selected,
+    `check_pose_mode` then refused every Stage-F subprocess, on every bout,
+    whether or not wing_mask_fit was enabled -- and Stage F is non-fatal, so
+    nothing crashed: sidebyside.mp4 just silently stopped being produced. That
+    is the very failure the value-binding test was added to prevent, one level
+    up. So bind the PAIR, through the real guard, and parse it with the real
+    parser.
+    """
+    from viz.views import sidebyside
+    pose_args = _run_bout_fn("sidebyside_pose_args")
+    p = cli.build_parser()
+    for right in RIGHT_MODES:
+        for action in WING_ACTIONS:
+            argv = (["sidebyside", "--run", "/r", "--bout", "1", "--fly", "0",
+                     "--right", right] + pose_args(right, action))
+            ns = p.parse_args(argv)               # would SystemExit on a bad value
+            assert ns.right == right
+            # must not raise -- run_bout may never ask for what viz refuses
+            sidebyside.check_pose_mode(ns.right, ns.pose)
+
+    # and the guard is still doing its job when a HUMAN asks for it
+    import pytest
+    with pytest.raises(ValueError):
+        sidebyside.check_pose_mode("mujoco", "wingfit")
+    # the rigcam/reproj panels must still be told the pose explicitly, or the
+    # renderer falls back to 'auto' and Task 7 cannot pin an arm
+    assert pose_args("rigcam", "fit") == ["--pose", "wingfit"]
+    assert pose_args("rigcam", "off") == ["--pose", "refined"]
+    assert pose_args("reproj", "reuse") == ["--pose", "wingfit"]
+    assert pose_args("mujoco", "fit") == [], \
+        "the mujoco panel renders stac_ik.h5; --pose there is meaningless"
+
+
+def test_check_pose_mode_runs_before_any_expensive_work():
+    """A rejected combination must not first load masks, score the left camera,
+    makedirs the output, or compose Hydra."""
+    import ast
+    import inspect
+    from viz.views import sidebyside
+    fn = next(n for n in ast.parse(inspect.getsource(sidebyside)).body
+              if isinstance(n, ast.FunctionDef) and n.name == "run")
+    checks = [n.lineno for n in ast.walk(fn)
+              if isinstance(n, ast.Call) and getattr(n.func, "id", None) == "check_pose_mode"]
+    assert checks, "run() never validates the --right/--pose combination"
+    costly = [n.lineno for n in ast.walk(fn) if isinstance(n, ast.Call)
+              and ast.unparse(n.func) in ("os.makedirs", "vio.load_masks",
+                                          "vio.load_outputs", "compose")]
+    assert costly, "expected some expensive calls in run() to order against"
+    assert min(checks) < min(costly), (
+        f"check_pose_mode is called at line {min(checks)}, after work at line "
+        f"{min(costly)} -- a rejected call pays for all of it before raising")
 
 
 def test_sidebyside_rejects_a_pose_override_the_mujoco_panel_cannot_honour():

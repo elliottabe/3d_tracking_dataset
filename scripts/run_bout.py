@@ -418,6 +418,33 @@ def stage_b_gate_signature(cfg):
     }, sort_keys=True)
 
 
+def sidebyside_pose_args(right_mode, action):
+    """``--pose`` argv for the Stage-F sidebyside subprocess, or ``[]``.
+
+    ``--right mujoco`` renders ``qpos`` straight out of ``stac_ik.h5`` -- the
+    PRE-BRIDGE STAC pose -- and never reads ``qpos_refined.npz`` /
+    ``qpos_wingfit.npz``, so ``viz.views.sidebyside.check_pose_mode`` REFUSES a
+    non-'auto' ``--pose`` there. That refusal is right when a human asks for it;
+    asking for it unconditionally from here was not.
+
+    THE REGRESSION THIS EXISTS TO PREVENT. ``cfg.outputs.sidebyside_right`` is a
+    live config knob (``mujoco`` is the older setting). Emitting an explicit,
+    never-'auto' ``--pose`` alongside it made every Stage-F subprocess exit 2 --
+    on every bout, whether or not ``wing_mask_fit`` was enabled. Stage F's
+    failure is deliberately non-fatal, so nothing crashed and nothing was
+    logged as broken: ``sidebyside.mp4`` simply stopped being produced. The
+    combination is pinned by ``viz/tests/test_cli.py``, which drives this
+    function's output through the real argparse and the real ``check_pose_mode``.
+
+    For the panels that DO read the pose, name it explicitly rather than let the
+    renderer's 'auto' choose: the render must show the pose that is actually in
+    outputs.h5, and Task 7 renders both arms deliberately.
+    """
+    if str(right_mode) == "mujoco":
+        return []
+    return ["--pose", "wingfit" if action in ("fit", "reuse") else "refined"]
+
+
 def wing_mask_fit_enabled(cfg) -> bool:
     """True only when the opt-in ``wing_mask_fit`` block exists AND is enabled.
 
@@ -2302,6 +2329,7 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
         if not stage_done(sbs_path) or _sbs_stale:
             import subprocess
             n_sbs = int(cfg.outputs.get("sidebyside_frames", 300))
+            _sbs_right = str(cfg.outputs.get("sidebyside_right", "rigcam"))
             # Pass THIS recording's session/predictions dir + the bout's absolute
             # start frame, else the viz resolves the default (Session0) recording
             # and renders the wrong video/masks/frames.
@@ -2324,12 +2352,10 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
                    # "cannot be used to judge orientation"; `rigcam` (added
                    # after this comment was first written) is the fix for
                    # exactly that, not `reproj`.
-                   "--right", str(cfg.outputs.get("sidebyside_right", "rigcam")),
-                   # Name the pose explicitly rather than let the renderer guess:
-                   # this render must show the pose that is actually in
-                   # outputs.h5, and Task 7 renders both arms deliberately.
-                   "--pose", ("wingfit" if _action in ("fit", "reuse")
-                              else "refined"),
+                   "--right", _sbs_right,
+                   # --pose only where the right panel actually reads a pose;
+                   # see sidebyside_pose_args (the mujoco panel refuses one).
+                   *sidebyside_pose_args(_sbs_right, _action),
                    "--conf", str(float(cfg.detector.conf_thresh)),
                    "--session-dir", str(cfg.recording.session_dir),
                    "--predictions-dir", str(cfg.recording.predictions_dir),

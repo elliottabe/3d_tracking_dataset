@@ -902,11 +902,20 @@ def test_the_renderers_are_told_which_pose_to_draw():
     body = _ast.get_source_segment(src, fn)
     i = body.index('"-m", "viz", "sidebyside"')
     cmd = body[i:i + 2500]
-    assert '"--pose"' in cmd, (
+    assert "sidebyside_pose_args(" in cmd, (
         "the sidebyside subprocess must name the pose source; without it the "
         "renderer loads qpos_refined.npz and shows the PRE-FIT pose")
-    assert '"wingfit"' in cmd and '"refined"' in cmd, \
-        "both arms must be nameable so Task 7 can render them deliberately"
+
+    # The value depends on the RIGHT panel too, so the decision is a helper the
+    # binding tests in viz/tests/test_cli.py drive through the real argparse and
+    # the real check_pose_mode. Here just pin that both arms are reachable.
+    pose_args, = _run_bout_helpers("sidebyside_pose_args")
+    assert pose_args("rigcam", "fit") == ["--pose", "wingfit"]
+    assert pose_args("rigcam", "off") == ["--pose", "refined"]
+    assert pose_args("mujoco", "fit") == [], (
+        "the mujoco panel renders stac_ik.h5's pre-bridge pose and viz refuses "
+        "a --pose there; emitting one made every Stage-F subprocess exit 2, "
+        "non-fatally, so sidebyside.mp4 silently stopped being produced")
 
 
 def test_stage_b_restage_moves_the_wing_fit_aside():
@@ -998,9 +1007,20 @@ def test_overlay_stamps_are_per_camera_not_per_group(tmp_path):
                      for a in _ast.walk(n) if isinstance(a, _ast.Assign)
                      for t in a.targets)]
     assert loops, "could not find the loop that stamps the rendered cameras"
-    guarded = [any(isinstance(st, _ast.If)
-                   and "_errs" in _ast.dump(st.test)
-                   and "stage_done" in _ast.dump(st.test)
+    def _both_conditions_required(test):
+        """An `and` of a render-succeeded check and an output-exists check.
+
+        Substring-matching the dump would pass an `and` -> `or` swap, which
+        would stamp a camera whose render failed as soon as a stale mp4 happened
+        to exist -- so require the BoolOp and check each operand separately.
+        """
+        if not (isinstance(test, _ast.BoolOp) and isinstance(test.op, _ast.And)):
+            return False
+        dumps = [_ast.dump(v) for v in test.values]
+        return (any("_errs" in d for d in dumps)
+                and any("stage_done" in d for d in dumps))
+
+    guarded = [any(isinstance(st, _ast.If) and _both_conditions_required(st.test)
                    for st in _ast.walk(lp))
                for lp in loops]
     assert all(guarded), (

@@ -189,6 +189,11 @@ def check_pose_mode(right_mode, pose):
 
 
 def run(args):
+    # FIRST, before any I/O: a --right/--pose combination the renderer cannot
+    # honour must be refused before loading masks, scoring the left camera,
+    # creating the output directory or (on one path) composing Hydra.
+    check_pose_mode(getattr(args, "right", None) or "rigcam",
+                    getattr(args, "pose", "auto"))
     # Opt-in multi-view mode (--views left,top,right ...): a completely
     # separate code path below (_run_multiview), so the single-view flow that
     # follows is untouched byte-for-byte when --views is absent.
@@ -289,7 +294,6 @@ def run(args):
     if out_dir:
         os.makedirs(out_dir, exist_ok=True)
 
-    check_pose_mode(right_mode, getattr(args, "pose", "auto"))
     mesh_mm = fitted_mm = None
     mj_render_path = None
     rframes = None
