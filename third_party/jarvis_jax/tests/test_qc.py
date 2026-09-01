@@ -109,7 +109,7 @@ def test_qc_report_bundles_keys():
     rep = qc_report(rt, kp3d_by_frame=kp3d_by_frame, mesh_by_frame=mesh_by_frame,
                     kp2d_by_frame=kp2d_by_frame, vis_by_frame=vis_by_frame,
                     masks_by_frame=masks_by_frame, out_json=None)
-    for k in ("per_camera_reproj_px", "loo_reproj_px", "silhouette_iou", "n_frames"):
+    for k in ("per_camera_reproj_px", "loo_reproj_px", "mesh_mask_iou", "n_frames"):
         assert k in rep
     assert rep["n_frames"] == 1
     # additive-only: kp3d_measured_by_frame/kp_names/group_defs all omitted
@@ -235,7 +235,7 @@ def test_qc_report_ik_reproj_key_is_additive_and_carries_measured_and_group():
                     kp3d_measured_by_frame=kp3d_measured_by_frame,
                     kp_names=kp_names, group_defs=group_defs)
 
-    for k in ("per_camera_reproj_px", "loo_reproj_px", "silhouette_iou", "n_frames"):
+    for k in ("per_camera_reproj_px", "loo_reproj_px", "mesh_mask_iou", "n_frames"):
         assert k in rep  # existing keys untouched
     assert "ik_reproj" in rep
     assert "per_keypoint" in rep["ik_reproj"] and "Scutellum" in rep["ik_reproj"]["per_keypoint"]

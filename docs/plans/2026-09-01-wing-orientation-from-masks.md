@@ -19,6 +19,20 @@
 - **Never index a keypoint or camera axis by integer.** Use `viz.core.bout_artifacts.load_bout_kp` / `centroids_canonical`. `kp2d/kp3d` are in `cfg.model.KP_NAMES` order; the camera axis is canonical `cfg.recording.cameras` order. Three index-space errors happened in one session; see CLAUDE.md.
 - **Verify recovered code, do not trust docstrings.** Three docstrings in this repo were contradicted by measurement. Every recovered file gets a test asserting its documented behaviour.
 - Never `git add -A` / `git commit -a`; explicit paths only. Never commit PNGs or videos; figures go under `figures/<date>-<topic>/`.
+- **Performance is a requirement, not a follow-up.** The per-bout budget after
+  `3eab485` is 1230 s, of which STAC IK is 746 s (61%). The new stage gets a
+  **hard budget of 60 s per bout-fly** (< 5% of the bout). If it cannot be met,
+  reduce `n_steps` or the vertex count -- do not ship a stage that doubles the bout.
+- **Never regress the numbers for speed.** The discipline that made `3eab485`
+  trustworthy: profile first (`cProfile`, real frames), then prove the outputs
+  unchanged against the artifacts already on disk -- bit-identical, or a
+  documented 1-2 ulp with the reassociation named. `np.einsum`, not `@` (BLAS
+  reassociates a 4-term dot and drifts 2.3e-13 px); a float64 camera-matrix
+  stack, not the float32 `camera_matrices` attribute.
+- **Do not materialise the masks again.** `load_bout_masks` already builds a
+  12.2 GB `(T,C,H,W)` bool array and Stage E peaks near 27 GB RSS. The SDF
+  precompute must stream over it, not add a second copy.
+
 - MuJoCo renders need `MUJOCO_GL=egl`; `unset LD_LIBRARY_PATH` before JAX. You are on a GPU node — run directly, do not sbatch.
 
 ---
@@ -368,6 +382,20 @@ otherwise be minimised by tucking the wing inside the body silhouette."
 - Consumes: `mask_sdf.sdf_stack_from_masks`, `mask_containment.containment_residual`, `wing_coverage.*`, `appendage_dof.*`, `fk.make_fk_repose`.
 - Produces: `refine_wing_pitch(q_init, *, fk_repose, wing_vert_idx, body_vert_idx, cam_Ms, cam_ts, sdf, grid_scale, grid_offset, present, masks, bridge_s, bridge_R, bridge_t, opt_mask, lb, ub, containment_weight=0.3, coverage_weight=0.3, smooth_weight=0.005, limit_weight=10.0, n_steps=300, lr=1e-2, chunk_size=32) -> (T, nq)`.
 
+**Performance requirements (part of the interface, not a later pass):**
+- One `jax.jit` of the whole `n_steps` loop via `jax.lax.fori_loop`, compiled
+  ONCE per bout -- never a Python loop over steps, and never a re-trace per
+  frame chunk. Pad the last chunk to a constant shape and pass the pad as a
+  mask, so the shape never changes and only one trace happens.
+- `jax.vmap` over frames inside a chunk. Frames are independent apart from the
+  smoothness term, which applies within a chunk with an overlap of 1.
+- float32 throughout the refinement. This is a pixel-scale cost, not a
+  reprojection identity, so unlike Task 9's rules f32 is the correct choice here.
+- FK only the wing vertices -- ~100 of 61 666 -- selected once outside the loop.
+- Build the next chunk's SDF on the CPU while the current chunk optimises on the
+  GPU (`ThreadPoolExecutor(1)`; `distance_transform_edt` releases the GIL).
+
+
 - [ ] **Step 1: Recover the Adam driver as the starting point**
 
 ```bash
@@ -430,12 +458,42 @@ Write `_tiny_problem()` and `_synthetic_from_model()` in the test file: build th
 
 - [ ] **Step 3: Run; expect failures** — then implement until green (4 passed).
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 4: Measure against the 60 s budget, and pin what causes blowups**
+
+Time the real bout (2007 frames, 7 cameras), printing SDF precompute / compile /
+optimise separately. A wall-clock assert would be flaky in CI, so pin the two
+structural properties instead:
+
+```python
+def test_the_step_loop_compiles_once_not_per_chunk():
+    """A re-trace per chunk is the difference between 40 s and 20 minutes."""
+    from jarvis_jax.tracking import wing_mask_refine as R
+    q0, kw = _tiny_problem(n_frames=40)          # 3 chunks at chunk_size=16
+    kw["chunk_size"] = 16
+    with _count_traces(R, "_refine_chunk") as n:
+        R.refine_wing_pitch(q0, **kw)
+    assert n.value == 1, f"retraced {n.value}x -- pad chunks to a constant shape"
+
+
+def test_only_the_wing_vertices_are_fk_d():
+    """FK over all 61 666 vertices per step per frame is a ~600x waste."""
+    q0, kw = _tiny_problem()
+    assert len(kw["wing_vert_idx"]) < 400, "wing selection must be the fps subset"
+```
+
+Put the measured seconds in the commit message. If it exceeds 60 s, cut
+`n_steps` until it fits and say so — that is a legitimate outcome, not a failure.
+
+- [ ] **Step 5: Commit**
 
 ```bash
 git add third_party/jarvis_jax/jarvis_jax/tracking/wing_mask_refine.py \
         third_party/jarvis_jax/tests/test_wing_mask_refine.py
-git commit -m "feat(wing-mask-refine): Adam refinement of wing pitch against the SAM masks"
+git commit -m "feat(wing-mask-refine): Adam refinement of wing pitch against the SAM masks
+
+<measured> s per bout-fly against a 60 s budget: SDF <a> s, compile <b> s,
+optimise <c> s. A single jitted fori_loop, vmapped over frames, FK-ing only the
+~100 wing vertices; chunks padded to a constant shape so it traces once."
 ```
 
 ---
@@ -551,10 +609,194 @@ git commit -m "test(wing-mask-fit): acceptance A/B + 7-camera figure"
 
 ---
 
+---
+
+## Phase 2 — Optimization
+
+`3eab485` already took QC + overlays from 1076 s to 215 s (5.0x) with every
+number proven unchanged. That moved the bottleneck rather than removing it. The
+per-bout budget now:
+
+| stage | s | share |
+|---|---|---|
+| **STAC IK** | **746** | **61%** |
+| overlays (7 videos) | 195 | 16% |
+| bridge + FK | 154 | 13% |
+| sidebyside.mp4 | 115 | 9% |
+| qc.json + qc_perframe (shared) | 15 | 1% |
+| triangulation | 5 | <1% |
+| **total** | **1230** | |
+
+These tasks are ordered by measured share, and each one **profiles before it
+optimises**. Do not start Task 10 or 11 on a hunch about where the time goes;
+that is exactly what the QC work disproved (the named suspect was real, but a
+second bottleneck — QC computing the same two metrics twice — was worth as much
+and nobody had named it).
+
+---
+
+### Task 9: Profile and cut STAC IK (the 61%)
+
+**Files:**
+- Profile script: scratchpad (throwaway)
+- Modify: `third_party/jarvis_jax/jarvis_jax/tracking/stac_ik.py` (and/or the
+  `JaxlsBatchSolver` call site) — only where the profile points
+- Create: `docs/benchmark/2026-09-01-stac-ik-speedup/notes.md`
+
+- [ ] **Step 1: Profile it before touching anything**
+
+Instrument one real bout-fly (2007 frames): time spent in JIT compilation vs.
+solve, per `jaxls` batch; iterations actually taken vs. `max_iterations`; and
+whether the solver **recompiles per batch** (2007 frames at 600 per batch = 4
+batches, and the last is a different shape — if that re-traces, a quarter of the
+compile cost is pure waste, the same trap Task 5 pins a test against).
+
+Report a table before proposing any change. Record it in `notes.md` even if the
+answer is "it is genuinely solve-bound", because that result decides Step 2.
+
+- [ ] **Step 2: Act only on what the profile showed**
+
+Candidates, in the order they are cheap to test — take the ones the profile
+supports and explicitly reject the others in `notes.md` with the measurement:
+
+1. **Pad the last batch to a constant shape.** Free if it is re-tracing.
+2. **Early termination.** If the LM solve converges well before
+   `max_iterations`, tighten the tolerance rather than spending the iterations.
+3. **`jax.block_until_ready` placement.** Confirm the timing is real and not an
+   async-dispatch artifact before believing any of the above.
+4. **Batch size.** 600 frames/batch was not chosen by measurement; sweep it.
+5. **float32.** Try it, and gate it hard: the pose must not move by more than
+   the smoothness prior's own noise floor. If it moves the fitted qpos
+   measurably, reject it and write down the delta — accuracy is not for sale here.
+
+- [ ] **Step 3: Prove the fit did not change**
+
+Rerun the bout and diff `stac_ik.h5` against the copy already on disk. For a
+pure scheduling/compile change, require **bit-identical** qpos. For anything
+numerical (batch size, tolerance, dtype), report max abs and max rel qpos delta
+plus the wing-keypoint residual, and state which acceptance threshold it clears.
+A speedup that moves the fit is a different change and needs its own A/B.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add third_party/jarvis_jax/jarvis_jax/tracking/stac_ik.py \
+        docs/benchmark/2026-09-01-stac-ik-speedup/notes.md
+git commit -m "perf(stac-ik): <what the profile actually showed> -- 746 s -> <X> s
+
+qpos <bit-identical | max abs delta ...>. Rejected: <candidates> because <measurement>."
+```
+
+---
+
+### Task 10: Stop materialising 12.2 GB of masks
+
+**Files:**
+- Modify: `third_party/jarvis_jax/jarvis_jax/tracking/masks_io.py` (`load_bout_masks`)
+- Modify: `scripts/run_bout.py` (Stage E and the new wing-fit stage)
+- Test: `third_party/jarvis_jax/tests/test_masks_io_streaming.py`
+
+This is a **throughput** task, not a latency one, and it may be worth more than
+either: Stage E peaks near 27 GB RSS, which is why concurrent pipelines are
+capped at ~4 on a 128 GB-cgroup node. Halving peak RSS raises the cap.
+
+- [ ] **Step 1: Measure peak RSS per stage** (`resource.getrusage` +
+  `tracemalloc`, or `/proc/self/status` VmHWM sampled in a thread) so the win is
+  a number, not an argument.
+
+- [ ] **Step 2: Add a streaming accessor** — `iter_bout_masks(...)` yielding
+  `(t, {cam: mask})` in canonical camera order, with the SAME name-based
+  reordering `load_bout_masks(..., expected_cameras=…)` does. **Keep the
+  reorder-by-name**: this is the camera-order trap, and a streaming path that
+  drops it would reintroduce the exact bug CLAUDE.md documents.
+
+- [ ] **Step 3: Test that streaming and bulk agree, camera for camera**
+
+```python
+def test_streaming_matches_bulk_in_canonical_camera_order():
+    bulk = load_bout_masks(bout, expected_cameras=cams)
+    for t, per_cam in iter_bout_masks(bout, expected_cameras=cams):
+        for ci, cam in enumerate(cams):
+            assert (per_cam[cam] == bulk.masks[t, ci]).all(), (t, cam)
+
+
+def test_streaming_refuses_a_camera_list_it_cannot_satisfy():
+    with pytest.raises(CameraOrderError):
+        next(iter(iter_bout_masks(bout, expected_cameras=cams[::-1] + ["nope"])))
+```
+
+- [ ] **Step 4: Convert the consumers** — Stage E's QC (already reads each mask
+  twice, not four times, after `3eab485`) and the Task 6 wing-fit stage. Leave
+  `load_bout_masks` in place for callers that genuinely need random access.
+
+- [ ] **Step 5: Prove qc.json is still identical** and report peak RSS before/after.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add third_party/jarvis_jax/jarvis_jax/tracking/masks_io.py scripts/run_bout.py \
+        third_party/jarvis_jax/tests/test_masks_io_streaming.py
+git commit -m "perf(masks): stream masks instead of a 12.2 GB (T,C,H,W) array
+
+Peak RSS <before> -> <after> GB. qc.json bit-identical. The streaming path keeps
+load_bout_masks' reorder-BY-NAME; dropping it would reintroduce the camera-order
+trap in CLAUDE.md."
+```
+
+---
+
+### Task 11: bridge + FK (154 s) and sidebyside (115 s)
+
+**Files:**
+- Modify: `third_party/jarvis_jax/jarvis_jax/tracking/bridge.py`
+- Modify: `viz/views/sidebyside.py`
+- Create: `docs/benchmark/2026-09-01-bridge-sidebyside-speedup/notes.md`
+
+- [ ] **Step 1: Profile both.** For the bridge, expect the same shape of problem
+  the QC work found — per-frame Python over a scalar API. `compute_bridges`
+  solves a per-frame Umeyama/SVD; those stack into one batched `np.linalg.svd`
+  exactly as `loo_reproj` did. Confirm with the profile first.
+
+- [ ] **Step 2: Batch the bridge**, using `np.einsum` and a float64 stack for
+  the same reasons as `3eab485`. Require **bit-identical** `bridge_s/R/t`; if
+  the stacked SVD differs in sign convention on a degenerate frame, handle it
+  explicitly rather than accepting a delta.
+
+- [ ] **Step 3: sidebyside.mp4** is MuJoCo/EGL-bound and already frame-capped at
+  300. The cheap win is rendering the model once per frame instead of once per
+  panel if it currently re-renders; check before assuming. Do **not** switch
+  encoders — `h264_nvenc` changes the bytes for a ~1.2x ceiling, which
+  `3eab485` already evaluated and rejected.
+
+- [ ] **Step 4: Verify** the bridge outputs bit-identical and the video
+  md5-identical (or, if the render genuinely changed, extract frames and Read
+  them per CLAUDE.md before claiming it is fine).
+
+- [ ] **Step 5: Commit** with the before/after table.
+
+---
+
+### Task 12: Report the end-to-end number
+
+- [ ] Rerun one full bout-fly and rebuild the stage table: 1230 s before this
+  phase, plus the wing-fit stage's measured cost, minus what Tasks 9-11 removed.
+  Write it into `docs/benchmark/2026-09-01-qc-render-speedup/notes.md` as a
+  follow-up section so the whole optimisation story lives in one place, and
+  state the new dominant stage — whatever it turns out to be — so the next
+  person starts from a measurement instead of a guess.
+
 ## Self-review
 
 **Spec coverage:** §2 root cause → Tasks 2–5 (the cost acts on pitch only). §4.1 mask evidence → Task 7 criterion 5. §4.2 reuse → Tasks 2–5 all recover from `0bc36fe^`. §4.2b verification → every recovered task has tests asserting documented behaviour. §4.3 one-sidedness trap → Task 4 exists precisely to oppose it. §4.4 scope/staging → Task 6. §5 acceptance → Task 7. §6 risks: the broad optimum and modest contrast are why criterion 5 allows ~10°; `exclude_cameras` handles the weak-camera risk; cost is bounded by `n_steps`/`chunk_size`.
 
 **Placeholder scan:** none — every step has a command, code, or a named file and function.
+
+**Performance coverage:** the new stage is budgeted (60 s) and its two blowup
+modes are pinned by tests in Task 5, not left to a later pass. Phase 2 attacks
+the measured shares in order — STAC IK 61%, masks/RSS (throughput), bridge 13% +
+sidebyside 9% — and every task profiles before it edits and proves the outputs
+unchanged after. Tasks 9-12 are independent of Tasks 2-8 and can run in parallel
+with them; only Task 10 touches a file (`run_bout.py`) that Task 6 also touches,
+so land Task 6 first or expect a small conflict there.
 
 **Type consistency:** `grid_xy = (orig_xy - grid_offset) * grid_scale` is used identically in Tasks 1, 2, 5. `appendage_vertex_indices` returns FULL-array indices in Tasks 3, 4, 5 (pinned by a test). `opt_mask` is the parameter name in Task 5 (verified; it is not `sil_qs`).
