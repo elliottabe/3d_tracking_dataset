@@ -367,7 +367,7 @@ def _load_pipeline_cfg(anatomy: str, overrides: Optional[Sequence[str]] = None):
     This CLI addresses a run by ``--run-root``/``--fly`` rather than a hydra
     ``recording`` group, but ``fit_offsets_once``/``ik_only_bout`` (via
     ``stac_mjx.run_stac``) need the FULL cfg tree (``cfg.stac``,
-    ``cfg.model``, ``cfg.silhouette``, ...) regardless -- including branches
+    ``cfg.model``, ``cfg.ik``, ...) regardless -- including branches
     this script never reads -- because ``stac_mjx.io.save_data_to_h5`` does
     a full ``OmegaConf`` resolve of the whole config before writing every
     h5 (see ``configs/pipeline.yaml``'s ``dataset``/``preprocessing`` block

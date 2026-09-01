@@ -3,7 +3,7 @@
 These exist because of a real, silent regression (2026-08-27): adding the
 NaN-robust STAC helpers pasted their `def`s into the MIDDLE of
 `process_bout_fly`, which truncated that function after the offsets fit and
-left Stage C (STAC), Stage D (polish), Stage E (outputs/qc), the overlays and
+left Stage C (STAC), Stage D (model->mm bridge), Stage E (outputs/qc), the overlays and
 `mark_done` stranded as unreachable code after `joints_frozen`'s unconditional
 `return`. The pipeline then ran to completion, printed no error and exited 0
 while producing no stac_ik.h5 for ANY bout -- invisible to every runtime check
@@ -54,7 +54,7 @@ def test_no_unreachable_code_after_return():
 
 @pytest.mark.parametrize("marker", [
     "Stage C: STAC",
-    "Stage D: silhouette",
+    "Stage D: model->mm bridge",
     "Stage E: outputs",
     "stac_ik.h5",
     "mark_done(",

@@ -100,7 +100,7 @@ def main():
     import mujoco, h5py
     from omegaconf import OmegaConf
     import stac_mjx.io_dict_to_hdf5 as ioh5
-    from jarvis_jax.tracking.silhouette_ik_solve import build_solver_inputs
+    from jarvis_jax.tracking.ik_solve import build_solver_inputs
     from stac_mjx.stac_core_jaxls import JaxlsBatchSolver
     from stac_mjx.stac import _resolve_smooth_q_mult
     from viz.config import resolve_body_model_xml

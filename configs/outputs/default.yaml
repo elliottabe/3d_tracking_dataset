@@ -29,3 +29,14 @@ sidebyside_frames: 300
 # `track1` camera, which is NOT view-matched to the left panel and, per its
 # own help, "cannot be used to judge orientation" -- do not use it.
 sidebyside_right: rigcam
+# Camera views for the side-by-side, passed to `--views`. Each named view
+# becomes ONE ROW of [real camera frame + mask + 2D skeleton | view-matched
+# MuJoCo IK render], so the default renders three real views beside three
+# matched renders and a bad fit cannot hide behind a single flattering angle.
+# Roles (left/top/right) are resolved from the recording's OWN calibration
+# geometry by viz.core.rigviews, so this works unchanged on Session0 and
+# Session1 despite their different camera sets. Explicit camera names
+# (e.g. "Cam2012630,Cam2012855") also work. Set to "" for the old single-view
+# render. Cost scales with the number of views; sidebyside_frames still caps
+# total frames.
+sidebyside_views: left,top,right

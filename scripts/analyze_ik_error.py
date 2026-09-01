@@ -164,7 +164,7 @@ def _load_or_compute_scale(cfg, kp3d, kp_names, run_root):
             return float(json.load(f)["scale"])
     from jarvis_jax.tracking.scale import compute_trunk_scale
     _scale = compute_trunk_scale(
-        kp3d, kp_names, cfg.silhouette.xml,
+        kp3d, kp_names, cfg.ik.xml,
         trunk_names=list(cfg.scaling.trunk_keypoints),
         estimator=cfg.scaling.estimator,
         robust_stat=cfg.scaling.robust_stat,
