@@ -29,16 +29,26 @@ def test_present_false_zeroes_the_residual():
 
 
 def test_gradient_points_back_toward_the_mask():
-    """The whole purpose: an outside vertex must feel an inward pull."""
+    """The whole purpose: an outside vertex must feel an inward pull.
+
+    Probed at x=195 (crop is x in [96, 204] for this fixture, box right edge
+    at x=180): this is outside the mask but still inside the SDF crop, so
+    the residual here is driven by the actual signed-distance sample
+    (`d_edge`), not by the sign-independent `overflow` term that takes over
+    once a point leaves the crop (see x=250 in
+    test_far_outside_the_grid_keeps_a_finite_gradient, which deliberately
+    tests that separate regime). x=185 is used for the "closer costs less"
+    comparison, also inside the crop.
+    """
     import jax
     sdf, gs, go, _ = _sdf_box()
     f = lambda x: float(containment_residual(
         jnp.asarray([[x, 100.0]]), sdf, gs, go, jnp.ones(1))[0])
     g = jax.grad(lambda x: containment_residual(
         jnp.stack([jnp.stack([x, jnp.asarray(100.0)])]),
-        sdf, gs, go, jnp.ones(1))[0])(jnp.asarray(250.0))
+        sdf, gs, go, jnp.ones(1))[0])(jnp.asarray(195.0))
     assert float(g) > 0.0, "moving further right must increase the cost"
-    assert f(250.0) > f(200.0), "closer to the mask must cost less"
+    assert f(195.0) > f(185.0), "closer to the mask must cost less"
 
 
 def test_far_outside_the_grid_keeps_a_finite_gradient():
