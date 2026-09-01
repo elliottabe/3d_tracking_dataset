@@ -78,3 +78,58 @@ def test_write_video_avc1_writes_nonzero_reopenable_mp4(tmp_path):
     ok, frame = cap.read()
     cap.release()
     assert ok and frame is not None
+
+
+def _fly(tmp_path, refined=True, wingfit=None):
+    d = tmp_path / "bouts" / "bout_00001" / "fly0"
+    d.mkdir(parents=True, exist_ok=True)
+    if refined:
+        np.savez(d / "qpos_refined.npz", qpos=np.zeros((4, 93), np.float32),
+                 bridge_ok=np.ones(4, bool))
+    if wingfit is not None:
+        kw = {"qpos": np.ones((4, 93), np.float32)}
+        if wingfit:                       # wingfit is the signature, or "" for none
+            kw["wing_mask_fit_sig"] = wingfit
+        np.savez(d / "qpos_wingfit.npz", **kw)
+    return d
+
+
+def test_load_qpos_prefers_the_wing_fit_when_it_is_present_and_stamped(tmp_path):
+    """The renderers drew qpos_refined.npz unconditionally, so `python -m viz
+    sidebyside` -- the pipeline's DEFAULT visual QC artifact -- showed the
+    PRE-FIT pose even on a clean run with the wing-mask fit enabled. A weight
+    sweep judged by eye off that render would be a confident, wrong comparison.
+    """
+    _fly(tmp_path, wingfit=None)
+    qpos, src = io.load_qpos(str(tmp_path), 1, 0)
+    assert src == "qpos_refined.npz" and qpos.shape == (4, 93)
+    assert np.allclose(qpos, 0.0)
+
+    _fly(tmp_path, wingfit="SIG")
+    qpos, src = io.load_qpos(str(tmp_path), 1, 0)
+    assert src == "qpos_wingfit.npz", "a stamped wing fit must win under 'auto'"
+    assert np.allclose(qpos, 1.0)
+
+
+def test_load_qpos_ignores_an_unstamped_wing_fit(tmp_path):
+    """No readable signature means no provenance -- the file could be from any
+    config, so 'auto' must not silently prefer it."""
+    _fly(tmp_path, wingfit="")            # written, but carries no signature
+    qpos, src = io.load_qpos(str(tmp_path), 1, 0)
+    assert src == "qpos_refined.npz" and np.allclose(qpos, 0.0)
+
+
+def test_load_qpos_source_override(tmp_path):
+    """Task 7 must be able to render BOTH arms deliberately, not hope 'auto'
+    picks the one it meant."""
+    import pytest
+    _fly(tmp_path, wingfit="SIG")
+    assert io.load_qpos(str(tmp_path), 1, 0, source="refined")[1] == "qpos_refined.npz"
+    assert io.load_qpos(str(tmp_path), 1, 0, source="wingfit")[1] == "qpos_wingfit.npz"
+
+    _fly(tmp_path, wingfit=None)
+    (tmp_path / "bouts" / "bout_00001" / "fly0" / "qpos_wingfit.npz").unlink(missing_ok=True)
+    with pytest.raises(FileNotFoundError, match="qpos_wingfit.npz"):
+        io.load_qpos(str(tmp_path), 1, 0, source="wingfit")
+    with pytest.raises(ValueError, match="source"):
+        io.load_qpos(str(tmp_path), 1, 0, source="nonsense")

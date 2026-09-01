@@ -85,6 +85,10 @@ def build_parser():
     rc.add_argument("--predictions-dir", dest="predictions_dir", default=None)
     rc.add_argument("--calib-dir", dest="calib_dir", default=None)
     rc.add_argument("--out", default=None)
+    rc.add_argument("--pose", choices=("auto", "wingfit", "refined"), default="auto",
+                    help="which fitted pose to draw: 'auto' (default) prefers a stamped "
+                        "qpos_wingfit.npz over qpos_refined.npz; 'wingfit'/'refined' "
+                        "force one, so both arms of an A/B can be rendered deliberately")
     rc.set_defaults(func="_rigcam")
 
     s = sub.add_parser("sidebyside", help="side-by-side (bout,fly) QC: raw video+SAM+2D | MuJoCo IK render")
@@ -115,6 +119,10 @@ def build_parser():
                    help="camera calibration dir (default: <session-dir>/calibration). "
                         "MUST match the session being rendered: the right panel is built "
                         "from these camera poses.")
+    s.add_argument("--pose", choices=("auto", "wingfit", "refined"), default="auto",
+                   help="which fitted pose to draw: 'auto' (default) prefers a stamped "
+                        "qpos_wingfit.npz over qpos_refined.npz; 'wingfit'/'refined' "
+                        "force one, so both arms of an A/B can be rendered deliberately")
     s.add_argument("--conf", type=float, default=0.3, help="2D keypoint confidence threshold")
     s.add_argument("--verify", action="store_true",
                    help="LEFT panel: three-level verification overlay -- detections coloured "

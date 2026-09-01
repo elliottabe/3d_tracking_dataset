@@ -345,8 +345,14 @@ wing_mask_fit:
   limit_weight: 10.0
   n_steps: 300
   lr: 0.01
-  # Task 5 measured on a 46 GB card: 256 is what the real bout wants.
-  # The module default of 64 is safe but slower.
+  # PERFORMANCE, not a weight: frames per device call. Task 5 measured on a
+  # 46 GB card that 256 is what the real bout wants; the module default of 64
+  # is safe but slower. Chunking does change the DECOMPOSITION of the joint
+  # problem, so two chunk sizes agree only to within the chunk-boundary
+  # smoothness anchor (each chunk carries the previous chunk's last refined
+  # pose as its `q_prev`), not bit-for-bit. That is why it is excluded from
+  # `wing_mask_fit_signature` -- moving to a smaller GPU must not invalidate a
+  # good fit -- and why the exclusion is a judgement rather than an identity.
   frame_chunk: 256
   out_hw: [128, 128]
   bbox_margin: 0.4

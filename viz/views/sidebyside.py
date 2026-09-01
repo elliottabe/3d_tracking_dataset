@@ -292,7 +292,12 @@ def run(args):
             _kp3d_p = os.path.join(vio.fly_dir(args.run, bout, fly), "kp3d.npz")
             rig_meas = (np.asarray(np.load(_kp3d_p)["kp3d"], float)
                         if os.path.exists(_kp3d_p) else None)   # MEASURED kp
-            rig_qpos = np.asarray(np.load(qref_path)["qpos"], float)
+            # The pose to RENDER. Drawing qpos_refined.npz unconditionally
+            # showed the PRE-FIT pose whenever run_bout's opt-in wing-mask fit
+            # had run -- i.e. this QC video could not show that stage at all.
+            rig_qpos, _pose_src = vio.load_qpos(args.run, bout, fly,
+                                                source=getattr(args, "pose", "auto"))
+            print(f"[sidebyside] bout {bout} fly{fly}: pose source {_pose_src}")
             _cam_mats, _cam_names = reproject.camera_matrices(calib_dir)
             _cam_names = list(_cam_names)
             if left_cam not in _cam_names:
@@ -781,7 +786,9 @@ def _run_multiview(args, views_arg):
     _kp3d_p = os.path.join(vio.fly_dir(args.run, bout, fly), "kp3d.npz")
     rig_meas = (np.asarray(np.load(_kp3d_p)["kp3d"], float)
                 if os.path.exists(_kp3d_p) else None)    # MEASURED kp
-    rig_qpos = np.asarray(np.load(qref_path)["qpos"], float)
+    rig_qpos, _pose_src = vio.load_qpos(args.run, bout, fly,
+                                        source=getattr(args, "pose", "auto"))
+    print(f"[sidebyside] bout {bout} fly{fly}: pose source {_pose_src}")
 
     cam_mats, cam_names = reproject.camera_matrices(calib_dir)
     cam_names = list(cam_names)

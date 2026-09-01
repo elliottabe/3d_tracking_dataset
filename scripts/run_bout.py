@@ -482,34 +482,113 @@ def stored_wing_fit_signature(wingfit_path):
         return str(z["wing_mask_fit_sig"]) if "wing_mask_fit_sig" in z.files else None
 
 
-def wing_fit_action(cfg, stored_sig, outputs_exist):
+def wing_fit_action(cfg, stored_sig):
     """What Stage D2 must do. Returns ``(action, want_sig)``.
 
     ``stored_sig`` is the ``wing_mask_fit_sig`` entry of an existing
     ``qpos_wingfit.npz``, or None when there is no such file (or when it
-    predates this provenance record -- those are treated as unknown, hence
-    refitted). ``outputs_exist`` is ``stage_done(outputs.h5)``.
+    predates this provenance record -- those are unknown, hence refitted).
 
-    ``'off'``     the stage is off and nothing on disk came from it: no-op.
-    ``'fit'``     (re)compute. outputs.h5/qc.json MUST be rebuilt from it --
-                  they are guarded by ``stage_done`` and would otherwise skip,
-                  so the fit would be computed, written, logged with a plausible
-                  ``[wing-mask-fit]`` line, and never reach a single consumer.
-    ``'reuse'``   the stored fit was made under exactly this config.
-    ``'refuse'``  the stage is OFF but a fit AND an outputs.h5 are on disk, so
-                  outputs.h5 may have been built from the fit and nothing
-                  records which. The symmetric case to 'fit'; failing loudly is
-                  the only honest answer, and it is one `rm` to resolve.
+    ``'off'``    the stage is off: the STAC/bridge pose is used.
+    ``'fit'``    (re)compute.
+    ``'reuse'``  the stored fit was made under exactly this config.
 
-    Three reachable routes make this necessary even though the kp3d gate exists:
+    There is deliberately NO 'refuse'. An earlier round raised on "stage
+    disabled but a fit and an outputs.h5 are both on disk". That was the wrong
+    tool three ways: it could not fire on the common case (a completed bout has
+    DONE and returns long before this runs, so the contaminated bout sailed
+    through -- loud where the risk is small, silent where it is large); its
+    blast radius was the whole SLURM array task, since nothing wraps
+    ``process_bout_fly`` in try/except, so one leftover file aborted every
+    remaining bout under the DEFAULT shipped config; and it was inconsistent
+    with 'reuse', which assumed on exactly the same missing information. The
+    per-artifact pose STAMP makes the state decidable instead: disable-after-
+    enable simply rebuilds once from the STAC pose and stamps "none".
+
+    Three routes reach a stale reuse with the Stage-B kp3d gate never firing --
     deleting kp3d.npz by hand (the ordinary "just re-triangulate this bout"),
-    ``pipeline.allow_stale_kp3d=true``, and scripts/analysis/stage_b_restage.py.
-    In all three the kp3d refusal never fires.
+    ``pipeline.allow_stale_kp3d``, and scripts/analysis/stage_b_restage.py --
+    which is why the fit needs provenance of its own at all.
     """
     if not wing_mask_fit_enabled(cfg):
-        return ("refuse" if (stored_sig is not None and outputs_exist) else "off"), None
+        return "off", None
     want = wing_mask_fit_signature(cfg)
     return ("reuse" if stored_sig == want else "fit"), want
+
+
+def pose_artifact_stale(recorded, want):
+    """True when a derived artifact must be rebuilt for pose provenance `want`.
+
+    `recorded` is what the artifact says it was built from, or None for one that
+    is missing OR predates the stamp. An unstamped artifact reads as the
+    pre-wing-fit pose ("none"), which is exactly what keeps a default run a
+    strict no-op on every bout already on disk: `want` is "none" too, they
+    match, and nothing rebuilds. Callers still OR this with `not stage_done(p)`,
+    which is what covers a missing file.
+
+    THE DECISION LIVES ON DISK, deliberately. It used to be an in-memory
+    "did we recompute this run" flag, and that was wrong twice: a preemption
+    between build_fly_outputs and qc_report left QC PERMANENTLY stale (next run
+    the wing-fit signature matched, so the action was 'reuse', the flag was
+    False, and both QC guards skipped forever while outputs.h5 held the new
+    pose -- and we run on preemptible ckpt nodes); and on the 'reuse' path an
+    outputs.h5 that was never built from the fit was never rebuilt.
+    """
+    return (recorded if recorded is not None else "none") != want
+
+
+def outputs_pose_source(path):
+    """The `pose_source` stamped into outputs.h5, or None if absent/unreadable.
+
+    Read with h5py rather than `ioh5.load`: the file carries (T, Kmesh, 3)
+    mesh_mm and all we want is one small string.
+    """
+    if not stage_done(path):
+        return None
+    import h5py
+    try:
+        with h5py.File(path, "r") as f:
+            if "pose_source" not in f:
+                return None
+            v = f["pose_source"][()]
+    except OSError:
+        return None                     # truncated/corrupt -> rebuild, the safe way
+    return v.decode() if isinstance(v, bytes) else str(v)
+
+
+def json_pose_source(path):
+    """The `pose_source` recorded in a JSON artifact (qc.json, render sidecars)."""
+    if not stage_done(path):
+        return None
+    try:
+        with open(path) as f:
+            return (json.load(f) or {}).get("pose_source")
+    except (OSError, ValueError):
+        return None
+
+
+def npz_pose_source(path):
+    """The `pose_source` recorded in an npz artifact (qc_perframe.npz)."""
+    if not stage_done(path):
+        return None
+    try:
+        with np.load(path) as z:
+            return str(z["pose_source"]) if "pose_source" in z.files else None
+    except (OSError, ValueError):
+        return None
+
+
+def stamp_json_pose_source(path, pose_source):
+    """Add `pose_source` to a JSON artifact another writer just produced.
+
+    Used for qc.json, which `qc_report` writes itself. A preemption between that
+    write and this one leaves the file unstamped, which reads as "none" and so
+    rebuilds next run -- the safe direction.
+    """
+    with open(path) as f:
+        obj = json.load(f)
+    obj["pose_source"] = str(pose_source)
+    atomic_save_json(path, obj)
 
 
 def wing_mask_fit_refine_kwargs(wf):
@@ -650,14 +729,24 @@ def wing_mask_fit_bout(cfg, qpos, bridge_s, bridge_R, bridge_t, bridge_ok,
         _jid = mujoco.mj_name2id(anat["m"], mujoco.mjtObj.mjOBJ_JOINT, _name)
         adr[_name] = int(anat["m"].jnt_qposadr[_jid])
     q0 = np.asarray(qpos, np.float32)
-    moved = present.any(axis=1) & np.isfinite(q0).all(axis=1)
+    finite_pose = np.isfinite(q0).all(axis=1)
+    moved = present.any(axis=1) & finite_pose
     d = np.rad2deg(np.asarray(q_ref, np.float64)[moved] - q0[moved].astype(np.float64))
+    # THREE disjoint reasons a frame is left at its STAC pose, and they must SUM
+    # to n_skipped -- the log accounts for it by bucket. `moved` also drops a
+    # non-finite qpos row that DID have a bridge, which the first version
+    # counted in neither bucket, so the printed numbers could fail to add up.
+    # Disjoint by construction: no_bridge and _thin both have an all-False
+    # `present` row, and _thin excludes no_bridge, so the third bucket is
+    # exactly "evidence present, pose not finite".
+    nonfinite_pose = ~finite_pose & present.any(axis=1)
     stats = {
         "n_frames": int(q0.shape[0]),
         "n_refined": int(moved.sum()),
         "n_skipped": int(q0.shape[0] - moved.sum()),
         "n_thin_frames": int(_thin.sum()),
         "n_no_bridge_frames": int(no_bridge.sum()),
+        "n_nonfinite_pose_frames": int(nonfinite_pose.sum()),
         "min_present_cameras": _min_cams,
         "dpitch_left_deg": float(np.median(d[:, adr["wing_pitch_left"]])) if moved.any() else 0.0,
         "dpitch_right_deg": float(np.median(d[:, adr["wing_pitch_right"]])) if moved.any() else 0.0,
@@ -1904,30 +1993,18 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
     #    check altogether, which is worse. Three routes reach a stale reuse with
     #    the kp3d gate never firing: deleting kp3d.npz by hand,
     #    allow_stale_kp3d=true, and scripts/analysis/stage_b_restage.py.
-    _wing_fit_rebuilt = False       # -> Stage E and QC must rebuild (see below)
-    _action, _wf_sig = wing_fit_action(cfg, stored_wing_fit_signature(wingfit_path),
-                                       stage_done(outputs_h5_path))
-    if _action == "refuse":
-        raise RuntimeError(
-            f"bout {bout_idx} fly{fly}: wing_mask_fit is DISABLED but "
-            f"{wingfit_path} exists alongside {outputs_h5_path}, and nothing "
-            f"records which pose outputs.h5 was built from -- it may hold the "
-            f"wing-refined pose while the config says the stage is off. "
-            f"Delete these and rerun this bout/fly:\n"
-            f"    rm -f {wingfit_path} {outputs_h5_path} {qc_json_path} "
-            f"{os.path.join(bout_dir, 'qc_perframe.npz')} "
-            f"{os.path.join(bout_dir, 'DONE')}\n"
-            f"(or re-enable wing_mask_fit to keep using the fit.)")
+    _action, _wf_sig = wing_fit_action(cfg, stored_wing_fit_signature(wingfit_path))
+    # WHICH POSE Stage E and everything downstream will hold. Derived from the
+    # ACTION, not from "did we recompute this run": on the `reuse` path the fit
+    # is loaded and qpos_refined replaced, so an outputs.h5 that was never built
+    # from the fit still has to be rebuilt. "none" is the plain STAC/bridge pose.
+    _pose_sig = _wf_sig if _action in ("fit", "reuse") else "none"
     if _action == "fit":
         _q_wf, _wf_stats = wing_mask_fit_bout(
             cfg, qpos_refined, bridge_s, bridge_R, bridge_t, bridge_ok,
             masks_dict, cameras)
         atomic_save_npz(wingfit_path, qpos=_q_wf, wing_mask_fit_sig=_wf_sig,
                         **_wf_stats)
-        # outputs.h5 and qc.json are guarded by `stage_done`, so without this a
-        # newly-computed or newly-changed fit is written, logged with a
-        # plausible line, and never reaches a single consumer.
-        _wing_fit_rebuilt = True
     if _action in ("fit", "reuse"):
         with np.load(wingfit_path) as zw:
             qpos_refined = zw["qpos"]
@@ -1950,29 +2027,41 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
               f"{int(_st['n_skipped'])} left at the STAC pose "
               f"({int(_st['n_no_bridge_frames'])} unsolved by STAC, "
               f"{int(_st['n_thin_frames'])} seen by fewer than "
-              f"{int(_st['min_present_cameras'])} mask cameras); median "
+              f"{int(_st['min_present_cameras'])} mask cameras, "
+              f"{int(_st['n_nonfinite_pose_frames'])} non-finite pose); median "
               f"wing_pitch change L {float(_st['dpitch_left_deg']):+.2f} deg / "
               f"R {float(_st['dpitch_right_deg']):+.2f} deg", flush=True)
 
     # -- Stage E: outputs.h5 + qc.json ---------------------------------------------
-    #    `_wing_fit_rebuilt` forces a rebuild: outputs.h5/qc.json/qc_perframe.npz
-    #    are the ONLY consumers of the refined qpos, and they are guarded by
-    #    `stage_done`, so enabling Stage D2 on a bout that already has an
-    #    outputs.h5 would otherwise compute the fit, write it, log it, and change
-    #    nothing any consumer reads. Both writes overwrite atomically
-    #    (stac_mjx.io_dict_to_hdf5.save / atomic_save_npz), so nothing is deleted.
-    if not stage_done(outputs_h5_path) or _wing_fit_rebuilt:
+    #    Every artifact built from the fitted pose -- outputs.h5, qc.json,
+    #    qc_perframe.npz, the per-camera overlays and sidebyside.mp4 -- is
+    #    guarded by `stage_done`, so without a provenance check enabling Stage D2
+    #    on a bout that already has them computes the fit, writes it, logs a
+    #    plausible line, and changes nothing anyone reads. Each one therefore
+    #    carries the pose it was built from and is compared against `_pose_sig`.
+    #    Every write overwrites atomically (stac_mjx.io_dict_to_hdf5.save /
+    #    atomic_save_npz), so nothing is deleted.
+    _outputs_stale = pose_artifact_stale(outputs_pose_source(outputs_h5_path), _pose_sig)
+    if not stage_done(outputs_h5_path) or _outputs_stale:
         build_fly_outputs(
             cfg.recording, ik_h5=stac_h5_path, model_xml=cfg.ik.xml,
             mesh_npz=cfg.ik.mesh_npz, qpos=qpos_refined, bridges=bridges,
-            out_path=outputs_h5_path, mesh_subset=str(cfg.outputs.mesh_subset))
+            out_path=outputs_h5_path, mesh_subset=str(cfg.outputs.mesh_subset),
+            pose_source=_pose_sig)
 
     # NOTE: bout_dir already ends in f"fly{fly}" (see its construction above),
     # matching qc_json_path -- qc_perframe_path is a sibling, NOT another
     # nested fly{fly} segment.
     qc_perframe_path = os.path.join(bout_dir, "qc_perframe.npz")
-    if (not stage_done(qc_json_path) or not stage_done(qc_perframe_path)
-            or _wing_fit_rebuilt):
+    # Separate staleness per artifact, not one shared flag: a preemption between
+    # build_fly_outputs and qc_report used to leave QC permanently stale, because
+    # the next run saw a matching wing-fit signature ('reuse'), no in-memory
+    # flag, and both QC files present -- so both guards skipped forever while
+    # outputs.h5 held the new pose. We run on preemptible ckpt nodes.
+    _qc_stale = pose_artifact_stale(json_pose_source(qc_json_path), _pose_sig)
+    _qcpf_stale = pose_artifact_stale(npz_pose_source(qc_perframe_path), _pose_sig)
+    if (not stage_done(qc_json_path) or _qc_stale
+            or not stage_done(qc_perframe_path) or _qcpf_stale):
         d = ioh5.load(outputs_h5_path)
         kp3d_mm = np.asarray(d["kp3d_mm"])                  # (T,K,3) FK'd world-mm sites
         mesh_mm = np.asarray(d["mesh_mm"])                  # (T,Kmesh,3) FK'd world-mm mesh subset
@@ -1998,7 +2087,7 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
                                 kp2d_by_frame=kp2d_by_frame,
                                 vis_by_frame=vis_by_frame,
                                 masks_by_frame=masks_by_frame)
-        if not stage_done(qc_json_path) or _wing_fit_rebuilt:
+        if not stage_done(qc_json_path) or _qc_stale:
             # ik_reproj metric (additive qc.json key): FITTED (kp3d_by_frame,
             # the FK'd outputs.h5 sites above) vs MEASURED -- the RAW
             # triangulated kp3d.npz, reloaded explicitly here rather than
@@ -2054,16 +2143,21 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
                      kp3d_measured_by_frame=kp3d_measured_by_frame,
                      kp_names=kp_names, group_defs=group_defs,
                      frame_metrics=_fm)
+            # qc_report writes the file itself, so the provenance is added
+            # after. A preemption in between leaves it unstamped, which reads as
+            # "none" and rebuilds next run -- the safe direction.
+            stamp_json_pose_source(qc_json_path, _pose_sig)
 
         # -- per-frame QC (Gate A inputs): soft/hard silhouette IoU, marker
         #    reproj, n_cams, one row per frame -- next to qc.json. Reuses the
         #    same *_by_frame locals built for qc_report above.
-        if not stage_done(qc_perframe_path) or _wing_fit_rebuilt:
+        if not stage_done(qc_perframe_path) or _qcpf_stale:
             from jarvis_jax.tracking.qc_perframe import per_frame_qc
             pf = per_frame_qc(rt, mesh_by_frame=mesh_by_frame, kp3d_by_frame=kp3d_by_frame,
                               kp2d_by_frame=kp2d_by_frame, vis_by_frame=vis_by_frame,
                               masks_by_frame=masks_by_frame, frame_metrics=_fm)
-            atomic_save_npz(qc_perframe_path, **pf)
+            assert "pose_source" not in pf, "per_frame_qc now collides with the stamp"
+            atomic_save_npz(qc_perframe_path, pose_source=_pose_sig, **pf)
 
     # -- overlays: project the per-frame ARTICULATED mesh into each camera,
     #    plus the triangulated kp3d; skip cameras whose video already exists.
@@ -2078,6 +2172,14 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
         mesh_mm_all = np.asarray(d_out["mesh_mm"])   # (T,Kmesh,3) FK'd world-mm mesh subset
         overlay_dir = os.path.join(bout_dir, "overlays")
         start = bout_start_frame(cfg, bout_idx)
+        # An .mp4 cannot carry a stamp, so the GROUP gets one sidecar, written
+        # only once every camera's file exists. These are FK'd from outputs.h5's
+        # mesh_mm, so after a refit they would otherwise keep showing the
+        # previous wings -- the per-camera `stage_done` skip below is exactly
+        # the "plausible artifact, stale content" failure the stamps exist for.
+        overlay_stamp_path = os.path.join(overlay_dir, "pose_source.json")
+        _overlays_stale = pose_artifact_stale(
+            json_pose_source(overlay_stamp_path), _pose_sig)
         # Build one render JOB per missing camera, then render them
         # CONCURRENTLY -- jarvis_jax.tracking.reproj_video.render_camera_overlays
         # runs one ISOLATED SUBPROCESS per camera (same pattern as Stage F's
@@ -2093,7 +2195,7 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
         jobs = []
         for ci, cam in enumerate(cameras):
             overlay_path = os.path.join(overlay_dir, f"{cam}_reproj.mp4")
-            if stage_done(overlay_path):
+            if stage_done(overlay_path) and not _overlays_stale:
                 continue
             # Per-camera overlays are cosmetic QC and outputs.h5 is already
             # written above -- a render failure on one camera must never fail
@@ -2140,6 +2242,12 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
             print(f"[overlay] bout {bout_idx} fly{fly}: {len(jobs)} camera(s) in "
                   f"{time.time() - _t_ov:.0f}s "
                   f"({sum(1 for e in _errs.values() if e is None)} written)", flush=True)
+        # Stamp the group only when it is complete. A partial render (a camera
+        # errored, or the job was preempted) leaves the sidecar stale, so the
+        # next run re-renders rather than declaring the set current.
+        if all(stage_done(os.path.join(overlay_dir, f"{c}_reproj.mp4"))
+               for c in cameras):
+            atomic_save_json(overlay_stamp_path, {"pose_source": _pose_sig})
 
     # -- Stage F: standard QC side-by-side video (raw video + SAM mask + ViTPose
     #    2-D skeleton  |  MuJoCo IK render + 3-D sites). Auto-generated per
@@ -2151,7 +2259,14 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
     #    bouts. A viz failure is logged but never fails the bout (QC, not core).
     if bool(cfg.outputs.get("sidebyside", True)):
         sbs_path = os.path.join(bout_dir, "sidebyside.mp4")
-        if not stage_done(sbs_path):
+        # Same sidecar treatment as the overlays, and for a sharper reason: this
+        # is the pipeline's DEFAULT visual QC artifact, the one a reader judges
+        # the fit by, and `viz sidebyside` loads the pose itself -- so it is also
+        # told WHICH pose to draw (--pose below) instead of defaulting to
+        # qpos_refined.npz, which is the PRE-FIT pose.
+        sbs_stamp_path = os.path.join(bout_dir, "sidebyside.pose_source.json")
+        _sbs_stale = pose_artifact_stale(json_pose_source(sbs_stamp_path), _pose_sig)
+        if not stage_done(sbs_path) or _sbs_stale:
             import subprocess
             n_sbs = int(cfg.outputs.get("sidebyside_frames", 300))
             # Pass THIS recording's session/predictions dir + the bout's absolute
@@ -2177,6 +2292,11 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
                    # after this comment was first written) is the fix for
                    # exactly that, not `reproj`.
                    "--right", str(cfg.outputs.get("sidebyside_right", "rigcam")),
+                   # Name the pose explicitly rather than let the renderer guess:
+                   # this render must show the pose that is actually in
+                   # outputs.h5, and Task 7 renders both arms deliberately.
+                   "--pose", ("wingfit" if _action in ("fit", "reuse")
+                              else "refined"),
                    "--conf", str(float(cfg.detector.conf_thresh)),
                    "--session-dir", str(cfg.recording.session_dir),
                    "--predictions-dir", str(cfg.recording.predictions_dir),
@@ -2203,6 +2323,8 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
                       f"(non-fatal):\n{r.stderr[-1500:]}")
             else:
                 print(f"[courtship] bout {bout_idx} fly{fly}: sidebyside -> {sbs_path}")
+                if stage_done(sbs_path):
+                    atomic_save_json(sbs_stamp_path, {"pose_source": _pose_sig})
 
     mark_done(bout_dir)
     print(f"[courtship] bout {bout_idx} fly{fly}: DONE -> {bout_dir}")

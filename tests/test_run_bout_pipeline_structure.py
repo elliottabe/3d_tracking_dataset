@@ -47,12 +47,19 @@ def _run_bout_helpers(*names):
     """
     import ast as _ast
     import json as _json
+    from pathlib import Path as _P
     import numpy as _np
     body = [n for n in _ast.parse(RUN_BOUT.read_text()).body
             if isinstance(n, _ast.FunctionDef) and n.name in names]
     got = {n.name for n in body}
     assert got == set(names), f"run_bout.py is missing {sorted(set(names) - got)}"
-    g = {"json": _json, "np": _np}
+    # run_bout imports these from jarvis_jax.tracking.resume at module level;
+    # `stage_done` is literally "exists and non-empty", so reproduce it here
+    # rather than importing the package for an AST-level test.
+    import os as _os
+    g = {"json": _json, "np": _np,
+         "stage_done": lambda p: _os.path.exists(p) and _os.path.getsize(p) > 0,
+         "atomic_save_json": lambda p, o: _P(p).write_text(_json.dumps(o))}
     exec(compile(_ast.Module(body=body, type_ignores=[]), "<rb>", "exec"), g)
     return tuple(g[n] for n in names)
 
@@ -513,6 +520,7 @@ def _wing_fit_fixture(n_frames=5):
     bt = np.zeros((n_frames, 3), np.float32)
     bok = np.ones(n_frames, bool)
     bok[0] = False                       # frame 0: STAC could not solve it
+    qpos[1] = np.nan                     # frame 1: non-finite pose, bridge fine
     return cfg, cameras, masks_dict, qpos, bs, bR, bt, bok
 
 
@@ -546,8 +554,9 @@ def test_wing_mask_fit_bout_forwards_every_config_knob(monkeypatch):
     assert rec["appendage_vertex_indices"]["kwargs"] == {
         "subset": "fps_300", "include": ("wing",)}
     # and the pose actually handed on is the refined one
-    assert np.allclose(q_ref[:, 9], qpos[:, 9] + 0.5)
-    assert np.allclose(q_ref[:, 12], qpos[:, 12] + 0.25)
+    fin = np.isfinite(qpos).all(axis=1)
+    assert np.allclose(q_ref[fin, 9], qpos[fin, 9] + 0.5)
+    assert np.allclose(q_ref[fin, 12], qpos[fin, 12] + 0.25)
 
 
 def test_wing_mask_fit_bout_gates_frames_and_cameras(monkeypatch):
@@ -573,11 +582,16 @@ def test_wing_mask_fit_bout_gates_frames_and_cameras(monkeypatch):
     # frame 0 (bridge_ok=False) must not be counted as camera-starved.
     # left is at qpos 12 (+0.25 rad) and right at qpos 9 (+0.5 rad) -- reported
     # BY JOINT NAME, so a positional read of opt_mask would swap these two.
-    assert stats == {"n_frames": 5, "n_refined": 4, "n_skipped": 1,
+    assert stats == {"n_frames": 5, "n_refined": 3, "n_skipped": 2,
                      "n_thin_frames": 0, "n_no_bridge_frames": 1,
-                     "min_present_cameras": 3,
+                     "n_nonfinite_pose_frames": 1, "min_present_cameras": 3,
                      "dpitch_left_deg": pytest.approx(np.rad2deg(0.25)),
                      "dpitch_right_deg": pytest.approx(np.rad2deg(0.5))}
+    # the log accounts for n_skipped by bucket, so the buckets must SUM to it --
+    # `moved` also drops non-finite qpos rows, a third bucket the first version
+    # counted in neither, so the printed numbers could silently fail to add up
+    assert (stats["n_no_bridge_frames"] + stats["n_thin_frames"]
+            + stats["n_nonfinite_pose_frames"]) == stats["n_skipped"]
 
     # raise the bar above what the kept cameras can supply -> nothing is refined
     cfg.wing_mask_fit.min_present_cameras = 5
@@ -585,6 +599,10 @@ def test_wing_mask_fit_bout_gates_frames_and_cameras(monkeypatch):
     # 4 camera-starved + the 1 bridge-less frame = 5 skipped, still disjoint
     assert stats2["n_refined"] == 0
     assert stats2["n_thin_frames"] == 4 and stats2["n_no_bridge_frames"] == 1
+    assert stats2["n_nonfinite_pose_frames"] == 0, (
+        "frame 1 is now camera-starved as well; the buckets must stay disjoint")
+    assert (stats2["n_no_bridge_frames"] + stats2["n_thin_frames"]
+            + stats2["n_nonfinite_pose_frames"]) == stats2["n_skipped"]
 
 
 def test_wing_mask_fit_bout_refuses_a_non_canonical_mask_camera_axis(monkeypatch):
@@ -656,17 +674,26 @@ def test_wing_mask_fit_signature_covers_the_semantic_keys_and_only_those():
         assert _moved({k: v}), f"{k} changes the fitted pose but not its signature"
 
 
-def test_wing_fit_action_reuses_refits_and_refuses():
-    """The whole staleness contract for qpos_wingfit.npz, as a pure function.
+def test_wing_fit_action_reuses_and_refits_but_never_refuses():
+    """The staleness contract for qpos_wingfit.npz, as a pure function.
 
     Three reachable routes make this necessary even though the Stage-B gate
     exists, and in ALL THREE that gate never fires: deleting kp3d.npz by hand
     (the ordinary "just re-triangulate this bout"), pipeline.allow_stale_kp3d,
     and scripts/analysis/stage_b_restage.py.
+
+    There is deliberately NO 'refuse'. An earlier round raised on
+    "stage disabled but a fit and an outputs.h5 are both on disk", which was the
+    wrong tool three ways: it cannot fire on the common case (a completed bout
+    has DONE and returns before the check), its blast radius is the whole SLURM
+    array task because nothing wraps process_bout_fly in try/except, and it
+    assumed on exactly the missing information that `reuse` assumed away. The
+    pose STAMP makes that state decidable instead -- rebuild once from the STAC
+    pose and stamp "none" -- so the action set is off/fit/reuse.
     """
     from omegaconf import OmegaConf
-    action, sig = (_run_bout_helpers("wing_fit_action", "wing_mask_fit_signature",
-                                     "wing_mask_fit_enabled"))[:2]
+    action, sig = _run_bout_helpers("wing_fit_action", "wing_mask_fit_signature",
+                                    "wing_mask_fit_enabled")[:2]
 
     off = OmegaConf.create({"wing_mask_fit": {"enabled": False}})
     on = OmegaConf.create({"wing_mask_fit": WING_MASK_FIT_ON})
@@ -676,23 +703,66 @@ def test_wing_fit_action_reuses_refits_and_refuses():
         {"wing_mask_fit": {"frame_chunk": 64}}))
     s_on = sig(on)
 
-    # off, nothing on disk -> strict no-op
-    assert action(off, None, False) == ("off", None)
-    assert action(OmegaConf.create({}), None, True) == ("off", None)
-    # off, an orphan fit but no outputs.h5 -> still a no-op (nothing consumed it)
-    assert action(off, s_on, False) == ("off", None)
-    # off, a fit AND an outputs.h5 -> nothing records which pose outputs.h5 holds
-    assert action(off, s_on, True)[0] == "refuse"
-    # on, nothing on disk -> fit
-    assert action(on, None, False) == ("fit", s_on)
-    # on, a file with NO provenance (written before this record existed) -> refit
-    assert action(on, None, True) == ("fit", s_on)
-    # on, matching provenance -> reuse
-    assert action(on, s_on, True) == ("reuse", s_on)
-    # on, provenance from a different weight -> refit
-    assert action(retuned, s_on, True)[0] == "fit"
-    # on, same weights but a different frame_chunk -> reuse (perf-only)
-    assert action(faster, s_on, True) == ("reuse", s_on)
+    assert action(off, None) == ("off", None)
+    assert action(OmegaConf.create({}), None) == ("off", None)
+    # disabled with a fit on disk is NOT an error -- the stamp decides
+    assert action(off, s_on) == ("off", None)
+    assert action(on, None) == ("fit", s_on)          # nothing on disk
+    assert action(on, s_on) == ("reuse", s_on)        # matching provenance
+    assert action(retuned, s_on)[0] == "fit"          # different weights
+    assert action(faster, s_on) == ("reuse", s_on)    # perf-only change
+
+
+def test_pose_provenance_is_read_from_each_artifact_and_defaults_to_none(tmp_path):
+    """The rebuild decision must live ON DISK, one stamp per derived artifact.
+
+    N1 (the reason): with an in-memory `_wing_fit_rebuilt` flag, a preemption
+    between build_fly_outputs and qc_report left QC PERMANENTLY stale. On the
+    next run the stored wing-fit signature matched, so the action was 'reuse',
+    the flag was False, and qc.json/qc_perframe.npz both existed -- so both
+    guards skipped forever while outputs.h5 held the new pose. We run on
+    preemptible ckpt nodes. Per-artifact stamps make that state self-describing.
+    """
+    import json as _json
+    import numpy as np
+    import h5py
+    (outp, qcp, pfp, side) = _run_bout_helpers(
+        "outputs_pose_source", "json_pose_source", "npz_pose_source",
+        "pose_artifact_stale")
+
+    # an UNSTAMPED artifact reads as the pre-wing-fit pose, which is what keeps
+    # enabling nothing a strict no-op on every bout already on disk
+    assert side(None, "none") is False
+    assert side("none", "none") is False
+    assert side(None, "SIG") is True
+    assert side("OLD", "SIG") is True
+    assert side("SIG", "SIG") is False
+
+    h5p = tmp_path / "outputs.h5"
+    with h5py.File(h5p, "w") as f:
+        f["mesh_mm"] = np.zeros((2, 3, 3), np.float32)
+    assert outp(str(h5p)) is None, "an outputs.h5 predating the stamp reads None"
+    with h5py.File(h5p, "w") as f:
+        f["mesh_mm"] = np.zeros((2, 3, 3), np.float32)
+        f["pose_source"] = np.asarray("SIG").astype("S")
+    assert outp(str(h5p)) == "SIG"
+    assert outp(str(tmp_path / "missing.h5")) is None
+
+    jp = tmp_path / "qc.json"
+    jp.write_text(_json.dumps({"reproj": 1.0}))
+    assert qcp(str(jp)) is None
+    jp.write_text(_json.dumps({"reproj": 1.0, "pose_source": "OLD"}))
+    assert qcp(str(jp)) == "OLD"
+
+    np.savez(tmp_path / "qc_perframe.npz", soft_iou=np.zeros(3))
+    assert pfp(str(tmp_path / "qc_perframe.npz")) is None
+    np.savez(tmp_path / "qc_perframe.npz", soft_iou=np.zeros(3), pose_source="OLD")
+    assert pfp(str(tmp_path / "qc_perframe.npz")) == "OLD"
+
+    # THE N1 SCENARIO: outputs.h5 rebuilt and stamped, QC killed mid-write.
+    # outputs.h5 is current; qc.json is not; the two decisions must diverge.
+    assert side(outp(str(h5p)), "SIG") is False
+    assert side(qcp(str(jp)), "SIG") is True
 
 
 def test_the_wing_fit_records_its_signature_in_its_own_artifact():
@@ -711,49 +781,126 @@ def test_the_wing_fit_records_its_signature_in_its_own_artifact():
         "the decision must read the stored provenance, not just os.path.exists"
     assert "stage_done(wingfit_path)" not in body, \
         "existence alone must not gate the fit -- that is the stale-reuse bug"
+    # N2: the pose provenance handed to Stage E must come from the ACTION, not
+    # from "did we recompute this run". On the `reuse` path the fit is loaded
+    # and qpos_refined replaced, so an outputs.h5 that was NOT built from the
+    # fit still has to be rebuilt -- reachable with nothing but config flags
+    # (run on -> delete outputs.h5/qc.json and re-run OFF for the before-picture
+    # -> re-enable unchanged -> 'reuse', and outputs.h5 keeps the STAC pose
+    # while the log prints a plausible [wing-mask-fit] line).
+    assert "_wing_fit_rebuilt" not in body, (
+        "the rebuild decision must be the on-disk stamp, not an in-memory flag: "
+        "the flag is False on the `reuse` path and does not survive a preemption")
+    assert '_pose_sig = _wf_sig if _action in ("fit", "reuse") else "none"' in body, \
+        "the pose provenance must be decided by the action, including `reuse`"
 
 
-def test_a_new_or_changed_wing_fit_invalidates_outputs_and_qc():
-    """F3: outputs.h5/qc.json/qc_perframe.npz are the ONLY consumers of the
-    refined qpos and every one is guarded by `stage_done`. Enabling the stage on
-    a bout that already has them would otherwise compute the fit, write it, log
-    a plausible `[wing-mask-fit]` line, and change nothing anyone reads.
+def test_every_pose_derived_artifact_is_gated_on_the_pose_stamp():
+    """N3: the invalidation must reach every artifact built from the fitted pose.
 
-    Checked structurally over EVERY such guard, so a guard added later without
-    the flag is caught too.
+    The previous version of this test enumerated `If` nodes mentioning three
+    consumer names, which FROZE AN INCOMPLETE LIST into a test -- it asserted
+    that outputs.h5/qc.json/qc_perframe.npz were "the ONLY consumers" while the
+    per-camera reprojection overlays (FK'd from outputs.h5's mesh_mm) and
+    sidebyside.mp4 were skipped by their own `stage_done` guards and kept
+    showing the previous wings.
+
+    So this now works the other way round: it collects EVERY `stage_done(...)`
+    guard in process_bout_fly and requires each one to be classified -- either
+    upstream of the pose, or gated on the pose stamp. A guard added later cannot
+    quietly default to "not my problem".
     """
     import ast as _ast
     src = RUN_BOUT.read_text()
     fn = next(n for n in _ast.parse(src).body
               if isinstance(n, _ast.FunctionDef) and n.name == "process_bout_fly")
-    consumers = ("outputs_h5_path", "qc_json_path", "qc_perframe_path")
-    guards = []
+
+    # artifacts that exist BEFORE the pose is fitted, or are the fit's own input
+    upstream = {"coverage_path", "kp2d_path", "kp3d_path", "kp3d_filt_path",
+                "offsets_path", "stac_h5_path", "qpos_path", "scale_path",
+                "seg_scales_path", "wingfit_path"}
+    # artifacts built FROM the fitted qpos -- every one must honour the stamp
+    pose_derived = {"outputs_h5_path", "qc_json_path", "qc_perframe_path",
+                    "overlay_path", "sbs_path"}
+
+    guarded = set()
+    for node in _ast.walk(fn):
+        if (isinstance(node, _ast.Call)
+                and getattr(node.func, "id", None) == "stage_done"
+                and node.args and isinstance(node.args[0], _ast.Name)):
+            guarded.add(node.args[0].id)
+    unclassified = guarded - upstream - pose_derived
+    assert not unclassified, (
+        f"stage_done guards on artifacts nobody has classified as upstream or "
+        f"pose-derived: {sorted(unclassified)} -- decide, do not default")
+    missing = pose_derived - guarded
+    assert not missing, f"expected a stage_done guard on {sorted(missing)}"
+
+    # ... and every guard over a pose-derived artifact must also test staleness
+    unstamped = []
     for node in _ast.walk(fn):
         if not isinstance(node, _ast.If):
             continue
-        test = _ast.dump(node.test)
-        if "stage_done" in test and any(c in test for c in consumers):
-            guards.append((node.lineno, test))
-    assert guards, "could not find the Stage E / QC stage_done guards"
-    missing = [ln for ln, t in guards if "_wing_fit_rebuilt" not in t]
-    assert not missing, (
-        f"these stage_done guards on the refined-qpos consumers do not honour "
-        f"_wing_fit_rebuilt, so a newly-run wing fit never reaches them: "
-        f"lines {missing}")
+        dump = _ast.dump(node.test)
+        if "stage_done" not in dump:
+            continue
+        hit = sorted(a for a in pose_derived if f"id='{a}'" in dump)
+        # A guard whose BODY writes the stamp sidecar is a completeness check
+        # ("did every camera render before I declare the group current?"), not a
+        # skip -- it must not be required to test staleness itself.
+        writes_stamp = any(isinstance(c, _ast.Call)
+                           and getattr(c.func, "id", None) == "atomic_save_json"
+                           for st in node.body for c in _ast.walk(st))
+        if hit and not writes_stamp and "stale" not in dump:
+            unstamped.append((node.lineno, hit))
+    assert not unstamped, (
+        f"these guards skip a pose-derived artifact without comparing the pose "
+        f"stamp, so a refit never reaches them: {unstamped}")
 
-    # ... and the flag must actually be RAISED by the branch that (re)fits,
-    # otherwise every guard above honours a flag that is always False.
-    fit_branch = [n for n in _ast.walk(fn)
-                  if isinstance(n, _ast.If) and "'fit'" in _ast.dump(n.test)
-                  and "_action" in _ast.dump(n.test)]
-    assert fit_branch, "could not find the `if _action == 'fit':` branch"
-    raised = any(isinstance(st, _ast.Assign)
-                 and any(getattr(t, "id", None) == "_wing_fit_rebuilt"
-                         for t in st.targets)
-                 and getattr(st.value, "value", None) is True
-                 for b in fit_branch for st in _ast.walk(b))
-    assert raised, ("the branch that computes the fit must set "
-                    "_wing_fit_rebuilt = True, or the guards never fire")
+    # ... and each staleness term must come from THAT artifact's OWN stamp.
+    # Sharing one term is precisely the N1 bug in a new costume: a preemption
+    # between build_fly_outputs and qc_report leaves outputs.h5 current and QC
+    # not, so a QC guard reading outputs.h5's stamp declares QC fresh forever.
+    flat = "".join(_ast.get_source_segment(src, fn).split())
+    for stale, reader, path in (
+            ("_outputs_stale", "outputs_pose_source", "outputs_h5_path"),
+            ("_qc_stale", "json_pose_source", "qc_json_path"),
+            ("_qcpf_stale", "npz_pose_source", "qc_perframe_path"),
+            ("_overlays_stale", "json_pose_source", "overlay_stamp_path"),
+            ("_sbs_stale", "json_pose_source", "sbs_stamp_path")):
+        want = f"{stale}=pose_artifact_stale({reader}({path}),_pose_sig)"
+        assert want in flat, (
+            f"{stale} must be read from {path}'s own stamp via {reader}; "
+            f"sharing another artifact's term reintroduces the preemption hole")
+
+    # every stamp that is READ must also be WRITTEN, or the artifact rebuilds on
+    # every single run instead of once
+    for write in ("pose_source=_pose_sig",                       # build_fly_outputs
+                  "stamp_json_pose_source(qc_json_path,_pose_sig)",
+                  "atomic_save_npz(qc_perframe_path,pose_source=_pose_sig",
+                  'atomic_save_json(overlay_stamp_path,{"pose_source":_pose_sig})',
+                  'atomic_save_json(sbs_stamp_path,{"pose_source":_pose_sig})'):
+        assert write in flat, f"nothing writes the stamp: {write}"
+
+
+def test_the_renderers_are_told_which_pose_to_draw():
+    """N3, second half: the pipeline's default visual QC artifact must be able
+    to show this stage's effect. `python -m viz sidebyside` loads the pose
+    itself, so run_bout must name the source explicitly rather than let the
+    renderer guess -- and CLAUDE.md's bar is that a change is not done until a
+    figure shows it on real frames."""
+    import ast as _ast
+    src = RUN_BOUT.read_text()
+    fn = next(n for n in _ast.parse(src).body
+              if isinstance(n, _ast.FunctionDef) and n.name == "process_bout_fly")
+    body = _ast.get_source_segment(src, fn)
+    i = body.index('"-m", "viz", "sidebyside"')
+    cmd = body[i:i + 2500]
+    assert '"--pose"' in cmd, (
+        "the sidebyside subprocess must name the pose source; without it the "
+        "renderer loads qpos_refined.npz and shows the PRE-FIT pose")
+    assert '"wingfit"' in cmd and '"refined"' in cmd, \
+        "both arms must be nameable so Task 7 can render them deliberately"
 
 
 def test_stage_b_restage_moves_the_wing_fit_aside():
@@ -773,3 +920,31 @@ def test_stage_b_restage_moves_the_wing_fit_aside():
         f"solved against it: {artifacts}")
     # it must sit with the other pose artifacts, not after DONE-only entries
     assert artifacts.index("qpos_wingfit.npz") > artifacts.index("stac_ik.h5")
+
+
+def test_outputs_h5_carries_the_pose_it_was_built_from():
+    """The stamp is INTRINSIC to outputs.h5, not a sidecar beside it.
+
+    outputs.h5 is what every external consumer reads -- the benchmark, the
+    renderers, the analysis scripts -- and a sidecar can be moved or deleted
+    away from it. `pose_source` travels with the pose.
+    """
+    import ast as _ast
+    import importlib.util
+    from pathlib import Path as _P
+    origin = importlib.util.find_spec("jarvis_jax.tracking.outputs").origin
+    tree = _ast.parse(_P(origin).read_text())
+    fns = {n.name: n for n in tree.body if isinstance(n, _ast.FunctionDef)}
+    for name in ("build_fly_outputs", "write_outputs_h5"):
+        args = {a.arg for a in fns[name].args.kwonlyargs} | {a.arg for a in fns[name].args.args}
+        assert "pose_source" in args, f"{name} cannot record the pose provenance"
+    src = _ast.get_source_segment(_P(origin).read_text(), fns["write_outputs_h5"])
+    assert '"pose_source"' in src, "the key must actually reach the h5 dict"
+    # and run_bout must hand it the value it just decided
+    body = _ast.get_source_segment(
+        RUN_BOUT.read_text(),
+        next(n for n in _ast.parse(RUN_BOUT.read_text()).body
+             if isinstance(n, _ast.FunctionDef) and n.name == "process_bout_fly"))
+    i = body.index("build_fly_outputs(")
+    assert "pose_source=_pose_sig" in body[i:i + 500], \
+        "Stage E must stamp the pose provenance it is writing"

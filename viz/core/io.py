@@ -14,6 +14,59 @@ def load_outputs(run_root, bout, fly):
     return {"kp3d_mm": np.asarray(d["kp3d_mm"]), "mesh_mm": np.asarray(d["mesh_mm"]),
             "kp_names": [str(n) for n in np.asarray(d["kp_names"]).tolist()]}
 
+def load_qpos(run_root, bout, fly, source="auto"):
+    """(qpos (T,nq) float, source_filename) for a bout-fly.
+
+    WHY THIS EXISTS. run_bout's opt-in Stage D2 (`wing_mask_fit`) refines the
+    wing-pitch DOFs against the SAM masks and writes `qpos_wingfit.npz`; every
+    renderer here used to load `qpos_refined.npz` unconditionally, which is the
+    PRE-FIT pose. So `python -m viz sidebyside` -- the pipeline's default visual
+    QC artifact, and the thing a weight sweep is judged by eye from -- could not
+    show the stage's effect at all, and would have produced a confident, wrong
+    before/after comparison.
+
+    `source`:
+      'auto'    (default) the wing fit when it exists AND carries a readable
+                `wing_mask_fit_sig`; otherwise the STAC/bridge pose. No
+                signature means no provenance -- the file could be from any
+                config -- so 'auto' declines to prefer it.
+      'wingfit' require the wing fit; raise if it is absent.
+      'refined' always the STAC/bridge pose.
+
+    The two explicit values are what lets a caller render BOTH arms
+    deliberately rather than hope 'auto' picked the one it meant. The returned
+    filename is meant to be LABELLED on the figure, not just logged.
+    """
+    if source not in ("auto", "wingfit", "refined"):
+        raise ValueError(f"source must be 'auto', 'wingfit' or 'refined', got {source!r}")
+    d = fly_dir(run_root, bout, fly)
+    wing = os.path.join(d, "qpos_wingfit.npz")
+    refined = os.path.join(d, "qpos_refined.npz")
+
+    def _read(path):
+        with np.load(path) as z:
+            return np.asarray(z["qpos"], float)
+
+    if source == "refined":
+        return _read(refined), "qpos_refined.npz"
+    if source == "wingfit":
+        if not os.path.exists(wing):
+            raise FileNotFoundError(
+                f"--pose wingfit needs qpos_wingfit.npz for bout={bout} fly={fly} "
+                f"({wing}); run with wing_mask_fit.enabled=true, or use "
+                f"--pose refined")
+        return _read(wing), "qpos_wingfit.npz"
+    if os.path.exists(wing):
+        try:
+            with np.load(wing) as z:
+                stamped = "wing_mask_fit_sig" in z.files
+        except (OSError, ValueError):
+            stamped = False
+        if stamped:
+            return _read(wing), "qpos_wingfit.npz"
+    return _read(refined), "qpos_refined.npz"
+
+
 def load_kp2d(run_root, bout, fly):
     with np.load(os.path.join(fly_dir(run_root, bout, fly), "kp2d.npz")) as z:
         return np.asarray(z["kp2d"]), np.asarray(z["conf"])

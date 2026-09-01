@@ -66,7 +66,11 @@ def run(args):
     want = list(args.cams) if getattr(args, "cams", None) else cam_names
 
     fdir = vio.fly_dir(args.run, bout, fly)
-    qpos = np.asarray(np.load(os.path.join(fdir, "qpos_refined.npz"))["qpos"], float)
+    # The pose to DRAW. Loading qpos_refined.npz unconditionally showed the
+    # PRE-FIT pose whenever run_bout's opt-in wing-mask fit had run.
+    qpos, _pose_src = vio.load_qpos(args.run, bout, fly,
+                                    source=getattr(args, "pose", "auto"))
+    print(f"[rigcam] bout {bout} fly{fly}: pose source {_pose_src}")
     with h5py.File(os.path.join(fdir, "outputs.h5"), "r") as f:
         world = f["kp3d_mm"][()].astype(float)
         kp_names = [x.decode() if isinstance(x, bytes) else str(x)

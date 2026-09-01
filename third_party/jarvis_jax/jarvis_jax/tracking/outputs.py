@@ -102,8 +102,19 @@ def fk_sites_world_mm(mjx_model, mjx_data, site_idxs, qpos, bridges):
 
 
 def write_outputs_h5(out_path, *, qpos, root_se3, scale, mesh_mm, kp3d_mm,
-                     mesh_vert_idx, mesh_subset, kp_names):
-    """Write the per-fly outputs h5 via stac_mjx.io_dict_to_hdf5.save."""
+                     mesh_vert_idx, mesh_subset, kp_names, pose_source="none"):
+    """Write the per-fly outputs h5 via stac_mjx.io_dict_to_hdf5.save.
+
+    `pose_source` records WHICH pose this file holds -- "none" for the plain
+    STAC/bridge pose, or the `wing_mask_fit` signature when run_bout's opt-in
+    Stage D2 refined the wing pitch. It is intrinsic rather than a sidecar
+    because every consumer reads outputs.h5 and a sidecar can be separated from
+    it, and because the pipeline must be able to tell, on a RESUMED run, whether
+    the qc.json / overlays / sidebyside beside it describe THIS pose -- a
+    preemption between writing outputs.h5 and finishing QC used to leave that
+    undecidable. Files written before this key existed carry none; readers treat
+    that as "none", which is what it was.
+    """
     import os
     import stac_mjx.io_dict_to_hdf5 as ioh5
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
@@ -119,6 +130,7 @@ def write_outputs_h5(out_path, *, qpos, root_se3, scale, mesh_mm, kp3d_mm,
         # decodes them back (see test_write_outputs_h5_roundtrip).
         "mesh_subset": np.asarray(str(mesh_subset)).astype("S"),
         "kp_names": np.asarray([str(n) for n in kp_names]).astype("S"),
+        "pose_source": np.asarray(str(pose_source)).astype("S"),
     }
     ioh5.save(out_path, dic)
     return out_path
@@ -132,12 +144,14 @@ def _load_solver_bits(ik_h5, model_xml):
 
 
 def build_fly_outputs(recording, *, ik_h5, model_xml, mesh_npz, qpos, bridges,
-                      out_path, mesh_subset="fps_500"):
+                      out_path, mesh_subset="fps_500", pose_source="none"):
     """Glue: FK the mesh subset + sites to world mm and write the per-fly h5.
 
     root_se3 = qpos[:, :7] (free-joint SE3: xyz + wxyz quat, the model-frame
     root as stored by the solver). scale[t] = the per-frame bridge scale `s`
     (nan where bridges[t] is None). Efficiency: the mesh FK is one jax.vmap.
+
+    `pose_source` is stamped into the h5 -- see `write_outputs_h5`.
     """
     anat = load_anatomy(model_xml, mesh_npz)
     fk = make_fk_repose(anat)
@@ -157,7 +171,7 @@ def build_fly_outputs(recording, *, ik_h5, model_xml, mesh_npz, qpos, bridges,
     write_outputs_h5(
         out_path, qpos=qpos, root_se3=root_se3, scale=scale, mesh_mm=mesh_mm,
         kp3d_mm=kp3d_mm, mesh_vert_idx=vert_idx, mesh_subset=mesh_subset,
-        kp_names=kp_names)
+        kp_names=kp_names, pose_source=pose_source)
     return {"out_path": out_path, "mesh_subset": mesh_subset,
             "shapes": {"qpos": tuple(qpos.shape), "mesh_mm": tuple(mesh_mm.shape),
                        "kp3d_mm": tuple(kp3d_mm.shape)}}
