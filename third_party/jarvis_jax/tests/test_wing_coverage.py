@@ -50,3 +50,26 @@ def test_gradient_flows_to_the_wing_vertices():
     assert float(g[0, 0]) > 0.0, "cost must rise as the vertex moves away"
     step = 5.0 - 0.5 * float(g[0, 0])
     assert step < 5.0, "a descent step must move the vertex toward the target"
+
+
+def test_huber_delta_gradients_are_finite_in_BOTH_regimes():
+    """huber_delta>0 existed but had never been exercised: every gradient came
+    back NaN. `jnp.where` evaluates both branches, and the quadratic region fed
+    the linear branch's sqrt an argument clipped to exactly 0, whose derivative
+    is inf -> 0*inf = NaN. Values were correct throughout, so only a gradient
+    check catches it."""
+    import jax
+    from jarvis_jax.tracking.wing_coverage import _huber_sqrt
+
+    d = jnp.array([1.0, 4.0, 8.0, 20.0])          # two below delta, two above
+    val = np.asarray(_huber_sqrt(d, 8.0))
+    np.testing.assert_allclose(val, [1.0, 4.0, 8.0, 16.0], rtol=1e-6)
+    g = np.asarray(jax.vmap(jax.grad(lambda x: _huber_sqrt(x, 8.0)))(d))
+    assert np.isfinite(g).all(), f"non-finite huber gradient: {g}"
+    np.testing.assert_allclose(g[:2], [1.0, 1.0], rtol=1e-6)   # quadratic region
+    np.testing.assert_allclose(g[2:], [1.0, 0.5], rtol=1e-5)   # linear region
+
+    tgt = jnp.asarray([[0.0, 0.0], [3.0, 0.0]])
+    verts = jnp.asarray([[5.0, 0.0], [6.0, 1.0]])
+    gv = jax.grad(lambda w: jnp.sum(coverage_residual(tgt, w, huber_delta=8.0)))(verts)
+    assert np.isfinite(np.asarray(gv)).all(), f"non-finite coverage grad: {gv}"

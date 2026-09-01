@@ -96,10 +96,26 @@ def _huber_sqrt(d, delta):
     huber(d) = d^2 for |d|<=delta, else 2*delta*|d| - delta^2. Returning its
     sqrt lets the LM least-squares objective (sum of residual^2) behave as a
     Huber loss on the raw distance d.
+
+    DOUBLE-WHERE, and it is load-bearing. The obvious form,
+    ``jnp.where(|d| <= delta, d, jnp.sqrt(jnp.clip(2*delta*|d| - delta**2, 0)))``,
+    returns the RIGHT VALUES and a NaN GRADIENT: jnp.where evaluates both
+    branches, and in the |d| <= delta region the clip makes the sqrt argument
+    exactly 0, whose derivative is inf, so reverse mode forms 0*inf = NaN and
+    the where propagates it. Measured on the four probes d=[1,4,8,20] at
+    delta=8: values [1,4,8,16] correct, grads [nan,nan,1.0,0.5]. That made
+    every huber_delta>0 gradient NaN -- the whole point of the parameter -- and
+    went unnoticed because nothing exercised it until the wing-pitch weight
+    sweep. This is the same hazard the module docstring already flags for the
+    huber_delta==0 case; there it is avoided with a static Python `if`, here it
+    needs the inner `jnp.where` that feeds the unselected branch a CONSTANT so
+    its gradient is exactly zero.
     """
-    quad = d
-    lin = jnp.sqrt(jnp.clip(2.0 * delta * jnp.abs(d) - delta ** 2, min=0.0))
-    return jnp.where(jnp.abs(d) <= delta, quad, lin)
+    absd = jnp.abs(d)
+    use_lin = absd > delta
+    safe = jnp.where(use_lin, absd, delta + 1.0)     # constant where unselected
+    lin = jnp.sqrt(2.0 * delta * safe - delta ** 2)
+    return jnp.where(use_lin, lin, d)
 
 
 def coverage_residual(target_pts, proj_wing_uv, *, beta: float = 8.0,
