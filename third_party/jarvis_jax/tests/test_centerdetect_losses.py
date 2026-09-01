@@ -197,3 +197,49 @@ def test_accepts_4d_pred_with_trailing_channel_axis():
     t3, f3, b3 = centerdetect_instance_mse(pred_3d, centers, valid, heatmap_size=H, sigma=SIGMA)
     t4, f4, b4 = centerdetect_instance_mse(pred_4d, centers, valid, heatmap_size=H, sigma=SIGMA)
     assert float(t3) == float(t4)
+
+
+def test_focal_makes_a_spurious_peak_expensive_but_leaves_clean_frames_free():
+    """The property the focal background term exists for.
+
+    With a UNIFORM background term the model reached two_peak=1.000 by learning
+    to always emit two peaks, hallucinating a confident second fly on 65% of
+    single-fly frames at a median 0.87 of the primary's confidence. A 10x
+    bg_weight sweep moved that only 0.648 -> 0.594, because a spurious peak
+    covers a few pixels out of ~25,600 and normalising by PIXEL COUNT dilutes
+    it away. Focal weights each background pixel by how confidently it is
+    wrongly predicted and normalises by the sum of weights instead.
+    """
+    # coordinates must sit INSIDE the H=64 map used by this module
+    centers = jnp.asarray([[[32.0, 32.0], [0.0, 0.0]]], dtype=jnp.float32)
+    valid = jnp.asarray([[True, False]])
+    AMP = 255.0
+    gt = AMP * jnp.max(render_heatmaps(centers, valid, heatmap_size=H, sigma=SIGMA), axis=-1)
+    ghost_c = jnp.asarray([[[12.0, 50.0], [0.0, 0.0]]], dtype=jnp.float32)
+    ghost = AMP * jnp.max(render_heatmaps(ghost_c, valid, heatmap_size=H, sigma=SIGMA), axis=-1)
+
+    def bg(pred, alpha):
+        return float(centerdetect_instance_mse(pred, centers, valid, heatmap_size=H,
+                                               sigma=SIGMA, bg_weight=1.0,
+                                               focal_alpha=alpha)[2])
+
+    # a clean frame must stay free under focal -- otherwise it would just be a
+    # constant tax that suppresses real peaks too
+    assert bg(gt, 2.0) < 1e-6
+
+    with_ghost = jnp.maximum(gt, ghost)
+    uniform, focal = bg(with_ghost, 0.0), bg(with_ghost, 2.0)
+    # Focal must make the ghost DRAMATICALLY more expensive, not marginally.
+    # The multiplier scales with map size, because it is undoing dilution by
+    # the background pixel count: ~100x at this module's H=64, ~647x measured
+    # at the production H=160. Assert a floor that holds at the smaller size.
+    assert focal > 50 * uniform, (focal, uniform)
+
+
+def test_focal_alpha_zero_reproduces_the_uniform_background_exactly():
+    centers = jnp.asarray([[[16.0, 16.0], [4.0, 4.0]]], dtype=jnp.float32)
+    valid = jnp.asarray([[True, True]])
+    pred = jnp.zeros((1, H, H))
+    a = centerdetect_instance_mse(pred, centers, valid, heatmap_size=H, sigma=SIGMA,
+                                  focal_alpha=0.0)
+    assert all(np.isfinite(float(x)) for x in a)

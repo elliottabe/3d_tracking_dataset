@@ -31,7 +31,7 @@ def heatmap_mse(pred, gt, vis, bg_weight=0.1, fg_thresh=0.01, eps=1e-6,
 
 def centerdetect_instance_mse(pred, centers_xy, valid, *, heatmap_size, sigma,
                               fg_thresh=0.01, bg_weight=0.1, eps=1e-6,
-                              amplitude=255.0):
+                              amplitude=255.0, focal_alpha=2.0):
     """Per-INSTANCE-normalised heatmap MSE for CenterDetect (multi-animal,
     single output channel).
 
@@ -87,6 +87,29 @@ def centerdetect_instance_mse(pred, centers_xy, valid, *, heatmap_size, sigma,
         fg_thresh: per-instance foreground threshold on the UNMERGED
             per-instance Gaussian (default matches ``heatmap_mse``).
         bg_weight: background term weight (default matches ``heatmap_mse``).
+        focal_alpha: CornerNet/CenterNet-style penalty-reduction exponent on the
+            BACKGROUND term. 0.0 restores the old uniform background exactly.
+
+            Why this is needed, measured: with a uniform background term the
+            model reached a two-peak rate of 1.000 on real two-fly frames by
+            learning to ALWAYS emit two peaks -- hallucinating a confident
+            second fly on 65% of SINGLE-fly frames, at a median 0.87 of the
+            primary peak's confidence, i.e. unfilterable by any threshold. A
+            10x sweep of `bg_weight` (0.1 -> 0.5 -> 1.0) moved that only
+            0.648 -> 0.594 and the confidence ratio only 0.868 -> 0.782.
+
+            It cannot work, because a spurious peak covers a handful of pixels
+            out of ~25,600 on a 160x160 map: normalising by PIXEL COUNT dilutes
+            its penalty to nothing no matter how `bg_weight` is scaled, while
+            the per-instance foreground term charges full price for a MISSED
+            instance. The loss had no term saying "a confident peak far from any
+            instance is bad".
+
+            The focal fix is CornerNet's: weight each background pixel by how
+            confident the (wrong) prediction there is, ``(pred/amplitude)**
+            focal_alpha``, and normalise by the SUM OF WEIGHTS rather than the
+            pixel count. Quiet background contributes ~0 and stops drowning the
+            signal; one confident false peak now dominates the term.
         amplitude: PEAK VALUE of the regression target. MUST be 255.0 to match
             JARVIS, which renders targets as ``255.0*np.exp(...)``
             (``dataset2D.py:420,432``) -- so its trained CenterDetect emits
@@ -129,9 +152,26 @@ def centerdetect_instance_mse(pred, centers_xy, valid, *, heatmap_size, sigma,
     per_inst_mean = per_inst_sum / per_inst_count                      # (B,K)
     fg_loss = (per_inst_mean * valid_f).sum() / (valid_f.sum() + eps)
 
-    bg_mask = (gt_merged <= fg_thresh).astype(pred2d.dtype)            # (B,H,W)
-    nbg = bg_mask.sum(axis=(1, 2)) + eps                                # (B,)
-    bg_per_image = (se * bg_mask).sum(axis=(1, 2)) / nbg                # (B,)
+    # NOTE the `amplitude *` here: `fg_thresh` is a FRACTION of peak (it is
+    # applied to the unscaled peak-1.0 `gt_inst` above), but `gt_merged` is
+    # amplitude-scaled. Comparing the scaled target against the raw fraction
+    # left a ring of Gaussian-skirt pixels (0.0000392 < g <= 0.01) in NEITHER
+    # the foreground nor the background mask, silently excluded from the loss.
+    bg_mask = (gt_merged <= amplitude * fg_thresh).astype(pred2d.dtype)  # (B,H,W)
+
+    if focal_alpha > 0.0:
+        # CornerNet-style penalty reduction: a background pixel matters in
+        # proportion to how confidently it is (wrongly) predicted.
+        conf = jnp.clip(pred2d / amplitude, 0.0, 1.0)                   # (B,H,W)
+        bg_w = bg_mask * conf ** focal_alpha
+        # Normalise by the SUM OF WEIGHTS, not the pixel count -- this is the
+        # part that actually fixes the dilution. A floor of 1.0 keeps a fully
+        # quiet background at ~0 loss instead of dividing by ~0.
+        denom = jnp.maximum(bg_w.sum(axis=(1, 2)), 1.0)                 # (B,)
+        bg_per_image = (se * bg_w).sum(axis=(1, 2)) / denom             # (B,)
+    else:
+        nbg = bg_mask.sum(axis=(1, 2)) + eps                             # (B,)
+        bg_per_image = (se * bg_mask).sum(axis=(1, 2)) / nbg             # (B,)
     bg_loss = bg_per_image.mean()
 
     total = fg_loss + bg_weight * bg_loss
