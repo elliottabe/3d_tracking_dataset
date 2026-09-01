@@ -176,7 +176,7 @@ def make_train_step(*, bg_weight=0.1, lr=3e-4, weight_decay=0.05,
 
 def eval_two_peak_rate(model, val_ds, two_fly_idx, *, batch_size=16,
                        suppression_radius=SUPPRESSION_RADIUS,
-                       capture_radius_px=CAPTURE_RADIUS_PX):
+                       capture_radius_px=CAPTURE_RADIUS_PX, mesh=None):
     """Two-peak rate on the held-out labelled two-fly val frames (the
     acceptance metric, not loss -- see module docstring). Decodes from res2
     (the half-res / 160px scale -- matches production's own
@@ -201,6 +201,12 @@ def eval_two_peak_rate(model, val_ds, two_fly_idx, *, batch_size=16,
         imgs, centers, valid = zip(*(val_ds[i] for i in idxs))
         img_u8 = jnp.asarray(np.stack(imgs))
         img = (img_u8.astype(jnp.float32) / 255.0 - IMAGENET_MEAN_J) / IMAGENET_STD_J
+        if mesh is not None and img.shape[0] % len(mesh.devices.flat) == 0:
+            # The model is replicated across the mesh, but an UNSHARDED input
+            # runs the forward on the default device alone -- measured: one GPU
+            # at 62% while the other three sat at 0-2% for the whole eval.
+            from jarvis_jax.sharding import shard_batch
+            img = shard_batch(img, mesh)
         _, res2 = model.forward_both(img)
         peaks_hm, conf = extract_top_k_peaks(np.asarray(res2), k=2,
                                              suppression_radius=suppression_radius)
@@ -234,7 +240,8 @@ def eval_two_peak_rate(model, val_ds, two_fly_idx, *, batch_size=16,
 
 def eval_single_fly_false_positive(model, val_ds, single_fly_idx, *, batch_size=16,
                                    suppression_radius=SUPPRESSION_RADIUS,
-                                   conf_ratio_thresholds=(0.25, 0.5, 0.75)):
+                                   conf_ratio_thresholds=(0.25, 0.5, 0.75),
+                                   max_frames=256, seed=0, mesh=None):
     """False-positive (spurious second peak) rate on the held-out labelled
     SINGLE-fly val frames -- the risk ``eval_two_peak_rate`` cannot see
     (see module docstring / the copy-paste-synthesis task brief's
@@ -259,11 +266,30 @@ def eval_single_fly_false_positive(model, val_ds, single_fly_idx, *, batch_size=
 
     model.eval()
     conf1s, conf2s = [], []
+    # This rate is estimated, not enumerated: 1,509 single-fly frames were being
+    # pushed through an unsharded forward + host-side NMS EVERY epoch, which
+    # measured ~40% of a 352s epoch while the training half took ~200s. A fixed
+    # random subsample of `max_frames` gives the rate to within a few percent
+    # (binomial s.e. at n=256 is ~3%), which is far finer than the effect sizes
+    # this metric exists to catch. Deterministic seed so the subset is the SAME
+    # frames every epoch -- an epoch-to-epoch curve over a MOVING subset would
+    # confound sampling noise with real change.
+    if max_frames is not None and len(single_fly_idx) > max_frames:
+        rng = np.random.default_rng(seed)
+        single_fly_idx = list(np.asarray(single_fly_idx)[
+            np.sort(rng.choice(len(single_fly_idx), size=max_frames, replace=False))])
+
     for i0 in range(0, len(single_fly_idx), batch_size):
         idxs = single_fly_idx[i0:i0 + batch_size]
         imgs, centers, valid = zip(*(val_ds[i] for i in idxs))
         img_u8 = jnp.asarray(np.stack(imgs))
         img = (img_u8.astype(jnp.float32) / 255.0 - IMAGENET_MEAN_J) / IMAGENET_STD_J
+        if mesh is not None and img.shape[0] % len(mesh.devices.flat) == 0:
+            # The model is replicated across the mesh, but an UNSHARDED input
+            # runs the forward on the default device alone -- measured: one GPU
+            # at 62% while the other three sat at 0-2% for the whole eval.
+            from jarvis_jax.sharding import shard_batch
+            img = shard_batch(img, mesh)
         _, res2 = model.forward_both(img)
         peaks_hm, conf = extract_top_k_peaks(np.asarray(res2), k=2,
                                              suppression_radius=suppression_radius)
@@ -403,9 +429,10 @@ def run_training(root, run_dir, *, epochs=30, batch_size=32, lr=3e-4,
                       f"(fg1={fg1:.4f} bg1={bg1:.4f} fg2={fg2:.4f} bg2={bg2:.4f})")
         train_loss = float(np.mean([float(x) for x in losses])) if losses else float("nan")
 
-        two_peak = eval_two_peak_rate(model, val_ds, two_fly_idx, batch_size=batch_size)
+        two_peak = eval_two_peak_rate(model, val_ds, two_fly_idx,
+                                      batch_size=batch_size, mesh=mesh)
         false_pos = eval_single_fly_false_positive(model, val_ds, single_fly_idx,
-                                                    batch_size=batch_size)
+                                                    batch_size=batch_size, mesh=mesh)
         dt = time.time() - t0
         print(f"epoch {epoch}/{epochs}: train_loss={train_loss:.5f} "
               f"two_peak_rate={two_peak['two_peak_rate']:.3f} "
