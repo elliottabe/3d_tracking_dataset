@@ -118,6 +118,44 @@ and is recoverable from `0bc36fe^`:
 Restore them under non-silhouette names (`mask_sdf.py`, `mask_containment.py`,
 `appendage_dof.py`, `wing_mask_refine.py`) with their tests.
 
+### 4.2b Every recovered file is re-verified, not trusted
+
+Docstrings in this repo have been unreliable: tonight three separate ones were
+contradicted by measurement (the roll prior calling roll the weak wing DOF when
+it is the strongest; "a SAM3 mask is the BODY silhouette ... wings are NOT
+filled" when wing landmarks sit inside the mask on 75-91% of frames;
+`silhouette_iou` named for a polish it has nothing to do with). So each
+recovered file's load-bearing claim was re-measured before this spec relied on
+it. Results:
+
+| file | claim | verdict |
+|---|---|---|
+| `silhouette_sdf` | signed, negative inside / positive outside | **PASS** (-25.3 inside, +27.8 outside) |
+| `silhouette_sdf` | "rescaled to ORIGINAL-image pixels" | **APPROXIMATE ONLY -- see below** |
+| `silhouette_containment` | `r = conf * relu(d + margin)`, one-sided, `present`-gated | **PASS** |
+| `silhouette_dof` | `abdomen` pattern does not catch the leg `coxa_abduct` | **PASS** (no 'coxa' joint selected) |
+| `silhouette_dof` | `include=("wing",)` selects exactly the wing DOFs | **PASS** (the 6 wing joints) |
+| `silhouette_dof` | wing vertex selection is wing-only | **PASS** (100 verts, `wing_left`+`wing_right`) |
+| `silhouette_refine` | "All other DOFs stay exactly at q_init" via `opt_mask` | **PASS** (opt_mask gates the update and the limit rows) |
+
+**The one real defect: the SDF's original-pixel scaling is anisotropic.** The
+distance transform runs on the crop AFTER an anisotropic resize to a square grid
+and is then rescaled by a single factor, so it cannot be right in both axes.
+Measured on a 40x60 box: `grid_scale` (0.593, 0.889), a 1.50x anisotropy, and the
+SDF at the box centre reads -25.3 px against a true inradius of 20.0 px -- a
+**27% error**, direction-dependent. For a containment penalty this mis-weights
+the pull by up to the anisotropy factor depending on which way the vertex is
+outside. Fix before use: either resize isotropically (letterbox the crop) or run
+the distance transform at the crop's native resolution.
+
+Also note three of the "failures" in the first verification pass were bugs in
+the VERIFICATION, not the code: grepping for `abduct` (but `abdomen_abduct_*`
+are legitimately abdomen joints), grepping for a parameter name I guessed
+(`sil_qs`; it is `opt_mask`), and indexing `seg_names` with `vertex_segment`
+values (`seg_ids` are values 1..67, `seg_names` is positional 0..66 -- an
+off-by-one, the third index-space error of the session). Verify by reading the
+code and measuring, never by pattern-matching assumed names.
+
 ### 4.3 The cost, and the trap in the recovered code
 
 `silhouette_containment` is **one-sided**: `r = conf * relu(d + margin)`, so
@@ -139,9 +177,11 @@ only, and the acceptance tests below are what decide the weights.
 
 ### 4.4 Scope and staging
 
-* DOFs optimised: `wing_pitch_left`, `wing_pitch_right`. Roll is a **stretch
-  goal, default off** -- it is the strongest-observed wing DOF, so the markers
-  already constrain it and a mask term there risks fighting real signal.
+* DOFs optimised: `wing_pitch_left`, `wing_pitch_right`. **Roll is OUT OF
+  SCOPE** (user decision, 2026-09-01), not merely defaulted off: it is the
+  strongest-observed wing DOF (per-column 0.344, vs pitch 0.042), so the markers
+  already constrain it and a mask term there would fight real signal -- which is
+  exactly how the earlier roll smoothness prior destroyed the song.
 * Everything else frozen: root, thorax, abdomen, legs, and **wing yaw** (yaw
   carries the song; it is well observed and must not be touched).
 * Runs as an opt-in stage after STAC and before the bridge, writing
@@ -193,4 +233,5 @@ what let the rest prior through.
 * A third wing landmark (e.g. trailing edge) would close the null space
   properly, but needs new annotations and a detector retrain.
 * Leg or abdomen silhouette terms.
-* Any change to wing yaw, or to the marker offsets (measured correct).
+* Any change to wing yaw, wing ROLL, or the marker offsets (all measured
+  correct or well-constrained already).
