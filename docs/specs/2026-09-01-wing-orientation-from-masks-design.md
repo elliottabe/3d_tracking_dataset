@@ -11,6 +11,17 @@ rest-prior attempt of the same day, which is documented here as rejected.*
 > `smooth_weight` measured. **Acceptance criterion 1 was blind to that** and has
 > been replaced. Read 8 for the outcome and 5.0/5.1'/5.3' for the amended
 > criteria before re-attempting anything here.
+>
+> **UPDATE (2026-09-01, section 9): the fine-motion half is SOLVED, the stage is
+> still OFF.** 8.3's recommended direction is implemented as
+> `wing_mask_fit.param_mode` -- `free` (unchanged default), `spline` (the
+> optimisation variable is a knot vector, not a per-frame offset) and `lowpass`
+> (solve free, keep the slow half). Both new modes preserve the song BY
+> CONSTRUCTION and pass criterion 1' on every epoch of the singing fly with
+> placement intact. What now blocks the stage is three things that are NOT the
+> parameterisation: the female's 31%/41% gap closure against 3''s 50% gate, a
+> SAM MASK collapse in her frames 1500-2006, and 85-95 s against a 60 s budget.
+> Read 9 before re-attempting anything.
 
 ## 1. The defect
 
@@ -594,3 +605,142 @@ WHOLE bout, on at least one more recording -- preferably one with a reviewed
 mask cost normalisation ever changes: the temporal term is
 `smooth_weight**2 * sum(dq)^2` with `dq` in radians against a raw-pixel cost, so
 those numbers are specific to this normalisation and must not be copied forward.
+
+## 9. The redesign (2026-09-01): `param_mode`, measured
+
+8.3 recommended stopping the stage carrying high-frequency content at all. That
+is now built and measured. Full record:
+`docs/benchmark/2026-09-01-wing-mask-fit/notes.md` section 10 +
+`scorecard_redesign.json`; figures under
+`figures/2026-09-01-wing-mask-fit/redesign/` (gitignored, commands in notes 10.8).
+
+**Nothing shipped changed.** `param_mode: free` is the default and
+`enabled: false` is untouched, so every number in 1-8 stays reproducible.
+
+### 9.1 What the two new modes are, and why `lowpass` exists
+
+* `spline` -- `Delta pitch = knot_basis(F, knot_spacing) @ theta`, piecewise
+  linear with knots every `knot_spacing` (32) frames. An order of magnitude
+  below the 6.4-FRAME song period, so **no** knot vector can put power in the
+  song band. Chunk boundaries are part of it: each chunk's first knot is clamped
+  to the previous chunk's last, because three chunks splined independently and
+  stitched have a STEP at every boundary and a step is broadband. Hence
+  `frame_chunk % knot_spacing == 0`.
+* `lowpass` -- solve exactly as `free`, then `q_out = q_init +
+  lowpass(q_fit - q_init)`, zero-phase 4th-order Butterworth at
+  `1/(2*knot_spacing)` cycles/frame. It exists as the **honest control**: it
+  preserves the song equally well by construction, so if it lands where `spline`
+  lands, `spline` is not "a better fit", only a cheaper parameterisation.
+
+### 9.2 Criterion 1' -- PASS, and read it as the trivial pass it is
+
+fly1, whole bout, three extended-wing epochs (E1 0-869 left, E2 869-1515 right,
+E3 1515-1943 left -- the whole-bout window finds a THIRD epoch that 5.0's
+"swaps at 869" reading did not). `MSC(hp(pitch_L), hp(pitch_R))` at f0:
+control 0.418 / 0.861 / 0.712; `free` 0.039 / 0.111 / 0.043; **`spline32` 0.417 /
+0.861 / 0.712 and `lowpass32` 0.418 / 0.861 / 0.712** -- the control's own values
+to three decimals. 1'd `corr(hp_treat, hp_ctrl)` 0.996-1.000. 1'e pulse counts
+30/30, 43/43, 10/10.
+
+That is a pass **by identity**, which is exactly what "by construction" buys and
+exactly why it is not evidence the fit is good. Criteria 2-6 (9.3) are.
+
+**Two defects in the criterion itself, both found by scoring the UNMODIFIED
+CONTROL as its own arm -- do that from now on; it is the only way to know a gate
+is falsifiable rather than unpassable.**
+
+1. **5.1'a applies PER WINDOW, not per epoch.** 5.1'b's "require the verdict at
+   nperseg 64/128/256" and 5.1'a's "score only where the control's coherence is
+   significant" conflict whenever a long window leaves too few segments. On fly1
+   E1, nperseg 256 over 869 frames gives K=5, a 0.53 significance floor, and a
+   CONTROL MSC of 0.317 -- below its own floor. Requiring that window fails the
+   unmodified control, the pathology 5.0 exists to forbid. Such a window is
+   reported and excluded.
+2. **A window containing non-finite qpos makes the whole test undefined.**
+   `hp_filt` is a filtfilt: one NaN returns an all-NaN trace, every `>=` against
+   NaN is False, and the criterion prints a confident FAIL for every arm
+   including a copy of the control. fly0 has 252 such rows and exactly one long
+   finite run (frames 0-1710). `criterion1prime()` now prints UNDEFINED.
+
+### 9.3 Placement survives -- and criterion 3' still fails on the female
+
+Bout medians, coverage 0.3, frames 0-1500. Criterion 5: every arm lands in the
+measured -20..-40 deg band (fly0 -33.2/-35.4 spline32 vs -32.4/-35.2 free;
+fly1 -19.3/-31.0 vs -19.1/-32.0) and nowhere near the -57.3 deg springref.
+Criterion 4: +0.7% fly1, -22.8% (improved) fly0. Criterion 2: `max |Delta|` over
+every non-pitch qpos address is **exactly 0.0** in every mode -- the `opt_mask`
+contract survives the reparameterisation. Criterion 3' gap closure:
+fly1 73.9%/61.2% (spline32) against free's 74.2%/65.4%; **fly0 31.1%/41.1%
+against free's 29.9%/40.3%** -- still "direction met, target not met" on the
+female, still short of the 50% gate. The redesign was never going to fix that:
+it is the pitch-only limit of 4.4, and roll is out of scope.
+
+**Is `spline` better or merely quieter?** On the male, neither: `spline`,
+`lowpass` and `free` agree to 0.1 pt of `inside%`/`explained%`. On the female's
+clean stretch `spline32` beats BOTH on `inside%` (92.8 vs 92.3 free / 92.5
+lowpass), `explained%` (46.5 / 45.8 / 46.0), both penetrations and the residual.
+Real, consistent, and marginal. Against it, `lowpass` is 5-10x cleaner on the
+1'f negative control (9.4). **Neither dominates.**
+
+### 9.4 A C0 basis has a comb at the knot rate -- 1'f on the non-singing female
+
+`hp_rms` ratio: `free` 9.25x (the failure 1'f was written for), `spline32` 1.02x,
+`spline64` 1.00x, `lowpass32` 1.00x. But `peak/floor` ratio: `spline32` **1.56x**
+at 0-1500 and 1.13-1.30x elsewhere, `spline64` 1.06-1.11x, `lowpass32` 1.000x.
+The piecewise-linear KINKS put a comb at the knot rate and its harmonics, and on
+a fly that does not sing the 43.7 Hz "f0" the test picks sits near it. Not
+clipping: the joint clamp is inactive in every arm.
+
+**1'f as written -- "peak/floor must not rise above control's" -- has no
+tolerance band and only the identity passes it**: `lowpass32` scores 3.9402
+against 3.9392 and is recorded FAIL by 0.025%. 5.1'f already calls its threshold
+uncalibrated; this is the first measurement that brackets the "no new peak"
+half (identity 1.000, lowpass 1.000, spline64 1.06-1.11, spline32 1.13-1.56,
+the rejected `smooth_weight` 30 arm 7.3). A future version needs a band. **A C2
+(cubic) basis would remove the comb and is NOT implemented** -- stitching cubic
+chunks needs value + 1st + 2nd derivative continuity across the boundary, not
+the single value clamp the linear basis needs.
+
+### 9.5 The hard case is a SAM MASK failure, not a fit failure
+
+8.5 recorded fly0's frames 1500-2006 as the worst behaviour measured anywhere
+and never scored them. Scored now: her median SAM mask area collapses from
+**15 862 px to 4 882 px** over 1500-1710 with **40.2% of the still-valid masks
+under a quarter of their own camera's median**, and 1710-2007 is 58% valid at
+2 834 px. fly1 is untouched across the same frames (20 838-22 014 px, 0%
+slivers, 7/7 cameras). `min_present_cameras: 3` cannot catch this -- the masks
+are present, just tiny and truncated (the female against the wall). Her control's
+own `inside%` is 40.2 there against 86.4 on the clean stretch and her wing
+residual 0.0617 against 0.0147, so the STAC pose is bad there too.
+
+What the redesign does to that stretch, read back off
+`traces/pitch_traces_spline32.png`: fly0's right wing ramps -55 -> **+77** ->
+-45 deg between frames 1600 and 1695 as ONE clean ~60-frame triangle with
+straight sides. `free` does the same excursion as a jagged square wave reaching
++95 deg. **The spline makes the error smooth; it does not make it correct, and a
+smooth wrong answer is the more dangerous of the two.** Any future acceptance
+run must gate on mask AREA, not only on camera count.
+
+### 9.6 Performance: unchanged, and now explained
+
+85-97 s per bout-fly in every mode (free 93.6/85.3, spline32 94.5/85.9,
+lowpass32 93.7). Cutting `n_steps` 300 -> 100 -- on top of a 28-fold parameter
+reduction -- buys **2.6%** (93.4 -> 91.7 s) with every placement metric identical
+to three significant figures. The Adam loop is not the cost: `prefetch=True`
+overlaps it with host-side coverage-target sampling and the serial
+`sdf_stack_from_masks`. That confirms 8.5's diagnosis and leaves threading the
+SDF stack (34.4 s -> 4.8 s at 16 threads) as the only lever. Budget 60 s.
+
+### 9.7 What would now change the decision
+
+8.6 asked for a variant passing 1'b on both epochs of a singing fly while
+keeping placement and the measured 3' gap closure. **`spline` does that, on all
+three epochs of the whole bout.** What remains, in order:
+
+1. a mask-AREA validity gate, so 9.5's stretch is left at the STAC pose instead
+   of being fitted to a sliver;
+2. the female's 3' gap -- pitch alone reaches 31%/41%, so this needs either roll
+   (out of scope, 4.4 -- reopening it requires new evidence) or a third wing
+   landmark (7);
+3. the 60 s budget, via threaded `sdf_stack_from_masks`;
+4. a second recording, preferably with a reviewed `sex.json`.

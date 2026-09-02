@@ -1509,6 +1509,46 @@ def report_epochs(st, cases, arms):
               f"pulse threshold = 2x control sigma, common to every arm)")
 
 
+#: Criterion 1'b is REPORTED AT THREE WINDOW LENGTHS and the verdict must hold
+#: at all three -- "a coherence that depends on the window length is not a phase
+#: lock" (spec section 5.1'b). 256 on a ~630-frame epoch leaves only K~3
+#: segments, so its own 95% significance floor is ~0.78; that is the point, not
+#: a flaw: it is the hardest of the three and a real lock still clears it.
+CRIT1_NPERSEG = (64, 128, 256)
+
+
+def msc_sig95(n_frames, nperseg):
+    """(K, 95% significance level) for a Welch MSC at 50% overlap.
+
+    MSC is a RATIO of averaged spectra and is biased hard upward when there are
+    few segments -- with K segments the null distribution gives
+    `1 - 0.05**(1/(K-1))`. Reporting a coherence without it is meaningless: at
+    nperseg 256 on a 631-frame epoch the floor is 0.78, so 0.7 is NOT evidence.
+    """
+    K = max(2, int(2 * n_frames / nperseg) - 1)
+    return K, float(1 - 0.05 ** (1 / (K - 1)))
+
+
+def xcorr_periodicity(cc, lags, period_frames):
+    """Fraction of a cross-correlation curve's power at the song period, 0..1.
+
+    THE SPECIFICITY HALF of criterion 1'e, made a number instead of an eyeball.
+    Two wings on one body share pose noise, so fly0's control also reaches
+    `MSC ~ 0.8` at some frequency -- what separates real bilateral song is that
+    the L/R cross-correlation OSCILLATES at 1/f0 (a clean +-0.6 at the 6.4-frame
+    period on fly1) instead of wandering aperiodically (+-0.2 on fly0). A pure
+    cosine at `period_frames` scores 1.0; broadband noise scores ~2/len.
+    """
+    c = np.asarray(cc, float)
+    c = c - c.mean()
+    L = np.asarray(lags, float)
+    tot = float(np.sum(c ** 2))
+    if tot <= 0 or not np.isfinite(period_frames) or period_frames <= 1:
+        return 0.0
+    z = np.abs(np.sum(c * np.exp(-2j * np.pi * L / period_frames))) ** 2 / len(c)
+    return float(min(1.0, 2.0 * z / tot))
+
+
 def bilateral_stats(control, arms, mjadr, cases, fs, hp_hz=40.0):
     """THE DECISIVE TEST: are the LEFT and RIGHT wing pitch oscillations
     phase-locked to each other?
@@ -1564,11 +1604,24 @@ def bilateral_stats(control, arms, mjadr, cases, fs, hp_hz=40.0):
             lags = np.arange(-len(a_) + 1, len(a_))
             m = np.abs(lags) <= 20
             k = int(np.argmax(np.abs(cc[m])))
+            # 1'b at THREE window lengths; the verdict must hold at all three.
+            by_np = {}
+            for npg in CRIT1_NPERSEG:
+                if npg > n:
+                    continue
+                fn, Cn = coherence(L, R, fs=fs, nperseg=npg)
+                Kn, sn = msc_sig95(n, npg)
+                by_np[str(npg)] = dict(
+                    msc=float(Cn[int(np.argmin(np.abs(fn - f0)))]),
+                    sig95=sn, n_segments=Kn)
             c["arms"][lab] = dict(msc_LR_at_f0=float(C[j]),
                                   msc_LR_max=float(C[fc > hp_hz].max()),
+                                  msc_LR_by_nperseg=by_np,
                                   phase_LR_deg=ph,
                                   xcorr_LR=float(cc[m][k]),
                                   xcorr_lag_fr=int(lags[m][k]),
+                                  xcorr_periodicity=xcorr_periodicity(
+                                      cc[m], lags[m], fs / f0),
                                   xcorr_curve=cc[m].tolist(),
                                   xcorr_lags=lags[m].tolist(),
                                   hp_rms_left=float(L.std()),
@@ -1716,6 +1769,188 @@ def report_bilateral(bst, st, cases, arms):
               f"joint coordinates)")
 
 
+def criterion1prime(bst, st, cases, arms, min_periodicity=0.35):
+    """ACCEPTANCE CRITERION 1' (spec section 5.1'), scored, not eyeballed.
+
+    Returns `{case_key: {...}}` and is the machine-checked form of the criterion
+    that REPLACED the amplitude test. The amplitude test (`hp_rms` within 20% of
+    control) scored the shipped free-mode fit a clean 1.00x PASS on the very
+    epoch where the song was destroyed; it is still reported here (1'g) and
+    still never gated on.
+
+    1'a APPLICABILITY. Only epochs the control shows as (i) an extension epoch,
+        (ii) coherent above its own 95% significance level, and (iii) PERIODIC
+        at 1/f0. Without (iii) the test fires on the female, whose two wings
+        share pose noise and reach MSC ~0.8 broadband with an aperiodic xcorr.
+        A fly with no such epoch is scored by 1'f instead.
+    1'b PRIMARY GATE. `MSC(hp(pitch_L), hp(pitch_R))` at f0 must be
+        `>= max(0.8 * control, own 95% significance)`, AT ALL THREE window
+        lengths in `CRIT1_NPERSEG`.
+    1'c SUPPORT. song-band `peak/floor` >= 0.5x control. NEVER primary: it is a
+        ratio, so smoothing inflates it while deleting the song.
+    1'd SUPPORT. `corr(hp_treat, hp_ctrl)` >= 0.5, with the spec's escape hatch:
+        failing 1'd while RAISING 1'b is a recovery, not a loss, and is flagged
+        for adjudication by figure rather than auto-failed.
+    1'e SUPPORT. pulse count within [0.5x, 2x] control and |median offset| <= 1
+        frame, at one common threshold.
+    1'f NEGATIVE CONTROL, on a non-singing fly: no new spectral peak
+        (`peak/floor` must not exceed control's) and `hp_rms` <= 2x control.
+        The 2x is UNCALIBRATED -- no measured arm has ever passed it.
+    """
+    out = {}
+    for key, fly, a0, a1, wing, label in cases:
+        b, c = bst[key], st[key]
+        cb, cc_ = b["arms"]["control"], c["arms"]["control"]
+        # NON-FINITE FRAMES MAKE THE WHOLE TEST UNDEFINED, and saying so is not
+        # optional. `hp_filt` is a filtfilt: one NaN anywhere in the window
+        # returns an all-NaN trace, every statistic below becomes NaN, and every
+        # `>=` against NaN is False -- so a window containing even one of fly0's
+        # 252 STAC-unsolved frames would print a confident FAIL for EVERY arm,
+        # including a copy of the control. That is a false negative, not a
+        # result. Report it as undefined.
+        finite = bool(np.isfinite(cb["msc_LR_at_f0"]) and np.isfinite(cc_["hp_rms"])
+                      and np.isfinite(cc_["peak_over_floor"]))
+        applicable = bool(
+            finite and "nosong" not in key
+            and cb["msc_LR_at_f0"] >= b["msc_sig95"]
+            and cb["xcorr_periodicity"] >= min_periodicity)
+        row = {"label": label, "fly": fly, "t0": a0, "t1": a1, "wing": wing,
+               "f0_hz": b["f0_hz"], "f0_period_frames": b["f0_period_frames"],
+               "applicable_1a": applicable, "finite": finite,
+               "control_msc": cb["msc_LR_at_f0"], "msc_sig95": b["msc_sig95"],
+               "control_xcorr_periodicity": cb["xcorr_periodicity"],
+               "arms": {}}
+        for lab in arms:
+            a, sa = b["arms"][lab], c["arms"][lab]
+            r = {}
+            if not finite:
+                r["verdict"] = "UNDEFINED (non-finite qpos in this window)"
+                r["g_hp_rms"] = dict(value=sa["hp_rms"], control=cc_["hp_rms"],
+                                     ratio=float("nan"))
+                row["arms"][lab] = r
+                continue
+            if applicable:
+                wins = {}
+                for npg, cv in cb["msc_LR_by_nperseg"].items():
+                    av = a["msc_LR_by_nperseg"][npg]
+                    gate = max(0.8 * cv["msc"], av["sig95"])
+                    # 1'a APPLIES PER WINDOW, not just per epoch, and this is a
+                    # ruling the spec's two clauses leave in conflict. "Report at
+                    # nperseg 64/128/256 and require the verdict to hold at all
+                    # three" collides with "score only where the CONTROL's own
+                    # coherence is significant" whenever a long window leaves too
+                    # few segments. MEASURED on fly1 epoch 1: nperseg 256 over
+                    # 869 frames gives K=5 and a 0.53 significance floor, and the
+                    # CONTROL's own MSC there is 0.317 -- below its own floor, so
+                    # that window shows no phase lock to preserve in the first
+                    # place. Requiring it would fail the UNMODIFIED CONTROL, the
+                    # exact pathology section 5.0 exists to forbid. Such a window
+                    # is reported and excluded, never silently passed.
+                    ok_ctrl = bool(cv["msc"] >= cv["sig95"])
+                    wins[npg] = dict(msc=av["msc"], control=cv["msc"],
+                                     control_sig95=cv["sig95"],
+                                     n_segments=cv["n_segments"],
+                                     control_significant=ok_ctrl, gate=gate,
+                                     passed=bool(av["msc"] >= gate))
+                usable = {k: v for k, v in wins.items() if v["control_significant"]}
+                r["b_coherence"] = dict(
+                    windows=wins,
+                    n_windows_usable=len(usable),
+                    passed=bool(usable) and all(w["passed"] for w in usable.values()))
+                r["c_peak_over_floor"] = dict(
+                    value=sa["peak_over_floor"], control=cc_["peak_over_floor"],
+                    gate=0.5 * cc_["peak_over_floor"],
+                    passed=bool(sa["peak_over_floor"] >= 0.5 * cc_["peak_over_floor"]))
+                r["d_content_retention"] = dict(
+                    value=sa["corr_with_control_hp"], gate=0.5,
+                    passed=bool(sa["corr_with_control_hp"] >= 0.5))
+                # the escape hatch: a treatment that RAISES the phase lock has
+                # recovered song the marker solve missed, not lost content.
+                r["d_recovery_escape_hatch"] = bool(
+                    not r["d_content_retention"]["passed"]
+                    and a["msc_LR_at_f0"] > cb["msc_LR_at_f0"])
+                nc, npul = sa["n_control_pulses"], sa["n_pulses_common_thr"]
+                ratio = npul / max(nc, 1)
+                off = sa["median_offset_fr"]
+                r["e_pulses"] = dict(
+                    n=npul, n_control=nc, ratio=ratio,
+                    median_offset_fr=off,
+                    passed=bool(0.5 <= ratio <= 2.0
+                                and np.isfinite(off) and abs(off) <= 1.0))
+                r["e_specificity_xcorr_periodicity"] = a["xcorr_periodicity"]
+                r["verdict"] = ("PASS" if r["b_coherence"]["passed"] else "FAIL")
+            else:
+                # 1'f, the negative control: do not MANUFACTURE song.
+                hp_ratio = sa["hp_rms"] / max(cc_["hp_rms"], 1e-12)
+                no_peak = bool(sa["peak_over_floor"] <= cc_["peak_over_floor"])
+                amp_ok = bool(hp_ratio <= 2.0)
+                r["f_negative_control"] = dict(
+                    peak_over_floor=sa["peak_over_floor"],
+                    control_peak_over_floor=cc_["peak_over_floor"],
+                    no_new_peak=no_peak,
+                    hp_rms_ratio=hp_ratio, hp_rms_gate=2.0, amplitude_ok=amp_ok,
+                    passed=bool(no_peak and amp_ok),
+                    threshold_calibrated=False)
+                r["verdict"] = "PASS" if r["f_negative_control"]["passed"] else "FAIL"
+            # 1'g REPORTED, NEVER GATED -- the number that was blind.
+            r["g_hp_rms"] = dict(value=sa["hp_rms"], control=cc_["hp_rms"],
+                                 ratio=sa["hp_rms"] / max(cc_["hp_rms"], 1e-12))
+            row["arms"][lab] = r
+        out[key] = row
+    return out
+
+
+def report_criterion1prime(c1):
+    """Print criterion 1' as a verdict table. Ratios to the run's OWN control."""
+    print("\n===== ACCEPTANCE CRITERION 1' (spec section 5.1'): does the song "
+          "survive? =====")
+    for key, row in c1.items():
+        print(f"\n-- {key}: {row['label']}")
+        print(f"   frames {row['t0']}-{row['t1']}, f0 {row['f0_hz']:.0f} Hz = "
+              f"{row['f0_period_frames']:.1f} frames; control MSC(L,R) "
+              f"{row['control_msc']:.3f} (95% sig {row['msc_sig95']:.2f}), "
+              f"xcorr periodicity {row['control_xcorr_periodicity']:.2f}")
+        if not row["finite"]:
+            print("   UNDEFINED: this window contains non-finite qpos rows (the "
+                  "frames STAC could not solve). filtfilt propagates one NaN over "
+                  "the whole trace, so every statistic is NaN -- for the CONTROL "
+                  "too. Score a window with no gaps, or a contiguous finite run.")
+        elif not row["applicable_1a"]:
+            print("   1'a: NOT an applicable song epoch -> scored by 1'f "
+                  "(negative control: do not manufacture song)")
+        for lab, r in row["arms"].items():
+            if not row["finite"]:
+                print(f"   {lab:>12}  {r['verdict']}")
+            elif row["applicable_1a"]:
+                w = r["b_coherence"]["windows"]
+                cells = "  ".join(
+                    f"n{k}: {v['msc']:.3f}/{v['gate']:.3f}"
+                    + ("n.a.(ctrl %.3f < sig %.2f)" % (v["control"], v["control_sig95"])
+                       if not v["control_significant"]
+                       else ("ok" if v["passed"] else "FAIL"))
+                    for k, v in w.items())
+                print(f"   {lab:>12}  1'b {cells}")
+                print(f"   {'':>12}  1'c pk/floor {r['c_peak_over_floor']['value']:.1f} "
+                      f"(gate {r['c_peak_over_floor']['gate']:.1f}) "
+                      f"{'ok' if r['c_peak_over_floor']['passed'] else 'FAIL'}"
+                      f" | 1'd corr {r['d_content_retention']['value']:+.3f} "
+                      f"{'ok' if r['d_content_retention']['passed'] else 'FAIL'}"
+                      f"{' (RECOVERY escape hatch)' if r['d_recovery_escape_hatch'] else ''}"
+                      f" | 1'e pulses {r['e_pulses']['n']}/{r['e_pulses']['n_control']} "
+                      f"off {r['e_pulses']['median_offset_fr']:+.1f}fr "
+                      f"{'ok' if r['e_pulses']['passed'] else 'FAIL'}"
+                      f" | xcorr per {r['e_specificity_xcorr_periodicity']:.2f}"
+                      f" | 1'g hp_rms {r['g_hp_rms']['ratio']:.2f}x (never gated)"
+                      f"  =>  {r['verdict']}")
+            else:
+                f = r["f_negative_control"]
+                print(f"   {lab:>12}  1'f pk/floor {f['peak_over_floor']:.1f} vs "
+                      f"control {f['control_peak_over_floor']:.1f} "
+                      f"{'ok' if f['no_new_peak'] else 'FAIL(manufactured a peak)'}"
+                      f" | hp_rms {f['hp_rms_ratio']:.2f}x (gate 2x, UNCALIBRATED) "
+                      f"{'ok' if f['amplitude_ok'] else 'FAIL'}  =>  {r['verdict']}")
+
+
 def run_plots(args):
     """`--plot` entry point: figures from saved arms, no fits."""
     flies = [int(x) for x in args.flies.split(",")]
@@ -1764,6 +1999,8 @@ def run_plots(args):
     bst = bilateral_stats(control, arms, mjadr, cases, args.fs)
     report_epochs(st_song, cases, arms)
     report_bilateral(bst, st_song, cases, arms)
+    c1 = criterion1prime(bst, st_song, cases, arms)
+    report_criterion1prime(c1)
 
     wanted = (("pitch", "alldof", "delta", "crit1", "bilateral", "song",
                "pulses") if args.plot == "all" else (args.plot,))
@@ -1801,6 +2038,7 @@ def run_plots(args):
                    "delta_qpos_nonzero": delta,
                    "epochs": {f"fly{f}": epochs[f] for f in flies},
                    "song_stats": st_song, "bilateral_stats": bst,
+                   "criterion_1prime": c1,
                    "stats": {f"fly{f}": stats[f] for f in flies}},
                   fh, indent=2, default=float)
     print(f"\nwrote {j}\n" + "\n".join(paths))
