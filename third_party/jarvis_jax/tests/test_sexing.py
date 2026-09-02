@@ -144,3 +144,120 @@ def test_swap_recovers_partial_after_step2(tmp_path):
     assert os.path.exists(os.path.join(bd, "fly1", "orig_fly0"))
     assert os.path.exists(os.path.join(bd, "fly0", "orig_fly1"))
     assert not os.path.exists(tmp)
+
+
+# ---------------------------------------------------------------------------
+# Human ID review as the authority (scripts/canonicalize_sam_masks.py bakes the
+# review into the mask npz's sex_meta; a review manifest can also be passed
+# straight in). The heuristic runs only when neither is available.
+# ---------------------------------------------------------------------------
+
+HUMAN_META = {"male_slot": 1, "status": "kept", "method": "human_id_review",
+              "review_file": "id_review_reviewed_20260829.json",
+              "review_reviewed_at": "2026-08-29T22:48:41+00:00",
+              "original_male_slot": 1}
+
+
+def test_review_from_mask_meta_reads_the_human_slot():
+    d = sexing.review_from_mask_meta(HUMAN_META)
+    assert d["male_fly"] == 1 and d["confidence"] == "user"
+    assert d["method"] == "human_id_review_masks"
+    assert d["review_file"] == "id_review_reviewed_20260829.json"
+
+
+def test_review_from_mask_meta_ignores_the_area_vote():
+    """sam3_driver's own mask-area vote writes sex_meta too. It is a heuristic,
+    not a human decision, and must not be promoted to 'user' authority."""
+    assert sexing.review_from_mask_meta(
+        {"male_slot": 1, "status": "kept", "method": "mask_area_vote",
+         "agreement": 0.43}) is None
+    assert sexing.review_from_mask_meta(None) is None
+
+
+def test_review_from_mask_meta_rejects_a_nonbinary_slot():
+    assert sexing.review_from_mask_meta({**HUMAN_META, "male_slot": 2}) is None
+    assert sexing.review_from_mask_meta({**HUMAN_META, "male_slot": None}) is None
+
+
+def test_review_from_manifest_entry():
+    e = {"reviewed_male_fly": 0, "status": "swapped", "original_male_fly": 1,
+         "reviewed_at": "2026-08-29T22:49:04+00:00"}
+    d = sexing.review_from_manifest_entry(e)
+    assert d["male_fly"] == 0 and d["method"] == "human_id_review_manifest"
+    assert d["confidence"] == "user"
+
+
+def test_review_from_manifest_entry_rejects_unreviewed_or_unsure():
+    assert sexing.review_from_manifest_entry(None) is None
+    for status in ("unsure", "bad", "pending"):
+        assert sexing.review_from_manifest_entry(
+            {"reviewed_male_fly": 1, "status": status}) is None
+    assert sexing.review_from_manifest_entry(
+        {"reviewed_male_fly": 2, "status": "confirmed"}) is None
+
+
+def test_canonicalize_prefers_the_review_over_the_wing_cv(tmp_path):
+    """The wing-CV heuristic says fly0 (it is the one singing in this fixture).
+    The human says fly1. The human must win, and sex.json must say so."""
+    bd = _write_bout(str(tmp_path / "bout"), male_fly=0)
+    res = sexing.canonicalize_bout(bd, KP, mask_sex_meta=HUMAN_META)
+    assert res["applied_swap"] is False              # already fly1 per the human
+    assert res["male_fly"] == 1
+    assert res["method"] == "human_id_review_masks"
+    assert res["authority"] == "human_review"
+    assert res["heuristic_male_fly"] == 0            # the disagreement is recorded
+    assert res["heuristic_agrees"] is False
+    assert os.path.exists(os.path.join(bd, "fly0", "orig_fly0"))    # NOT moved
+    j = json.load(open(os.path.join(bd, "sex.json")))
+    assert j["male_fly"] == 1 and j["authority"] == "human_review"
+
+
+def test_canonicalize_applies_a_review_that_needs_a_swap(tmp_path):
+    bd = _write_bout(str(tmp_path / "bout"), male_fly=1)
+    res = sexing.canonicalize_bout(
+        bd, KP, mask_sex_meta={**HUMAN_META, "male_slot": 0})
+    assert res["applied_swap"] is True and res["male_fly"] == 1
+    assert os.path.exists(os.path.join(bd, "fly1", "orig_fly0"))
+
+
+def test_canonicalize_uses_a_manifest_entry_when_the_mask_has_no_review(tmp_path):
+    bd = _write_bout(str(tmp_path / "bout"), male_fly=1)
+    res = sexing.canonicalize_bout(
+        bd, KP, review_entry={"reviewed_male_fly": 0, "status": "swapped"})
+    assert res["method"] == "human_id_review_manifest"
+    assert res["applied_swap"] is True and res["male_fly"] == 1
+
+
+def test_the_mask_review_outranks_the_manifest_entry(tmp_path):
+    """Both are human, but only the mask's is expressed in the SLOT space the
+    pose fly dirs are built from. A manifest entry names a fly index in the
+    tree it was reviewed against, which a re-run does not reproduce."""
+    bd = _write_bout(str(tmp_path / "bout"), male_fly=1)
+    res = sexing.canonicalize_bout(
+        bd, KP, mask_sex_meta=HUMAN_META,
+        review_entry={"reviewed_male_fly": 0, "status": "swapped"})
+    assert res["method"] == "human_id_review_masks"
+    assert res["applied_swap"] is False
+
+
+def test_canonicalize_falls_back_to_the_heuristic_with_no_review(tmp_path):
+    bd = _write_bout(str(tmp_path / "bout"), male_fly=0)
+    res = sexing.canonicalize_bout(bd, KP, mask_sex_meta={
+        "male_slot": 1, "method": "mask_area_vote", "status": "kept"})
+    assert res["method"] == "pose_wing_cv" and res["authority"] == "heuristic"
+    assert res["applied_swap"] is True
+
+
+def test_review_key_for_bout_dir():
+    key = sexing.review_key_for(
+        "/data/processed/courtship/Session1/2026_04_02_12_11_50/pose/bouts/bout_00004")
+    assert key == "Session1/2026_04_02_12_11_50/bout_00004"
+
+
+def test_load_review_accepts_both_manifest_shapes(tmp_path):
+    p = tmp_path / "r.json"
+    p.write_text(json.dumps({"convention": {"female": 0, "male": 1},
+                             "bouts": {"S/r/bout_00001": {"reviewed_male_fly": 1}}}))
+    assert "S/r/bout_00001" in sexing.load_review(str(p))
+    p.write_text(json.dumps({"S/r/bout_00002": {"reviewed_male_fly": 1}}))
+    assert "S/r/bout_00002" in sexing.load_review(str(p))

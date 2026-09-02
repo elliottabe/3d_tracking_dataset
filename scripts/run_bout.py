@@ -2549,23 +2549,42 @@ def _log_gpu_env():
 
 
 def _canonicalize_bout_sex(cfg, bout_idx: int):
-    """After both flies of a courtship bout are written, canonicalize male -> fly1."""
-    from jarvis_jax.tracking.sexing import canonicalize_bout, read_sex_meta
+    """After both flies of a courtship bout are written, canonicalize male -> fly1.
+
+    The human ID review is the authority when one exists. It normally arrives
+    baked into the mask npz's `sex_meta` (written by
+    scripts/canonicalize_sam_masks.py), which is the form that survives a
+    re-run because it is expressed in the mask slot space the fly dirs inherit.
+    `cfg.sexing.review` may additionally point at an id_review manifest, used
+    only when the mask carries no human decision.
+    """
+    from jarvis_jax.tracking.sexing import (
+        canonicalize_bout, load_review, read_sex_meta, review_key_for)
     run_root = str(cfg.outputs.out)
     bout_dir = os.path.join(run_root, "bouts", f"bout_{bout_idx:05d}")
     mask_npz = os.path.join(str(cfg.recording.predictions_dir),
                             f"bout_{bout_idx:05d}", "sam3_masks.npz")
     sx = cfg.get("sexing", {}) or {}
+    review_entry = None
+    review_path = sx.get("review", None)
+    if review_path:
+        key = review_key_for(bout_dir, pose_dir=os.path.basename(run_root))
+        review_entry = load_review(str(review_path)).get(key)
+        if review_entry is None:
+            print(f"[sexing] bout {bout_idx}: no entry for {key!r} in "
+                  f"{review_path} -- falling back to the mask/pose signal")
     res = canonicalize_bout(
         bout_dir, list(cfg.model.KP_NAMES),
         mask_sex_meta=read_sex_meta(mask_npz),
+        review_entry=review_entry,
         ratio_thr=float(sx.get("ratio_thr", 1.5)),
         high_ratio=float(sx.get("high_ratio", 2.5)),
         conf_min=float(sx.get("conf_min", 0.2)),
         min_frames=int(sx.get("min_frames", 20)))
     male_label = "fly?" if res["male_fly"] is None else f"fly{res['male_fly']}"
     print(f"[sexing] bout {bout_idx}: male={male_label} conf={res['confidence']} "
-          f"method={res['method']} swap={res['applied_swap']}")
+          f"authority={res['authority']} method={res['method']} "
+          f"swap={res['applied_swap']} heuristic_agrees={res['heuristic_agrees']}")
     return res
 
 

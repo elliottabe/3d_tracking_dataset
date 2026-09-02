@@ -14,7 +14,8 @@ from collections import Counter
 import hydra
 from omegaconf import DictConfig, OmegaConf
 
-from jarvis_jax.tracking.sexing import canonicalize_bout, read_sex_meta, _swap_fly_dirs
+from jarvis_jax.tracking.sexing import (
+    _swap_fly_dirs, canonicalize_bout, load_review, read_sex_meta, review_key_for)
 
 # Register the `basename` OmegaConf resolver used by configs/outputs/default.yaml
 # (out = .../${recording.name}/${basename:${recording.session_dir}}/pose). Same
@@ -72,10 +73,19 @@ def main(cfg: DictConfig):
     sx = cfg.get("sexing", {}) or {}
     kp_names = list(cfg.model.KP_NAMES)
 
+    # The human ID review outranks the wing-CV heuristic. It normally reaches
+    # canonicalize_bout through the mask npz's sex_meta (written by
+    # scripts/canonicalize_sam_masks.py); an id_review manifest can be passed
+    # as ++sexing.review=<path> for a tree the reviewer actually watched.
+    review_path = sx.get("review", None)
+    review = load_review(str(review_path)) if review_path else {}
+    if review_path:
+        print(f"[canonicalize] human review: {review_path} ({len(review)} bouts)")
+
     bout_dirs = sorted(glob.glob(os.path.join(run_root, "bouts", "bout_*")))
     print(f"[canonicalize] {len(bout_dirs)} bouts under {run_root} (dry_run={dry})")
-    print(f"{'bout':12s} {'male':5s} {'conf':8s} {'method':14s} {'swap':6s} "
-          f"{'cv0':>7s} {'cv1':>7s} {'ratio':>6s}")
+    print(f"{'bout':12s} {'male':5s} {'conf':8s} {'method':22s} {'auth':13s} "
+          f"{'swap':6s} {'cv0':>7s} {'cv1':>7s} {'ratio':>6s}")
 
     conf_counts = Counter()
     unknown = []
@@ -86,9 +96,11 @@ def main(cfg: DictConfig):
     for bd in bout_dirs:
         b = os.path.basename(bd)
         mask_npz = os.path.join(predictions_dir, b, "sam3_masks.npz")
+        key = review_key_for(bd, pose_dir=os.path.basename(run_root))
         res = canonicalize_bout(
             bd, kp_names,
             mask_sex_meta=read_sex_meta(mask_npz),
+            review_entry=review.get(key),
             ratio_thr=float(sx.get("ratio_thr", 1.5)),
             high_ratio=float(sx.get("high_ratio", 2.5)),
             conf_min=float(sx.get("conf_min", 0.2)),
@@ -97,7 +109,8 @@ def main(cfg: DictConfig):
         cv = res["wing_cv_original"]
         r = res["cv_ratio"]
         print(f"{b:12s} {str(res['male_fly']):5s} {res['confidence']:8s} "
-              f"{res['method']:14s} {str(res['applied_swap']):6s} "
+              f"{res['method']:22s} {res['authority']:13s} "
+              f"{str(res['applied_swap']):6s} "
               f"{fmt(cv['fly0'])} {fmt(cv['fly1'])} "
               f"{('   nan' if r is None else f'{r:6.2f}')}")
         conf_counts[res["confidence"]] += 1
