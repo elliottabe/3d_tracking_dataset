@@ -863,3 +863,68 @@ insufficient, so 9.3's +0.7% (criterion 4) and 73.9/61.2 (criterion 3') were
 quoted from the wrong window: whole bout they are **+9.2%** and **57.0/58.3** on
 fly1. Both still pass.
 
+
+## 10. Task 10 (2026-09-01): the validity gate, and the stage on three more bouts
+
+Full record: `docs/benchmark/2026-09-01-wing-mask-fit/notes.md` section 12 +
+`tracking_quality.{json,md}`.
+
+**9.7's item 1 is DONE.** The three-part remedy of 9.8 is implemented as the
+user asked it to be -- *"our focus for correcting is when the flies are well
+tracked, so if the female is not well tracked it is ok to skip it"* -- so
+skipping is a FEATURE, not a workaround:
+
+* a POSE-AWARE per-(frame, camera) gate: area against that camera's own p75
+  reference catches the truncated sliver, and the fraction of the projected BODY
+  landing inside the mask catches a wrong-fly or merged-fly mask, which has
+  normal AREA;
+* used TWICE -- `camera_ok` gates the SDF stack so sliver evidence never enters
+  the objective, and `frame_keep` holds the skipped frames at the STAC pose,
+  which zeroing `present` alone does NOT do in `spline`/`lowpass` (9.5). Applied
+  as an ENVELOPE that returns to 1 over one knot spacing, because a hard 0/1
+  step is broadband;
+* `max_dpitch_deg: 50`, bracketed on both sides: across all four `param_mode`
+  arms the largest correction on any WELL-TRACKED frame of bout 28 is 42.2 deg
+  and the collapsed stretch reaches 71-98 deg.
+
+**Measured on bout 28**: 324 of fly0's 2007 frames gated (the collapsed stretch,
+starting 70 frames earlier than 8.5's hand-drawn boundary), max |dpitch| over
+1500-1750 **50.0 -> 0.00 deg** with 0-1500 unchanged, `n_at_dpitch_bound`
+**34 -> 0**, and a measured NO-OP on the well-tracked male.
+
+**Measured on three bouts the stage had never seen** (10, 30, 20; chosen by a
+mask-only tracking-quality ranking of all 30 bouts, calibrated to reproduce bout
+28's known good/bad split and nothing else): **the result of 8.1 and 9.3
+GENERALISES.** Same defect (female control penetration -0.042..-0.046, control
+pitch -6..-12 deg), same fix (into the -20..-40 deg band, 35-50% gap closure on
+the female and 50-63% on the male's folded wing, wing residual improved 11-26%,
+`inside%` +4..+7 pt), **criterion 1' PASSES on every epoch of every fly**, and
+4.1's SELF-TARGETING property shows cleanly on two strongly singing males
+(+0.46 deg on the EXTENDED wing against -24.66 on the FOLDED one).
+**Criterion 3' clears 50% on a female for the first time** (bout 30's right wing,
+50.3%) though 7 of 8 female wings are still short, so its verdict stands.
+
+**THE DEFAULT BEHAVIOUR OF THE STAGE CHANGED.** Reproducing every number in
+sections 1-9 now requires BOTH
+`wing_mask_fit.gate_enabled=false wing_mask_fit.max_dpitch_deg=null`
+(verified: 0.028 deg against the saved spline64 arm, against a 0.014 deg
+run-to-run solver noise floor). `gate_enabled=false` alone does not -- the bound
+fires on 34 frames. `enabled: false` is unchanged.
+
+**Two criterion defects found, neither fixed here.** 3' is UNDEFINED when the
+control already has zero penetration: on bout 30 fly1's extended wing, two arms
+agreeing to 0.03 deg on the pose get opposite verdicts from a 0.005-unit
+difference in the median of a quantity that is zero. And the gate's thresholds,
+calibrated on a catastrophe, miss a MILD degradation: on bouts 10 and 20 the
+female's correction exceeds 45 deg on 32/1741 and 43/1160 frames while her mask
+area sits at 0.88-0.95 of her own p75, far above the 0.25 sliver line. Whether
+those excursions are real behaviour or fit error is NOT settled -- the control
+pose moves there too.
+
+**What remains from 9.7**: the female's 3' gap (item 2, now known to be partly a
+TRACKING problem rather than a DOF one), the 60 s budget (item 3 -- the gate adds
+11 s, so it is now 92-119 s), and a second RECORDING with a reviewed `sex.json`
+(item 4 -- three more bouts is not that). Identity was at least checked rather
+than assumed: mean `|yawL-yawR|` is 5-205x larger on fly1 than fly0 on all four
+bouts, so `male = fly1` holds even where SAM3's own mask-area vote is weak
+(camera agreement 0.143 on bout 20).
