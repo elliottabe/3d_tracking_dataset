@@ -623,8 +623,16 @@ is now built and measured. Full record:
 `scorecard_redesign.json`; figures under
 `figures/2026-09-01-wing-mask-fit/redesign/` (gitignored, commands in notes 10.8).
 
-**Nothing shipped changed.** `param_mode: free` is the default and
-`enabled: false` is untouched, so every number in 1-8 stays reproducible.
+**Nothing shipped changed AT THE TIME OF SECTION 9.** `param_mode: free` was
+the default then, so every number in 1-8 was reproducible from the shipped
+config as it stood.
+
+**SUPERSEDED 2026-09-02 (section 11).** The default is now `param_mode: spline`
+/ `knot_spacing: 64`, because shipping `free` as the mode you get by turning the
+stage on is unsafe: it is the one mode measured to destroy the song. Sections
+1-9 now reproduce only with `wing_mask_fit.param_mode=free
+wing_mask_fit.knot_spacing=32 wing_mask_fit.gate_enabled=false
+wing_mask_fit.max_dpitch_deg=null`. `enabled: false` is unchanged.
 
 ### 9.1 What the two new modes are, and why `lowpass` exists
 

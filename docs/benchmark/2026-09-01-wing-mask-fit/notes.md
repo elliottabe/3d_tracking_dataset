@@ -694,9 +694,10 @@ before anything is enabled.
 §9 left the stage OFF because it gets **placement right and fine motion wrong**,
 and recorded the direction: stop the stage carrying high-frequency content at
 all. That is now implemented as a new `wing_mask_fit.param_mode`, measured, and
-this section is the result. **`param_mode: free` remains the default and the
-stage remains `enabled: false`** — nothing about the shipped configuration
-changed, so §1–§9 stay reproducible.
+this section is the result. **`param_mode: free` was the default when §10 was written and the
+stage remains `enabled: false`.** SUPERSEDED 2026-09-02: the default is now
+`spline` / `knot_spacing: 64` (see §13), so §1–§9 reproduce only with
+`param_mode=free knot_spacing=32 gate_enabled=false max_dpitch_deg=null`.
 
 ### 10.1 What was built
 
@@ -1620,3 +1621,33 @@ for B in 10 20 30; do python scripts/run_bout.py paths=hyak ++bout_ids=$B \
 # then the A/B per bout-fly, and the traces, exactly as above with --bout-dir
 # $S/bouts/bout_000NN and --nt 1741 / 1160 / 1298.
 ```
+
+## 13. The shipped parameterisation is now the song-safe one (2026-09-02)
+
+`param_mode: free` -> `spline`, `knot_spacing: 32` -> `64`. **The stage is still
+`enabled: false`; this changes only what you get when you turn it on.**
+
+The reason is a safety one rather than a new measurement. `free` optimises an
+independent pitch correction per frame and is the one mode measured to destroy
+the bilaterally phase-locked courtship song in wing pitch (left/right coherence
+at the song frequency 0.418/0.852 -> 0.038/0.070; pulses buried, 168 detected
+where 43 are real). Shipping it as the default meant a single `enabled: true`
+selected it. `spline` preserves the song by construction and keeps every
+placement gain, and it is what all four validated bouts actually ran.
+
+`knot_spacing` 64 over 32 because a C0 basis leaks 1/f^2 kink energy at the knot
+rate, and 64 measured better on the hard fly on every axis: inside% 92.89 vs
+92.80, penetration gap 31.9/41.9 vs 31.1/41.1, residual -23.25% vs -22.85%,
+knot-rate comb 1.06-1.11x vs 1.13-1.56x, and on the mask-failure stretch its
+excursion peaks at +47.4 deg against +76.6.
+
+`frame_chunk % knot_spacing == 0` is required in spline mode and enforced at
+`wing_mask_refine.py:829`; 256 % 64 == 0.
+
+Pinned by `test_the_shipped_parameterisation_is_the_song_safe_one`, which was
+mutation-checked both ways (reverting to `free` and to `knot_spacing: 48` each
+fail it for the stated reason).
+
+**Reproducing sections 1-9 now requires** `wing_mask_fit.param_mode=free
+wing_mask_fit.knot_spacing=32 wing_mask_fit.gate_enabled=false
+wing_mask_fit.max_dpitch_deg=null`.

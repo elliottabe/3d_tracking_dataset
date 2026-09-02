@@ -621,6 +621,32 @@ def test_wing_mask_fit_bout_forwards_every_config_knob(monkeypatch):
     assert np.allclose(q_ref[fin, 12], qpos[fin, 12] + 0.25)
 
 
+def test_the_shipped_parameterisation_is_the_song_safe_one():
+    """The default `param_mode` must not be the mode that destroys the song.
+
+    `free` optimises an independent pitch correction per frame, and is MEASURED
+    to collapse the bilaterally phase-locked courtship song in wing pitch --
+    left/right coherence at the song frequency 0.418/0.852 -> 0.038/0.070, with
+    pulses buried (168 detected where 43 are real). `spline` preserves it by
+    construction. The stage ships OFF, so whoever turns it on gets whatever this
+    default says: it must be the safe one, and changing it must be deliberate.
+
+    `knot_spacing` 64 over 32 because a C0 basis leaks 1/f^2 kink energy at the
+    knot rate; 64 measured better on the hard fly on every axis (comb 1.06-1.11x
+    vs 1.13-1.56x, mask-failure excursion +47.4 deg vs +76.6).
+
+    The multiple-of constraint is real and enforced at wing_mask_refine.py:829.
+    """
+    wf = _pipeline_wing_mask_fit()
+    assert wf["enabled"] is False, "the stage must ship OFF"
+    assert wf["param_mode"] == "spline", (
+        f"shipped param_mode is {wf['param_mode']!r}; `free` destroys the song")
+    assert wf["knot_spacing"] == 64
+    assert wf["frame_chunk"] % wf["knot_spacing"] == 0, (
+        "spline mode requires frame_chunk % knot_spacing == 0 to keep the knot "
+        "grid uniform across chunks")
+
+
 def test_wing_mask_fit_bout_gates_frames_and_cameras(monkeypatch):
     """exclude_cameras, bridge_ok and min_present_cameras must each actually
     remove evidence -- an all-False `present` row is what leaves a frame at its
@@ -662,7 +688,13 @@ def test_wing_mask_fit_bout_gates_frames_and_cameras(monkeypatch):
                      # (per-frame) is the arm measured to destroy the song, so a
                      # reader of qpos_wingfit.npz must not have to reconstruct
                      # the config to find out which one they are holding.
-                     "param_mode": "free", "knot_spacing": 32,
+                     # read from the shipped config rather than hardcoded, so
+                     # this test asserts "the stats RECORD the parameterisation"
+                     # and does not rot every time the default is retuned. The
+                     # default itself is pinned deliberately, and separately, by
+                     # test_the_shipped_parameterisation_is_the_song_safe_one.
+                     "param_mode": WING_MASK_FIT_ON["param_mode"],
+                     "knot_spacing": WING_MASK_FIT_ON["knot_spacing"],
                      "dpitch_left_deg": pytest.approx(np.rad2deg(0.25)),
                      "dpitch_right_deg": pytest.approx(np.rad2deg(0.5))}
     # the log accounts for n_skipped by bucket, so the buckets must SUM to it --

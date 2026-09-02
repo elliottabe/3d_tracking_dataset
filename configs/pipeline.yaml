@@ -396,13 +396,25 @@ wing_mask_fit:
   #            but spends the whole solve on content it then discards -- it
   #            exists as the CONTROL that says whether `spline` is better or
   #            merely quieter.
-  param_mode: free
+  # CHANGED 2026-09-02 from `free`. `free` is the one mode MEASURED to destroy
+  # the bilaterally phase-locked courtship song in wing pitch (L/R coherence at
+  # the song frequency 0.85 -> 0.04), so it must not be what you get by turning
+  # the stage on. `spline` preserves the song by construction and keeps every
+  # placement gain, and is what all four validated bouts actually ran.
+  # `free` is still selectable and is required to reproduce spec sections 1-9.
+  param_mode: spline
   # Frames between spline knots, and the 1/(2*K) cycles/frame lowpass cutoff.
-  # 32 is an order of magnitude slower than the measured 6.4-FRAME song period
-  # and ~2x slower than the acceptance scorer's own 40 Hz high pass, so neither
-  # mode can carry song. `frame_chunk` MUST be a multiple of this in spline mode
-  # (it keeps the global knot grid uniform across chunks).
-  knot_spacing: 32
+  # CHANGED 2026-09-02 from 32. Both are far slower than the measured 6.4-FRAME
+  # song period, so neither carries song -- but 64 DOMINATES 32 on the hard fly
+  # on every axis measured: inside% 92.89 vs 92.80, penetration gap 31.9/41.9 vs
+  # 31.1/41.1, residual -23.25% vs -22.85%, knot-rate comb 1.06-1.11x vs
+  # 1.13-1.56x, and on the mask-failure stretch its excursion peaks at +47.4 deg
+  # against +76.6. A C0 basis leaks 1/f^2 kink energy at the knot rate, and
+  # widening the knots is the measured way to suppress it.
+  # `frame_chunk` MUST be a multiple of this in spline mode (it keeps the global
+  # knot grid uniform across chunks): 256 % 64 == 0, enforced at
+  # wing_mask_refine.py:829.
+  knot_spacing: 64
   limit_weight: 10.0
   n_steps: 300
   lr: 0.01
