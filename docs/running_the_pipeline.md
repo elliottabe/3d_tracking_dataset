@@ -114,6 +114,45 @@ grinding on CPU).
 
 ---
 
+## Fly identity: reprocessing the courtship set with male = fly1
+
+The 160 reviewed courtship bouts have a canonicalized mask set at
+
+    /gscratch/portia/eabe/data/Johnson_lab/processed/courtship_canonical/<Session>/<recording>/sam3_masks
+
+built by `scripts/canonicalize_sam_masks.py` from the human ID review
+(`processed/courtship/id_review_reviewed_20260829.json`). In it, **mask slot 1
+is the male in every bout**, and each npz's `sex_meta` records the review file,
+its sha256, the original slot and whether a swap was applied. `run_bout` writes
+`fly{slot}`, so pointing the pipeline at this set makes `fly1` the male
+throughout with no other change:
+
+```bash
+python scripts/run_bout.py recording=session1 \
+    recording.timestamp="2026_04_02_16_21_32" \
+    'recording.predictions_dir=${paths.processed_root}/courtship_canonical/${recording.name}/${basename:${recording.session_dir}}/sam3_masks'
+```
+
+Do NOT point `predictions_dir` at the video tree's `Predictions_3D_sam3*`
+instead: measured over all 160 bouts, 25 of them (21 of Session0's 30) have
+their two fly slots reversed relative to the reviewed set, so identity would be
+inverted on those bouts while every stage reported success.
+
+`jarvis_jax.tracking.sexing.canonicalize_bout` reads that `sex_meta` and treats
+it as the authority, falling back to the wing-song CV heuristic only when no
+human decision is present; `sex.json` records which path was taken
+(`authority`) and whether the heuristic agreed (`heuristic_agrees`).
+
+Regenerate the acceptance figure with:
+
+```bash
+python scripts/viz/canonical_sex_check.py \
+    --bouts Session1/2026_04_02_16_21_32/bout_00009,Session1/2026_04_02_16_39_56/bout_00018,Session1/2026_04_02_16_56_37/bout_00007,Session0/2025_10_20_13_20_04/bout_00028 \
+    --out figures/2026-09-02-mask-canonicalization
+```
+
+---
+
 ## Single recording
 
 `slurm_bout_array.py` processes one recording (SAM3 → precompute → jax →
