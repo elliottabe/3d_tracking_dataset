@@ -206,3 +206,146 @@ def test_write_derived_emits_keypoint_names_json(tmp_path):
     p = tmp_path / "annotations" / "keypoint_names.json"
     assert p.exists(), "guard would silently degrade to warn-only"
     assert json.loads(p.read_text()) == names
+
+
+# ---------------------------------------------------------------------------
+# Content-keyed split (2026-09-02). The defect: a recording NAME does not
+# identify footage. The same capture was ingested twice under two names, so a
+# name-keyed split put 29.6% of val's pixels in train while every name-,
+# frame- and fly-level check above read clean.
+# ---------------------------------------------------------------------------
+from jarvis_jax.data.content_index import (
+    alias_components, assert_disjoint, capture_of, content_groups)
+
+
+def _aliased(rec_a, rec_b, n):
+    """rec_a and rec_b are the SAME footage under two names: same camera, same
+    frame numbers, byte-identical files. This is the real shape of
+    2026_06_15_12_12_33 / _34 (courtship_28_34_male / _female)."""
+    merged = {"framesets": {}}
+    path_hash, image_hashes, iid = {}, {}, 0
+    for i in range(n):
+        digest = f"md5_{i:04d}"
+        for rec in (rec_a, rec_b):
+            p = f"{rec}/Cam1/Frame_{i:06d}.jpg"
+            path_hash[p] = digest
+            image_hashes[iid] = digest
+            merged["framesets"][f"{rec}/Frame_{i:06d}/fly0"] = {
+                "recording": rec, "fly_id": 0, "frames": [iid], "ann_ids": [iid]}
+            iid += 1
+    return merged, path_hash, image_hashes
+
+
+def test_alias_components_join_two_names_for_one_capture():
+    _, path_hash, _ = _aliased("rec_m", "rec_f", 5)
+    al = alias_components(path_hash, lambda p: p.split("/")[0])
+    assert al["rec_m"] == al["rec_f"], al
+    # id is the lexicographically smallest member, so it is stable and readable
+    assert al["rec_m"] == "rec_f"
+
+
+def test_alias_components_leave_unrelated_recordings_alone():
+    ph = {"a/Cam1/Frame_0.jpg": "h0", "b/Cam1/Frame_0.jpg": "h1"}
+    al = alias_components(ph, lambda p: p.split("/")[0])
+    assert al == {"a": "a", "b": "b"}
+
+
+def test_capture_is_shared_by_every_alias_of_one_frame():
+    _, path_hash, _ = _aliased("rec_m", "rec_f", 3)
+    al = alias_components(path_hash, lambda p: p.split("/")[0])
+    assert capture_of("rec_m", 2, al) == capture_of("rec_f", 2, al)
+    assert capture_of("rec_m", 2, al) != capture_of("rec_m", 1, al)
+
+
+def test_name_keyed_split_leaks_content_that_content_keyed_does_not():
+    """THE regression test. Holding out rec_m WHOLE looks perfectly clean by
+    name -- and puts every one of its images in train too, via rec_f. Same
+    inputs, same policy, only `aliases` differs."""
+    merged, path_hash, image_hashes = _aliased("rec_m", "rec_f", 40)
+    man = _manifest(["rec_m", "rec_f"])          # both male: normal rule
+
+    leaky = make_split(merged, man, val_recordings=["rec_m"])
+    a = audit_split(merged, leaky, image_hashes=image_hashes)
+    assert a["cross_recording_leaks"] == 0        # every OLD check passes ...
+    assert a["cross_fly_leaked_frames"] == 0
+    assert a["content_overlap"] == 40, a          # ... and all 40 images leak
+
+    al = alias_components(path_hash, lambda p: p.split("/")[0])
+    fixed = make_split(merged, man, val_recordings=["rec_m"], aliases=al)
+    b = audit_split(merged, fixed, aliases=al, image_hashes=image_hashes)
+    assert b["content_overlap"] == 0, b
+    assert b["cross_capture_leaks"] == 0, b
+    # naming ONE member holds out the WHOLE component -- half a component is
+    # exactly the leak being replaced.
+    assert {v for k, v in fixed.items() if k.startswith("rec_f")} == {"val"}
+
+
+def test_audit_content_overlap_needs_hashes_to_see_anything():
+    """Without image_hashes the audit cannot report the only check that
+    mattered -- so a build that omits them is not verified, and must not
+    claim to be."""
+    merged, _, _ = _aliased("rec_m", "rec_f", 5)
+    a = audit_split(merged, make_split(merged, _manifest(["rec_m", "rec_f"]),
+                                       val_recordings=["rec_m"]))
+    assert "content_overlap" not in a
+
+
+def test_write_derived_refuses_a_content_leaking_split(tmp_path):
+    """The build-time guard. red_data_3d_v5 and red_data_3d_v5_valfix both
+    shipped with 29.6% of val leaked because nothing here objected."""
+    merged, _, image_hashes = _aliased("rec_m", "rec_f", 4)
+    merged.update(keypoint_names=["kp0"], skeleton=[],
+                  categories=[{"id": 1, "name": "fly"}],
+                  images=[{"id": i, "file_name": f"x/Cam1/Frame_{i}.jpg"}
+                          for i in range(8)],
+                  annotations=[{"id": i, "image_id": i} for i in range(8)])
+    leaky = make_split(merged, _manifest(["rec_m", "rec_f"]),
+                       val_recordings=["rec_m"])
+    with pytest.raises(ValueError, match="leaks"):
+        write_derived(merged, leaky, str(tmp_path), image_hashes=image_hashes)
+
+
+def test_write_derived_accepts_the_content_keyed_split(tmp_path):
+    merged, path_hash, image_hashes = _aliased("rec_m", "rec_f", 4)
+    merged.update(keypoint_names=["kp0"], skeleton=[],
+                  categories=[{"id": 1, "name": "fly"}],
+                  images=[{"id": i, "file_name": f"x/Cam1/Frame_{i}.jpg"}
+                          for i in range(8)],
+                  annotations=[{"id": i, "image_id": i} for i in range(8)])
+    al = alias_components(path_hash, lambda p: p.split("/")[0])
+    good = make_split(merged, _manifest(["rec_m", "rec_f"]),
+                      val_recordings=["rec_m"], aliases=al)
+    write_derived(merged, good, str(tmp_path), image_hashes=image_hashes)
+    assert (tmp_path / "annotations" / "instances_val.json").exists()
+
+
+def test_forced_component_overrides_female_preservation_explicitly():
+    """A female-inclusive component normally cannot be held out WHOLE. The
+    only footage that can give an unseen-session FEMALE number is exactly such
+    a component, so the override exists -- but it must be opt-in by name, never
+    a side effect of listing the male twin in val_recordings."""
+    merged, path_hash, _ = _aliased("rec_m", "rec_f", 20)
+    al = alias_components(path_hash, lambda p: p.split("/")[0])
+    man = {"recordings": {"rec_m": {"sex": "male"}, "rec_f": {"sex": "female"}}}
+
+    # listing the male twin does NOT hold the component out (female veto)
+    s = make_split(merged, man, val_recordings=["rec_m"], aliases=al,
+                   female_val_frac=0.10, guard=5)
+    assert set(s.values()) == {"train", "val"}
+    assert sum(1 for v in s.values() if v == "val") == 4      # 10% tail x 2 recs
+
+    # naming it explicitly does
+    s2 = make_split(merged, man, val_components_force=["rec_m"], aliases=al)
+    assert set(s2.values()) == {"val"}
+
+
+def test_content_groups_collapse_paths_by_bytes():
+    _, path_hash, _ = _aliased("rec_m", "rec_f", 3)
+    g = content_groups(path_hash)
+    assert len(g) == 3
+    assert all(len(v) == 2 for v in g.values())
+
+
+def test_assert_disjoint_message_names_the_real_cause():
+    with pytest.raises(ValueError, match="name-keyed split"):
+        assert_disjoint({"a", "b"}, {"b"})

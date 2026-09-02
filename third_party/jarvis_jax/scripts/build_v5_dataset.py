@@ -19,6 +19,7 @@ import hydra
 from jarvis_jax.hydra_utils import CONFIG_DIR, register_resolvers
 from jarvis_jax.data.build_v5 import (
     discover_sources, build_manifest, link_media, merge_annotations)
+from jarvis_jax.data.content_index import alias_components, hash_paths
 from jarvis_jax.data.split_v5 import make_split, audit_split, write_derived
 
 register_resolvers()
@@ -43,6 +44,17 @@ register_resolvers()
 # (see jarvis_jax.data.v5_2d._resolve_sex) -- for this recording fly0=male,
 # fly1=female, so the added val slice IS sexed. See split_v5.py's docstring
 # for why female-inclusive recordings ignore this list entirely regardless.
+#
+# 2026-09-02: THREE OF THESE FOUR ARE ALIASES OF A TRAINING RECORDING and this
+# list, as written, produces a split with 29.6% of val byte-identical to train
+# (see jarvis_jax.data.content_index). 2026_06_15_12_12_33 is the same footage
+# as 2026_06_15_12_12_34; 2026_05_27_11_57_05 as 2026_05_27_11_56_05;
+# 2026_04_07_11_33_33 as part of 2026_03_09_14_39_40. Only
+# 2026_03_18_15_31_22 is clean. The `aliases=` argument below expands each
+# name to its whole alias component so the holdout is all-or-nothing, and the
+# content assertion in write_derived refuses the build outright if any pixels
+# still straddle the split. Do not re-add a recording here without checking
+# `content_index.alias_components` for what it drags with it.
 VAL_RECORDINGS = [
     "2026_03_18_15_31_22",   # group A, courtship  (137 framesets)
     "2026_06_15_12_12_33",   # group B, courtship male
@@ -66,12 +78,30 @@ def main(cfg):
     man = build_manifest(srcs, out)
     link_media(srcs, out)
 
-    split = make_split(merged, man, val_recordings=VAL_RECORDINGS)
-    audit = audit_split(merged, split)
+    # Content identity, resolved through the symlinks into the two upstream
+    # corpora. This is the only thing that can see two recording NAMES for one
+    # capture, and it is cheap: ~490 files/s at 192 threads on gpfs, so the
+    # whole tree is about a minute.
+    real = {im["id"]: os.path.realpath(os.path.join(out, "images", im["file_name"]))
+            for im in merged["images"]}
+    digest = hash_paths(sorted(set(real.values())))
+    image_hashes = {i: digest[p] for i, p in real.items()}
+    rec_of = {real[im["id"]]: im["recording"] for im in merged["images"]}
+    aliases = alias_components({p: digest[p] for p in real.values()},
+                               lambda p: rec_of[p])
+    aliased = sorted((rec, comp) for rec, comp in aliases.items() if rec != comp)
+    if aliased:
+        print("alias components (same footage under a second name):")
+        for rec, comp in aliased:
+            print(f"    {rec} -> component {comp}")
+
+    split = make_split(merged, man, val_recordings=VAL_RECORDINGS, aliases=aliases)
+    audit = audit_split(merged, split, aliases=aliases, image_hashes=image_hashes)
     print("split audit:", json.dumps(audit, indent=2)[:400])
-    if audit["cross_recording_leaks"] or audit["cross_fly_leaked_frames"]:
+    if (audit["cross_recording_leaks"] or audit["cross_fly_leaked_frames"]
+            or audit["cross_capture_leaks"] or audit["content_overlap"]):
         raise SystemExit(f"REFUSING to write a leaky split: {audit}")
-    write_derived(merged, split, out)
+    write_derived(merged, split, out, image_hashes=image_hashes)
 
     for k, v in split.items():
         man["recordings"][merged["framesets"][k]["recording"]]["split"] = (

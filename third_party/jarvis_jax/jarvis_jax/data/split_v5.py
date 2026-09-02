@@ -31,6 +31,24 @@ can no longer be held out WHOLE via val_recordings -- the female-preservation
 intent (scarce data stays in training) outranks the male's normal rule for any
 frame they share, because sharing pixels means they must share a split side,
 and it is train (mostly) that is more valuable for the female-heavy case.
+
+CONTENT-KEYED, NOT NAME-KEYED (2026-09-02 fix). Everything above assumed a
+recording NAME identifies footage. It does not: the same capture was ingested
+twice under different session names, so `2026_06_15_12_12_33` (held out WHOLE
+as val) is byte-identical to `2026_06_15_12_12_34` (in train) -- the same
+frames, labelled once per fly and filed one second apart. Measured over all
+39,536 upstream jpgs: 6 alias groups, and 29.6% of val images (33.1% of val
+annotations) byte-identical to a train image. The frame-level rule above was
+enforced WITHIN a recording and was blind to it.
+
+The holdout unit is therefore the ALIAS COMPONENT (jarvis_jax.data.
+content_index.alias_components -- recordings joined transitively by byte
+identity), and the split atom is the CAPTURE `(component, frame)`. Pass
+`aliases=` to get this; `aliases=None` reproduces the old name-keyed
+behaviour exactly (each recording is its own component) and is kept only so
+the pre-existing unit tests still describe the rule they were written for.
+Real builds MUST pass aliases and MUST pass image_hashes to audit_split /
+write_derived, which then assert zero train/val content overlap.
 """
 from __future__ import annotations
 
@@ -54,28 +72,40 @@ def _by_recording(merged: dict) -> dict[str, list[str]]:
     return out
 
 
-def _frame_groups(merged: dict) -> dict[str, dict[int, list[str]]]:
-    """recording -> {frame_no: [frameset keys, one per fly annotated in it]}.
+def _frame_groups(merged: dict,
+                  aliases: dict[str, str] | None = None,
+                  ) -> dict[str, dict[int, list[str]]]:
+    """component -> {frame_no: [frameset keys sharing that physical capture]}.
 
     Two flies annotated in the same recording+frame share the SAME physical
     images (this dataset labels both flies off one multi-camera capture), so
     every key in one inner list MUST end up on the same side of the split --
     that invariant is the entire reason to group this way instead of by
-    (recording, fly)."""
+    (recording, fly).
+
+    `aliases` (recording -> component id) extends the same invariant across
+    RECORDING NAMES, which is where the 2026-09-02 leak lived: two names for
+    one capture put the same pixels in both splits. With aliases=None each
+    recording is its own component and this is the pre-2026-09-02 grouping."""
+    aliases = aliases or {}
     out: dict[str, dict[int, list[str]]] = {}
     for k, v in merged["framesets"].items():
-        out.setdefault(v["recording"], {}).setdefault(_frame_no(k), []).append(k)
+        comp = aliases.get(v["recording"], v["recording"])
+        out.setdefault(comp, {}).setdefault(_frame_no(k), []).append(k)
     return out
 
 
-def _recording_is_female(rec: str, frames: dict[int, list[str]],
-                          recs_meta: dict) -> bool:
-    """True if ANY fly annotated anywhere in this recording is female. Sex is
+def _group_is_female(frames: dict[int, list[str]], merged: dict,
+                     recs_meta: dict) -> bool:
+    """True if ANY fly annotated anywhere in this component is female. Sex is
     a per-(recording, fly) label that is constant across frames, so in
-    practice this is true for either none or all of a recording's frames --
-    but it is cheap and correct to check every key rather than assume."""
+    practice this is true for either none or all of a component's frames --
+    but it is cheap and correct to check every key rather than assume. The
+    recording is read off the frameset (not the group id) because a component
+    can span several recording names."""
     for keys in frames.values():
         for k in keys:
+            rec = merged["framesets"][k]["recording"]
             if _is_female_fly(rec, k.split("/")[-1], recs_meta):
                 return True
     return False
@@ -96,18 +126,34 @@ def _is_female_fly(rec: str, fly: str, recs_meta: dict) -> bool:
 
 def make_split(merged: dict, manifest: dict, *, val_recordings=(),
                female_val_frac: float = 0.10, guard: int = 50,
-               seed: int = 0) -> dict:
+               seed: int = 0, aliases: dict[str, str] | None = None,
+               val_components_force=()) -> dict:
+    """Assign every frameset to train/val/dropped-guard-band.
+
+    `val_recordings` names recordings to hold out WHOLE. With `aliases` the
+    holdout expands to the naming recording's whole alias component, because
+    holding out half a component is exactly the leak this replaces.
+
+    `val_components_force` is the deliberate escape hatch: recordings whose
+    whole component goes to val EVEN IF it contains a female fly. Female
+    preservation normally vetoes a whole holdout, but the only footage that
+    can produce an unseen-session FEMALE val number is a female-inclusive
+    component, so refusing categorically means never measuring the thing the
+    pipeline is worst at. Spend it explicitly, on small components, and say
+    how much female training data it costs."""
     recs_meta = manifest.get("recordings", {})
-    val_recordings = set(val_recordings)
-    by_rec = _frame_groups(merged)
+    aliases = aliases or {}
+    val_groups = {aliases.get(r, r) for r in val_recordings}
+    forced_groups = {aliases.get(r, r) for r in val_components_force}
+    by_rec = _frame_groups(merged, aliases)
     split: dict[str, str] = {}
 
     for rec, frames in by_rec.items():
         frame_nos = sorted(frames)
-        is_female = _recording_is_female(rec, frames, recs_meta)
+        is_female = _group_is_female(frames, merged, recs_meta)
 
-        if not is_female:
-            side = "val" if rec in val_recordings else "train"
+        if not is_female or rec in forced_groups:
+            side = "val" if (rec in val_groups or rec in forced_groups) else "train"
             for fn in frame_nos:
                 for k in frames[fn]:
                     split[k] = side
@@ -157,8 +203,15 @@ def _cross_fly_leaks(merged: dict, split: dict) -> list[tuple[str, int]]:
     return sorted(key for key, s in sides.items() if len(s) > 1)
 
 
-def audit_split(merged: dict, split: dict, *, guard: int = 50) -> dict:
-    """Prove the split does not leak. This is the test the old data would fail."""
+def audit_split(merged: dict, split: dict, *, guard: int = 50,
+                aliases: dict[str, str] | None = None,
+                image_hashes: dict[int, str] | None = None) -> dict:
+    """Prove the split does not leak. This is the test the old data would fail.
+
+    `image_hashes` (coco image id -> content md5) turns on the only check that
+    would have caught the 2026-09-02 defect: whether any pixels are on both
+    sides. Names, frame numbers and fly ids were all consistent in the leaky
+    split -- the bytes were not."""
     groups = _by_recording(merged)
     leaks = 0
     min_dist: dict[str, int] = {}
@@ -179,17 +232,62 @@ def audit_split(merged: dict, split: dict, *, guard: int = 50) -> dict:
             leaks += 1
     n = sum(1 for v in split.values() if v in ("train", "val"))
     leaky_frames = _cross_fly_leaks(merged, split)
-    return {"cross_recording_leaks": leaks, "min_guard_distance": min_dist,
-            "val_frac": sum(1 for v in split.values() if v == "val") / max(n, 1),
-            # Image-level check (2026-08-29): a frame (same physical images
-            # across every fly annotated in it) must never appear on both
-            # sides. Zero is the only leak-free value.
-            "cross_fly_leaked_frames": len(leaky_frames),
-            "leaky_frame_ids": leaky_frames}
+    out = {"cross_recording_leaks": leaks, "min_guard_distance": min_dist,
+           "val_frac": sum(1 for v in split.values() if v == "val") / max(n, 1),
+           # Image-level check (2026-08-29): a frame (same physical images
+           # across every fly annotated in it) must never appear on both
+           # sides. Zero is the only leak-free value.
+           "cross_fly_leaked_frames": len(leaky_frames),
+           "leaky_frame_ids": leaky_frames}
+
+    # Capture-level check (2026-09-02): two RECORDING NAMES for one capture.
+    caps: dict[str, set[str]] = {}
+    for grp, frames in _frame_groups(merged, aliases).items():
+        for fn, keys in frames.items():
+            sides = {split.get(k) for k in keys} & {"train", "val"}
+            if sides:
+                caps.setdefault(f"{grp}/Frame_{fn:06d}", set()).update(sides)
+    split_caps = sorted(c for c, s in caps.items() if len(s) > 1)
+    out["cross_capture_leaks"] = len(split_caps)
+    out["leaky_capture_ids"] = split_caps[:20]
+
+    # Content-level check: the ground truth. Everything above is a proxy.
+    if image_hashes is not None:
+        side_h: dict[str, set[str]] = {"train": set(), "val": set()}
+        for k, v in merged["framesets"].items():
+            s = split.get(k)
+            if s in side_h:
+                side_h[s].update(image_hashes[i] for i in v["frames"]
+                                 if i in image_hashes)
+        ov = side_h["train"] & side_h["val"]
+        out["content_overlap"] = len(ov)
+        out["content_overlap_examples"] = sorted(ov)[:5]
+        out["val_content"] = len(side_h["val"])
+        out["train_content"] = len(side_h["train"])
+    return out
 
 
-def write_derived(merged: dict, split: dict, out_root: str) -> None:
-    """Emit instances_{train,val}.json DERIVED from instances.json + split.json."""
+def write_derived(merged: dict, split: dict, out_root: str, *,
+                  image_hashes: dict[int, str] | None = None) -> None:
+    """Emit instances_{train,val}.json DERIVED from instances.json + split.json.
+
+    BUILD-TIME GUARD. When `image_hashes` is supplied this REFUSES to write a
+    split whose train and val share image content. Two builds shipped without
+    that assertion (red_data_3d_v5, red_data_3d_v5_valfix) and both leaked
+    29.6% of val; every val number measured on them -- including the
+    mask-on/mask-off detector A/B -- is optimistic. A split is not leak-free
+    because its recording names are disjoint; it is leak-free when its bytes
+    are, and that is cheap to check here."""
+    if image_hashes is not None:
+        from jarvis_jax.data.content_index import assert_disjoint
+        side_h: dict[str, set[str]] = {"train": set(), "val": set()}
+        for k, v in merged["framesets"].items():
+            s = split.get(k)
+            if s in side_h:
+                side_h[s].update(image_hashes[i] for i in v["frames"]
+                                 if i in image_hashes)
+        assert_disjoint(side_h["train"], side_h["val"], what=out_root)
+
     ann_dir = os.path.join(out_root, "annotations")
     os.makedirs(ann_dir, exist_ok=True)
     with open(os.path.join(ann_dir, "split.json"), "w") as f:
