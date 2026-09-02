@@ -320,6 +320,19 @@ rigid_repair:
 # model->mm bridge to project onto the masks) and writes qpos_wingfit.npz.
 # See docs/specs/2026-09-01-wing-orientation-from-masks-design.md
 wing_mask_fit:
+  # MEASURED AND DELIBERATELY OFF (2026-09-01, bout 28, both flies). This is a
+  # decision, not an untried default. The stage gets wing PLACEMENT right --
+  # both flies move from ~-8 deg into the measured -20..-40 deg optimum band,
+  # wing/abdomen penetration closes 30-74% of the gap to the model's grazing
+  # value on BOTH wings of BOTH flies, and the wing-marker residual does not
+  # degrade (+1.1% male, -22.5% female) -- and it gets wing FINE MOTION wrong:
+  # it DESTROYS the bilaterally phase-locked courtship song in wing pitch
+  # (L/R coherence at the song frequency 0.418/0.852 in the control -> 0.038/
+  # 0.070 here), and on the female it ADDS oscillation the video does not have.
+  # Do not flip this to true without re-measuring against the AMENDED
+  # acceptance criterion 1 (a phase-lock test; the old amplitude test scored
+  # this config a clean pass on the epoch where the song died).
+  # docs/benchmark/2026-09-01-wing-mask-fit/notes.md + the spec's section 8.
   enabled: false
   containment_weight: 0.3
   # MEASURED, Task 5: at coverage_weight == containment_weight the coverage sum
@@ -327,20 +340,42 @@ wing_mask_fit:
   # sum (100 wing verts, ~79% of them exactly zero) by ~100x, so 0.3/0.3 is
   # effectively coverage-only and the fit gets WORSE on both metrics. The fix is
   # per-target-count normalisation plus huber_delta > 0, not zeroing the term.
-  # Task 7 sweeps this on BOTH flies; Task 8 sets the final value.
+  #
+  # UNDECIDED (Task 8) -- 0.3 is INHERITED, not chosen. On real data 0.0 and 0.3
+  # agree to 3 s.f. on the headline metrics, but the term is not inert: on the
+  # FEMALE it moves hp_rms +2.4% and right-wing penetration 2.8% the WRONG way,
+  # and at 1.0 her added jitter nearly doubles (do not go there). Its only
+  # ground-truth win is at the REST attitude (2.49 -> 1.14 deg with containment)
+  # and is offset by an almost equal loss at the EXTENDED attitude
+  # (0.53 -> 1.63 deg) -- the attitude the song criterion protects. Alone it is
+  # catastrophic at rest (43 deg, worse than doing nothing). If forced to
+  # choose, the evidence tips to 0.0. Re-derive it if the mask cost is rescaled.
   coverage_weight: 0.3
   # NOTE the module normalises coverage per (frame, camera) target count by
   # default, so coverage_weight: 0.3 here is ~ the OLD un-normalised 0.03.
   coverage_normalize: true
-  # MUST be > 0. At huber_delta 0 the chamfer is an unrobustified L2 whose
-  # gradient scales with distance, so SAM halo and body-silhouette crescents
-  # dominate and the term loses on its own metric. 8.0 is the measured corner.
+  # MUST be > 0, whatever coverage_weight ends up being. At huber_delta 0 the
+  # chamfer is an unrobustified L2 whose gradient scales with distance, so SAM
+  # halo and body-silhouette crescents dominate and the term loses on its own
+  # metric. In the synthetic fixture the COMBINED objective improves on both
+  # attitudes going from huber 0 to 8: extended 1.88 -> 1.63 deg, rest
+  # 1.63 -> 1.14 deg. 8.0 is the measured corner.
   huber_delta: 8.0
   # Body basis for "what the body already explains". Density MATTERS on real
   # masks (stride 20->4 with dilate_px 3->8 recovered 1.3 pt); the synthetic
   # fixture could not show this because there the mask IS the mesh silhouette.
   body_vertex_stride: 4
   dilate_px: 8
+  # MEASURED (Task 7/8), and NOT the axis that protects the song. The term is
+  # smooth_weight**2 * sum(dq)^2 with dq in RADIANS against a raw-pixel mask
+  # cost, so 0.005 is a coefficient of 2.5e-5: no effective temporal coupling,
+  # and the fit is independent per frame. Swept 0.5/5/10/20/30/50 on both flies:
+  # placement, penetration and residual are FLAT across the whole range, and
+  # raising it buys the (retired) amplitude test -- but BOTH ends destroy the
+  # bilateral phase lock, and 30 additionally removes 37% of the second song
+  # epoch's real dynamics and all 29 of its pulses. Neither 0.005 nor 30 is
+  # shippable; the fix is a design change (a slowly-varying pitch correction),
+  # not a weight. Value is specific to this cost normalisation.
   smooth_weight: 0.005
   limit_weight: 10.0
   n_steps: 300
