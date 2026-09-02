@@ -17,11 +17,25 @@ run_root re-derives rather than depending on a backup directory surviving.
         --run-root <.../pose> --recording Session0/2025_10_20_13_20_04
     python scripts/apply_id_review.py --review <...> --root <.../processed/courtship>
 
-NOTE this writes only ``sex.json``; it performs no directory swap. Every
-reviewed bout in this dataset has ``applied: false`` (i.e. the tracker's
-original assignment already matched the reviewer's), so a swap would be a
-no-op -- but if a future review disagrees, this refuses rather than guessing.
-Use ``scripts/canonicalize_session_sex.py`` for the physical swap.
+NOTE this writes only ``sex.json``; it performs no directory swap, and it
+refuses any bout whose review it cannot replay safely.
+
+CORRECTION (2026-09-02). This docstring used to read "every reviewed bout has
+``applied: false``, i.e. the tracker's original assignment already matched the
+reviewer's, so a swap would be a no-op". That was FALSE. ``applied`` is false
+on all 160 bouts while ``original_male_fly != reviewed_male_fly`` in 24 of
+them -- ``applied`` records that no directory swap was ever PERFORMED, not
+that none was needed. The old ``sex_entry`` guard keyed on ``applied`` was
+therefore unreachable, and this script emitted labels for the 24 overruled
+bouts as if the tracker had been right. The guard below now keys on the
+disagreement itself.
+
+For the physical fix, canonicalize the MASKS
+(``scripts/canonicalize_sam_masks.py``) rather than the pose dirs: the review
+names a fly-DIR index in the tree the reviewer watched, which a re-run does
+not reproduce, whereas a mask slot is what the fly dirs are built from.
+``scripts/canonicalize_session_sex.py`` still does the pose-dir swap for a
+tree that IS the reviewed one.
 """
 import argparse
 import json
@@ -31,23 +45,29 @@ import re
 _BOUT_RE = re.compile(r"^bout_\d{5}$")
 
 
-def sex_entry(rec_bout, entry):
+def sex_entry(rec_bout, entry, *, allow_overruled=False):
     """Review entry -> sex.json payload, or raise if it cannot be trusted."""
     male = entry.get("reviewed_male_fly", entry.get("prior_reviewed_male_fly"))
     if isinstance(male, bool) or not isinstance(male, int) or male not in (0, 1):
         raise ValueError(f"{rec_bout}: no usable reviewed_male_fly ({male!r})")
     status = str(entry.get("status", entry.get("prior_status", "unknown")))
-    if status != "confirmed":
-        raise ValueError(f"{rec_bout}: review status is {status!r}, not 'confirmed'")
+    if status not in ("confirmed", "swapped"):
+        raise ValueError(f"{rec_bout}: review status is {status!r}, not "
+                         f"'confirmed' or 'swapped'")
     orig = entry.get("original_male_fly")
-    if entry.get("applied") and orig is not None and orig != male:
-        # A swap was recorded as already applied to the DIRECTORIES. Re-emitting
-        # sex.json against a freshly-run run_root (whose dirs were never
-        # swapped) would then label the wrong animal. Refuse loudly.
+    if orig is not None and orig != male and not allow_overruled:
+        # The reviewer OVERRULED the tracker: the male is not in the fly dir the
+        # tracker put it in. Writing sex.json alone would label fly{male} male
+        # while the pixels of that dir hold the other animal, unless the dirs
+        # (or the masks they came from) have already been swapped to match.
+        # Refuse unless the caller says the swap is done.
         raise ValueError(
-            f"{rec_bout}: review says a directory swap was applied "
-            f"(original_male_fly={orig}, reviewed={male}); this script only "
-            f"writes labels. Run scripts/canonicalize_session_sex.py first.")
+            f"{rec_bout}: the reviewer overruled the tracker "
+            f"(original_male_fly={orig}, reviewed_male_fly={male}); this "
+            f"script only writes labels. Canonicalize first "
+            f"(scripts/canonicalize_sam_masks.py for the masks, or "
+            f"scripts/canonicalize_session_sex.py for the pose dirs), then "
+            f"re-run with --allow-overruled.")
     return {
         "male_fly": male,
         "original_male_fly": orig if orig is not None else male,
@@ -69,6 +89,11 @@ def main():
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--overwrite", action="store_true",
                     help="replace an existing sex.json (default: leave it)")
+    ap.add_argument("--allow-overruled", action="store_true",
+                    help="write labels for bouts where the reviewer overruled "
+                         "the tracker (original_male_fly != reviewed_male_fly). "
+                         "Only correct once the dirs/masks have been swapped to "
+                         "match the review.")
     args = ap.parse_args()
 
     with open(args.review) as f:
@@ -107,7 +132,7 @@ def main():
             if os.path.exists(out) and not args.overwrite:
                 n_skipped += 1
                 continue
-            payload = sex_entry(key, entry)
+            payload = sex_entry(key, entry, allow_overruled=args.allow_overruled)
             if args.dry_run:
                 print(f"  would write {out}: male_fly={payload['male_fly']}")
             else:
