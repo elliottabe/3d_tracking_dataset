@@ -157,9 +157,8 @@ def permutation_scan(rt, obs, max_perms=None):
         perms = perms[:max_perms]
     P = np.asarray(perms)                          # (nP, C)
     nP = len(P)
-    # (nP, K, C, 2) -> flatten to (nP*K, C, 2)
-    big = xy[None, :, :, :][:, :, :, :]            # (1, K, C, 2)
-    big = np.take(np.broadcast_to(big, (nP, K, C, 2)), 0, axis=0) if False else None
+    # xy[:, P, :] gathers, for every permutation, the keypoint set each camera
+    # would be scored against; flatten (nP, K) into one batch of DLT systems.
     obs_perm = xy[:, P, :]                         # (K, nP, C, 2)
     obs_perm = np.transpose(obs_perm, (1, 0, 2, 3)).reshape(nP * K, C, 2)
     cams = np.broadcast_to(np.arange(C), (nP * K, C))
