@@ -91,3 +91,82 @@ def test_bbox_margin_grows_the_box():
     b = mask_bbox(m, 0.5)
     assert (b[2] - b[0]) > (a[2] - a[0]) and (b[3] - b[1]) > (a[3] - a[1])
     assert mask_bbox(np.zeros((10, 10), bool)) is None
+
+
+# ---------------------------------------------------------------------------
+# Threading (Phase 2 / Task 9): the per-(frame, camera) loop is embarrassingly
+# parallel and was measured at 34.4 s serial on one bout-fly, dominating the
+# wing-mask-fit stage. Threading it must be a pure SCHEDULING change: every
+# worker writes only its own (t, c) slot of preallocated arrays, so the output
+# cannot depend on how the work was split.
+# ---------------------------------------------------------------------------
+
+def _rng_masks(T=6, C=4, H=48, W=72, seed=0):
+    """Masks with a per-(t,c) blob of a DIFFERENT size and position, so a
+    mis-indexed write (the race this pins) produces a different array."""
+    rng = np.random.default_rng(seed)
+    masks = np.zeros((T, C, H, W), bool)
+    valid = np.ones((T, C), bool)
+    for t in range(T):
+        for c in range(C):
+            h = int(rng.integers(6, 20)); w = int(rng.integers(6, 28))
+            y0 = int(rng.integers(0, H - h)); x0 = int(rng.integers(0, W - w))
+            masks[t, c, y0:y0 + h, x0:x0 + w] = True
+    valid[2, 1] = False                       # an invalid view
+    masks[4, 3] = False                       # an empty mask
+    return masks, valid
+
+
+@pytest.mark.parametrize("workers", [2, 4, 8])
+def test_threaded_sdf_stack_is_bit_identical_to_serial(workers):
+    masks, valid = _rng_masks()
+    ref = sdf_stack_from_masks(masks, valid, out_hw=(32, 32), workers=1)
+    got = sdf_stack_from_masks(masks, valid, out_hw=(32, 32), workers=workers)
+    names = ("sdf", "grid_scale", "grid_offset", "present")
+    for name, a, b in zip(names, ref, got):
+        assert a.dtype == b.dtype, f"{name} dtype changed"
+        assert np.array_equal(a, b), (
+            f"{name} differs between workers=1 and workers={workers}: "
+            f"max|d| = {np.abs(a.astype(float) - b.astype(float)).max()}")
+
+
+def test_threaded_sdf_stack_places_each_frame_camera_in_its_own_slot():
+    """Ordering guard. Each (t, c) blob has a distinct area, so the SDF minimum
+    (deepest interior point) is a per-slot fingerprint; a worker writing another
+    worker's slot would permute these even while the multiset stayed the same."""
+    masks, valid = _rng_masks(seed=3)
+    ref = sdf_stack_from_masks(masks, valid, out_hw=(32, 32), workers=1)[0]
+    got = sdf_stack_from_masks(masks, valid, out_hw=(32, 32), workers=8)[0]
+    assert np.array_equal(ref.min(axis=(2, 3)), got.min(axis=(2, 3)))
+
+
+def test_workers_default_does_not_change_the_numbers():
+    masks, valid = _rng_masks(seed=7)
+    ref = sdf_stack_from_masks(masks, valid, out_hw=(32, 32), workers=1)
+    got = sdf_stack_from_masks(masks, valid, out_hw=(32, 32))   # auto
+    for a, b in zip(ref, got):
+        assert np.array_equal(a, b)
+
+
+@pytest.mark.parametrize("env,cpus,expected", [
+    ({"SLURM_CPUS_PER_TASK": "8"}, 4096, 8),      # the batch case: 4 bouts x 8 CPUs
+    ({"SLURM_CPUS_PER_TASK": "64"}, 4096, 16),    # never above the auto cap
+    ({}, 4096, None),                             # interactive: affinity, capped at 16
+    ({"SLURM_CPUS_PER_TASK": "not-a-number"}, 4096, None),
+])
+def test_auto_worker_count_respects_the_slurm_allocation(env, cpus, expected):
+    """A bout process must not size its pool off the whole node: the pipeline
+    runs up to four of them per node under --cpus-per-task=8."""
+    from jarvis_jax.tracking.mask_sdf import _n_workers, _MAX_AUTO_WORKERS
+    got = _n_workers(None, cpus, env=env)
+    if expected is None:
+        assert 1 <= got <= _MAX_AUTO_WORKERS
+    else:
+        assert got == expected
+
+
+def test_worker_count_never_exceeds_the_job_count():
+    from jarvis_jax.tracking.mask_sdf import _n_workers
+    assert _n_workers(None, 3, env={"SLURM_CPUS_PER_TASK": "8"}) == 3
+    assert _n_workers(8, 2) == 2
+    assert _n_workers(0, 100) == 1

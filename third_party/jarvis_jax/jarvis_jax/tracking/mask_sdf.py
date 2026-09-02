@@ -29,9 +29,41 @@ is needed. With `sampling=(dy, dx)` the same test box reads exactly -20.0.
 """
 from __future__ import annotations
 
+import os
+from concurrent.futures import ThreadPoolExecutor
+
 import numpy as np
 
 BIG = 1.0e6          # SDF fill for a (frame, camera) with no usable mask
+
+# Cap on the auto worker count. The per-(frame, camera) job is a few hundred
+# microseconds of cv2/scipy C code, so past ~16 threads the pool's dispatch
+# overhead eats the gain and a shared node's other jobs start to suffer.
+_MAX_AUTO_WORKERS = 16
+
+
+def _n_workers(workers, n_jobs, env=None):
+    """Resolve the requested worker count against the CPUs actually available.
+
+    ``SLURM_CPUS_PER_TASK`` first, then ``os.sched_getaffinity`` (never bare
+    ``cpu_count``): the pipeline runs up to four bout processes per node under
+    ``--cpus-per-task=8``, and sizing a pool off the node's 32-128 cores would
+    have each of them oversubscribe the whole machine.
+    """
+    if workers is None:
+        env = os.environ if env is None else env
+        avail = None
+        try:
+            avail = int(env["SLURM_CPUS_PER_TASK"])
+        except (KeyError, ValueError, TypeError):
+            pass
+        if not avail or avail < 1:
+            try:
+                avail = len(os.sched_getaffinity(0))
+            except AttributeError:                   # pragma: no cover - non-Linux
+                avail = os.cpu_count() or 1
+        workers = min(_MAX_AUTO_WORKERS, max(1, avail))
+    return max(1, min(int(workers), max(1, n_jobs)))
 
 
 def mask_bbox(mask, margin=0.4):
@@ -86,7 +118,8 @@ def mask_to_sdf_crop(mask, bbox, out_hw):
     return sdf, grid_scale, grid_offset
 
 
-def sdf_stack_from_masks(masks, valid, *, out_hw=(128, 128), bbox_margin=0.4):
+def sdf_stack_from_masks(masks, valid, *, out_hw=(128, 128), bbox_margin=0.4,
+                         workers=None):
     """(T,C,H,W) masks + (T,C) valid -> per-(frame,camera) SDF stack.
 
     Replaces the recovered `build_sdf_stack`, which indexed a COCO annotation
@@ -97,6 +130,18 @@ def sdf_stack_from_masks(masks, valid, *, out_hw=(128, 128), bbox_margin=0.4):
     present (T,C) bool). A (frame, camera) with no usable mask is left
     `present=False` and its SDF filled with BIG, so a containment residual gated
     on `present` contributes nothing there rather than pulling toward garbage.
+
+    `workers` threads the (frame, camera) loop (None = auto, 1 = serial). This
+    is a pure SCHEDULING change and the result is bit-identical to the serial
+    order by construction: the output arrays are preallocated and each job
+    writes only its own `(t, c)` slot, so no two threads touch the same memory
+    and nothing depends on completion order. Pinned by
+    `tests/test_mask_sdf.py::test_threaded_sdf_stack_is_bit_identical_to_serial`.
+    Threading (rather than processes) is what fits: `cv2.resize` and
+    `scipy.ndimage.distance_transform_edt` are C extensions that release the
+    GIL, and the (T,C,H,W) mask array would have to be pickled to subprocesses.
+    Measured on Session0/2025_10_20_13_20_04 bout 28 fly0 (2007x7 masks):
+    34.4 s serial -> 4.8 s.
     """
     masks = np.asarray(masks)
     valid = np.asarray(valid, bool)
@@ -106,16 +151,24 @@ def sdf_stack_from_masks(masks, valid, *, out_hw=(128, 128), bbox_margin=0.4):
     gs = np.ones((T, C, 2), np.float32)
     go = np.zeros((T, C, 2), np.float32)
     present = np.zeros((T, C), bool)
-    for t in range(T):
-        for c in range(C):
-            if not valid[t, c]:
-                continue
-            bb = mask_bbox(masks[t, c], bbox_margin)
-            if bb is None:
-                continue
-            out = mask_to_sdf_crop(masks[t, c], bb, (H, W))
-            if out is None:
-                continue
-            sdf[t, c], gs[t, c], go[t, c] = out
-            present[t, c] = True
+
+    def _one(tc):
+        t, c = tc
+        bb = mask_bbox(masks[t, c], bbox_margin)
+        if bb is None:
+            return
+        out = mask_to_sdf_crop(masks[t, c], bb, (H, W))
+        if out is None:
+            return
+        sdf[t, c], gs[t, c], go[t, c] = out
+        present[t, c] = True
+
+    jobs = [(t, c) for t in range(T) for c in range(C) if valid[t, c]]
+    n = _n_workers(workers, len(jobs))
+    if n <= 1:
+        for tc in jobs:
+            _one(tc)
+    else:
+        with ThreadPoolExecutor(max_workers=n) as ex:
+            list(ex.map(_one, jobs))
     return sdf, gs, go, present
