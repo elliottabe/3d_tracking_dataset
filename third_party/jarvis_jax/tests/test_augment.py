@@ -62,6 +62,7 @@ def test_affine_rotation_image_and_kp_consistent():
 
 
 def test_affine_batch_offcrop_sets_vis_false():
+    """Legacy path (keep_kp_in_bounds=False): the in-bounds AND still fires."""
     rng = np.random.RandomState(0)
     img = jnp.asarray(rng.randint(0, 256, (2, 32, 32, 4), dtype=np.uint8))
     # one kp near an edge so a big translation pushes it off-crop
@@ -70,7 +71,7 @@ def test_affine_batch_offcrop_sets_vis_false():
     # deterministic large negative translation via a fixed key + max range
     out_img, out_kp, out_vis = affine_batch(
         jax.random.PRNGKey(0), img, kp, vis, rot_deg=0.0, scale_min=1.0,
-        scale_max=1.0, translate_frac=0.5, heatmap_size=16)
+        scale_max=1.0, translate_frac=0.5, heatmap_size=16, keep_kp_in_bounds=False)
     assert out_img.shape == img.shape and out_img.dtype == jnp.uint8
     assert out_kp.shape == kp.shape
     # at least some keypoints fall off-crop and are marked invisible
@@ -187,4 +188,312 @@ def test_per_channel_multiply_disabled_is_identity_and_keeps_mask():
     out = per_channel_multiply_batch(jax.random.PRNGKey(3), img, 0.2)
     assert out.shape == img.shape and out.dtype == jnp.uint8
     assert not jnp.array_equal(out[..., :3], img[..., :3])
+    assert jnp.array_equal(out[..., 3], img[..., 3])
+
+
+# --- affine bounds-fitting: the transform must not push annotated keypoints
+# --- out of the crop (measured 2026-09-02: the wall crop kept only 82.7% of
+# --- its 49 annotated keypoints per draw under configs/aug/default.yaml, and
+# --- the six most-dropped were ALL tarsal tips).
+from jarvis_jax.data.augment import fit_affine_to_bounds
+
+DEF = dict(rot_deg=30.0, scale_min=0.8, scale_max=1.25, translate_frac=0.1)
+
+
+def _cloud(cx, cy, spread, K=50, seed=11):
+    """A (K,2) keypoint cloud centred at (cx,cy) in heatmap units."""
+    rng = np.random.RandomState(seed)
+    return (np.stack([cx + rng.uniform(-spread, spread, K),
+                      cy + rng.uniform(-spread, spread, K)], -1).astype(np.float32))
+
+
+def _kept_fraction(kp, hm=224, ndraw=200, keep=True, **prm):
+    """Mean fraction of the annotated keypoints that survive affine_batch's
+    in-bounds AND, over `ndraw` independent draws."""
+    K = kp.shape[0]
+    img = jnp.zeros((1, 2 * hm, 2 * hm, 4), jnp.uint8)
+    kp_b = jnp.asarray(kp)[None]
+    vis_b = jnp.ones((1, K), bool)
+    fr = []
+    for d in range(ndraw):
+        _, _, v = affine_batch(jax.random.PRNGKey(7919 * (d + 1)), img, kp_b, vis_b,
+                               heatmap_size=hm, keep_kp_in_bounds=keep, **prm)
+        fr.append(float(np.asarray(v).mean()))
+    return float(np.mean(fr))
+
+
+def test_affine_keeps_visible_kp_in_bounds_on_a_wall_like_crop():
+    """A fly pressed against the crop edge (centroid 80 hm-units off-centre,
+    the measured wall case) must not lose supervision to the augmentation."""
+    kp = _cloud(224 / 2 - 80, 224 / 2 - 40, spread=40)
+    assert _kept_fraction(kp, keep=True, **DEF) == 1.0
+    # and the defect is real in the legacy path (guards against a tautology)
+    assert _kept_fraction(kp, keep=False, **DEF) < 0.95
+
+
+def test_affine_never_touches_the_sampled_rotation():
+    """Bounds-fitting shrinks scale and translation only: rotation diversity,
+    the augmentation that actually teaches orientation invariance, is intact."""
+    hm = 224
+    kp = jnp.asarray(_cloud(hm / 2 - 80, hm / 2 - 40, spread=40))[None]
+    vis = jnp.ones((1, kp.shape[1]), bool)
+    for d in range(25):
+        key = jax.random.PRNGKey(1234 + d)
+        th = jnp.deg2rad(jax.random.uniform(jax.random.split(key, 4)[0], (1,),
+                                            minval=-DEF["rot_deg"], maxval=DEF["rot_deg"]))
+        th2, _, _, _, _ = fit_affine_to_bounds(kp, vis, th, jnp.ones(1) * 1.25,
+                                               jnp.zeros(1), jnp.zeros(1), hm, 0.0)
+        assert float(abs(th2[0] - th[0])) < 1e-6
+
+
+def test_affine_rotates_about_the_visible_keypoint_centroid():
+    """One visible keypoint => the transform is centred ON it, so with s=1 and
+    zero translation it cannot move no matter what rotation was drawn."""
+    hm = 32
+    kp = jnp.asarray([[[6.0, 8.0]]], jnp.float32)          # (1,1,2), far off-centre
+    vis = jnp.ones((1, 1), bool)
+    img = jnp.zeros((1, 2 * hm, 2 * hm, 4), jnp.uint8)
+    for d in range(8):
+        _, k2, v2 = affine_batch(jax.random.PRNGKey(d), img, kp, vis, rot_deg=180.0,
+                                 scale_min=1.0, scale_max=1.0, translate_frac=0.0,
+                                 heatmap_size=hm, keep_kp_in_bounds=True)
+        assert bool(v2[0, 0])
+        assert float(jnp.abs(k2[0, 0] - kp[0, 0]).max()) < 1e-3
+    # legacy path rotates about the crop centre, so it DOES move
+    moved = max(float(jnp.abs(affine_batch(
+        jax.random.PRNGKey(d), img, kp, vis, rot_deg=180.0, scale_min=1.0,
+        scale_max=1.0, translate_frac=0.0, heatmap_size=hm,
+        keep_kp_in_bounds=False)[1][0, 0] - kp[0, 0]).max()) for d in range(8))
+    assert moved > 1.0
+
+
+def test_affine_image_warp_shares_the_keypoint_centre():
+    """The image must be warped about the SAME centre as the keypoints: a
+    bright pixel colocated with the single visible keypoint stays put."""
+    hm = 32
+    W = 2 * hm
+    kx, ky = 6.0, 8.0
+    img = np.zeros((1, W, W, 4), np.uint8)
+    img[0, int(2 * ky), int(2 * kx), 0] = 255
+    kp = jnp.asarray([[[kx, ky]]], jnp.float32)
+    vis = jnp.ones((1, 1), bool)
+    for d in range(6):
+        i2, _, _ = affine_batch(jax.random.PRNGKey(100 + d), jnp.asarray(img), kp, vis,
+                                rot_deg=180.0, scale_min=1.0, scale_max=1.0,
+                                translate_frac=0.0, heatmap_size=hm,
+                                keep_kp_in_bounds=True)
+        flat = int(jnp.argmax(i2[0, ..., 0]))
+        py, px = flat // W, flat % W
+        assert abs(px - 2 * kx) <= 1.5 and abs(py - 2 * ky) <= 1.5
+
+
+def test_affine_bounds_fit_leaves_a_centred_crop_uncorrected():
+    """A fly in the middle of its crop never violates the bound, so neither
+    corrective term may fire: the sampled scale and translation come back
+    EXACTLY as drawn. (The transform centre still moves to the keypoint
+    centroid -- that is the fix, not a correction, and is tested above.)"""
+    hm = 224
+    kp = jnp.asarray(_cloud(hm / 2, hm / 2, spread=35))[None]
+    vis = jnp.ones((1, kp.shape[1]), bool)
+    img = jnp.asarray(np.random.RandomState(5).randint(0, 256, (1, 2 * hm, 2 * hm, 4),
+                                                       dtype=np.uint8))
+    for d in range(20):
+        key = jax.random.PRNGKey(31337 + d)
+        k1, k2, k3, k4 = jax.random.split(key, 4)
+        th = jnp.deg2rad(jax.random.uniform(k1, (1,), minval=-DEF["rot_deg"],
+                                            maxval=DEF["rot_deg"]))
+        s0 = jax.random.uniform(k2, (1,), minval=DEF["scale_min"], maxval=DEF["scale_max"])
+        tx0 = jax.random.uniform(k3, (1,), minval=-DEF["translate_frac"],
+                                 maxval=DEF["translate_frac"])
+        ty0 = jax.random.uniform(k4, (1,), minval=-DEF["translate_frac"],
+                                 maxval=DEF["translate_frac"])
+        _, s1, tx1, ty1, _ = fit_affine_to_bounds(kp, vis, th, s0, tx0, ty0, hm, 0.01)
+        assert float(s1[0]) == float(s0[0])
+        assert abs(float(tx1[0]) - float(tx0[0])) < 1e-7
+        assert abs(float(ty1[0]) - float(ty0[0])) < 1e-7
+        # and no supervision is lost either way
+        assert bool(affine_batch(key, img, kp, vis, heatmap_size=hm,
+                                 keep_kp_in_bounds=True, **DEF)[2].all())
+        assert bool(affine_batch(key, img, kp, vis, heatmap_size=hm,
+                                 keep_kp_in_bounds=False, **DEF)[2].all())
+
+
+def test_fit_affine_to_bounds_shrinks_scale_by_the_exact_needed_factor():
+    """Hand-computed: two visible kp 12 units apart in a 16-unit grid
+    (bounds [0,15]). s=1.5 would span 18 > 15, so s must land on 15/12=1.25
+    and the translation on the single feasible value, -0.5 heatmap units."""
+    hm = 16
+    kp = jnp.asarray([[[2.0, 8.0], [14.0, 8.0]]], jnp.float32)
+    vis = jnp.ones((1, 2), bool)
+    th, s, tx, ty, cen = fit_affine_to_bounds(
+        kp, vis, jnp.zeros(1), jnp.ones(1) * 1.5, jnp.zeros(1), jnp.zeros(1), hm, 0.0)
+    assert abs(float(s[0]) - 1.25) < 1e-5
+    assert abs(float(tx[0]) * hm - (-0.5)) < 1e-4
+    assert abs(float(cen[0, 0]) - 8.0) < 1e-5 and abs(float(cen[0, 1]) - 8.0) < 1e-5
+    assert abs(float(ty[0])) < 1e-6          # y span is zero -> unconstrained
+
+
+def test_fit_affine_to_bounds_ignores_invisible_keypoints():
+    """An annotation already off-crop (vis=False) carries no supervision, so it
+    must not constrain the transform -- otherwise one bad label collapses the
+    augmentation for the whole sample."""
+    hm = 16
+    kp = jnp.asarray([[[8.0, 8.0], [-500.0, 8.0]]], jnp.float32)
+    vis = jnp.asarray([[True, False]])
+    _, s, tx, _, cen = fit_affine_to_bounds(
+        kp, vis, jnp.zeros(1), jnp.ones(1) * 1.25, jnp.ones(1) * 0.05,
+        jnp.zeros(1), hm, 0.0)
+    assert abs(float(s[0]) - 1.25) < 1e-6          # unshrunk
+    assert abs(float(tx[0]) - 0.05) < 1e-6         # unclipped
+    assert abs(float(cen[0, 0]) - 8.0) < 1e-5      # centroid is the visible kp only
+
+
+def test_affine_bounds_fit_survives_a_fully_invisible_sample():
+    """No visible keypoint => nothing to protect; must not divide by zero."""
+    hm = 32
+    kp = jnp.asarray(_cloud(hm / 2, hm / 2, 8, K=5))[None]
+    vis = jnp.zeros((1, 5), bool)
+    img = jnp.zeros((1, 2 * hm, 2 * hm, 4), jnp.uint8)
+    i2, k2, v2 = affine_batch(jax.random.PRNGKey(0), img, kp, vis, heatmap_size=hm,
+                              keep_kp_in_bounds=True, **DEF)
+    assert bool(jnp.isfinite(k2).all()) and not bool(v2.any())
+
+
+def test_affine_bounds_fit_is_jittable_and_per_sample():
+    """Must survive the nnx.jit train step, and must fit each sample on its own
+    (a batch mixing a wall crop with a centred one may not shrink both)."""
+    hm = 224
+    kp = jnp.asarray(np.stack([_cloud(hm / 2 - 80, hm / 2 - 40, 40),
+                               _cloud(hm / 2, hm / 2, 35, seed=3)]))
+    vis = jnp.ones((2, kp.shape[1]), bool)
+    img = jnp.zeros((2, 2 * hm, 2 * hm, 4), jnp.uint8)
+    f = jax.jit(lambda k, i, p, v, keep: affine_batch(
+        k, i, p, v, heatmap_size=hm, keep_kp_in_bounds=keep, **DEF), static_argnums=4)
+    _, k2, v2 = f(jax.random.PRNGKey(0), img, kp, vis, True)
+    assert bool(v2.all())
+    _, kb, _ = f(jax.random.PRNGKey(0), img, kp, vis, False)
+    # per-sample: the wall crop is corrected by much more than the centred one
+    d_wall = float(jnp.abs(k2[0] - kb[0]).max())
+    d_centred = float(jnp.abs(k2[1] - kb[1]).max())
+    assert d_wall > 20.0 and d_centred < 5.0
+
+
+# --- targeted cutout (PROPOSED, default-off). Measured 2026-09-02 over 60
+# --- real V5 train crops: the fly silhouette is 9.6% +- 1.7% of a 448-px crop
+# --- and only 10.4% of the pixels cutout erases land on it -- i.e. no better
+# --- than chance, because the box centres are uniform over the crop.
+
+def _old_cutout(key, img4_u8, n, frac):
+    """The pre-2026-09-02 cutout, inlined as the regression reference."""
+    B, H, W, _ = img4_u8.shape
+    side = max(1, int(round(frac * W)))
+    out = img4_u8
+    xs = jnp.arange(W)[None, :]
+    ys = jnp.arange(H)[None, :]
+    for j in range(int(n)):
+        k1, k2 = jax.random.split(jax.random.fold_in(key, j))
+        cx = jax.random.randint(k1, (B,), 0, W)
+        cy = jax.random.randint(k2, (B,), 0, H)
+        x0 = (cx - side // 2)[:, None]; x1 = (cx + side // 2)[:, None]
+        y0 = (cy - side // 2)[:, None]; y1 = (cy + side // 2)[:, None]
+        box = ((ys >= y0) & (ys < y1))[:, :, None] & ((xs >= x0) & (xs < x1))[:, None, :]
+        out = jnp.concatenate([out[..., :3] * (~box)[..., None].astype(out.dtype),
+                               out[..., 3:]], axis=-1)
+    return out
+
+
+def _crop_with_blob(cx, cy, r, W=64, seed=1):
+    """(1,W,W,4) uint8 crop: uniform RGB plus a disc silhouette in channel 3."""
+    rng = np.random.RandomState(seed)
+    img = rng.randint(40, 210, (1, W, W, 4)).astype(np.uint8)
+    yy, xx = np.mgrid[0:W, 0:W]
+    img[0, ..., 3] = (((xx - cx) ** 2 + (yy - cy) ** 2) <= r * r).astype(np.uint8)
+    return jnp.asarray(img)
+
+
+def _on_fly_fraction(img_before, img_after):
+    """Fraction of the pixels cutout erased that sit on the silhouette."""
+    er = (np.asarray(img_after)[..., :3].sum(-1) == 0) & \
+         (np.asarray(img_before)[..., :3].sum(-1) != 0)
+    m = np.asarray(img_before)[..., 3] > 0
+    return float((er & m).sum()) / max(int(er.sum()), 1)
+
+
+def test_cutout_defaults_reproduce_the_old_implementation_exactly():
+    """Both new options default off, so nothing that trains today may move --
+    including the RNG stream (the extra draws are taken only when enabled)."""
+    img = _crop_with_blob(20, 20, 8)
+    for j in range(5):
+        k = jax.random.PRNGKey(j)
+        assert jnp.array_equal(cutout_batch(k, img, 2, 0.25), _old_cutout(k, img, 2, 0.25))
+        assert jnp.array_equal(
+            cutout_batch(k, img, 3, 0.3, mask_target_p=0.0, size_rel_fly=0.0),
+            _old_cutout(k, img, 3, 0.3))
+
+
+def test_cutout_mask_targeting_moves_the_boxes_onto_the_fly():
+    """The whole point: with mask_target_p=1 nearly every erased pixel that
+    can be on the animal is, instead of ~its area share of the crop."""
+    img = _crop_with_blob(16, 16, 9)                  # blob is ~6% of the crop
+    uni, tgt = [], []
+    for j in range(30):
+        k = jax.random.PRNGKey(500 + j)
+        uni.append(_on_fly_fraction(img, cutout_batch(k, img, 2, 0.25)))
+        tgt.append(_on_fly_fraction(img, cutout_batch(k, img, 2, 0.25,
+                                                      mask_target_p=1.0)))
+    assert np.mean(tgt) > 4.0 * np.mean(uni)
+    assert np.mean(uni) < 0.15
+
+
+def test_cutout_mask_targeting_stays_a_mixture_at_p_half():
+    """p=0.5 must sit strictly between the two, or it is not a mixture and has
+    simply replaced one bias with another."""
+    img = _crop_with_blob(16, 16, 9)
+    f = lambda p: np.mean([_on_fly_fraction(img, cutout_batch(
+        jax.random.PRNGKey(900 + j), img, 2, 0.25, mask_target_p=p))
+        for j in range(30)])
+    lo, mid, hi = f(0.0), f(0.5), f(1.0)
+    assert lo < mid < hi
+
+
+def test_cutout_size_rel_fly_scales_the_box_with_the_animal():
+    """A fly twice as long gets a box twice as wide -- 4x the erased area --
+    so the occlusion is a constant fraction of the ANIMAL, not of the crop."""
+    small = _crop_with_blob(32, 32, 6)                # bbox side ~12 px
+    big = _crop_with_blob(32, 32, 12)                 # bbox side ~24 px
+    area = lambda im: np.mean([
+        float((np.asarray(cutout_batch(jax.random.PRNGKey(j), im, 1, 0.25,
+                                       size_rel_fly=0.5))[..., :3].sum(-1) == 0).sum())
+        for j in range(20)])
+    r = area(big) / max(area(small), 1.0)
+    assert 3.0 < r < 5.0
+
+
+def test_cutout_targeting_degrades_to_uniform_on_an_empty_mask():
+    """Crops whose SAM mask failed must not blow up or produce NaN centres."""
+    img = _crop_with_blob(16, 16, 0)                  # r=0 -> empty silhouette
+    out = cutout_batch(jax.random.PRNGKey(3), img, 2, 0.25, mask_target_p=1.0,
+                       size_rel_fly=0.5)
+    assert out.shape == img.shape and out.dtype == jnp.uint8
+    assert int((out[..., :3] == 0).sum()) > 0
+    assert jnp.array_equal(out[..., 3], img[..., 3])
+    # and it must degrade to UNIFORM, not pile every box on one cell. The eps
+    # floor inside _sample_mask_centre is what does that (log(0)=-inf on every
+    # cell makes the categorical argmax degenerate), so test it directly.
+    from jarvis_jax.data.augment import _sample_mask_centre
+    empty = jnp.zeros((1, 128, 128), bool)
+    cs = [tuple(float(v[0]) for v in _sample_mask_centre(jax.random.PRNGKey(j),
+                                                         empty, 8))
+          for j in range(25)]
+    assert all(np.isfinite(c).all() for c in cs)
+    assert len({tuple(np.round(c).astype(int)) for c in cs}) > 15
+    assert np.ptp(np.asarray(cs)[:, 0]) > 40.0
+
+
+def test_cutout_targeting_still_leaves_the_mask_channel_intact():
+    """cutout writes channels 0-2 only. For a mask-ON model that means an
+    RGB-occluded limb is still visible in channel 3 -- the reason targeted
+    cutout is a mask-OFF proposal."""
+    img = _crop_with_blob(16, 16, 9)
+    out = cutout_batch(jax.random.PRNGKey(4), img, 2, 0.25, mask_target_p=1.0)
     assert jnp.array_equal(out[..., 3], img[..., 3])
