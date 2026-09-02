@@ -78,6 +78,66 @@ canonical list. Positional construction from `ReprojectionTool._camera_list`
 against an un-reordered mask npz projects one camera's wing onto another
 camera's mask, and the residual still looks entirely plausible.
 
+WHAT THE OPTIMISATION VARIABLE IS -- `param_mode`, and why it is not obvious.
+The first version optimised `dq(t)` FREELY at every one of T frames. That gets
+PLACEMENT right (both flies move out of the fitted ~-8 deg into the measured
+-20..-40 deg mask optimum, penetration closes 30-74% of the gap to the model's
+grazing value on both wings of both flies) and FINE MOTION wrong: the mask
+minimum is broad (+-10-15 deg) and the objective is independent per frame, so
+the fit fills the null direction with its own per-frame mask noise. Measured on
+Session0 bout 28 fly1, that noise REPLACES the bilaterally phase-locked
+courtship song the marker solve carries in wing pitch -- L/R coherence at the
+song frequency 0.852 (95% significance 0.35) in the control, 0.038-0.139 in
+every fitted arm, correlation with the control's own hp(pitch) 0.017, and on the
+non-singing female it ADDS oscillation the video does not have. `smooth_weight`
+is not the axis: it is one scalar against a per-frame-independent cost, and both
+ends of a 0.005 -> 50 sweep destroy the lock.
+
+So the stage must not carry high-frequency content AT ALL. Two modes do that by
+construction, and `free` is kept because the negative result was measured on it:
+
+  `free`     (default) one parameter per frame per DOF. Reproducible, and the
+             configuration every number in
+             docs/benchmark/2026-09-01-wing-mask-fit/ refers to.
+  `spline`   the parameter is a KNOT VECTOR, not a per-frame offset: `dq` is
+             `knot_basis(F, knot_spacing) @ theta`, piecewise linear with knots
+             every `knot_spacing` frames. At the shipped 32 that is an order of
+             magnitude below the 6.4-FRAME song period, so no knot vector can
+             put power in the song band -- the song is preserved because the
+             correction cannot express it, not because a threshold rejected it.
+             It also cuts the parameter count ~`knot_spacing`-fold and stops the
+             optimiser chasing per-frame mask noise.
+  `lowpass`  solve exactly as `free`, then keep only the slow part of the
+             correction: `q_out = q_init + lowpass(q_fit - q_init)`, zero-phase
+             4th-order Butterworth at `1/(2*knot_spacing)` cycles/frame. This is
+             the honest CONTROL for `spline`: it preserves the song equally well
+             by construction, but it spends the whole optimisation on content it
+             then throws away, and its result need not sit at the mask optimum.
+             If the two land in the same place, `spline` is not "a better fit",
+             only a cheaper one.
+
+CHUNK BOUNDARIES ARE PART OF THE SPLINE, not an afterthought. Three chunks
+splined independently and stitched end to end have a STEP at every boundary, and
+a step is broadband -- it would put the song band straight back in. Each chunk's
+FIRST knot is therefore clamped to the previous chunk's LAST, and `knot_basis`
+places its last knot at local position F (== the next chunk's local 0), so the
+whole trajectory is ONE globally continuous piecewise-linear function. That is
+why `frame_chunk` must be a multiple of `knot_spacing` in this mode: it keeps
+the global knot grid uniform, so `frame_chunk` stays the performance knob its
+YAML comment says it is. Pinned by
+`test_spline_mode_confines_the_correction_to_a_GLOBAL_knot_basis`.
+
+THE FRAME GATE MOVES WITH THE PARAMETERISATION. In `free` mode "a frame with no
+mask evidence is left at its STAC pose" is enforced on the UPDATE (`upd` masks
+both the gradient and the step). One knot spans many frames, so that is
+impossible in `spline` mode; the gate is applied to the COST instead, and every
+term a no-evidence frame could contribute is zeroed there. With no evidence
+anywhere the objective is identically zero and the knots never move, so the
+contract still holds exactly. A frame inside a SHORT gap is nevertheless
+interpolated by its neighbouring knots rather than frozen -- freezing it would
+put a step back into the correction, which is the content these modes exist to
+remove. `lowpass` interpolates gaps for the same reason.
+
 float32 throughout: this is a pixel-scale cost, not a reprojection identity.
 """
 from __future__ import annotations
@@ -98,6 +158,99 @@ from jarvis_jax.tracking.wing_coverage import coverage_residual, wing_target_poi
 #: integer-index trap that has produced confident, self-consistent, completely
 #: wrong numbers in this pipeline before.
 WING_PITCH_JOINTS = ("wing_pitch_left", "wing_pitch_right")
+
+#: What the optimisation variable is. See the module docstring; `free` is the
+#: configuration the measured negative result was taken on and stays the default
+#: so it remains reproducible.
+PARAM_MODES = ("free", "spline", "lowpass")
+
+
+# ---------------------------------------------------------------------------
+# the smooth low-dimensional basis
+# ---------------------------------------------------------------------------
+def knot_basis(n_frames, knot_spacing):
+    """(F, n_knots) float32 piecewise-linear interpolation basis.
+
+    Knots are UNIFORM on the closed interval [0, F] -- both ends included -- so
+    the last knot sits at local position F, which is exactly the NEXT frame
+    chunk's local 0. Clamping each chunk's first knot to the previous chunk's
+    last then stitches the per-chunk splines into one globally continuous
+    function, with no step at the boundary. A step is broadband; a step every
+    `frame_chunk` frames would re-introduce precisely the high-frequency content
+    this parameterisation exists to exclude.
+
+    The spacing is `F / max(1, round(F / knot_spacing))`, i.e. `knot_spacing`
+    exactly whenever it divides F and the nearest UNIFORM spacing otherwise.
+    Never a short final segment: a 2-frame segment against 32-frame neighbours
+    would be a fast ramp sitting at a chunk boundary, which is the same defect
+    by another route. `refine_wing_pitch` additionally REQUIRES
+    `frame_chunk % knot_spacing == 0` in spline mode, so on the shipped config
+    the fallback never fires.
+
+    Rows sum to 1 (partition of unity), so a constant knot vector is a constant
+    offset -- the DC component the placement correction actually needs.
+    """
+    F = int(n_frames)
+    K = float(knot_spacing)
+    if F < 1:
+        raise ValueError(f"knot_basis needs at least one frame, got {n_frames}")
+    if not K > 0:
+        raise ValueError(f"knot_spacing must be > 0, got {knot_spacing}")
+    n_seg = max(1, int(round(F / K)))
+    step = F / n_seg
+    t = np.arange(F, dtype=np.float64)
+    seg = np.minimum((t / step).astype(np.int64), n_seg - 1)
+    u = (t - seg * step) / step
+    B = np.zeros((F, n_seg + 1), np.float32)
+    rows = np.arange(F)
+    B[rows, seg] = 1.0 - u
+    B[rows, seg + 1] = u
+    return B
+
+
+def _lowpass_correction(q_fit, q_init, opt_mask, knot_spacing, lb_row, ub_row,
+                        order=4):
+    """`param_mode='lowpass'`: keep only the slow part of the fitted correction.
+
+    `q_out = q_init + lowpass(q_fit - q_init)` with a ZERO-PHASE (filtfilt)
+    Butterworth at `1/(2*knot_spacing)` cycles/frame, so the correction cannot
+    shift the pose in time and `hp(q_out) == hp(q_init)` up to the filter's own
+    stop-band leak. Zero phase matters: a causal filter would delay the
+    placement correction by tens of frames, and placement is the half of this
+    stage that works.
+
+    4th order, not 2nd: at the shipped `knot_spacing = 32` the cutoff is only
+    3.2x below the acceptance scorer's own 40 Hz high pass, where a 2nd-order
+    Butterworth still passes ~1% of the amplitude. 4th order takes that to
+    ~1e-4, which is what makes "by construction" true rather than nearly true.
+
+    Only the `opt_mask` columns are touched, and the joint limits are re-applied
+    afterwards because filtering can overshoot a clipped value.
+    """
+    from scipy.signal import butter, filtfilt
+    cols = np.flatnonzero(np.asarray(opt_mask, bool))
+    T = int(q_fit.shape[0])
+    wn = 1.0 / float(knot_spacing)          # cutoff 1/(2K) cyc/frame vs Nyquist 0.5
+    if not 0.0 < wn < 1.0:
+        raise ValueError(
+            f"param_mode='lowpass' needs knot_spacing > 2 (got {knot_spacing}): "
+            f"the cutoff 1/(2*knot_spacing) cycles/frame must sit below the "
+            f"0.5 cycles/frame Nyquist")
+    b, a = butter(int(order), wn, btype="low")
+    padlen = min(3 * max(len(a), len(b)), T - 1)
+    if T < 4 or padlen < 1:
+        raise ValueError(f"param_mode='lowpass' needs at least 4 frames, got {T}")
+    qi = np.asarray(q_init, np.float32)
+    d = np.asarray(q_fit, np.float64)[:, cols] - qi[:, cols].astype(np.float64)
+    d = np.where(np.isfinite(d), d, 0.0)
+    y = filtfilt(b, a, d, axis=0, padlen=padlen).astype(np.float32)
+    out = np.asarray(q_fit, np.float32).copy()
+    out[:, cols] = qi[:, cols] + y
+    moved = out[:, cols] != qi[:, cols]
+    out[:, cols] = np.where(
+        moved, np.clip(out[:, cols], lb_row[cols][None, :], ub_row[cols][None, :]),
+        out[:, cols])
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -283,17 +436,24 @@ def _frame_cost(q_t, br_s, br_R, br_t, sdf_c, gsc_c, goff_c, pres_c, tgt_c, *,
 
 
 def _refine_chunk(q0_c, sdf_c, gsc_c, goff_c, pres_c, tgt_c, brs_c, brR_c, brt_c,
-                  real_c, q_prev, has_prev, *,
+                  real_c, q_prev, has_prev, theta_prev, has_theta, *,
                   fk_repose, wing_idx, cam_Ms, cam_ts, opt_mask, lb_row, ub_row,
                   containment_weight, coverage_weight, smooth_weight,
                   limit_weight, beta, huber_delta, margin, n_steps, lr, chunk_size,
-                  coverage_normalize):
-    """Adam-refine ONE padded frame chunk. Returns (q_ref (F,nq), history).
+                  coverage_normalize, basis=None):
+    """Adam-refine ONE padded frame chunk. Returns (q_ref (F,nq), history, theta_end).
 
     `real_c` marks the frames that are not padding; `q_prev`/`has_prev` carry
     the previous chunk's last refined pose so the smoothness term overlaps
     chunk boundaries by one frame. Every chunk has the same shapes, so this
     traces exactly once per `refine_wing_pitch` call.
+
+    `basis` selects the PARAMETERISATION (module docstring). None is `free`: one
+    parameter per (frame, DOF). An (F, n_knots) array is `spline`: the parameter
+    is the knot vector `theta` and `dq = basis @ theta`, with knot 0 clamped to
+    `theta_prev` when `has_theta` is 1 so the chunks stitch into one continuous
+    function. `theta_end` -- the knot at local position F, i.e. the next chunk's
+    local 0 -- is returned for exactly that; it is zeros in `free` mode.
     """
     fc = functools.partial(
         _frame_cost, fk_repose=fk_repose, wing_idx=wing_idx,
@@ -308,43 +468,87 @@ def _refine_chunk(q0_c, sdf_c, gsc_c, goff_c, pres_c, tgt_c, brs_c, brR_c, brt_c
     frame_ok = real_c & jnp.any(pres_c, axis=1)                      # (F,)
     upd = opt_mask[None, :] & frame_ok[:, None]                      # (F,nq)
     real_f = real_c.astype(jnp.float32)
+    nq = q0_c.shape[1]
 
-    def make_q(dq):
-        return q0_c + jnp.where(upd, dq, 0.0)
+    if basis is None:
+        # FREE. The frame gate lives on the UPDATE (and on the gradient), so a
+        # no-evidence frame cannot move whatever the cost says, and the cost
+        # weights stay `real_f` -- byte-for-byte the arm the negative result
+        # was measured on.
+        w_f = real_f
+        p0 = jnp.zeros_like(q0_c)
 
-    def objective(dq):
-        q = make_q(dq)
+        def to_dq(p):
+            return jnp.where(upd, p, 0.0)
+
+        def gate_grad(g):
+            return jnp.where(upd, g, 0.0)       # never move a frozen DOF or frame
+
+        def theta_end(p):
+            return jnp.zeros(nq, q0_c.dtype)
+    else:
+        # SPLINE. One knot spans many frames, so the frame gate CANNOT live on
+        # the update; it moves onto the COST (`w_f`) instead, and the mask terms
+        # are already `present`-gated. With no evidence anywhere the objective is
+        # identically zero, the knots never move, and "no evidence means no
+        # change" still holds exactly.
+        w_f = real_f * frame_ok.astype(jnp.float32)
+        nk = int(basis.shape[1])
+        p0 = jnp.zeros((nk, nq), q0_c.dtype)
+        anchored = jnp.zeros((nk, 1), q0_c.dtype).at[0].set(has_theta)
+
+        def _theta(p):
+            return p * (1.0 - anchored) + anchored * theta_prev[None, :]
+
+        def to_dq(p):
+            return jnp.where(opt_mask[None, :], basis @ _theta(p), 0.0)
+
+        def gate_grad(g):
+            return g            # theta rows outside opt_mask have zero gradient
+
+        def theta_end(p):
+            return _theta(p)[-1]
+
+    def make_q(p):
+        return q0_c + to_dq(p)
+
+    def objective(p):
+        q = make_q(p)
         mask_cost = jnp.sum(jax.vmap(fc)(q, brs_c, brR_c, brt_c,
                                          sdf_c, gsc_c, goff_c, pres_c, tgt_c))
         dj = (q[1:] - q[:-1]) * opt_mask[None, :]
-        pair = (real_f[1:] * real_f[:-1])[:, None]
-        d0 = (q[0] - q_prev) * opt_mask * has_prev * real_f[0]
+        pair = (w_f[1:] * w_f[:-1])[:, None]
+        d0 = (q[0] - q_prev) * opt_mask * has_prev * w_f[0]
         smooth = (smooth_weight ** 2) * (jnp.sum(pair * dj ** 2) + jnp.sum(d0 ** 2))
         over = jax.nn.relu(q - ub_row[None, :])
         under = jax.nn.relu(lb_row[None, :] - q)
-        limit = (limit_weight ** 2) * jnp.sum(real_f[:, None] * (over ** 2 + under ** 2))
+        limit = (limit_weight ** 2) * jnp.sum(w_f[:, None] * (over ** 2 + under ** 2))
         return mask_cost + smooth + limit
 
     opt = optax.adam(lr)
-    dq0 = jnp.zeros_like(q0_c)
     val_and_grad = jax.value_and_grad(objective)
 
     def step(carry, _):
-        dq, st = carry
-        v, g = val_and_grad(dq)
-        g = jnp.where(upd, g, 0.0)               # never move a frozen DOF or frame
-        updates, st = opt.update(g, st, dq)
-        return (optax.apply_updates(dq, updates), st), v
+        p, st = carry
+        v, g = val_and_grad(p)
+        g = gate_grad(g)
+        updates, st = opt.update(g, st, p)
+        return (optax.apply_updates(p, updates), st), v
 
-    (dq_final, _), hist = jax.lax.scan(step, (dq0, opt.init(dq0)), None, length=n_steps)
-    hist = jnp.concatenate([hist, objective(dq_final)[None]])
+    (p_final, _), hist = jax.lax.scan(step, (p0, opt.init(p0)), None, length=n_steps)
+    hist = jnp.concatenate([hist, objective(p_final)[None]])
 
-    q_ref = make_q(dq_final)
-    # Gated on `upd`, NOT on opt_mask: a frame with no evidence was never
-    # optimised, so clamping it would silently move a STAC pitch that happens to
-    # sit outside the joint range -- "no evidence must mean no change".
-    q_ref = jnp.where(upd, jnp.clip(q_ref, lb_row[None, :], ub_row[None, :]), q_ref)
-    return q_ref, hist
+    dq = to_dq(p_final)
+    q_ref = q0_c + dq
+    # Gated on having MOVED, NOT on opt_mask: a frame the parameterisation left
+    # alone was never optimised, so clamping it would silently move a STAC pitch
+    # that happens to sit outside the joint range -- "no evidence must mean no
+    # change". In free mode `upd` is exactly that gate; in spline mode the frame
+    # gate is not available, so the test is on dq itself.
+    clamp = upd if basis is None else (
+        (dq != 0) & opt_mask[None, :] & real_c[:, None])
+    q_ref = jnp.where(clamp, jnp.clip(q_ref, lb_row[None, :], ub_row[None, :]), q_ref)
+    return q_ref, hist, theta_end(p_final)
 
 
 # ---------------------------------------------------------------------------
@@ -372,7 +576,7 @@ def refine_wing_pitch(
     bridge_s, bridge_R, bridge_t, opt_mask, lb, ub,
     containment_weight=0.3, coverage_weight=0.3, smooth_weight=0.005,
     limit_weight=10.0, beta=8.0, huber_delta=0.0, margin=0.0,
-    coverage_normalize=True,
+    coverage_normalize=True, param_mode="free", knot_spacing=32,
     n_target_points=128, dilate_px=3, target_seed=0,
     n_steps=300, lr=1e-2, chunk_size=32, frame_chunk=64, prefetch=True,
     return_history=False,
@@ -403,6 +607,16 @@ def refine_wing_pitch(
             targets, making it a mean. See the module docstring -- without it
             `coverage_weight` is not comparable to `containment_weight` and
             depends on `n_target_points`.
+        param_mode: what the optimisation variable is -- `'free'` (default, one
+            parameter per frame; the arm the measured negative result was taken
+            on), `'spline'` (a knot vector, `knot_spacing` frames apart) or
+            `'lowpass'` (solve free, keep only the slow part of the correction).
+            See the module docstring; `spline` and `lowpass` exist because the
+            free fit destroys the courtship song in wing pitch.
+        knot_spacing: frames between knots in `'spline'` mode, and the period
+            setting the `1/(2*knot_spacing)` cycles/frame cutoff in `'lowpass'`.
+            32 is an order of magnitude slower than the 6.4-frame song period.
+            In `'spline'` mode `frame_chunk` must be a multiple of it.
         chunk_size: `coverage_residual`'s memory chunk over TARGET POINTS.
         frame_chunk: FRAMES per device call. Chunks are padded to this constant
             shape so the step loop traces once.
@@ -413,6 +627,11 @@ def refine_wing_pitch(
     Returns:
         (T, nq) float32 numpy, or `(q_refined, history)` if `return_history`.
     """
+    if param_mode not in PARAM_MODES:
+        raise ValueError(
+            f"param_mode {param_mode!r} is not one of {PARAM_MODES}. 'free' is "
+            f"the per-frame fit the measured negative result was taken on; "
+            f"'spline' and 'lowpass' are the two band-limited replacements.")
     q0 = np.asarray(q_init, np.float32)
     if q0.ndim != 2:
         raise ValueError(f"q_init must be (T, nq), got {q0.shape}")
@@ -470,8 +689,23 @@ def refine_wing_pitch(
         q_safe = q0
 
     F = int(frame_chunk) if frame_chunk else T
-    F = max(1, min(F, T))
+    if param_mode == "spline":
+        # NOT clamped to T: the knot grid has to be uniform across chunks, and
+        # a short last chunk would give the trajectory a fast final segment. A
+        # T < F bout is simply one chunk padded to F, which costs nothing --
+        # padded frames carry no evidence and contribute no cost.
+        F = max(1, F)
+        if F % int(knot_spacing):
+            raise ValueError(
+                f"param_mode='spline' needs frame_chunk ({F}) to be a multiple "
+                f"of knot_spacing ({knot_spacing}); otherwise the knot grid is "
+                f"not uniform across chunks and a chunk boundary carries a fast "
+                f"ramp -- exactly the high-frequency content this mode removes")
+    else:
+        F = max(1, min(F, T))
     n_chunks = int(np.ceil(T / F))
+    basis_j = (jnp.asarray(knot_basis(F, knot_spacing))
+               if param_mode == "spline" else None)
 
     cam_Ms_j = jnp.asarray(cam_Ms_np)
     cam_ts_j = jnp.asarray(cam_ts_np)
@@ -492,7 +726,7 @@ def refine_wing_pitch(
         limit_weight=float(limit_weight), beta=float(beta),
         huber_delta=float(huber_delta), margin=float(margin),
         n_steps=int(n_steps), lr=float(lr), chunk_size=int(chunk_size),
-        coverage_normalize=bool(coverage_normalize)))
+        coverage_normalize=bool(coverage_normalize), basis=basis_j))
 
     def prepare(k):
         s, e = k * F, min(T, (k + 1) * F)
@@ -532,6 +766,12 @@ def refine_wing_pitch(
     hist_all = []
     q_prev = jnp.asarray(q_safe[0])
     has_prev = np.float32(0.0)
+    # The spline anchor is deliberately NOT `has_prev`: `has_prev` is a POSE
+    # anchor and goes to 0 after a chunk that ends on a non-finite frame, while
+    # the knot value is a CORRECTION and is finite for every chunk. Dropping the
+    # anchor there would put a step into the correction at that boundary.
+    theta_prev = jnp.zeros(nq, np.float32)
+    has_theta = np.float32(0.0)
 
     pool = ThreadPoolExecutor(1) if (prefetch and n_chunks > 1) else None
     try:
@@ -540,17 +780,28 @@ def refine_wing_pitch(
             ch = pending.result() if pool else prepare(k)
             if pool and k + 1 < n_chunks:
                 pending = pool.submit(prepare, k + 1)
-            q_ref, hist = step_fn(*ch["args"], q_prev, jnp.asarray(has_prev))
+            q_ref, hist, theta_end = step_fn(
+                *ch["args"], q_prev, jnp.asarray(has_prev),
+                theta_prev, jnp.asarray(has_theta))
             q_ref = np.asarray(q_ref)
             q_out[ch["s"]:ch["e"]] = q_ref[:ch["n"]]
             hist_all.append(np.asarray(hist))
             # a non-finite last frame is not a usable smoothness anchor
             q_prev = jnp.asarray(q_out[ch["e"] - 1])
             has_prev = np.float32(finite_frame[ch["e"] - 1])
+            theta_prev, has_theta = theta_end, np.float32(1.0)
     finally:
         if pool is not None:
             pool.shutdown(wait=True)
 
+    if param_mode == "lowpass":
+        # OPTION B, the honest control for the spline: the free solve above is
+        # complete and its high-frequency half is now discarded. Done BEFORE the
+        # NaN rows are restored, so the filter sees the finite stand-in poses
+        # (whose correction is zero) rather than NaN, which filtfilt would smear
+        # over the whole trajectory.
+        q_out = _lowpass_correction(q_out, q_safe, opt_mask_np, knot_spacing,
+                                    lb_row, ub_row)
     q_out[~finite_frame] = q0[~finite_frame]     # hand the NaN rows back untouched
     if return_history:
         return q_out, np.stack(hist_all)

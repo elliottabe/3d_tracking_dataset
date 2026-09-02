@@ -585,6 +585,11 @@ def test_wing_mask_fit_bout_gates_frames_and_cameras(monkeypatch):
     assert stats == {"n_frames": 5, "n_refined": 3, "n_skipped": 2,
                      "n_thin_frames": 0, "n_no_bridge_frames": 1,
                      "n_nonfinite_pose_frames": 1, "min_present_cameras": 3,
+                     # which PARAMETERISATION the pose came from -- `free`
+                     # (per-frame) is the arm measured to destroy the song, so a
+                     # reader of qpos_wingfit.npz must not have to reconstruct
+                     # the config to find out which one they are holding.
+                     "param_mode": "free", "knot_spacing": 32,
                      "dpitch_left_deg": pytest.approx(np.rad2deg(0.25)),
                      "dpitch_right_deg": pytest.approx(np.rad2deg(0.5))}
     # the log accounts for n_skipped by bucket, so the buckets must SUM to it --

@@ -502,3 +502,194 @@ def test_a_nonfinite_bridge_frame_is_excluded_too():
     np.testing.assert_array_equal(q1[1], q0[1])      # left exactly at q_init
     m = np.asarray(kw["opt_mask"])
     assert np.abs(q1[good][:, m] - q0[good][:, m]).max() > 1e-9
+
+
+# --------------------------------------------------------------------------
+# param_mode: the SMOOTH-CORRECTION redesign
+# --------------------------------------------------------------------------
+# Measured on Session0 bout 28 fly1 (spec section 8.2): the marker-only control
+# carries bilaterally phase-locked courtship song in wing PITCH -- L/R coherence
+# 0.852 against a 0.35 significance floor on epoch 2, a clean periodic
+# cross-correlation at a 6.4-FRAME period -- and the free per-frame fit replaces
+# it with its own mask noise (coherence 0.038-0.139, correlation with the
+# control's own hp(pitch) 0.017). `smooth_weight` cannot fix that: it is one
+# scalar against a per-frame-independent objective, and both ends of the
+# measured sweep destroy the lock.
+#
+# The fix is to stop the stage carrying high-frequency content AT ALL, and the
+# tests below pin that BY CONSTRUCTION rather than by a threshold:
+#   1. the knot basis has no power in the song band  (pure numpy, no fit), and
+#   2. the correction a spline-mode fit produces lies in that basis' span.
+# Together those two are the proof; neither alone is.
+_SONG_PERIOD_FRAMES = 6.4          # measured; fs-independent form of f0
+_HP_NYQ = 0.1                      # the scorer's own high pass: 40 Hz at fs 800
+
+
+def _hp_fraction(x, wn=_HP_NYQ):
+    """Fraction of a signal's variance above the scorer's 40 Hz high pass.
+
+    Same 2nd-order Butterworth `wing_mask_fit_ab.hp_filt` uses, so a number here
+    means the same thing it means in the acceptance report.
+    """
+    from scipy.signal import butter, filtfilt
+    b, a = butter(2, wn, btype="high")
+    x = np.asarray(x, float)
+    x = x - x.mean()
+    return float(np.var(filtfilt(b, a, x)) / max(np.var(x), 1e-30))
+
+
+def test_the_knot_basis_cannot_represent_the_song():
+    """HALF ONE of the by-construction proof, and it needs no optimiser.
+
+    A piecewise-linear basis with knots every 32 frames is an order of magnitude
+    below the 6.4-frame song period in frequency, so NO knot vector -- however
+    the optimiser chooses it -- can put power in the song band. The K = 2
+    control is what shows the test measures the basis and not the random draw.
+    """
+    from jarvis_jax.tracking.wing_mask_refine import knot_basis
+
+    rng = np.random.default_rng(0)
+    F = 512
+    frac = {}
+    for K in (32, 2):
+        B = knot_basis(F, K)
+        assert B.shape[0] == F
+        np.testing.assert_allclose(B.sum(axis=1), 1.0, atol=1e-6)   # partition of unity
+        frac[K] = float(np.median([
+            _hp_fraction(B @ rng.standard_normal(B.shape[1])) for _ in range(64)]))
+    assert frac[32] < 1e-3, (
+        f"a 32-frame knot basis puts {frac[32]:.2e} of its variance above the "
+        f"40 Hz high pass -- it can carry the {_SONG_PERIOD_FRAMES}-frame song")
+    assert frac[2] > 100 * frac[32], (
+        f"the K=2 control must be able to carry it: {frac[2]:.2e} vs {frac[32]:.2e}")
+
+
+def test_spline_mode_confines_the_correction_to_a_GLOBAL_knot_basis():
+    """HALF TWO, and it also pins chunk-to-chunk CONTINUITY.
+
+    The claim is not "each chunk is smooth" -- three independently-splined
+    chunks stitched end to end have a STEP at every boundary, and a step is
+    broadband, so it would put the song band straight back. The claim is that
+    the correction over the WHOLE trajectory lies in the span of ONE global
+    piecewise-linear basis with knots every K frames. That holds only if each
+    chunk's first knot is anchored to the previous chunk's last.
+
+    The free arm is run on the same problem as the control: without it, a
+    fixture whose truth happens to be linear in t would let free mode pass too.
+    """
+    from jarvis_jax.tracking.wing_mask_refine import knot_basis, refine_wing_pitch
+    T, K = 24, 4
+    q0, kw = _tiny_problem(n_frames=T, n_steps=30)
+    kw["frame_chunk"] = 8                       # 3 chunks, 2 segments each
+    m = np.flatnonzero(np.asarray(kw["opt_mask"]))
+
+    Bg = knot_basis(T, K)                       # knots at 0,4,...,24 -- global
+    P = Bg @ np.linalg.pinv(Bg)                 # projector onto the basis span
+
+    resid = {}
+    for mode in ("spline", "free"):
+        q1 = np.asarray(refine_wing_pitch(q0, param_mode=mode, knot_spacing=K, **kw))
+        d = (q1 - q0)[:, m]
+        assert np.abs(d).max() > 1e-3, f"{mode}: the fit did not move pitch at all"
+        resid[mode] = float(np.abs(d - P @ d).max() / np.abs(d).max())
+    assert resid["spline"] < 1e-4, (
+        f"the spline correction leaves the {K}-frame knot span by "
+        f"{resid['spline']:.2e} of its own amplitude -- either the basis is not "
+        f"applied or the chunk boundaries are not anchored")
+    assert resid["free"] > 100 * resid["spline"], (
+        f"free mode must NOT lie in the span, or this test proves nothing: "
+        f"free {resid['free']:.2e} vs spline {resid['spline']:.2e}")
+
+
+def test_spline_mode_still_recovers_a_known_pitch_offset():
+    """PLACEMENT must survive the reparameterisation, at BOTH attitudes.
+
+    "Preserves the song but no longer fixes the wings" is a failure, not a
+    success, so the round trip that proves the objective points the right way is
+    re-run in the new mode -- including the springref REST attitude, the regime
+    the defect actually lives in.
+    """
+    from jarvis_jax.tracking.wing_mask_refine import refine_wing_pitch
+    for rest in (False, True):
+        q_true, q_pert, kw = _synthetic_from_model(pitch_offset_deg=25.0, rest=rest)
+        m = np.asarray(kw["opt_mask"])
+        q1 = np.asarray(refine_wing_pitch(
+            q_pert, param_mode="spline", knot_spacing=len(q_pert), **kw))
+        err0 = np.abs(q_pert[:, m] - q_true[:, m]).mean()
+        err1 = np.abs(q1[:, m] - q_true[:, m]).mean()
+        assert err1 < 0.5 * err0, (
+            f"spline mode at the {'rest' if rest else 'extended'} attitude: "
+            f"pitch error {np.degrees(err0):.2f} -> {np.degrees(err1):.2f} deg")
+
+
+def test_lowpass_mode_leaves_q_inits_high_frequency_content_alone():
+    """Option B, the honest control for A: `q_out = q_init + lowpass(q_fit-q_init)`.
+
+    Whatever the free solve does, the high-frequency content of the RESULT is
+    the high-frequency content of the STAC pose it started from. Exact for an
+    ideal filter; for the shipped 4th-order Butterworth at a cutoff 3.2x below
+    the scorer's high pass the leak is asserted here at < 2% of the song's own
+    amplitude -- which is what "by construction" is worth in practice.
+    """
+    from jarvis_jax.tracking.wing_mask_refine import refine_wing_pitch
+    from scipy.signal import butter, filtfilt
+    T = 64
+    q0, kw = _tiny_problem(n_frames=T, n_steps=20)
+    m = np.flatnonzero(np.asarray(kw["opt_mask"]))
+    # a synthetic "song": 6.4-frame period, 1 deg, on the pitch DOFs of q_init
+    t = np.arange(T)
+    q0 = q0.copy()
+    q0[:, m] += np.deg2rad(1.0) * np.sin(2 * np.pi * t / _SONG_PERIOD_FRAMES)[:, None]
+
+    q1 = np.asarray(refine_wing_pitch(q0, param_mode="lowpass", knot_spacing=32, **kw))
+    b, a = butter(2, _HP_NYQ, btype="high")
+    hp0 = filtfilt(b, a, q0[:, m], axis=0)
+    hp1 = filtfilt(b, a, q1[:, m], axis=0)
+    leak = float(np.abs(hp1 - hp0).max() / np.abs(hp0).max())
+    assert np.abs(q1[:, m] - q0[:, m]).max() > 1e-3, "the fit did not move pitch"
+    assert leak < 0.02, (
+        f"lowpass mode changed q_init's high-frequency content by {leak:.3f} of "
+        f"its amplitude -- the correction is not band-limited")
+
+
+def test_free_is_the_default_and_the_new_knobs_do_not_touch_it():
+    """The negative result was measured on `free`; it must stay reproducible.
+
+    BIT-IDENTITY IS NOT AVAILABLE and asserting it would be a false claim: two
+    IDENTICAL calls to `refine_wing_pitch` on this L40S already differ by
+    5.96e-08 rad on 2 of 558 entries (XLA reduction non-determinism in float32).
+    So the guard is "no further from the default than the default is from
+    itself" -- which is still five orders of magnitude tighter than any real
+    change of parameterisation, whose corrections are ~1e-2 rad.
+    """
+    import inspect
+    from jarvis_jax.tracking.wing_mask_refine import refine_wing_pitch
+    sig = inspect.signature(refine_wing_pitch)
+    assert sig.parameters["param_mode"].default == "free"
+    q0, kw = _tiny_problem(n_frames=6, n_steps=10)
+    a = np.asarray(refine_wing_pitch(q0, **kw))
+    a2 = np.asarray(refine_wing_pitch(q0, **kw))          # the noise floor itself
+    b = np.asarray(refine_wing_pitch(q0, param_mode="free", knot_spacing=3, **kw))
+    noise = float(np.abs(a - a2).max())
+    delta = float(np.abs(a - b).max())
+    assert delta <= max(noise, 1e-6), (
+        f"param_mode='free' moved the fit by {delta:.3e} rad against a "
+        f"run-to-run float32 noise floor of {noise:.3e} -- the arm the measured "
+        f"negative result was taken on is no longer reproducible")
+
+
+def test_an_unknown_param_mode_raises():
+    from jarvis_jax.tracking.wing_mask_refine import refine_wing_pitch
+    q0, kw = _tiny_problem(n_frames=4, n_steps=2)
+    with pytest.raises(ValueError, match="param_mode"):
+        refine_wing_pitch(q0, param_mode="smooth", **kw)
+
+
+def test_the_spline_step_loop_also_compiles_once():
+    """Same guarantee as free mode: a re-trace per chunk is 40 s vs 20 min."""
+    from jarvis_jax.tracking import wing_mask_refine as R
+    q0, kw = _tiny_problem(n_frames=40, n_steps=3)
+    kw["frame_chunk"] = 16
+    with _count_traces(R, "_refine_chunk") as n:
+        R.refine_wing_pitch(q0, param_mode="spline", knot_spacing=8, **kw)
+    assert n.value == 1, f"retraced {n.value}x -- pad chunks to a constant shape"

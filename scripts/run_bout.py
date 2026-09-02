@@ -488,9 +488,9 @@ def wing_mask_fit_signature(cfg):
 
     semantic = ("bbox_margin", "body_vertex_stride", "containment_weight",
                 "coverage_normalize", "coverage_weight", "dilate_px",
-                "exclude_cameras", "huber_delta", "limit_weight", "lr",
-                "min_present_cameras", "n_steps", "n_target_points", "out_hw",
-                "smooth_weight")
+                "exclude_cameras", "huber_delta", "knot_spacing", "limit_weight",
+                "lr", "min_present_cameras", "n_steps", "n_target_points",
+                "out_hw", "param_mode", "smooth_weight")
     wf = cfg.get("wing_mask_fit") or {}
     return json.dumps({k: _plain(wf.get(k)) for k in semantic}, sort_keys=True)
 
@@ -661,6 +661,7 @@ def wing_mask_fit_refine_kwargs(wf):
     keys = (("containment_weight", float), ("coverage_weight", float),
             ("coverage_normalize", bool), ("huber_delta", float),
             ("smooth_weight", float), ("limit_weight", float),
+            ("param_mode", str), ("knot_spacing", int),
             ("n_steps", int), ("lr", float), ("frame_chunk", int),
             ("n_target_points", int), ("dilate_px", int))
     missing = [k for k, _ in keys if k not in wf]
@@ -798,6 +799,13 @@ def wing_mask_fit_bout(cfg, qpos, bridge_s, bridge_R, bridge_t, bridge_ok,
         "n_no_bridge_frames": int(no_bridge.sum()),
         "n_nonfinite_pose_frames": int(nonfinite_pose.sum()),
         "min_present_cameras": _min_cams,
+        # WHICH PARAMETERISATION produced this pose. `free` fits Delta-pitch per
+        # frame and was measured to destroy the courtship song in wing pitch;
+        # `spline`/`lowpass` are band-limited. It is in the provenance signature,
+        # but a reader of the npz or the log should not have to reconstruct the
+        # config to know which one they are holding.
+        "param_mode": str(wf.get("param_mode", "free")),
+        "knot_spacing": int(wf.get("knot_spacing", 32)),
         "dpitch_left_deg": float(np.median(d[:, adr["wing_pitch_left"]])) if moved.any() else 0.0,
         "dpitch_right_deg": float(np.median(d[:, adr["wing_pitch_right"]])) if moved.any() else 0.0,
     }
@@ -2085,7 +2093,11 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
               f"({int(_st['n_no_bridge_frames'])} unsolved by STAC, "
               f"{int(_st['n_thin_frames'])} seen by fewer than "
               f"{int(_st['min_present_cameras'])} mask cameras, "
-              f"{int(_st['n_nonfinite_pose_frames'])} non-finite pose); median "
+              f"{int(_st['n_nonfinite_pose_frames'])} non-finite pose); "
+              f"param_mode {str(_st['param_mode'])}"
+              + (f" (knots every {int(_st['knot_spacing'])} frames)"
+                 if str(_st['param_mode']) != 'free' else '')
+              + f"; median "
               f"wing_pitch change L {float(_st['dpitch_left_deg']):+.2f} deg / "
               f"R {float(_st['dpitch_right_deg']):+.2f} deg", flush=True)
 

@@ -377,6 +377,32 @@ wing_mask_fit:
   # shippable; the fix is a design change (a slowly-varying pitch correction),
   # not a weight. Value is specific to this cost normalisation.
   smooth_weight: 0.005
+  # WHAT THE OPTIMISATION VARIABLE IS -- the axis `smooth_weight` is NOT.
+  #   free     one Delta-pitch per FRAME. The configuration every number in
+  #            docs/benchmark/2026-09-01-wing-mask-fit/ was measured on, kept as
+  #            the default so that negative result stays reproducible. It gets
+  #            placement right and fine motion wrong: the mask minimum is broad
+  #            (+-10-15 deg) and the cost is independent per frame, so the fit
+  #            fills the wing-pitch null direction with its own mask noise and
+  #            REPLACES the bilaterally phase-locked courtship song there.
+  #   spline   the variable is a KNOT VECTOR `knot_spacing` frames apart and
+  #            Delta-pitch is piecewise linear between knots. The song is
+  #            preserved BY CONSTRUCTION -- the basis cannot represent a
+  #            6.4-frame period -- and the optimiser can no longer chase
+  #            per-frame mask noise.
+  #   lowpass  solve as `free`, then keep only the slow half of the correction
+  #            (zero-phase 4th-order Butterworth at 1/(2*knot_spacing)
+  #            cycles/frame). Preserves the song equally well by construction,
+  #            but spends the whole solve on content it then discards -- it
+  #            exists as the CONTROL that says whether `spline` is better or
+  #            merely quieter.
+  param_mode: free
+  # Frames between spline knots, and the 1/(2*K) cycles/frame lowpass cutoff.
+  # 32 is an order of magnitude slower than the measured 6.4-FRAME song period
+  # and ~2x slower than the acceptance scorer's own 40 Hz high pass, so neither
+  # mode can carry song. `frame_chunk` MUST be a multiple of this in spline mode
+  # (it keeps the global knot grid uniform across chunks).
+  knot_spacing: 32
   limit_weight: 10.0
   n_steps: 300
   lr: 0.01
