@@ -488,8 +488,10 @@ def wing_mask_fit_signature(cfg):
 
     semantic = ("bbox_margin", "body_vertex_stride", "containment_weight",
                 "coverage_normalize", "coverage_weight", "dilate_px",
-                "exclude_cameras", "huber_delta", "knot_spacing", "limit_weight",
-                "lr", "min_present_cameras", "n_steps", "n_target_points",
+                "exclude_cameras", "gate_area_ref_pct", "gate_enabled",
+                "gate_min_area_frac", "gate_min_body_inside", "huber_delta",
+                "knot_spacing", "limit_weight", "lr", "max_dpitch_deg",
+                "min_present_cameras", "n_steps", "n_target_points",
                 "out_hw", "param_mode", "smooth_weight")
     wf = cfg.get("wing_mask_fit") or {}
     return json.dumps({k: _plain(wf.get(k)) for k in semantic}, sort_keys=True)
@@ -658,10 +660,15 @@ def wing_mask_fit_refine_kwargs(wf):
     `wing_mask_fit_bout`; `tests/test_run_bout_pipeline_structure.py` pins that
     the two sets partition the YAML block exactly.
     """
+    # `max_dpitch_deg: null` means "no bound" and must stay None, not become 0.0
+    def _opt_float(v):
+        return None if v is None else float(v)
+
     keys = (("containment_weight", float), ("coverage_weight", float),
             ("coverage_normalize", bool), ("huber_delta", float),
             ("smooth_weight", float), ("limit_weight", float),
             ("param_mode", str), ("knot_spacing", int),
+            ("max_dpitch_deg", _opt_float),
             ("n_steps", int), ("lr", float), ("frame_chunk", int),
             ("n_target_points", int), ("dilate_px", int))
     missing = [k for k, _ in keys if k not in wf]
@@ -697,10 +704,11 @@ def wing_mask_fit_bout(cfg, qpos, bridge_s, bridge_R, bridge_t, bridge_ok,
     """
     from jarvis_jax.tracking.appendage_dof import appendage_vertex_indices
     from jarvis_jax.tracking.fk import load_anatomy, make_fk_repose
+    from jarvis_jax.tracking.mask_quality import wing_fit_validity_gate
     from jarvis_jax.tracking.mask_sdf import sdf_stack_from_masks
     from jarvis_jax.tracking.wing_mask_refine import (
-        affine_cameras_by_name, body_vertex_indices, qpos_limits,
-        refine_wing_pitch, wing_pitch_dof_mask)
+        affine_cameras_by_name, body_uv_track, body_vertex_indices,
+        qpos_limits, refine_wing_pitch, wing_pitch_dof_mask)
     import mujoco
 
     wf = cfg.get("wing_mask_fit") or {}
@@ -741,35 +749,83 @@ def wing_mask_fit_bout(cfg, qpos, bridge_s, bridge_R, bridge_t, bridge_ok,
     for c in _excl:
         valid[:, cameras.index(c)] = False                          # BY NAME
 
+    _min_cams = int(wf["min_present_cameras"])
+    anat = load_anatomy(str(cfg.ik.xml), str(cfg.ik.mesh_npz))
+    lb, ub = qpos_limits(anat["m"])
+    opt_mask = wing_pitch_dof_mask(anat["m"])       # raises if the joints moved
+    fk_repose = make_fk_repose(anat)
+    body_idx = body_vertex_indices(str(cfg.ik.mesh_npz),
+                                   stride=int(wf["body_vertex_stride"]))
+
+    # ---- THE VALIDITY GATE: skipping a badly-tracked fly-frame is a FEATURE --
+    # `min_present_cameras` counts masks that are PRESENT, and on Session0 bout
+    # 28 fly0's frames 1500-2006 they are: 90.7% of them, at a third of her own
+    # area, 40% of them slivers (the female pressed against a wall). The fit
+    # then solves against a fragment and every band-limited parameterisation
+    # renders the result as a SMOOTH 130 deg swing.
+    #
+    # TWO SIGNALS, and only the second is general. Area against that camera's
+    # own healthy reference catches the truncated sliver; the fraction of the
+    # projected BODY landing inside the mask catches a wrong-fly or merged-fly
+    # mask, which has perfectly normal area and is invisible to any area test.
+    #
+    # AND THE RESULT IS USED TWICE. `camera_ok` goes into the SDF stack, so
+    # sliver evidence never enters the objective; `frame_keep` goes into
+    # refine_wing_pitch, so the skipped frames are HELD at the STAC pose. The
+    # first alone is not enough: in spline/lowpass zeroing `present` does not
+    # freeze a frame, the knots interpolate across it.
+    gate = None
+    if bool(wf["gate_enabled"]):
+        # a coarse body basis is plenty for an inside FRACTION (the dense one
+        # exists for the coverage raster, where the footprint has to cover the
+        # silhouette), and it keeps this an O(seconds) precompute
+        _gidx = body_idx[::max(1, len(body_idx) // 512)]
+        _uv = body_uv_track(qpos, bridge_s, bridge_R, bridge_t,
+                            fk_repose=fk_repose, body_idx=_gidx,
+                            cam_Ms=cam_Ms, cam_ts=cam_ts)
+        gate = wing_fit_validity_gate(
+            masks, valid, body_uv=_uv,
+            min_area_frac=float(wf["gate_min_area_frac"]),
+            min_body_inside=float(wf["gate_min_body_inside"]),
+            min_cameras=_min_cams,
+            area_ref_pct=float(wf["gate_area_ref_pct"]))
+        valid_fit = gate["camera_ok"]
+    else:
+        valid_fit = valid
+
     sdf, grid_scale, grid_offset, present = sdf_stack_from_masks(
-        masks, valid,
+        masks, valid_fit,
         out_hw=tuple(int(v) for v in wf["out_hw"]),
         bbox_margin=float(wf["bbox_margin"]))
     # Too few views is ill-conditioned for a silhouette fit exactly as it is for
     # triangulation. An all-False `present` row freezes that frame at its STAC
     # pose inside refine_wing_pitch (its "no evidence means no change" gate).
-    _min_cams = int(wf["min_present_cameras"])
     _few = present.sum(axis=1) < _min_cams
     present[_few] = False
-    # `_few` also catches every no-bridge frame (its `valid` row was just zeroed
-    # above), so subtract them out to keep the two counts disjoint.
-    _thin = _few & ~no_bridge
+    # THREE disjoint camera-side diagnoses, peeled in order. "STAC could not
+    # solve it", "too few cameras saw the fly AT ALL" and "enough cameras saw
+    # it but their masks are slivers or disagree with the pose" send a reader to
+    # three different places, so they are never merged into one count.
+    _few_valid = valid.sum(axis=1) < _min_cams
+    _thin = _few_valid & ~no_bridge
+    _gated = _few & ~_few_valid & ~no_bridge
 
-    anat = load_anatomy(str(cfg.ik.xml), str(cfg.ik.mesh_npz))
-    lb, ub = qpos_limits(anat["m"])
-    opt_mask = wing_pitch_dof_mask(anat["m"])       # raises if the joints moved
     q_ref = refine_wing_pitch(
         qpos,
-        fk_repose=make_fk_repose(anat),
+        fk_repose=fk_repose,
         wing_vert_idx=appendage_vertex_indices(
             str(cfg.ik.mesh_npz), subset=str(cfg.ik.mesh_subset), include=("wing",)),
-        body_vert_idx=body_vertex_indices(
-            str(cfg.ik.mesh_npz), stride=int(wf["body_vertex_stride"])),
+        body_vert_idx=body_idx,
         cam_Ms=cam_Ms, cam_ts=cam_ts,
         sdf=sdf, grid_scale=grid_scale, grid_offset=grid_offset,
         present=present, masks=masks,
         bridge_s=bridge_s, bridge_R=bridge_R, bridge_t=bridge_t,
         opt_mask=opt_mask, lb=lb, ub=ub,
+        # HOLD the skipped frames at the STAC pose. `present` alone cannot do
+        # it in a band-limited mode; see refine_wing_pitch's `frame_keep`.
+        # None when the gate is off, so the arm the measured negative result was
+        # taken on stays byte-reproducible.
+        frame_keep=(present.any(axis=1) if gate is not None else None),
         **wing_mask_fit_refine_kwargs(wf))
 
     # Report the two wings by NAME, never by array position: which qpos address
@@ -802,7 +858,7 @@ def wing_mask_fit_bout(cfg, qpos, bridge_s, bridge_R, bridge_t, bridge_ok,
     # many did -- without it the effect of the per-frame evidence gate, which is
     # the only frame-level safety this stage has, is invisible in the log.
     nonfinite_pose = ~finite_pose & present.any(axis=1)
-    no_evidence = no_bridge | _thin | ~finite_pose
+    no_evidence = no_bridge | _thin | _gated | ~finite_pose
     # Frames sitting ON a wing-pitch joint stop that were not there before. The
     # hard clamp is a per-frame nonlinearity applied AFTER the parameterisation,
     # so a clamp hit makes the band-limited guarantee CONDITIONAL: measured on
@@ -814,6 +870,17 @@ def wing_mask_fit_bout(cfg, qpos, bridge_s, bridge_R, bridge_t, bridge_ok,
     _was_on_stop = (np.isclose(q0[:, _padr], _lo[None, :], atol=1e-9)
                     | np.isclose(q0[:, _padr], _hi[None, :], atol=1e-9))
     clamp_hits = (np.isfinite(q1[:, _padr]) & _on_stop & ~_was_on_stop).any(axis=1)
+    # Frames sitting AT the physiological |dpitch| bound. Like the joint clamp
+    # this is a per-frame nonlinearity applied after the parameterisation, and
+    # unlike it, its whole purpose is to fire on evidence that should not have
+    # been believed -- so a non-zero count is a pointer at the MASKS, not a
+    # defect in the fit.
+    _dmax = wf.get("max_dpitch_deg")
+    n_at_bound = 0
+    if _dmax is not None:
+        _dp = np.abs(q1[:, _padr] - q0[:, _padr].astype(np.float64))
+        n_at_bound = int((np.isfinite(_dp)
+                          & (_dp >= np.deg2rad(float(_dmax)) - 1e-9)).any(axis=1).sum())
     stats = {
         "n_frames": int(q0.shape[0]),
         "n_refined": int(moved.sum()),
@@ -822,6 +889,16 @@ def wing_mask_fit_bout(cfg, qpos, bridge_s, bridge_R, bridge_t, bridge_ok,
         "n_no_evidence_frames": int(no_evidence.sum()),
         "n_clamp_hits": int(clamp_hits.sum()),
         "n_thin_frames": int(_thin.sum()),
+        # The NEW gate's own bucket: enough cameras saw the fly, but their masks
+        # were slivers or disagreed with the STAC pose. Kept separate from
+        # `n_thin_frames` because the remedy is different -- SAM, not coverage.
+        "n_gated_frames": int(_gated.sum()),
+        "n_sliver_camera_frames": (int(gate["n_sliver_camera_frames"])
+                                   if gate is not None else 0),
+        "n_pose_reject_camera_frames": (int(gate["n_pose_reject_camera_frames"])
+                                        if gate is not None else 0),
+        "gate_enabled": bool(wf["gate_enabled"]),
+        "n_at_dpitch_bound": n_at_bound,
         "n_no_bridge_frames": int(no_bridge.sum()),
         "n_nonfinite_pose_frames": int(nonfinite_pose.sum()),
         "min_present_cameras": _min_cams,
@@ -2120,9 +2197,14 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
               f"({int(_st['n_no_bridge_frames'])} unsolved by STAC, "
               f"{int(_st['n_thin_frames'])} seen by fewer than "
               f"{int(_st['min_present_cameras'])} mask cameras, "
+              f"{int(_st.get('n_gated_frames', 0))} GATED as badly tracked "
+              f"({int(_st.get('n_sliver_camera_frames', 0))} sliver + "
+              f"{int(_st.get('n_pose_reject_camera_frames', 0))} pose-disagreeing "
+              f"camera-frames), "
               f"{int(_st['n_nonfinite_pose_frames'])} non-finite pose), of which "
               f"{int(_st['n_interpolated'])} moved anyway; "
               f"{int(_st['n_clamp_hits'])} hit a joint stop; "
+              f"{int(_st.get('n_at_dpitch_bound', 0))} at the |dpitch| bound; "
               f"param_mode {str(_st['param_mode'])}"
               + (f" (knots every {int(_st['knot_spacing'])} frames)"
                  if str(_st['param_mode']) != 'free' else '')

@@ -693,3 +693,131 @@ def test_the_spline_step_loop_also_compiles_once():
     with _count_traces(R, "_refine_chunk") as n:
         R.refine_wing_pitch(q0, param_mode="spline", knot_spacing=8, **kw)
     assert n.value == 1, f"retraced {n.value}x -- pad chunks to a constant shape"
+
+
+# --------------------------------------------------------------------------
+# Task 10: the validity gate -- skipping badly-tracked frames is a FEATURE
+# --------------------------------------------------------------------------
+def test_the_frame_gate_HOLDS_skipped_frames_at_q_init_in_a_BAND_LIMITED_mode():
+    """THE reason `frame_keep` exists, and it is not the same as `present`.
+
+    Zeroing a frame's `present` row freezes it only in `free` mode, where the
+    frame gate lives on the parameter UPDATE. In `spline`/`lowpass` one knot
+    spans many frames, so the knots INTERPOLATE across a no-evidence frame and
+    the low-pass smears across it -- measured, that is exactly what happens on
+    Session0 bout 28 fly0's collapsed masks, where every band-limited arm turns
+    a sliver-driven error into a smooth 130 deg swing.
+
+    The `present`-only arm below is the control: if it also came back at q_init
+    this test would prove nothing, because the gate would be redundant.
+    """
+    from jarvis_jax.tracking.wing_mask_refine import refine_wing_pitch
+    T, K = 24, 4
+    q0, kw = _tiny_problem(n_frames=T, n_steps=30)
+    kw["frame_chunk"] = 8
+    m = np.flatnonzero(np.asarray(kw["opt_mask"]))
+    skip = np.zeros(T, bool)
+    skip[10:14] = True                       # a 4-frame "bad tracking" stretch
+
+    kw_ng = dict(kw)
+    kw_ng["present"] = np.asarray(kw["present"], bool).copy()
+    kw_ng["present"][skip] = False           # the remedy that CANNOT work alone
+    q_present_only = np.asarray(refine_wing_pitch(
+        q0, param_mode="spline", knot_spacing=K, **kw_ng))
+    interp = np.abs(q_present_only[skip][:, m] - q0[skip][:, m]).max()
+    assert interp > 1e-3, (
+        f"the `present`-only control moved the gated frames by only {interp:.2e} "
+        f"rad -- if zeroing `present` already froze them the gate would be "
+        f"redundant and this test would prove nothing")
+
+    q_gated = np.asarray(refine_wing_pitch(
+        q0, param_mode="spline", knot_spacing=K, frame_keep=~skip, **kw_ng))
+    assert np.array_equal(q_gated[skip], q0[skip]), (
+        "a gated frame must come back at EXACTLY its STAC pose, not decayed "
+        "toward it")
+    assert np.abs(q_gated[~skip][:, m] - q0[~skip][:, m]).max() > 1e-3, \
+        "the kept frames must still be fitted"
+
+
+def test_the_gate_envelope_ramps_rather_than_stepping_in_a_band_limited_mode():
+    """A hard 0/1 gate is BROADBAND -- exactly the content `spline`/`lowpass`
+    exist to keep out of the 6.4-frame song band. The envelope returns to 1 over
+    one knot spacing, so the fastest slope the gate can introduce is 1/K of the
+    correction's amplitude per frame.
+
+    THIS IS ASSERTED AS THE ENVELOPE'S SHAPE, not as a step bound, and the
+    difference was found by mutation: with the gate deleted entirely, a
+    `max |diff| <= amp/K` assertion still PASSED, because a K=8 spline
+    correction is already that smooth on its own. What only the envelope can
+    produce is a correction that is exactly 0 at the skipped frame and
+    ATTENUATED in proportion to the distance from it -- 1/8 of the local
+    amplitude one frame out, 1/2 four frames out, back to full at K.
+    """
+    from jarvis_jax.tracking.wing_mask_refine import refine_wing_pitch
+    T, K = 48, 8
+    q0, kw = _tiny_problem(n_frames=T, n_steps=20)
+    kw["frame_chunk"] = 16
+    m = np.flatnonzero(np.asarray(kw["opt_mask"]))
+    t0 = 24
+    skip = np.zeros(T, bool)
+    skip[t0] = True
+
+    q1 = np.asarray(refine_wing_pitch(q0, param_mode="spline", knot_spacing=K,
+                                      frame_keep=~skip, **kw))
+    d = np.abs((q1 - q0)[:, m]).mean(axis=1)          # (T,) amplitude per frame
+    full = d[t0 + K]
+    assert full > 1e-3, "the fit did not move pitch"
+    assert d[t0] == 0.0
+    step = np.abs(np.diff(d)).max()
+    assert step <= d.max() / K * 1.05 + 1e-6, (
+        f"the gated correction steps by {step:.3e} rad in one frame against an "
+        f"amplitude of {d.max():.3e} over a {K}-frame ramp")
+    # the ramp itself: env(t0+j) = j/K, and the underlying spline correction is
+    # near-constant over 8 frames, so the RATIO to the full value tracks it
+    for j, want in ((1, 1 / K), (4, 4 / K)):
+        got = d[t0 + j] / full
+        assert abs(got - want) < 0.25, (
+            f"{j} frames from the skipped frame the correction is {got:.3f} of "
+            f"its full value; a {K}-frame linear ramp wants {want:.3f} "
+            f"(a hard gate would give 1.0, no gate at all would give ~1.0)")
+
+
+def test_a_hard_dpitch_bound_no_evidence_can_override():
+    """The model's own joint limits are NOT a bound: -72.8..+167.3 deg leaves the
+    optimiser free to travel most of that range legally, and on bout 28 fly0 it
+    did -- a 130 deg swing driven by a collapsed mask. `max_dpitch_deg` is the
+    physiological bound that makes such an answer unrepresentable."""
+    from jarvis_jax.tracking.wing_mask_refine import refine_wing_pitch
+    q_true, q_pert, kw = _synthetic_from_model(pitch_offset_deg=25.0)
+    m = np.flatnonzero(np.asarray(kw["opt_mask"]))
+    free = np.asarray(refine_wing_pitch(q_pert, **kw))
+    d_free = np.abs(free[:, m] - q_pert[:, m]).max()
+    assert d_free > np.deg2rad(5.0), (
+        f"the unbounded fit moves only {np.degrees(d_free):.2f} deg -- the bound "
+        f"below would not bite and the test would prove nothing")
+
+    bound = np.asarray(refine_wing_pitch(q_pert, max_dpitch_deg=5.0, **kw))
+    d = np.abs(bound[:, m] - q_pert[:, m]).max()
+    assert d <= np.deg2rad(5.0) + 1e-6, \
+        f"max_dpitch_deg=5 let the correction reach {np.degrees(d):.3f} deg"
+
+
+def test_the_gate_and_the_bound_are_no_ops_at_their_defaults():
+    """`free` + no gate is the arm every measured number in
+    docs/benchmark/2026-09-01-wing-mask-fit/ was taken on, and it must stay
+    reproducible: passing an all-True `frame_keep` or a bound wider than the
+    correction may not move the fit further than it moves run to run."""
+    from jarvis_jax.tracking.wing_mask_refine import refine_wing_pitch
+    import inspect
+    sig = inspect.signature(refine_wing_pitch)
+    assert sig.parameters["frame_keep"].default is None
+    assert sig.parameters["max_dpitch_deg"].default is None
+    q0, kw = _tiny_problem(n_frames=6, n_steps=10)
+    a = np.asarray(refine_wing_pitch(q0, **kw))
+    noise = float(np.abs(a - np.asarray(refine_wing_pitch(q0, **kw))).max())
+    b = np.asarray(refine_wing_pitch(q0, frame_keep=np.ones(6, bool),
+                                     max_dpitch_deg=180.0, **kw))
+    delta = float(np.abs(a - b).max())
+    assert delta <= max(noise, 1e-6), (
+        f"the gate at its no-op settings moved the fit by {delta:.3e} rad "
+        f"against a run-to-run noise floor of {noise:.3e}")

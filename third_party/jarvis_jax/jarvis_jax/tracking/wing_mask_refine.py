@@ -158,6 +158,7 @@ import jax.numpy as jnp
 import optax
 
 from jarvis_jax.tracking.mask_containment import containment_residual
+from jarvis_jax.tracking.mask_quality import gate_envelope
 from jarvis_jax.tracking.wing_coverage import coverage_residual, wing_target_points
 
 #: The only two DOFs this module ever moves. Addressed BY NAME -- they sit at
@@ -404,6 +405,50 @@ def _body_uv_chunk(q_c, brs_c, brR_c, brt_c, *, fk_repose, body_idx, cam_Ms, cam
     return jax.vmap(one)(q_c, brs_c, brR_c, brt_c)
 
 
+def body_uv_track(q, bridge_s, bridge_R, bridge_t, *, fk_repose, body_idx,
+                  cam_Ms, cam_ts, frame_chunk=256):
+    """(T, C, V, 2) projected BODY vertices in original px, for a whole bout.
+
+    The public form of `_body_uv_chunk`, for the POSE-AWARE half of the validity
+    gate: how much of the projected body lands inside the SAM mask is what tells
+    a wrong-fly or merged-fly mask (which has perfectly normal AREA) apart from
+    a good one. The body is frozen by `opt_mask`, so this depends only on the
+    STAC pose and is computed once, outside the optimiser.
+
+    Non-finite frames come back non-finite; the caller treats those as
+    "unknown", not as "0% inside".
+    """
+    q = np.asarray(q, np.float32)
+    T = q.shape[0]
+    fn = jax.jit(functools.partial(
+        _body_uv_chunk, fk_repose=fk_repose, body_idx=jnp.asarray(body_idx),
+        cam_Ms=jnp.asarray(np.asarray(cam_Ms, np.float32)),
+        cam_ts=jnp.asarray(np.asarray(cam_ts, np.float32))))
+    finite = (np.isfinite(q).all(axis=1)
+              & np.isfinite(bridge_s)
+              & np.isfinite(bridge_R).all(axis=(1, 2))
+              & np.isfinite(bridge_t).all(axis=1))
+    if not finite.any():
+        C = np.asarray(cam_Ms).shape[0]
+        return np.full((T, C, len(np.asarray(body_idx)), 2), np.nan, np.float32)
+    # a NaN row would poison nothing here (there is no reduction across frames),
+    # but jnp still propagates it, so substitute and mask afterwards
+    stand_in = int(np.argmax(finite))
+    qs = q.copy(); qs[~finite] = q[stand_in]
+    bs = np.where(finite, bridge_s, bridge_s[stand_in]).astype(np.float32)
+    bR = np.where(finite[:, None, None], bridge_R, bridge_R[stand_in]).astype(np.float32)
+    bt = np.where(finite[:, None], bridge_t, bridge_t[stand_in]).astype(np.float32)
+    F = max(1, int(frame_chunk))
+    out = []
+    for s0 in range(0, T, F):
+        e0 = min(T, s0 + F)
+        out.append(np.asarray(fn(jnp.asarray(qs[s0:e0]), jnp.asarray(bs[s0:e0]),
+                                 jnp.asarray(bR[s0:e0]), jnp.asarray(bt[s0:e0]))))
+    uv = np.concatenate(out, axis=0)
+    uv[~finite] = np.nan
+    return uv
+
+
 # ---------------------------------------------------------------------------
 # the cost
 # ---------------------------------------------------------------------------
@@ -592,6 +637,7 @@ def refine_wing_pitch(
     containment_weight=0.3, coverage_weight=0.3, smooth_weight=0.005,
     limit_weight=10.0, beta=8.0, huber_delta=0.0, margin=0.0,
     coverage_normalize=True, param_mode="free", knot_spacing=32,
+    frame_keep=None, max_dpitch_deg=None,
     n_target_points=128, dilate_px=3, target_seed=0,
     n_steps=300, lr=1e-2, chunk_size=32, frame_chunk=64, prefetch=True,
     return_history=False,
@@ -632,6 +678,28 @@ def refine_wing_pitch(
             setting the `1/(2*knot_spacing)` cycles/frame cutoff in `'lowpass'`.
             32 is an order of magnitude slower than the 6.4-frame song period.
             In `'spline'` mode `frame_chunk` must be a multiple of it.
+        frame_keep: (T,) bool -- frames the caller judges WELL TRACKED. Frames
+            outside it come back at EXACTLY `q_init`, whatever the
+            parameterisation. This is NOT the same as zeroing `present`: that
+            only removes a frame's contribution to the COST, and in
+            `spline`/`lowpass` the knots then interpolate across it and the
+            low-pass smears across it, so the frame still moves (measured: on
+            Session0 bout 28 fly0's collapsed masks every band-limited arm
+            renders the failure as a SMOOTH 130 deg swing). Do BOTH -- zero
+            `present` so the sliver evidence never enters the fit, and pass
+            `frame_keep` so the skipped frames are held at the marker-solve
+            pose. Applied as an ENVELOPE that returns to 1 over one
+            `knot_spacing` beside a skipped frame, because a hard 0/1 step is
+            broadband and would put content straight back into the song band;
+            in `'free'` mode the ramp is 0, which is exact and is what that
+            mode's own per-frame gate already does. None (default) keeps every
+            frame, which is the arm the measured negative result was taken on.
+        max_dpitch_deg: hard bound on |q_out - q_init| for the optimised DOFs,
+            in degrees. The MODEL's joint limits are no constraint here -- wing
+            pitch is legal over -72.8..+167.3 deg and the optimiser has been
+            measured travelling most of it on collapsed masks -- so this is the
+            physiological bound that makes such an answer unrepresentable.
+            None (default) applies no bound.
         chunk_size: `coverage_residual`'s memory chunk over TARGET POINTS.
         frame_chunk: FRAMES per device call. Chunks are padded to this constant
             shape so the step loop traces once.
@@ -651,6 +719,14 @@ def refine_wing_pitch(
     if q0.ndim != 2:
         raise ValueError(f"q_init must be (T, nq), got {q0.shape}")
     T, nq = q0.shape
+    if frame_keep is not None:
+        frame_keep = np.asarray(frame_keep, bool)
+        if frame_keep.shape != (T,):
+            raise ValueError(
+                f"frame_keep must be (T,) = ({T},), got {frame_keep.shape}")
+    if max_dpitch_deg is not None and not float(max_dpitch_deg) > 0:
+        raise ValueError(
+            f"max_dpitch_deg must be > 0 or None, got {max_dpitch_deg}")
 
     opt_mask_np = np.asarray(opt_mask, bool)
     if opt_mask_np.shape != (nq,):
@@ -817,6 +893,28 @@ def refine_wing_pitch(
         # over the whole trajectory.
         q_out = _lowpass_correction(q_out, q_safe, opt_mask_np, knot_spacing,
                                     lb_row, ub_row)
+    # THE VALIDITY GATE AND THE PHYSIOLOGICAL BOUND, both applied to the
+    # CORRECTION rather than to the pose, and both AFTER the parameterisation.
+    #
+    # Shrinking a correction toward zero can only move `q_out` toward `q_safe`,
+    # so neither of these can push a frame further outside the joint range than
+    # its own STAC pose already was -- which is why there is no re-clip here.
+    # Re-clipping would move a frame whose STAC pitch legitimately sits outside
+    # the range, and "no evidence means no change" forbids that.
+    cols = np.flatnonzero(opt_mask_np)
+    if cols.size and (frame_keep is not None or max_dpitch_deg is not None):
+        d = q_out[:, cols].astype(np.float64) - q_safe[:, cols].astype(np.float64)
+        if max_dpitch_deg is not None:
+            lim = float(np.deg2rad(float(max_dpitch_deg)))
+            d = np.clip(d, -lim, lim)
+        if frame_keep is not None:
+            # ramp = 0 in `free` (its correction is already independent per
+            # frame, so there is nothing to smear and a hard gate is exact);
+            # one knot spacing in the band-limited modes, so the envelope
+            # cannot introduce a slope the basis could not already express.
+            ramp = 0 if param_mode == "free" else int(knot_spacing)
+            d = gate_envelope(frame_keep, ramp)[:, None] * d
+        q_out[:, cols] = (q_safe[:, cols].astype(np.float64) + d).astype(np.float32)
     q_out[~finite_frame] = q0[~finite_frame]     # hand the NaN rows back untouched
     if return_history:
         return q_out, np.stack(hist_all)

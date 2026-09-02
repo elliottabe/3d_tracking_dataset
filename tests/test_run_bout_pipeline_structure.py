@@ -385,7 +385,11 @@ def test_every_wing_mask_fit_yaml_key_reaches_the_refinement():
         n for n in _ast.parse(src).body
         if isinstance(n, _ast.FunctionDef) and n.name == "wing_mask_fit_bout"))
     caller_keys = {"out_hw", "bbox_margin", "body_vertex_stride",
-                   "min_present_cameras", "exclude_cameras"}
+                   "min_present_cameras", "exclude_cameras",
+                   # the validity gate: the stage builds camera_ok/frame_keep
+                   # itself and hands the refiner an array, not these knobs
+                   "gate_enabled", "gate_min_area_frac",
+                   "gate_min_body_inside", "gate_area_ref_pct"}
     for k in caller_keys:
         assert f'"{k}"' in stage or f"'{k}'" in stage, \
             f"wing_mask_fit.{k} is in the YAML but never read by the stage"
@@ -424,6 +428,30 @@ def test_wing_mask_fit_runs_after_the_bridges_and_reuses_them():
         "the wing-fit stage must refuse a T-mismatched resumed artifact"
 
 
+def _fake_refine(q, delta, honour_present, **kw):
+    """Stand-in for `refine_wing_pitch`, faking BOTH refiners and the gate.
+
+    `honour_present=True` is `param_mode='free'`, whose frame gate lives on the
+    parameter update; False is `spline`/`lowpass`, where a no-evidence frame is
+    interpolated and MOVES. `frame_keep` is honoured in both, because that is
+    the contract the real module now guarantees regardless of mode -- and the
+    only reason the gate is worth having in a band-limited mode at all.
+    """
+    import numpy as np
+    q = np.array(q, np.float32)
+    d = delta * (np.asarray(kw["present"], bool).any(axis=1)[:, None]
+                 if honour_present else 1.0)
+    out = np.clip(q + d, np.asarray(kw["lb"]), np.asarray(kw["ub"]))
+    keep = kw.get("frame_keep")
+    if keep is not None:
+        out = np.where(np.asarray(keep, bool)[:, None], out, q)
+    lim = kw.get("max_dpitch_deg")
+    if lim is not None:
+        dd = np.clip(out - q, -np.deg2rad(float(lim)), np.deg2rad(float(lim)))
+        out = q + dd
+    return out
+
+
 class _Rec(dict):
     """A recorder that stands in for one jarvis_jax entry point."""
 
@@ -458,6 +486,10 @@ def _stub_wing_mask_fit(monkeypatch, n_frames, cameras, honour_present=True,
     import sys
     import types
     import numpy as np
+    # Resolved BEFORE the monkeypatch below replaces the module in sys.modules:
+    # a lazy `from ... import` inside the stub would re-enter the stub itself.
+    # `mask_quality` is pure numpy, so importing it keeps this guard cheap.
+    from jarvis_jax.tracking.mask_quality import wing_fit_validity_gate
 
     C = len(cameras)
     rec = {}
@@ -487,9 +519,17 @@ def _stub_wing_mask_fit(monkeypatch, n_frames, cameras, honour_present=True,
             "make_fk_repose": lambda anat: "FK"},
         "jarvis_jax.tracking.appendage_dof": {
             "appendage_vertex_indices": _Rec(np.arange(4, dtype=np.int32))},
+        # The gate's two entry points. `body_uv_track` fakes the projection
+        # (the real one FKs an 87-joint model); `wing_fit_validity_gate` is the
+        # REAL function, fed the fixture's masks, so the wiring under test is
+        # the wiring that ships -- only the FK is stubbed.
+        "jarvis_jax.tracking.mask_quality": {
+            "wing_fit_validity_gate": _Rec(wing_fit_validity_gate)},
         "jarvis_jax.tracking.wing_mask_refine": {
             "affine_cameras_by_name": _Rec(
                 (np.zeros((C, 2, 3), np.float32), np.zeros((C, 2), np.float32))),
+            "body_uv_track": _Rec(
+                lambda q, *a, **k: np.zeros((len(q), C, 4, 2), np.float32)),
             "body_vertex_indices": _Rec(np.arange(8, dtype=np.int32)),
             "qpos_limits": lambda m: (
                 np.full(14, -np.inf, np.float32) if limits is None
@@ -498,11 +538,7 @@ def _stub_wing_mask_fit(monkeypatch, n_frames, cameras, honour_present=True,
                 else np.full(14, limits[1], np.float32)),
             "wing_pitch_dof_mask": lambda m: np.isin(np.arange(14), [9, 12]),
             "refine_wing_pitch": _Rec(
-                lambda q, **kw: np.clip(
-                    np.array(q, np.float32) + delta * (
-                        np.asarray(kw["present"], bool).any(axis=1)[:, None]
-                        if honour_present else 1.0),
-                    np.asarray(kw["lb"]), np.asarray(kw["ub"])))},
+                lambda q, **kw: _fake_refine(q, delta, honour_present, **kw))},
         "mujoco": {"mjtObj": types.SimpleNamespace(mjOBJ_JOINT=3),
                    "mj_name2id": lambda m, obj, nm: {"wing_pitch_left": 1,
                                                      "wing_pitch_right": 0}[nm]},
@@ -528,7 +564,12 @@ def _wing_fit_fixture(n_frames=5):
                "mesh_subset": "fps_300"},
         "wing_mask_fit": WING_MASK_FIT_ON,
     })
-    masks_dict = {"masks": np.zeros((n_frames, len(cameras), 4, 4), bool),
+    # Masks are all-TRUE, not all-false: the validity gate is pose-aware and
+    # asks how much of the projected body lands inside the mask, so an empty
+    # mask is (correctly) rejected as badly tracked and nothing downstream of
+    # the gate would ever be exercised. The stubbed `body_uv_track` projects to
+    # (0, 0), which is inside this mask.
+    masks_dict = {"masks": np.ones((n_frames, len(cameras), 4, 4), bool),
                   "valid": np.ones((n_frames, len(cameras)), bool),
                   "cameras": list(cameras), "T": n_frames, "C": len(cameras)}
     qpos = np.zeros((n_frames, 14), np.float32)
@@ -609,6 +650,13 @@ def test_wing_mask_fit_bout_gates_frames_and_cameras(monkeypatch):
                      "n_interpolated": 0, "n_no_evidence_frames": 2,
                      "n_clamp_hits": 0,
                      "n_thin_frames": 0, "n_no_bridge_frames": 1,
+                     # the validity gate is ON but the fixture's masks are
+                     # healthy and agree with the (stubbed) pose, so it removes
+                     # nothing -- a gate that fired here would be a false
+                     # positive, and the count is how you would see it
+                     "n_gated_frames": 0, "n_sliver_camera_frames": 0,
+                     "n_pose_reject_camera_frames": 0, "gate_enabled": True,
+                     "n_at_dpitch_bound": 0,
                      "n_nonfinite_pose_frames": 1, "min_present_cameras": 3,
                      # which PARAMETERISATION the pose came from -- `free`
                      # (per-frame) is the arm measured to destroy the song, so a
@@ -621,6 +669,7 @@ def test_wing_mask_fit_bout_gates_frames_and_cameras(monkeypatch):
     # `moved` also drops non-finite qpos rows, a third bucket the first version
     # counted in neither, so the printed numbers could silently fail to add up
     assert (stats["n_no_bridge_frames"] + stats["n_thin_frames"]
+            + stats["n_gated_frames"]
             + stats["n_nonfinite_pose_frames"]) == stats["n_skipped"]
 
     # raise the bar above what the kept cameras can supply -> nothing is refined
@@ -631,7 +680,11 @@ def test_wing_mask_fit_bout_gates_frames_and_cameras(monkeypatch):
     assert stats2["n_thin_frames"] == 4 and stats2["n_no_bridge_frames"] == 1
     assert stats2["n_nonfinite_pose_frames"] == 0, (
         "frame 1 is now camera-starved as well; the buckets must stay disjoint")
+    assert stats2["n_gated_frames"] == 0, (
+        "these frames are starved of VALID cameras, which is a different "
+        "diagnosis from 'their masks disagree with the pose'")
     assert (stats2["n_no_bridge_frames"] + stats2["n_thin_frames"]
+            + stats2["n_gated_frames"]
             + stats2["n_nonfinite_pose_frames"]) == stats2["n_skipped"]
 
 
@@ -657,6 +710,10 @@ def test_wing_mask_fit_bout_counts_the_frames_that_ACTUALLY_moved(monkeypatch):
     import numpy as np
     cfg, cameras, masks_dict, qpos, bs, bR, bt, bok = _wing_fit_fixture()
     cfg.wing_mask_fit.param_mode = "spline"
+    # The gate is OFF here on purpose: this test documents the hazard the gate
+    # exists to remove, so with the gate on it would no longer be visible.
+    # `test_the_validity_gate_HOLDS...` below is the with-gate counterpart.
+    cfg.wing_mask_fit.gate_enabled = False
     _stub_wing_mask_fit(monkeypatch, len(qpos), cameras, honour_present=False)
     fit = _run_bout_helpers("wing_mask_fit_bout", "wing_mask_fit_refine_kwargs")[0]
     _q, stats = fit(cfg, qpos, bs, bR, bt, bok, masks_dict, cameras)
@@ -693,6 +750,7 @@ def test_wing_mask_fit_bout_counts_joint_clamp_hits(monkeypatch):
     import numpy as np
     cfg, cameras, masks_dict, qpos, bs, bR, bt, bok = _wing_fit_fixture()
     cfg.wing_mask_fit.param_mode = "spline"
+    cfg.wing_mask_fit.gate_enabled = False   # the clamp in isolation
     # +0.5 / +0.25 rad against a 0.2 rad ceiling: every moved frame clamps.
     _stub_wing_mask_fit(monkeypatch, len(qpos), cameras, honour_present=False,
                         limits=(-0.2, 0.2))
@@ -703,6 +761,96 @@ def test_wing_mask_fit_bout_counts_joint_clamp_hits(monkeypatch):
         f"the joint stop and every one of them voids the knot-span guarantee")
     fin = np.isfinite(qpos).all(axis=1)
     assert np.allclose(q_ref[fin, 9], 0.2) and np.allclose(q_ref[fin, 12], 0.2)
+
+
+def test_the_validity_gate_HOLDS_no_evidence_frames_at_stac_in_a_band_limited_mode(monkeypatch):
+    """The with-gate counterpart of the ACTUALLY_moved test above.
+
+    Without the gate, `spline`/`lowpass` INTERPOLATE a no-evidence frame -- the
+    knots span it -- which is how Session0 bout 28 fly0's collapsed masks became
+    a smooth 130 deg swing. `frame_keep` holds such a frame at exactly its STAC
+    pose, and `n_interpolated` going to zero is how you can see it happened.
+    """
+    import numpy as np
+    cfg, cameras, masks_dict, qpos, bs, bR, bt, bok = _wing_fit_fixture()
+    cfg.wing_mask_fit.param_mode = "spline"
+    _stub_wing_mask_fit(monkeypatch, len(qpos), cameras, honour_present=False)
+    fit = _run_bout_helpers("wing_mask_fit_bout", "wing_mask_fit_refine_kwargs")[0]
+    q_ref, stats = fit(cfg, qpos, bs, bR, bt, bok, masks_dict, cameras)
+
+    assert stats["n_interpolated"] == 0, (
+        f"{stats['n_interpolated']} no-evidence frames still moved -- the gate "
+        f"is not holding them at the STAC pose, which is the ONLY thing it is "
+        f"for in a band-limited mode")
+    assert np.array_equal(q_ref[0], qpos[0]), \
+        "frame 0 has no bridge; it must come back bit-identical"
+    assert stats["n_refined"] == 3 and stats["n_skipped"] == 2
+
+
+def test_the_validity_gate_skips_sliver_and_pose_disagreeing_frames(monkeypatch):
+    """The two rejection reasons, end to end through the stage, and they are
+    counted separately because they send a reader to different places.
+
+    A SLIVER is a truncated mask -- SAM found the fly but only a fragment of it.
+    A POSE-DISAGREEING mask is full-size and in the wrong place: the wrong fly,
+    or two flies merged. No area test can see the second one, which is why the
+    gate projects the body at all.
+    """
+    import numpy as np
+    cfg, cameras, masks_dict, qpos, bs, bR, bt, bok = _wing_fit_fixture(n_frames=6)
+    bok[:] = True
+    qpos[:] = 0.0                                   # every frame solvable
+    cfg.wing_mask_fit.param_mode = "spline"
+    C = len(cameras)
+    masks = np.ones((6, C, 8, 8), bool)
+    masks[3] = False
+    masks[3, :, 0:1, 0:1] = True                    # frame 3: slivers everywhere
+    masks_dict["masks"] = masks
+    rec = _stub_wing_mask_fit(monkeypatch, 6, cameras, honour_present=False)
+    # frame 4: full-size masks, but the body projects OUTSIDE them
+    uv = np.zeros((6, C, 4, 2), np.float32)
+    uv[4] = 100.0
+    rec_uv = {"body_uv_track": lambda q, *a, **k: uv}
+    import sys
+    mod = sys.modules["jarvis_jax.tracking.wing_mask_refine"]
+    monkeypatch.setattr(mod, "body_uv_track", rec_uv["body_uv_track"])
+    fit = _run_bout_helpers("wing_mask_fit_bout", "wing_mask_fit_refine_kwargs")[0]
+    q_ref, stats = fit(cfg, qpos, bs, bR, bt, bok, masks_dict, cameras)
+
+    # Cam2012631 is excluded for wings, so 4 of the 5 fixture cameras count
+    assert stats["n_sliver_camera_frames"] == 4, stats
+    assert stats["n_pose_reject_camera_frames"] == 4, stats
+    assert stats["n_gated_frames"] == 2, (
+        f"frames 3 (sliver) and 4 (wrong place) must be gated, got "
+        f"{stats['n_gated_frames']}")
+    assert np.array_equal(q_ref[3], qpos[3]) and np.array_equal(q_ref[4], qpos[4])
+    assert not np.array_equal(q_ref[0], qpos[0]), \
+        "the healthy frames must still be fitted"
+    assert stats["n_refined"] == 4
+
+
+def test_max_dpitch_deg_reaches_the_refiner_and_is_counted(monkeypatch):
+    """The MODEL's joint limits are no bound -- wing pitch is legal over
+    -72.8..+167.3 deg and the optimiser has been measured travelling most of it
+    on collapsed masks. `max_dpitch_deg` is the physiological one, and a
+    non-zero `n_at_dpitch_bound` is a pointer at the MASKS, not a defect."""
+    import numpy as np
+    cfg, cameras, masks_dict, qpos, bs, bR, bt, bok = _wing_fit_fixture()
+    cfg.wing_mask_fit.max_dpitch_deg = 5.0        # the stub moves 14.3 / 28.6 deg
+    rec = _stub_wing_mask_fit(monkeypatch, len(qpos), cameras)
+    fit = _run_bout_helpers("wing_mask_fit_bout", "wing_mask_fit_refine_kwargs")[0]
+    q_ref, stats = fit(cfg, qpos, bs, bR, bt, bok, masks_dict, cameras)
+    assert rec["refine_wing_pitch"]["kwargs"]["max_dpitch_deg"] == 5.0
+    fin = np.isfinite(qpos).all(axis=1) & np.asarray(bok, bool)
+    assert np.allclose(np.abs(q_ref[fin][:, [9, 12]] - qpos[fin][:, [9, 12]]),
+                       np.deg2rad(5.0))
+    assert stats["n_at_dpitch_bound"] == 3, stats
+
+    cfg.wing_mask_fit.max_dpitch_deg = None       # null == no bound
+    rec2 = _stub_wing_mask_fit(monkeypatch, len(qpos), cameras)
+    _q, stats2 = fit(cfg, qpos, bs, bR, bt, bok, masks_dict, cameras)
+    assert rec2["refine_wing_pitch"]["kwargs"]["max_dpitch_deg"] is None
+    assert stats2["n_at_dpitch_bound"] == 0
 
 
 def test_wing_mask_fit_bout_refuses_a_non_canonical_mask_camera_axis(monkeypatch):

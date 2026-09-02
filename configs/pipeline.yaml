@@ -420,6 +420,52 @@ wing_mask_fit:
   n_target_points: 128
   # a frame with fewer than this many present cameras is left at its STAC pose
   min_present_cameras: 3
+  # --- THE VALIDITY GATE (2026-09-01). Skipping a badly-tracked fly-frame is a
+  # FEATURE, not a workaround: the user's ruling is that this correction is for
+  # flies that are WELL TRACKED, and a poorly-tracked female may be left at her
+  # marker-solve pose. MEASURED on Session0 bout 28 fly0, whose masks collapse
+  # from 15 862 px to 4 882 px over frames 1500-2006 with 47% slivers while
+  # remaining `valid` on 90.7% of camera-frames -- which is exactly why
+  # min_present_cameras (a count of PRESENT masks) is blind to it.
+  #
+  # Two signals, and only the second is general: area against that camera's own
+  # healthy reference catches the truncated sliver; the fraction of the
+  # projected BODY landing inside the mask catches a wrong-fly or merged-fly
+  # mask, which has perfectly normal AREA. The result gates the SDF stack (so
+  # sliver evidence never enters the objective) AND holds the skipped frames at
+  # the STAC pose (which zeroing `present` alone does NOT do in spline/lowpass).
+  #
+  # NOTE FOR REPRODUCING TASK 7/9: every number in
+  # docs/benchmark/2026-09-01-wing-mask-fit/ sections 1-11 predates this gate
+  # AND the |dpitch| bound below. BOTH must be turned off --
+  # `gate_enabled=false max_dpitch_deg=null` -- and with both off the spline64
+  # arm reproduces to 0.028 deg (VERIFIED on bout 28 fly0, whole bout, against
+  # the saved redesign arms; the residue is XLA float32 non-determinism).
+  # `gate_enabled=false` ALONE does not: the bound fires on 34 frames there and
+  # moves the left wing by up to 28.2 deg.
+  gate_enabled: true
+  # sliver: an area below this fraction of that camera's own reference.
+  # MEASURED: on fly0's clean stretch the median area ratio is 0.95 and 0.1% of
+  # camera-frames fall under 0.25; on the collapsed stretch 47% do.
+  gate_min_area_frac: 0.25
+  # pose disagreement: fewer than this fraction of the projected body vertices
+  # land inside the mask. The control's own WING inside% drops 86.4 -> 40.2 on
+  # the collapsed stretch, which is the signal this generalises.
+  gate_min_body_inside: 0.5
+  # the reference is a high quantile, not a median: a median is dragged down by
+  # a long enough bad stretch, at which point the slivers define "normal" and
+  # the gate silently stops firing. p75 survives a bout up to a quarter bad,
+  # which the worst measured case (25% of bout 28) exactly is.
+  gate_area_ref_pct: 75.0
+  # HARD PHYSIOLOGICAL BOUND on |wing pitch change|, degrees. The MODEL's own
+  # limits are no constraint -- wing pitch is legal over -72.8..+167.3 deg and
+  # the optimiser has been measured travelling most of it on collapsed masks.
+  # MEASURED bracket: across all four param_mode arms, on every well-tracked
+  # frame of both flies of bout 28, the largest correction is 42.2 deg; the
+  # collapsed stretch reaches 71-98 deg. 50 deg is also about the distance from
+  # the fitted pose (~-8 deg) to the model's own springref rest (-57.3 deg), so
+  # no legitimate placement correction can need more.
+  max_dpitch_deg: 50.0
   # cameras to exclude for wings. Cam2012631 has the right wing inside its mask
   # on only 43-46% of frames (Abd_tip 20%), i.e. truncated masks.
   exclude_cameras: [Cam2012631]
