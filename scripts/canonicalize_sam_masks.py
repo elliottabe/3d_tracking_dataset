@@ -11,17 +11,17 @@ re-hashes it afterwards to prove that).
 WHY THE MALE SLOT IS MEASURED, NEVER REPLAYED AS AN INDEX. `reviewed_male_fly`
 is the pose fly-DIR index the human judged (the GUI serves
 `pose/bouts/bout_*/fly<k>/sidebyside.mp4`). A mask npz's fly axis is a
-different index space, and the two mask sets in this dataset DISAGREE: measured
-2026-09-02 over all 160 reviewed bouts, pose fly0 lands on mask slot 0 in
-159/160 bouts of `processed/.../sam3_masks`, but in only 135/160 bouts of
-`Video_recordings/.../Predictions_3D_sam3*` -- 24 bouts (21 of Session0's 30)
-have the two slots reversed, and 1 (Session0 bout_00008) collapses both pose
-flies onto one slot. Copying `reviewed_male_fly` straight onto a slot index
-would therefore have mislabelled the sex of 24 bouts while every stage reported
-success. So for each bout this script VOTES the reviewed fly's 2D keypoints
-against the centroids of the file it is about to write, per camera matched BY
-NAME, and refuses when the vote is unusable. Same argument, same method as
-scripts/qc/remap_review_to_new_masks.py.
+different index space, and the two courtship mask sets DISAGREE. Measured
+2026-09-02 with the vote below over all 160 reviewed bouts: pose fly0 lands on
+mask slot 0 in 160/160 bouts of `processed/.../sam3_masks`, but in only 135/160
+of `Video_recordings/.../Predictions_3D_sam3*` -- the other 25 (21 of
+Session0's 30, plus 4 in Session1) have the two slots REVERSED, every one of
+them unanimous across all 7 cameras. Copying `reviewed_male_fly` straight onto
+a slot index would therefore have mislabelled the sex of 25 bouts while every
+stage reported success. So for each bout this script VOTES the reviewed fly's
+2D keypoints against the centroids of the file it is about to write, per camera
+matched BY NAME, and refuses when the vote is unusable. Same argument, same
+method as scripts/qc/remap_review_to_new_masks.py.
 
 Relation to the neighbours:
   * scripts/recanonicalize_masks.py -- swaps masks IN PLACE using the mask-area
