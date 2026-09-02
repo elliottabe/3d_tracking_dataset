@@ -27,15 +27,30 @@
 # JAX-port gray-fill gap, not a checkpoint property, so it may still apply here.
 # CHANGED 2026-09-02. v5vf_maskoff was trained with train.mask_ablation=true on
 # red_data_3d_v5_valfix (the CORRECTED val split -- the older red_data_3d_v5 had
-# 2026_04_07_11_33_33 in TRAIN, which valfix moves to val). The recorded
-# ablation has the mask channel roughly DOUBLING female error; a head-to-head on
-# the corrected split is running now and this line is one revert if it refutes.
+# 2026_04_07_11_33_33 in TRAIN, which valfix moves to val).
+# MEASURED head-to-head on that val split, 1871 anns, each arm in-distribution
+# (docs/benchmark/2026-09-02-vitpose-maskoff-ab/): 5.291 px overall / 4.854 px
+# female, vs 5.483 / 5.250 for v5vf_maskon -- -3.6% overall, -8.2% female,
+# concentrated above p95 and in the tarsi that feed leg IK.
+# The earlier "roughly doubles female error" line (9.93 vs 19.08) was WRONG: it
+# was the MPJPE of a single 14-annotation recording, 0.7% of val, not a female
+# metric. And the advantage does NOT survive on the one never-trained female
+# recording (3.748 maskoff vs 3.658 maskon). This is a tail/robustness win, not
+# a female breakthrough. Kept because it is better overall, better in the tail,
+# better on the tarsi, and -- the argument the val numbers cannot show -- a
+# detector whose first layer provably discards the mask channel CANNOT be hurt
+# by a SAM mask dropout at inference, a recurring failure in this pipeline.
 # Previous: ${paths.vit_runs_root}/v5_s70_bal_augdef_full/final (mask channel
 # populated, trained on the uncorrected root).
 ckpt: ${paths.vit_runs_root}/v5vf_maskoff/final
 # INSEPARABLE from `ckpt` above -- see predict_2d.predict_bout_2d. This
 # checkpoint's 4th channel was 0 for every training sample, so a populated mask
 # at inference is silently out-of-distribution: no error, just worse keypoints.
+# MEASURED NO-OP for THIS checkpoint: all 196,608 weights of
+# patch_embed.proj.kernel[:, :, 3, :] are exactly 0.0 (verified directly; the
+# maskon ckpt has all 196,608 nonzero), so predictions are bitwise identical
+# with the flag either way. Retained as an INVARIANT for future ablation
+# checkpoints, whose channel-3 weights need not be zero -- not as a live fix.
 # The mask is still used for the crop centre and the distractor gray-fill; only
 # the 4th CHANNEL is zeroed. Pinned by test_detector_maskoff_flag_travels_with_ckpt.
 zero_mask_channel: true
