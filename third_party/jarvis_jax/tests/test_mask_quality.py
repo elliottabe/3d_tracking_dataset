@@ -306,3 +306,46 @@ def test_the_gate_without_a_pose_is_area_only_and_says_so_by_missing_the_wrong_f
                                   )["frame_keep"].all()
     assert not wing_fit_validity_gate(masks, valid, body_uv=uv, min_cameras=2
                                       )["frame_keep"][1]
+
+
+# ---------------------------------------------------------------------------
+# the ESCAPE HATCH -- "gate off AND bound off" must be the pre-gate code path
+# ---------------------------------------------------------------------------
+def test_gate_off_and_bound_off_returns_the_fit_UNTOUCHED():
+    """Every acceptance number in docs/benchmark/2026-09-01-wing-mask-fit/ was
+    taken before this gate and this bound existed, and the spec's own criterion
+    thresholds -- including the null-derived CRIT1F_PEAK_TOL = 2.0 -- were
+    calibrated against them. If no config state reproduced those arms, they
+    would stop being re-derivable from the committed config and the thresholds
+    could not be re-derived either.
+
+    The bound therefore has its OWN switch (`max_dpitch_deg: null`) rather than
+    living under `gate_enabled`, and this pins that with both off the function
+    is not merely close to a no-op but returns THE SAME OBJECT. It is asserted
+    here, on pure numpy, and not on the fit, because two identical GPU solves
+    already differ by XLA float32 non-determinism -- a bit-identity assertion on
+    `refine_wing_pitch` would be a false claim.
+    """
+    from jarvis_jax.tracking.wing_mask_refine import apply_gate_and_bound
+    rng = np.random.default_rng(0)
+    q_fit = rng.standard_normal((16, 5)).astype(np.float32)
+    q_init = rng.standard_normal((16, 5)).astype(np.float32)
+    opt = np.array([False, True, False, False, True])
+
+    out = apply_gate_and_bound(q_fit, q_init, opt)
+    assert out is q_fit, "both switches off must not even copy the array"
+
+    # ... and each switch ALONE must bite, or the test above is vacuous
+    bounded = apply_gate_and_bound(q_fit, q_init, opt, max_dpitch_deg=1e-3)
+    assert bounded is not q_fit
+    # 1e-6 rad, not 0: the clip is applied in float64 and the pose is stored as
+    # float32, so the bound holds to float32 rounding and not exactly.
+    assert np.abs(bounded[:, opt] - q_init[:, opt]).max() <= np.deg2rad(1e-3) + 1e-6
+    keep = np.ones(16, bool)
+    keep[4:8] = False
+    gated = apply_gate_and_bound(q_fit, q_init, opt, frame_keep=keep)
+    assert np.array_equal(gated[4:8, opt], q_init[4:8, opt])
+    assert np.array_equal(gated[:4], q_fit[:4])
+    # and the frozen DOFs are never touched by either
+    for arr in (bounded, gated):
+        assert np.array_equal(arr[:, ~opt], q_fit[:, ~opt])

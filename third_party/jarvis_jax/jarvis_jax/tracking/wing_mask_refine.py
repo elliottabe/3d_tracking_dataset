@@ -629,6 +629,46 @@ def _pad_zero(a, F):
         [a, np.zeros((F - a.shape[0],) + a.shape[1:], a.dtype)], axis=0)
 
 
+def apply_gate_and_bound(q_fit, q_init, opt_mask, *, frame_keep=None,
+                         max_dpitch_deg=None, ramp=0):
+    """The validity gate and the physiological bound, applied to the CORRECTION.
+
+    Split out of `refine_wing_pitch` so that the ESCAPE HATCH is testable
+    bit-exactly. With `frame_keep is None` and `max_dpitch_deg is None` this
+    returns `q_fit` UNTOUCHED -- the same object, not a copy that happens to
+    compare equal -- so `gate_enabled: false` plus `max_dpitch_deg: null`
+    reproduces the pre-gate code path exactly, and every number in
+    docs/benchmark/2026-09-01-wing-mask-fit/ stays re-derivable from the
+    committed config. (The FIT itself is still only reproducible to the
+    solver's own run-to-run float32 non-determinism; that is a property of XLA,
+    not of this function, and it is measured in the notes.)
+
+    Both act on `q_fit - q_init` rather than on the pose, and both can only
+    SHRINK it, so neither can push a frame further outside the joint range than
+    its own STAC pose already was -- which is why there is no re-clip here.
+    Re-clipping would move a frame whose STAC pitch legitimately sits outside
+    the range, and "no evidence means no change" forbids that.
+
+    `ramp` is the number of frames over which the gate returns to 1 beside a
+    skipped frame: 0 in `free`, one `knot_spacing` in the band-limited modes.
+    """
+    if frame_keep is None and max_dpitch_deg is None:
+        return q_fit
+    cols = np.flatnonzero(np.asarray(opt_mask, bool))
+    if not cols.size:
+        return q_fit
+    out = np.asarray(q_fit, np.float32).copy()
+    qi = np.asarray(q_init, np.float32)
+    d = out[:, cols].astype(np.float64) - qi[:, cols].astype(np.float64)
+    if max_dpitch_deg is not None:
+        lim = float(np.deg2rad(float(max_dpitch_deg)))
+        d = np.clip(d, -lim, lim)
+    if frame_keep is not None:
+        d = gate_envelope(frame_keep, ramp)[:, None] * d
+    out[:, cols] = (qi[:, cols].astype(np.float64) + d).astype(np.float32)
+    return out
+
+
 def refine_wing_pitch(
     q_init, *,
     fk_repose, wing_vert_idx, body_vert_idx, cam_Ms, cam_ts,
@@ -893,28 +933,14 @@ def refine_wing_pitch(
         # over the whole trajectory.
         q_out = _lowpass_correction(q_out, q_safe, opt_mask_np, knot_spacing,
                                     lb_row, ub_row)
-    # THE VALIDITY GATE AND THE PHYSIOLOGICAL BOUND, both applied to the
-    # CORRECTION rather than to the pose, and both AFTER the parameterisation.
-    #
-    # Shrinking a correction toward zero can only move `q_out` toward `q_safe`,
-    # so neither of these can push a frame further outside the joint range than
-    # its own STAC pose already was -- which is why there is no re-clip here.
-    # Re-clipping would move a frame whose STAC pitch legitimately sits outside
-    # the range, and "no evidence means no change" forbids that.
-    cols = np.flatnonzero(opt_mask_np)
-    if cols.size and (frame_keep is not None or max_dpitch_deg is not None):
-        d = q_out[:, cols].astype(np.float64) - q_safe[:, cols].astype(np.float64)
-        if max_dpitch_deg is not None:
-            lim = float(np.deg2rad(float(max_dpitch_deg)))
-            d = np.clip(d, -lim, lim)
-        if frame_keep is not None:
-            # ramp = 0 in `free` (its correction is already independent per
-            # frame, so there is nothing to smear and a hard gate is exact);
-            # one knot spacing in the band-limited modes, so the envelope
-            # cannot introduce a slope the basis could not already express.
-            ramp = 0 if param_mode == "free" else int(knot_spacing)
-            d = gate_envelope(frame_keep, ramp)[:, None] * d
-        q_out[:, cols] = (q_safe[:, cols].astype(np.float64) + d).astype(np.float32)
+    q_out = apply_gate_and_bound(
+        q_out, q_safe, opt_mask_np, frame_keep=frame_keep,
+        max_dpitch_deg=max_dpitch_deg,
+        # ramp = 0 in `free` (its correction is already independent per frame,
+        # so there is nothing to smear and a hard gate is exact); one knot
+        # spacing in the band-limited modes, so the envelope cannot introduce a
+        # slope the basis could not already express.
+        ramp=(0 if param_mode == "free" else int(knot_spacing)))
     q_out[~finite_frame] = q0[~finite_frame]     # hand the NaN rows back untouched
     if return_history:
         return q_out, np.stack(hist_all)

@@ -853,6 +853,53 @@ def test_max_dpitch_deg_reaches_the_refiner_and_is_counted(monkeypatch):
     assert stats2["n_at_dpitch_bound"] == 0
 
 
+def test_the_gate_and_the_bound_have_SEPARATE_switches_and_both_can_be_off(monkeypatch):
+    """THE ESCAPE HATCH. Every acceptance number in
+    docs/benchmark/2026-09-01-wing-mask-fit/ sections 1-11 was measured before
+    the validity gate and the |dpitch| bound existed, and the spec's own
+    criterion thresholds -- including the null-derived CRIT1F_PEAK_TOL = 2.0 --
+    were calibrated against them. If no config state reproduced those arms they
+    would stop being re-derivable from the committed config.
+
+    So the bound gets its OWN key rather than living under `gate_enabled`, and
+    `gate_enabled=false max_dpitch_deg=null` must reach the refiner as
+    `frame_keep=None, max_dpitch_deg=None` -- the pre-gate call, exactly.
+    (`apply_gate_and_bound` is then a bit-exact no-op; pinned in
+    third_party/jarvis_jax/tests/test_mask_quality.py.)
+
+    Turning ONLY the gate off is NOT the escape hatch, and this pins that too:
+    measured on bout 28 fly0, the bound alone fires on 34 frames and moves her
+    left wing by up to 28.2 deg.
+    """
+    import numpy as np
+    cfg, cameras, masks_dict, qpos, bs, bR, bt, bok = _wing_fit_fixture()
+    cfg.wing_mask_fit.gate_enabled = False
+    cfg.wing_mask_fit.max_dpitch_deg = None
+    rec = _stub_wing_mask_fit(monkeypatch, len(qpos), cameras)
+    fit = _run_bout_helpers("wing_mask_fit_bout", "wing_mask_fit_refine_kwargs")[0]
+    q_ref, stats = fit(cfg, qpos, bs, bR, bt, bok, masks_dict, cameras)
+
+    kw = rec["refine_wing_pitch"]["kwargs"]
+    assert kw["frame_keep"] is None, "gate_enabled=false must not pass a frame gate"
+    assert kw["max_dpitch_deg"] is None, "max_dpitch_deg=null must not become 0.0"
+    assert stats["gate_enabled"] is False
+    assert stats["n_gated_frames"] == 0 and stats["n_at_dpitch_bound"] == 0
+    # the stub moves 14.3 / 28.6 deg; neither switch may touch that
+    fin = np.isfinite(qpos).all(axis=1) & np.asarray(bok, bool)
+    assert np.allclose(q_ref[fin, 9], qpos[fin, 9] + 0.5)
+    assert np.allclose(q_ref[fin, 12], qpos[fin, 12] + 0.25)
+    # and the SDF stack saw the ungated validity -- the gate did not run at all
+    assert rec["sdf"]["valid"][1:, [0, 2, 3, 4]].all()
+
+    # gate off but bound ON is a DIFFERENT state, and it must bite
+    cfg.wing_mask_fit.max_dpitch_deg = 5.0
+    rec2 = _stub_wing_mask_fit(monkeypatch, len(qpos), cameras)
+    q2, stats2 = fit(cfg, qpos, bs, bR, bt, bok, masks_dict, cameras)
+    assert rec2["refine_wing_pitch"]["kwargs"]["max_dpitch_deg"] == 5.0
+    assert stats2["n_at_dpitch_bound"] == 3
+    assert not np.allclose(q2[fin, 9], qpos[fin, 9] + 0.5)
+
+
 def test_wing_mask_fit_bout_refuses_a_non_canonical_mask_camera_axis(monkeypatch):
     """The camera-order trap. `refine_wing_pitch` only checks the camera COUNT,
     so a PERMUTATION is invisible to it -- it would project each camera's wing
