@@ -436,7 +436,8 @@ class _Rec(dict):
         return self._ret(*a, **kw) if callable(self._ret) else self._ret
 
 
-def _stub_wing_mask_fit(monkeypatch, n_frames, cameras):
+def _stub_wing_mask_fit(monkeypatch, n_frames, cameras, honour_present=True,
+                        limits=None):
     """Install fake jarvis_jax/mujoco entry points for wing_mask_fit_bout.
 
     Only the WIRING is under test here. The real `refine_wing_pitch` runs
@@ -444,6 +445,15 @@ def _stub_wing_mask_fit(monkeypatch, n_frames, cameras):
     XLA CPU backend against 6.4 s on an L40S (Task 5), so calling it for real is
     a GPU-only Task-7 concern -- but the config plumbing, the camera axes, the
     per-frame gating and the stats are all exercised for real below.
+
+    `honour_present` picks WHICH refiner is being faked, and the two are not
+    interchangeable. True reproduces `param_mode='free'`, whose frame gate lives
+    on the parameter update, so a frame with no present camera comes back at
+    q_init. False reproduces `spline`/`lowpass`, where one knot spans many frames
+    and a no-evidence frame is interpolated -- it moves. The first version of
+    this stub ignored `present` unconditionally while the tests asserted the
+    free-mode counts, so it was silently testing the OLD predicate rather than
+    either refiner's behaviour.
     """
     import sys
     import types
@@ -481,11 +491,18 @@ def _stub_wing_mask_fit(monkeypatch, n_frames, cameras):
             "affine_cameras_by_name": _Rec(
                 (np.zeros((C, 2, 3), np.float32), np.zeros((C, 2), np.float32))),
             "body_vertex_indices": _Rec(np.arange(8, dtype=np.int32)),
-            "qpos_limits": lambda m: (np.full(14, -np.inf, np.float32),
-                                      np.full(14, np.inf, np.float32)),
+            "qpos_limits": lambda m: (
+                np.full(14, -np.inf, np.float32) if limits is None
+                else np.full(14, limits[0], np.float32),
+                np.full(14, np.inf, np.float32) if limits is None
+                else np.full(14, limits[1], np.float32)),
             "wing_pitch_dof_mask": lambda m: np.isin(np.arange(14), [9, 12]),
             "refine_wing_pitch": _Rec(
-                lambda q, **kw: np.array(q, np.float32) + delta)},
+                lambda q, **kw: np.clip(
+                    np.array(q, np.float32) + delta * (
+                        np.asarray(kw["present"], bool).any(axis=1)[:, None]
+                        if honour_present else 1.0),
+                    np.asarray(kw["lb"]), np.asarray(kw["ub"])))},
         "mujoco": {"mjtObj": types.SimpleNamespace(mjOBJ_JOINT=3),
                    "mj_name2id": lambda m, obj, nm: {"wing_pitch_left": 1,
                                                      "wing_pitch_right": 0}[nm]},
@@ -553,8 +570,12 @@ def test_wing_mask_fit_bout_forwards_every_config_knob(monkeypatch):
     assert rec["body_vertex_indices"]["kwargs"]["stride"] == 4
     assert rec["appendage_vertex_indices"]["kwargs"] == {
         "subset": "fps_300", "include": ("wing",)}
-    # and the pose actually handed on is the refined one
-    fin = np.isfinite(qpos).all(axis=1)
+    # and the pose actually handed on is the refined one -- on the frames that
+    # HAVE evidence. Frame 0 has bridge_ok=False, so in `free` mode (the default
+    # this fixture uses) its `present` row is all-False and it is returned at
+    # q_init; asserting over every finite frame would only pass against a stub
+    # that ignores the frame gate.
+    fin = np.isfinite(qpos).all(axis=1) & np.asarray(bok, bool)
     assert np.allclose(q_ref[fin, 9], qpos[fin, 9] + 0.5)
     assert np.allclose(q_ref[fin, 12], qpos[fin, 12] + 0.25)
 
@@ -583,6 +604,10 @@ def test_wing_mask_fit_bout_gates_frames_and_cameras(monkeypatch):
     # left is at qpos 12 (+0.25 rad) and right at qpos 9 (+0.5 rad) -- reported
     # BY JOINT NAME, so a positional read of opt_mask would swap these two.
     assert stats == {"n_frames": 5, "n_refined": 3, "n_skipped": 2,
+                     # free mode: the frame gate is on the UPDATE, so a
+                     # no-evidence frame cannot move and nothing is interpolated
+                     "n_interpolated": 0, "n_no_evidence_frames": 2,
+                     "n_clamp_hits": 0,
                      "n_thin_frames": 0, "n_no_bridge_frames": 1,
                      "n_nonfinite_pose_frames": 1, "min_present_cameras": 3,
                      # which PARAMETERISATION the pose came from -- `free`
@@ -608,6 +633,76 @@ def test_wing_mask_fit_bout_gates_frames_and_cameras(monkeypatch):
         "frame 1 is now camera-starved as well; the buckets must stay disjoint")
     assert (stats2["n_no_bridge_frames"] + stats2["n_thin_frames"]
             + stats2["n_nonfinite_pose_frames"]) == stats2["n_skipped"]
+
+
+def test_wing_mask_fit_bout_counts_the_frames_that_ACTUALLY_moved(monkeypatch):
+    """The frame accounting must be a MEASUREMENT, not a predicate.
+
+    `moved = present.any(1) & finite_pose` is an assumption that holds only in
+    `param_mode='free'`, where the frame gate lives on the parameter update. In
+    `spline`/`lowpass` one knot spans many frames and the gate lives on the COST
+    instead, so a frame with no mask evidence is INTERPOLATED by its neighbouring
+    knots -- it genuinely moves. Under the old predicate the log line then said
+    "N left at the STAC pose" about frames that had changed, and the reported
+    `dpitch` medians were taken over a subset that excluded them.
+
+    That is not cosmetic: the per-frame evidence gate is the only frame-level
+    safety the stage has, and the remedy for the SAM-mask collapse on fly0's
+    frames 1500-2006 is to widen it. A gate whose effect is invisible in the
+    telemetry cannot be tuned.
+
+    The stub moves EVERY finite frame, which is exactly what a band-limited mode
+    does, so the two accountings disagree here by construction.
+    """
+    import numpy as np
+    cfg, cameras, masks_dict, qpos, bs, bR, bt, bok = _wing_fit_fixture()
+    cfg.wing_mask_fit.param_mode = "spline"
+    _stub_wing_mask_fit(monkeypatch, len(qpos), cameras, honour_present=False)
+    fit = _run_bout_helpers("wing_mask_fit_bout", "wing_mask_fit_refine_kwargs")[0]
+    _q, stats = fit(cfg, qpos, bs, bR, bt, bok, masks_dict, cameras)
+
+    # frame 0 has no bridge (no evidence) but the fit moved it; frame 1 is NaN
+    # in and NaN out, so it did not.
+    assert stats["n_refined"] == 4, (
+        f"n_refined {stats['n_refined']} -- frames 0,2,3,4 all changed; a frame "
+        f"with no mask evidence still moves in a band-limited mode")
+    assert stats["n_skipped"] == 1
+    assert stats["n_interpolated"] == 1, (
+        "frame 0 changed WITHOUT direct mask evidence -- that has to be visible "
+        "in the stats or the evidence gate cannot be tuned")
+    # the evidence diagnosis is unchanged and still disjoint
+    assert stats["n_no_bridge_frames"] == 1
+    assert stats["n_thin_frames"] == 0
+    assert stats["n_nonfinite_pose_frames"] == 1
+    # and the medians are taken over what MOVED, resolved BY JOINT NAME
+    assert stats["dpitch_left_deg"] == pytest.approx(np.rad2deg(0.25))
+    assert stats["dpitch_right_deg"] == pytest.approx(np.rad2deg(0.5))
+    assert stats["n_clamp_hits"] == 0
+
+
+def test_wing_mask_fit_bout_counts_joint_clamp_hits(monkeypatch):
+    """A clamp hit VOIDS the band-limited guarantee, so it has to be counted.
+
+    The hard `np.clip` in `refine_wing_pitch` is a per-frame nonlinearity applied
+    AFTER the parameterisation. Measured on bout 28 fly0, 17 clamped frames took
+    a `spline` correction 11.45 deg -- 0.146 of its own amplitude -- out of the
+    knot span it lies in to 4.5e-08 everywhere else. "Band-limited by
+    construction" is therefore conditional on the clamp not firing, and a reader
+    of the log has to be able to see whether it did.
+    """
+    import numpy as np
+    cfg, cameras, masks_dict, qpos, bs, bR, bt, bok = _wing_fit_fixture()
+    cfg.wing_mask_fit.param_mode = "spline"
+    # +0.5 / +0.25 rad against a 0.2 rad ceiling: every moved frame clamps.
+    _stub_wing_mask_fit(monkeypatch, len(qpos), cameras, honour_present=False,
+                        limits=(-0.2, 0.2))
+    fit = _run_bout_helpers("wing_mask_fit_bout", "wing_mask_fit_refine_kwargs")[0]
+    q_ref, stats = fit(cfg, qpos, bs, bR, bt, bok, masks_dict, cameras)
+    assert stats["n_clamp_hits"] == 4, (
+        f"n_clamp_hits {stats['n_clamp_hits']} -- frames 0,2,3,4 were pushed to "
+        f"the joint stop and every one of them voids the knot-span guarantee")
+    fin = np.isfinite(qpos).all(axis=1)
+    assert np.allclose(q_ref[fin, 9], 0.2) and np.allclose(q_ref[fin, 12], 0.2)
 
 
 def test_wing_mask_fit_bout_refuses_a_non_canonical_mask_camera_axis(monkeypatch):

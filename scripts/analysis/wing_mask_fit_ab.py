@@ -1540,10 +1540,17 @@ def xcorr_periodicity(cc, lags, period_frames):
     cosine at `period_frames` scores 1.0; broadband noise scores ~2/len.
     """
     c = np.asarray(cc, float)
-    c = c - c.mean()
     L = np.asarray(lags, float)
+    # A non-finite curve must read as NOT periodic. `min(1.0, nan)` returns 1.0
+    # in Python, so without this guard an all-NaN cross-correlation -- what a
+    # window containing an unsolved STAC frame produces -- scored 1.00,
+    # "maximally periodic", which is the worst possible default for a metric
+    # whose entire job is to REFUSE to fire on a fly that does not sing.
+    if not np.isfinite(c).all() or not np.isfinite(period_frames):
+        return 0.0
+    c = c - c.mean()
     tot = float(np.sum(c ** 2))
-    if tot <= 0 or not np.isfinite(period_frames) or period_frames <= 1:
+    if tot <= 0 or period_frames <= 1:
         return 0.0
     z = np.abs(np.sum(c * np.exp(-2j * np.pi * L / period_frames))) ** 2 / len(c)
     return float(min(1.0, 2.0 * z / tot))
@@ -1769,7 +1776,25 @@ def report_bilateral(bst, st, cases, arms):
               f"joint coordinates)")
 
 
-def criterion1prime(bst, st, cases, arms, min_periodicity=0.35):
+#: 1'f's "no new spectral peak" tolerance -- MEASURED, not judged. `peak/floor`
+#: is one periodogram bin over the median of its neighbours, on a fly that does
+#: not sing, at an f0 taken from the yaw spectrum of a wing that never extends.
+#: Re-estimating it on random half-windows of fly0's own CONTROL -- i.e. with no
+#: change of any kind -- moves it by 1.50-1.58x at the 95th percentile and up to
+#: 2.07x (`figures/2026-09-01-wing-mask-fit/redesign/crit1f_null.json`, 400
+#: draws per wing). So 2.0 is the point below which a rise is indistinguishable
+#: from the statistic's own instability. Without a band the clause is passed only
+#: by the identity: `lowpass32`, whose correction is 129-673x below the free
+#: fit's high-frequency content, scored 3.9402 against a control 3.9392 and was
+#: recorded FAIL by 0.025%. A criterion that fails a correct fit is worse than no
+#: criterion -- the section-5.0 pathology in a different clause.
+#: It still rejects what it was written to reject: the `smooth_weight` 30 arm
+#: manufactures a peak at 7.3x.
+CRIT1F_PEAK_TOL = 2.0
+
+
+def criterion1prime(bst, st, cases, arms, min_periodicity=0.35,
+                    peak_tol=CRIT1F_PEAK_TOL):
     """ACCEPTANCE CRITERION 1' (spec section 5.1'), scored, not eyeballed.
 
     Returns `{case_key: {...}}` and is the machine-checked form of the criterion
@@ -1794,8 +1819,9 @@ def criterion1prime(bst, st, cases, arms, min_periodicity=0.35):
     1'e SUPPORT. pulse count within [0.5x, 2x] control and |median offset| <= 1
         frame, at one common threshold.
     1'f NEGATIVE CONTROL, on a non-singing fly: no new spectral peak
-        (`peak/floor` must not exceed control's) and `hp_rms` <= 2x control.
-        The 2x is UNCALIBRATED -- no measured arm has ever passed it.
+        (`peak/floor` within `CRIT1F_PEAK_TOL` of control's -- see that constant
+        for the measurement that sets it) and `hp_rms` <= 2x control. The
+        AMPLITUDE half remains uncalibrated; the PEAK half no longer is.
     """
     out = {}
     for key, fly, a0, a1, wing, label in cases:
@@ -1882,15 +1908,20 @@ def criterion1prime(bst, st, cases, arms, min_periodicity=0.35):
             else:
                 # 1'f, the negative control: do not MANUFACTURE song.
                 hp_ratio = sa["hp_rms"] / max(cc_["hp_rms"], 1e-12)
-                no_peak = bool(sa["peak_over_floor"] <= cc_["peak_over_floor"])
+                pk_ratio = sa["peak_over_floor"] / max(cc_["peak_over_floor"], 1e-30)
+                no_peak = bool(pk_ratio <= peak_tol)
                 amp_ok = bool(hp_ratio <= 2.0)
                 r["f_negative_control"] = dict(
                     peak_over_floor=sa["peak_over_floor"],
                     control_peak_over_floor=cc_["peak_over_floor"],
-                    no_new_peak=no_peak,
+                    peak_ratio=pk_ratio, peak_gate=peak_tol, no_new_peak=no_peak,
                     hp_rms_ratio=hp_ratio, hp_rms_gate=2.0, amplitude_ok=amp_ok,
                     passed=bool(no_peak and amp_ok),
-                    threshold_calibrated=False)
+                    # the PEAK half is calibrated (CRIT1F_PEAK_TOL); the
+                    # AMPLITUDE half still is not -- no measured arm sits
+                    # between lowpass32's 1.00x and free's 3.63x.
+                    peak_threshold_calibrated=True,
+                    amplitude_threshold_calibrated=False)
                 r["verdict"] = "PASS" if r["f_negative_control"]["passed"] else "FAIL"
             # 1'g REPORTED, NEVER GATED -- the number that was blind.
             r["g_hp_rms"] = dict(value=sa["hp_rms"], control=cc_["hp_rms"],
@@ -1944,8 +1975,10 @@ def report_criterion1prime(c1):
                       f"  =>  {r['verdict']}")
             else:
                 f = r["f_negative_control"]
-                print(f"   {lab:>12}  1'f pk/floor {f['peak_over_floor']:.1f} vs "
-                      f"control {f['control_peak_over_floor']:.1f} "
+                print(f"   {lab:>12}  1'f pk/floor {f['peak_over_floor']:.2f} vs "
+                      f"control {f['control_peak_over_floor']:.2f} "
+                      f"= {f['peak_ratio']:.2f}x (gate {f['peak_gate']:.1f}x, "
+                      f"calibrated) "
                       f"{'ok' if f['no_new_peak'] else 'FAIL(manufactured a peak)'}"
                       f" | hp_rms {f['hp_rms_ratio']:.2f}x (gate 2x, UNCALIBRATED) "
                       f"{'ok' if f['amplitude_ok'] else 'FAIL'}  =>  {r['verdict']}")

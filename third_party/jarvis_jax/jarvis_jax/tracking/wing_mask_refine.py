@@ -102,9 +102,15 @@ construction, and `free` is kept because the negative result was measured on it:
   `spline`   the parameter is a KNOT VECTOR, not a per-frame offset: `dq` is
              `knot_basis(F, knot_spacing) @ theta`, piecewise linear with knots
              every `knot_spacing` frames. At the shipped 32 that is an order of
-             magnitude below the 6.4-FRAME song period, so no knot vector can
-             put power in the song band -- the song is preserved because the
-             correction cannot express it, not because a threshold rejected it.
+             magnitude below the 6.4-FRAME song period, so the song band is
+             STRONGLY SUPPRESSED -- not zeroed, and the difference matters. A C0
+             basis is only piecewise smooth and its kinks carry 1/f^2 energy at
+             EVERY frequency, so the honest claim is a factor, not an
+             impossibility: measured on bout 28,
+             `hp_rms(free correction) / hp_rms(this correction)` is >= 15x at
+             K=32 and >= 37x at K=64 across both flies and both wings
+             (`figures/2026-09-01-wing-mask-fit/redesign/knot_span_and_clamp.json`);
+             spec section 9.4 measures the residual comb directly.
              It also cuts the parameter count ~`knot_spacing`-fold and stops the
              optimiser chasing per-frame mask noise.
   `lowpass`  solve exactly as `free`, then keep only the slow part of the
@@ -114,7 +120,8 @@ construction, and `free` is kept because the negative result was measured on it:
              by construction, but it spends the whole optimisation on content it
              then throws away, and its result need not sit at the mask optimum.
              If the two land in the same place, `spline` is not "a better fit",
-             only a cheaper one.
+             only a cheaper one. It has no kinks, so its measured suppression is
+             >= 129x -- an order of magnitude better than `spline`'s.
 
 CHUNK BOUNDARIES ARE PART OF THE SPLINE, not an afterthought. Three chunks
 splined independently and stitched end to end have a STEP at every boundary, and
@@ -545,6 +552,14 @@ def _refine_chunk(q0_c, sdf_c, gsc_c, goff_c, pres_c, tgt_c, brs_c, brR_c, brt_c
     # that happens to sit outside the joint range -- "no evidence must mean no
     # change". In free mode `upd` is exactly that gate; in spline mode the frame
     # gate is not available, so the test is on dq itself.
+    #
+    # AND THE BAND-LIMITED GUARANTEE IS CONDITIONAL ON THIS CLIP NOT FIRING. It
+    # is a per-frame nonlinearity applied AFTER the basis, so a clamped frame is
+    # no longer in the knot span: measured on bout 28 fly0, 17 clamped frames
+    # took a `spline` correction 11.45 deg -- 0.146 of its own amplitude -- out
+    # of the span it lies in to 4.5e-08 everywhere else. `wing_mask_fit_bout`
+    # counts these into `n_clamp_hits` and the stage log prints them; a run with
+    # a non-zero count has NOT been shown band-limited.
     clamp = upd if basis is None else (
         (dq != 0) & opt_mask[None, :] & real_c[:, None])
     q_ref = jnp.where(clamp, jnp.clip(q_ref, lb_row[None, :], ub_row[None, :]), q_ref)

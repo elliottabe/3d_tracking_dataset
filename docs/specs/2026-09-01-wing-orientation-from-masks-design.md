@@ -16,12 +16,21 @@ rest-prior attempt of the same day, which is documented here as rejected.*
 > still OFF.** 8.3's recommended direction is implemented as
 > `wing_mask_fit.param_mode` -- `free` (unchanged default), `spline` (the
 > optimisation variable is a knot vector, not a per-frame offset) and `lowpass`
-> (solve free, keep the slow half). Both new modes preserve the song BY
-> CONSTRUCTION and pass criterion 1' on every epoch of the singing fly with
-> placement intact. What now blocks the stage is three things that are NOT the
-> parameterisation: the female's 31%/41% gap closure against 3''s 50% gate, a
-> SAM MASK collapse in her frames 1500-2006, and 85-95 s against a 60 s budget.
-> Read 9 before re-attempting anything.
+> (solve free, keep the slow half). All three band-limited arms pass criterion 1'
+> on **BOTH flies** -- 1'b-1'e on every song epoch of the male, 1'f on every
+> finite window of the female -- with placement intact, and the arms that should
+> fail still do. What blocks the stage is NOT the parameterisation: the female's
+> 31%/41% gap closure against 3''s 50% gate, a SAM MASK collapse in her frames
+> 1500-2006, and 85-95 s against a 60 s budget.
+>
+> **Two of this spec's own claims are now REFUTED by measurement, and 9.8 is
+> where they are corrected.** "Pitch alone cannot close the female's penetration
+> gap" (7, 9.3) is false: swept against `mj_geomDistance`, pitch reaches POSITIVE
+> clearance on 100% of sampled frames on both flies, so the 31%/41% shortfall is
+> NOT evidence for reopening 4.4's roll decision. And "the song is preserved
+> because the correction cannot express it" is an overstatement -- a C0 basis
+> leaks 1/f^2 kink energy at every frequency; the measured claim is a suppression
+> factor (>= 15x, >= 37x, >= 129x) conditional on the joint clamp not firing.
 
 ## 1. The defect
 
@@ -640,7 +649,7 @@ E3 1515-1943 left -- the whole-bout window finds a THIRD epoch that 5.0's
 control 0.418 / 0.861 / 0.712; `free` 0.039 / 0.111 / 0.043; **`spline32` 0.417 /
 0.861 / 0.712 and `lowpass32` 0.418 / 0.861 / 0.712** -- the control's own values
 to three decimals. 1'd `corr(hp_treat, hp_ctrl)` 0.996-1.000. 1'e pulse counts
-30/30, 43/43, 10/10.
+30/30, 45/43 (spline32) or 43/43 (lowpass32), 10/10.
 
 That is a pass **by identity**, which is exactly what "by construction" buys and
 exactly why it is not evidence the fit is good. Criteria 2-6 (9.3) are.
@@ -673,14 +682,19 @@ contract survives the reparameterisation. Criterion 3' gap closure:
 fly1 73.9%/61.2% (spline32) against free's 74.2%/65.4%; **fly0 31.1%/41.1%
 against free's 29.9%/40.3%** -- still "direction met, target not met" on the
 female, still short of the 50% gate. The redesign was never going to fix that:
-it is the pitch-only limit of 4.4, and roll is out of scope.
+that was attributed here to "the pitch-only limit of 4.4" -- an inference, and
+9.8 REFUTES it. Pitch is not the limit.
 
 **Is `spline` better or merely quieter?** On the male, neither: `spline`,
 `lowpass` and `free` agree to 0.1 pt of `inside%`/`explained%`. On the female's
-clean stretch `spline32` beats BOTH on `inside%` (92.8 vs 92.3 free / 92.5
-lowpass), `explained%` (46.5 / 45.8 / 46.0), both penetrations and the residual.
-Real, consistent, and marginal. Against it, `lowpass` is 5-10x cleaner on the
-1'f negative control (9.4). **Neither dominates.**
+clean stretch `spline32` beats both on `inside%` (92.8 vs 92.3 free / 92.5
+lowpass), `explained%` (46.5 / 45.8 / 46.0) and both penetrations -- **but NOT on
+the residual**: at 0-1500 the ranking is lowpass32 -23.33% < spline64 -23.25% <
+spline32 -22.85% < free -22.54%, i.e. `spline32` is the worst of the three
+band-limited arms there (best over the whole bout, -24.11%; the metric flips with
+the window). Real, marginal, axis-dependent. **Neither mode dominates -- and
+`spline64`, not `spline32`, is the better-measured spline on the hard fly
+(9.8).**
 
 ### 9.4 A C0 basis has a comb at the knot rate -- 1'f on the non-singing female
 
@@ -691,15 +705,25 @@ The piecewise-linear KINKS put a comb at the knot rate and its harmonics, and on
 a fly that does not sing the 43.7 Hz "f0" the test picks sits near it. Not
 clipping: the joint clamp is inactive in every arm.
 
-**1'f as written -- "peak/floor must not rise above control's" -- has no
-tolerance band and only the identity passes it**: `lowpass32` scores 3.9402
-against 3.9392 and is recorded FAIL by 0.025%. 5.1'f already calls its threshold
-uncalibrated; this is the first measurement that brackets the "no new peak"
-half (identity 1.000, lowpass 1.000, spline64 1.06-1.11, spline32 1.13-1.56,
-the rejected `smooth_weight` 30 arm 7.3). A future version needs a band. **A C2
-(cubic) basis would remove the comb and is NOT implemented** -- stitching cubic
-chunks needs value + 1st + 2nd derivative continuity across the boundary, not
-the single value clamp the linear basis needs.
+**1'f as written -- "peak/floor must not rise above control's" -- had no
+tolerance band and only the identity could pass it**: `lowpass32` scores 3.9402
+against 3.9392 and was recorded FAIL by 0.025%. A criterion that fails a correct
+fit is worse than no criterion, which is the 5.0 pathology in a different clause.
+**9.8 gives it a MEASURED band (`CRIT1F_PEAK_TOL = 2.0`) and re-scores; with it
+every band-limited arm passes 1'f on all three windows and `smooth_weight` 30
+still fails at 7.28x.**
+
+Also corrected here: "the joint clamp is inactive in every arm" is FALSE.
+`spline64` hits the -72.77 deg stop on fly0's left wing for 17 consecutive frames
+and that alone takes its correction 11.45 deg -- 0.146 of its own amplitude --
+out of the knot span it otherwise lies in to 4.5e-08. The clip is a per-frame
+nonlinearity applied AFTER the basis, so the band-limited guarantee is
+CONDITIONAL on it not firing; `n_clamp_hits` is now reported by the stage.
+
+**Raising `knot_spacing` shrinks the comb and is already measured** (spline64
+1.06-1.11x against spline32's 1.13-1.56x) -- try that before writing a C2
+stitcher, which would need value + 1st + 2nd derivative continuity across chunk
+boundaries rather than the single value clamp the linear basis needs.
 
 ### 9.5 The hard case is a SAM MASK failure, not a fit failure
 
@@ -716,10 +740,15 @@ residual 0.0617 against 0.0147, so the STAC pose is bad there too.
 What the redesign does to that stretch, read back off
 `traces/pitch_traces_spline32.png`: fly0's right wing ramps -55 -> **+77** ->
 -45 deg between frames 1600 and 1695 as ONE clean ~60-frame triangle with
-straight sides. `free` does the same excursion as a jagged square wave reaching
-+95 deg. **The spline makes the error smooth; it does not make it correct, and a
-smooth wrong answer is the more dangerous of the two.** Any future acceptance
-run must gate on mask AREA, not only on camera count.
+straight sides. **The spline makes the error smooth; it does not make it
+correct, and a smooth wrong answer is the more dangerous of the two.** EVERY
+band-limited arm does it, not just the spline -- peak `wing_pitch_right` over
+1500-1750 is free +97.4, spline32 +76.6, lowpass32 +62.5, spline64 +47.4 deg --
+so "lowpass is cleaner" does not hold here.
+
+**And "gate on mask AREA" will not work as designed in these modes**, because
+zeroing `present` no longer freezes a frame: the knots interpolate across it and
+the filter smears across it. See 9.8 for the three-part remedy that replaces it.
 
 ### 9.6 Performance: unchanged, and now explained
 
@@ -737,10 +766,100 @@ SDF stack (34.4 s -> 4.8 s at 16 threads) as the only lever. Budget 60 s.
 keeping placement and the measured 3' gap closure. **`spline` does that, on all
 three epochs of the whole bout.** What remains, in order:
 
-1. a mask-AREA validity gate, so 9.5's stretch is left at the STAC pose instead
-   of being fitted to a sliver;
-2. the female's 3' gap -- pitch alone reaches 31%/41%, so this needs either roll
-   (out of scope, 4.4 -- reopening it requires new evidence) or a third wing
-   landmark (7);
+1. the three-part validity remedy of 9.8 (pose-aware gate + a hard |Delta pitch|
+   bound + the telemetry), so 9.5's stretch is left at the STAC pose instead of
+   being fitted to a sliver. A mask-AREA gate alone is NOT it;
+2. the female's 3' gap. **This is NOT a DOF limit** (9.8): pitch reaches positive
+   clearance everywhere, so what has to be settled first is whether 3''s
+   -0.0013 target is the right target at the mask optimum, and whether fly0's ~2x
+   control penetration is an abdomen-pose or body-scale error rather than a wing
+   error. Roll stays out of scope, 4.4;
 3. the 60 s budget, via threaded `sdf_stack_from_masks`;
 4. a second recording, preferably with a reviewed `sex.json`.
+
+### 9.8 Fix round 1 -- two of this spec's claims refuted, one criterion calibrated
+
+Full record: `docs/benchmark/2026-09-01-wing-mask-fit/notes.md` section 11 +
+`scorecard_redesign.json`.
+
+**A band-limited arm now passes criterion 1' on BOTH flies.** `spline32`,
+`spline64` and `lowpass32` pass 1'b-1'e on all three of fly1's song epochs AND
+1'f on all three of fly0's finite windows; `free` fails on both flies and
+`smooth_weight` 30 still fails at 7.28x. That is the whole point of 8.6's
+"what would change the decision", now met on both flies rather than the singer
+alone.
+
+**1'f is calibrated, was unpassable.** Its "no new spectral peak" clause had no
+tolerance, so only the identity passed it. `CRIT1F_PEAK_TOL = 2.0` is set from a
+measured null: re-estimating the CONTROL's own `peak/floor` on random
+half-windows -- no change of any kind -- moves it up to 2.07x (400 draws per
+wing). A second, per-arm null permutes the arm's own knot vector and adds it
+back: `spline32`'s measured 1.13x/0.34x falls BELOW the MEDIAN of that null
+(1.51x/4.20x), so its comb is less than a random correction in the same basis
+would produce -- it manufactures nothing. Related fix: `xcorr_periodicity`
+returned 1.0 ("maximally periodic") for an all-NaN curve because `min(1.0, nan)`
+is 1.0 in Python; it returns 0.0 now.
+
+**REFUTED 1 -- "pitch alone cannot close the female's penetration gap"** (7,
+9.3, 8's framing of criterion 3'). Nobody had swept pitch against
+`mj_geomDistance`; 4.1 swept it against mask SPILL. Swept now, 50 frames per fly,
+241 pitch values across the model's own joint range, everything else at the
+control pose:
+
+| fly | wing | control median | BEST achievable | best pitch | frames >= -0.005 |
+|---|---|---|---|---|---|
+| fly0 | left | -0.04440 | **+0.00813** | +78.8 deg | **100%** |
+| fly0 | right | -0.04526 | **+0.00642** | +78.8 deg | **100%** |
+| fly1 | left | -0.02563 | **+0.03289** | +96.8 deg | **100%** |
+| fly1 | right | -0.03677 | **+0.01954** | +97.8 deg | **100%** |
+
+Pitch lifts the blade entirely clear of the abdomen on every wing of both flies.
+**The 31%/41% shortfall is therefore NOT evidence for roll and must not be used
+to reopen 4.4.** What it does show needs care: the best-achieving pitch (+79 /
++97 deg) is nowhere near the measured mask optimum of -20..-40 deg, so criterion
+3' is measuring a DISAGREEMENT between the mask objective and the collision
+metric. Either the mask optimum genuinely leaves the wing resting on the abdomen
+-- real wings do -- and 3''s -0.0013 target is wrong; or the mask cost picks a
+wrong optimum. Two caveats: `mj_geomDistance` uses COLLISION geoms, which 4.2b
+flags as coarser than the 20 184-vertex mesh; and fly0's control penetration is
+~2x fly1's while her best achievable clearance is 4x worse, which points at an
+ABDOMEN-pose or BODY-SCALE error on her rather than a wing error.
+
+**REFUTED 2 -- "the correction cannot express the song".** A C0 basis is only
+piecewise smooth and its kinks carry 1/f^2 energy at every frequency; the unit
+test only ever asserted < 1e-3 of variance, and 9.4's comb IS that leak. The
+measured claim is a SUPPRESSION FACTOR -- `hp_rms(free correction) /
+hp_rms(this correction)`, minimum across both flies and both wings: **>= 15x
+(spline32), >= 37x (spline64), >= 129x (lowpass32)** -- and it is CONDITIONAL on
+the joint clamp not firing (9.4). Against that, the span property itself holds on
+production data better than the fixture showed: **4.5e-08 to 9.6e-08 of the
+correction's own amplitude across all 8 chunk boundaries at T=2007.**
+
+**`spline64` is the better-measured arm on the hard fly and was not
+recommended.** On fly0 it dominates `spline32` on inside% (92.89 vs 92.80), gap
+closure (31.9/41.9 vs 31.1/41.1), residual (-23.25% vs -22.85%), comb (1.06-1.11
+vs 1.13-1.56x), suppression (37.6x vs 15.6x) and the mask-failure excursion
+(+47.4 vs +76.6 deg). On the male they are a wash. **Candidate default if the
+stage is ever enabled: `param_mode: spline`, `knot_spacing: 64`.**
+
+**The mask-evidence remedy of 9.5 could not have worked** and is replaced by
+three parts, none implemented: (i) a POSE-AWARE validity gate -- the control's
+own `inside%` drops 86.4 -> 40.2 on that stretch and is already computed, and an
+area gate cannot catch a wrong-fly or merged-fly mask, which has normal area;
+(ii) a hard physiological bound on |Delta pitch|, since the model's own
+-72.8..+167.3 deg limits are no constraint; (iii) the stage telemetry below,
+without which a gate's effect is invisible.
+
+**The stage's frame accounting was a predicate, not a measurement.**
+`moved = present.any(1) & finite_pose` is only equivalent to "this frame changed"
+in `free` mode -- in a band-limited mode a gated frame is interpolated and
+genuinely moves, so the log line "N left at the STAC pose" was false and the
+`dpitch` medians excluded frames that had changed. `moved` is now the actual pose
+delta and the stats carry `n_interpolated`, `n_no_evidence_frames` and
+`n_clamp_hits`.
+
+**Headline figures are the WHOLE-BOUT row.** 8.5 already ruled the 0-1500 window
+insufficient, so 9.3's +0.7% (criterion 4) and 73.9/61.2 (criterion 3') were
+quoted from the wrong window: whole bout they are **+9.2%** and **57.0/58.3** on
+fly1. Both still pass.
+

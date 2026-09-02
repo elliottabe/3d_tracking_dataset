@@ -780,21 +780,47 @@ def wing_mask_fit_bout(cfg, qpos, bridge_s, bridge_R, bridge_t, bridge_ok,
         _jid = mujoco.mj_name2id(anat["m"], mujoco.mjtObj.mjOBJ_JOINT, _name)
         adr[_name] = int(anat["m"].jnt_qposadr[_jid])
     q0 = np.asarray(qpos, np.float32)
+    q1 = np.asarray(q_ref, np.float64)
     finite_pose = np.isfinite(q0).all(axis=1)
-    moved = present.any(axis=1) & finite_pose
-    d = np.rad2deg(np.asarray(q_ref, np.float64)[moved] - q0[moved].astype(np.float64))
-    # THREE disjoint reasons a frame is left at its STAC pose, and they must SUM
-    # to n_skipped -- the log accounts for it by bucket. `moved` also drops a
-    # non-finite qpos row that DID have a bridge, which the first version
-    # counted in neither bucket, so the printed numbers could fail to add up.
-    # Disjoint by construction: no_bridge and _thin both have an all-False
-    # `present` row, and _thin excludes no_bridge, so the third bucket is
-    # exactly "evidence present, pose not finite".
+    _padr = np.array([adr["wing_pitch_left"], adr["wing_pitch_right"]])
+    # `moved` is a MEASUREMENT of the pose delta, not the predicate
+    # `present.any(1) & finite_pose`. That predicate is only equivalent in
+    # `param_mode='free'`, where the frame gate lives on the parameter update.
+    # In `spline`/`lowpass` one knot spans many frames and the gate lives on the
+    # COST, so a frame with no mask evidence is INTERPOLATED by its neighbouring
+    # knots and genuinely moves -- reporting it as "left at the STAC pose", and
+    # excluding it from the dpitch medians, was simply false. Pinned by
+    # tests/test_run_bout_pipeline_structure.py.
+    moved = (finite_pose & np.isfinite(q1).all(axis=1)
+             & (q1[:, _padr] != q0[:, _padr].astype(np.float64)).any(axis=1))
+    d = np.rad2deg(q1[moved] - q0[moved].astype(np.float64))
+    # THREE disjoint reasons a frame carries NO EVIDENCE, and in `free` mode they
+    # sum to n_skipped exactly. Disjoint by construction: no_bridge and _thin both
+    # have an all-False `present` row, and _thin excludes no_bridge, so the third
+    # bucket is exactly "evidence present, pose not finite". In a band-limited
+    # mode a no-evidence frame can still move, so `n_interpolated` reports how
+    # many did -- without it the effect of the per-frame evidence gate, which is
+    # the only frame-level safety this stage has, is invisible in the log.
     nonfinite_pose = ~finite_pose & present.any(axis=1)
+    no_evidence = no_bridge | _thin | ~finite_pose
+    # Frames sitting ON a wing-pitch joint stop that were not there before. The
+    # hard clamp is a per-frame nonlinearity applied AFTER the parameterisation,
+    # so a clamp hit makes the band-limited guarantee CONDITIONAL: measured on
+    # bout 28 fly0, 17 clamped frames took a spline64 correction 11.45 deg (0.146
+    # of its own amplitude) out of the knot span it is supposed to lie in.
+    _lo, _hi = lb[_padr], ub[_padr]
+    _on_stop = (np.isclose(q1[:, _padr], _lo[None, :], atol=1e-9)
+                | np.isclose(q1[:, _padr], _hi[None, :], atol=1e-9))
+    _was_on_stop = (np.isclose(q0[:, _padr], _lo[None, :], atol=1e-9)
+                    | np.isclose(q0[:, _padr], _hi[None, :], atol=1e-9))
+    clamp_hits = (np.isfinite(q1[:, _padr]) & _on_stop & ~_was_on_stop).any(axis=1)
     stats = {
         "n_frames": int(q0.shape[0]),
         "n_refined": int(moved.sum()),
         "n_skipped": int(q0.shape[0] - moved.sum()),
+        "n_interpolated": int((moved & no_evidence).sum()),
+        "n_no_evidence_frames": int(no_evidence.sum()),
+        "n_clamp_hits": int(clamp_hits.sum()),
         "n_thin_frames": int(_thin.sum()),
         "n_no_bridge_frames": int(no_bridge.sum()),
         "n_nonfinite_pose_frames": int(nonfinite_pose.sum()),
@@ -2087,13 +2113,16 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
                 f"this bout/fly.")
         # Printed on a resumed run too (the stats live in the npz), so the log
         # of a re-run says what the reused fit did rather than going silent.
-        print(f"[wing-mask-fit] bout {bout_idx} fly{fly}: {_action}; refined "
-              f"{int(_st['n_refined'])}/{int(_st['n_frames'])} frames; "
-              f"{int(_st['n_skipped'])} left at the STAC pose "
+        print(f"[wing-mask-fit] bout {bout_idx} fly{fly}: {_action}; wing pitch "
+              f"CHANGED on {int(_st['n_refined'])}/{int(_st['n_frames'])} frames; "
+              f"{int(_st['n_skipped'])} unchanged; "
+              f"{int(_st['n_no_evidence_frames'])} frames carry no mask evidence "
               f"({int(_st['n_no_bridge_frames'])} unsolved by STAC, "
               f"{int(_st['n_thin_frames'])} seen by fewer than "
               f"{int(_st['min_present_cameras'])} mask cameras, "
-              f"{int(_st['n_nonfinite_pose_frames'])} non-finite pose); "
+              f"{int(_st['n_nonfinite_pose_frames'])} non-finite pose), of which "
+              f"{int(_st['n_interpolated'])} moved anyway; "
+              f"{int(_st['n_clamp_hits'])} hit a joint stop; "
               f"param_mode {str(_st['param_mode'])}"
               + (f" (knots every {int(_st['knot_spacing'])} frames)"
                  if str(_st['param_mode']) != 'free' else '')
