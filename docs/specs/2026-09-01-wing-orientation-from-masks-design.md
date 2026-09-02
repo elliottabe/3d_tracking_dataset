@@ -234,10 +234,15 @@ only, and the acceptance tests below are what decide the weights.
   exactly how the earlier roll smoothness prior destroyed the song.
 * Everything else frozen: root, thorax, abdomen, legs, and **wing yaw** (yaw
   carries the song; it is well observed and must not be touched).
-* Runs as an opt-in stage after STAC and before the bridge, writing
-  `qpos_wingfit.npz`; `config: wing_mask_fit.enabled` (default false), and it
-  participates in the Stage-B/C gate-signature provenance so a resumed run
-  cannot silently skip it.
+* Runs as an opt-in stage after STAC and AFTER `compute_bridges`, writing
+  `qpos_wingfit.npz`; `config: wing_mask_fit.enabled` (default false). It has
+  its OWN provenance stamp rather than joining the Stage-B gate signature --
+  that signature records "every setting that changes what kp3d.npz contains",
+  and this stage rewrites qpos, not kp3d. Putting it there made enabling the
+  stage trip a refusal that deleted kp3d.npz and stac_ik.h5, i.e. a full
+  re-triangulation plus a 12-minute STAC solve per bout-fly for a change that
+  provably cannot affect either artifact. The signature now lives inside
+  `qpos_wingfit.npz` and also invalidates `outputs.h5`/`qc.json`.
 * Per-frame, per-camera masking uses the existing validity flags; a frame with
   fewer than 3 valid wing-visible cameras is left at its STAC pose.
 
@@ -627,7 +632,7 @@ is now built and measured. Full record:
 the default then, so every number in 1-8 was reproducible from the shipped
 config as it stood.
 
-**SUPERSEDED 2026-09-02 (section 11).** The default is now `param_mode: spline`
+**SUPERSEDED 2026-09-02 (notes section 13).** The default is now `param_mode: spline`
 / `knot_spacing: 64`, because shipping `free` as the mode you get by turning the
 stage on is unsafe: it is the one mode measured to destroy the song. Sections
 1-9 now reproduce only with `wing_mask_fit.param_mode=free

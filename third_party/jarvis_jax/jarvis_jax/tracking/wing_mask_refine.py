@@ -101,7 +101,7 @@ construction, and `free` is kept because the negative result was measured on it:
              docs/benchmark/2026-09-01-wing-mask-fit/ refers to.
   `spline`   the parameter is a KNOT VECTOR, not a per-frame offset: `dq` is
              `knot_basis(F, knot_spacing) @ theta`, piecewise linear with knots
-             every `knot_spacing` frames. At the shipped 32 that is an order of
+             every `knot_spacing` frames. At the shipped 64 that is an order of
              magnitude below the 6.4-FRAME song period, so the song band is
              STRONGLY SUPPRESSED -- not zeroed, and the difference matters. A C0
              basis is only piecewise smooth and its kinks carry 1/f^2 energy at
@@ -227,7 +227,7 @@ def _lowpass_correction(q_fit, q_init, opt_mask, knot_spacing, lb_row, ub_row,
     placement correction by tens of frames, and placement is the half of this
     stage that works.
 
-    4th order, not 2nd: at the shipped `knot_spacing = 32` the cutoff is only
+    4th order, not 2nd: at the shipped `knot_spacing = 64` the cutoff is only
     3.2x below the acceptance scorer's own 40 Hz high pass, where a 2nd-order
     Butterworth still passes ~1% of the amplitude. 4th order takes that to
     ~1e-4, which is what makes "by construction" true rather than nearly true.
