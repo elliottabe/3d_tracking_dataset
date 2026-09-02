@@ -191,13 +191,37 @@ def predict_bout_2d(vitpose, frames_iter, masks, centroids, valid, cam_mats,
     behaviour.
 
     zero_mask_channel: zero the 4th (SAM-mask) channel of every crop before
-    the forward pass. REQUIRED for a checkpoint trained with
-    train.mask_ablation=true, whose 4th channel was always 0 during training
-    (e.g. v5vf_maskoff: 5.29px overall / 9.93px female val MPJPE, vs 5.49 /
-    19.08 for the same recipe WITH the mask channel -- the channel roughly
-    doubled female error). Feeding a real mask to such a checkpoint raises no
-    error and simply degrades accuracy, so this must be set from the same
-    config block that names the ckpt.
+    the forward pass. Set it from the same config block that names the ckpt
+    for any checkpoint trained with train.mask_ablation=true, whose 4th
+    channel was always 0 during training.
+
+    CORRECTED 2026-09-02 (docs/benchmark/2026-09-02-vitpose-maskoff-ab/).
+    This docstring previously claimed "v5vf_maskoff: 5.29px overall / 9.93px
+    female val MPJPE, vs 5.49 / 19.08 ... the channel roughly doubled female
+    error". Re-measured on the full red_data_3d_v5_valfix val split:
+      * the OVERALL numbers hold -- 5.291 (maskoff, zeroed) vs 5.483
+        (maskon, populated);
+      * the FEMALE numbers do NOT. 9.932 / 19.080 are reproducible, but only
+        as the MPJPE of the single recording 2026_05_27_11_56_05: 14 of 1871
+        val annotations (0.7%), from a recording whose manifest split is
+        "mixed". Across all 304 female annotations the gap is 4.854 vs
+        5.250 -- 8.2%, not ~2x -- and it disappears on the only female
+        recording never seen in training (3.748 vs 3.658).
+
+    Also measured: for v5vf_maskoff this flag is a NO-OP for accuracy.
+    Every one of the 196608 weights in patch_embed.proj.kernel[:, :, 3, :]
+    is exactly 0.0, so the model is mathematically invariant to the 4th
+    channel and its predictions are BITWISE identical either way (max abs
+    difference 0.0 over 1871x50x2 values). The same holds for the other
+    train.mask_ablation=true run, mask_ablation_zeroed_v5s70, so it is a
+    property of the recipe. Keep the flag anyway -- it is correct, and it is
+    what protects a future ablation checkpoint that is not perfectly
+    invariant -- but "omitting it silently degrades accuracy" is not true of
+    this checkpoint. A normally-trained checkpoint DOES use the channel:
+    zeroing v5vf_maskon costs +36% overall (5.483 -> 7.453).
+
+    The mask itself is still required regardless: it sets the crop centre and
+    drives the distractor gray-fill below. Only the 4th CHANNEL is zeroed.
 
     distractor_masks (T,C,H,W) bool | None: the OTHER animal(s)' masks. Passed
     through to build_frameset, which replaces those pixels with the crop mean
