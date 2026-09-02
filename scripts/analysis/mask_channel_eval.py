@@ -22,13 +22,25 @@ This caveat does NOT apply to a checkpoint trained with train.mask_ablation=true
 (jarvis_jax.train.train.TrainConfig) -- that model's own val split (zeroed) is
 in-distribution for it by construction.
 
-Usage (run via the SLURM queue -- scripts/slurm/submit_task.sh -- never on a
-shared interactive GPU node):
+FEMALE AXIS: reported from the per-annotation resolved `sex`, not from a
+recording name. See DEFAULT_VAL_RECORDING below for the one-recording trap
+that motivated this (a 14-annotation sliver quoted as the female headline).
+
+KEYPOINT ORDER: verified, not assumed. This script calls
+`jarvis_jax.tracking.predict_2d.verify_detector_kp_order` against the
+checkpoint's own training order (recovered from its .hydra/overrides.yaml ->
+paths.data_root -> annotations/keypoint_names.json) and records whether the
+guard actually VERIFIED or fell back to warn-only into the .npz
+(`kp_order_verified`). A warn-only run is exactly how a two-fly eval was
+scrambled on 2026-08-31.
+
+Usage (run via the SLURM queue -- scripts/slurm/submit_task.sh -- unless the
+GPU node is idle and the user has authorised running directly on it):
     python scripts/analysis/mask_channel_eval.py \\
-        --ckpt-dir /gscratch/.../jax_vitpose_runs/v5_s70_bal_augdef_full/final \\
-        --data-root /gscratch/.../red_data/red_data_3d_v5 \\
-        --conditions populated,zeroed \\
-        --out figures/2026-08-31-mask-ablation/v5_s70_bal_augdef_full.npz
+        --ckpt-dir /gscratch/.../jax_vitpose_runs/v5vf_maskoff/final \\
+        --data-root /gscratch/.../red_data/red_data_3d_v5_valfix \\
+        --conditions zeroed \\
+        --out figures/2026-09-02-vitpose-maskoff-ab/v5vf_maskoff.npz
 """
 from __future__ import annotations
 
@@ -43,7 +55,23 @@ for p in (str(PROJECT_DIR), str(PKG_DIR)):
     if p not in sys.path:
         sys.path.insert(0, p)
 
-DEFAULT_VAL_RECORDING = "2026_05_27_11_56_05"   # the female/courtship val recording
+# NO default recording. The previous default was "2026_05_27_11_56_05",
+# commented "the female/courtship val recording", and it is a trap that was
+# quoted as a headline female number:
+#   * it IS present in both red_data_3d_v5 and red_data_3d_v5_valfix -- but
+#     with only 14 val annotations out of 1871 (0.7%), and its manifest split
+#     is "mixed" (10 train / 2 val framesets), so it is a razor-thin, partly
+#     train-adjacent sliver, NOT the female cohort;
+#   * its sibling 2026_05_27_11_57_05 (105 val annotations) is the MALE half of
+#     the same courtship pair -- "fixing" the one-digit difference points the
+#     "female" metric at a male recording.
+# The real female axis on this val set is the per-annotation resolved sex
+# (V5Dataset._resolve_sex): 304 female vs 1567 male annotations in
+# red_data_3d_v5_valfix val, of which 181 female come from the two-fly
+# recording 2026_04_07_11_33_33 that valfix moved from TRAIN to val. So the
+# female MPJPE below is computed from `sex`, and --val-recording is an
+# OPTIONAL extra per-recording slice that must select something or die.
+DEFAULT_VAL_RECORDING = None
 
 
 def build_arrays(model, ds, batch_size=16, in_size=448):
@@ -98,15 +126,50 @@ def main(argv=None):
     ap.add_argument("--conditions", default="populated,zeroed",
                     help="comma-separated subset of {populated,zeroed}")
     ap.add_argument("--batch-size", type=int, default=16)
-    ap.add_argument("--val-recording", default=DEFAULT_VAL_RECORDING)
+    ap.add_argument("--val-recording", default=DEFAULT_VAL_RECORDING,
+                    help="OPTIONAL extra per-recording MPJPE slice. Must match "
+                         "at least one val annotation or the run aborts -- a "
+                         "typo'd/absent name used to select nothing (or a "
+                         "0.7%% sliver) and still print a confident number.")
     ap.add_argument("--out", required=True)
+    ap.add_argument("--require-kp-order", action=argparse.BooleanOptionalAction,
+                    default=True,
+                    help="abort if the keypoint-order guard can only warn "
+                         "(default on).")
     a = ap.parse_args(argv)
+
+    import json
+    import warnings
 
     import numpy as np
     from jarvis_jax.config import ViTPoseConfig
     from jarvis_jax.data.v5_2d import V5Dataset
     from jarvis_jax.data.mask_zero import ZeroMaskDataset
     from jarvis_jax.scripts.eval_keypoints_2d import restore_model
+    from jarvis_jax.tracking.predict_2d import verify_detector_kp_order
+
+    kp_names = json.load(
+        open(os.path.join(a.data_root, "annotations", "keypoint_names.json")))
+
+    # --- keypoint-order guard, BEFORE any inference. Compares the checkpoint's
+    # own training order (recovered from its .hydra/overrides.yaml) against the
+    # order of the root we are evaluating on. `None` means the guard could not
+    # resolve the training order and only WARNED -- record that, because a
+    # warn-only run is how a two-fly eval got scrambled on 2026-08-31.
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        trained = verify_detector_kp_order(a.ckpt_dir, kp_names, strict=True)
+    kp_order_verified = trained is not None
+    print(f"keypoint-order guard: "
+          f"{'VERIFIED against ckpt training order' if kp_order_verified else 'WARN-ONLY (unverified)'}"
+          f" ({len(kp_names)} names)")
+    for w in caught:
+        print(f"  warning: {w.message}")
+    if a.require_kp_order and not kp_order_verified:
+        raise SystemExit(
+            "aborting: keypoint-order guard is WARN-ONLY for "
+            f"{a.ckpt_dir} -- the eval would index a keypoint axis it cannot "
+            "verify. Pass --no-require-kp-order only if you accept that.")
 
     cfg = ViTPoseConfig()
     print(f"restoring checkpoint: {a.ckpt_dir}")
@@ -115,15 +178,38 @@ def main(argv=None):
     ds = V5Dataset(a.data_root, "val")
     meta = collect_metadata(ds)
     print(f"val set: {len(ds)} annotations, "
-          f"{len(set(meta['recording']))} recordings")
+          f"{len(set(meta['recording']))} recordings, "
+          f"{int((meta['sex'] == 'female').sum())} female / "
+          f"{int((meta['sex'] == 'male').sum())} male annotations")
 
     conditions = [c.strip() for c in a.conditions.split(",") if c.strip()]
     out = dict(meta)
-    out["kp_names"] = np.asarray(
-        __import__("json").load(
-            open(os.path.join(a.data_root, "annotations", "keypoint_names.json"))))
-    out["val_recording"] = np.asarray(a.val_recording)
-    fem_mask = meta["recording"] == a.val_recording
+    out["kp_names"] = np.asarray(kp_names)
+    out["kp_order_verified"] = np.asarray(kp_order_verified)
+    out["ckpt_dir"] = np.asarray(str(a.ckpt_dir))
+    out["data_root"] = np.asarray(str(a.data_root))
+    out["val_recording"] = np.asarray("" if a.val_recording is None
+                                      else a.val_recording)
+
+    # --- optional per-recording slice, with the guard the old default lacked
+    rec_mask = None
+    if a.val_recording:
+        rec_mask = meta["recording"] == a.val_recording
+        if not rec_mask.any():
+            raise SystemExit(
+                f"--val-recording {a.val_recording!r} matches 0 of {len(ds)} "
+                f"val annotations. Present recordings: "
+                f"{sorted(set(meta['recording'].tolist()))}")
+        print(f"--val-recording {a.val_recording}: {int(rec_mask.sum())} "
+              f"annotations ({100 * rec_mask.mean():.1f}% of val)")
+
+    female_mask = meta["sex"] == "female"
+    male_mask = meta["sex"] == "male"
+
+    def _mpjpe(err, vis, sel=None):
+        e, v = (err, vis) if sel is None else (err[sel], vis[sel])
+        d = v.sum()
+        return (float((e * v).sum() / d) if d > 0 else float("nan")), int(d)
 
     for cond in conditions:
         this_ds = ZeroMaskDataset(ds) if cond == "zeroed" else ds
@@ -132,13 +218,15 @@ def main(argv=None):
         out[f"pred_{cond}"] = pred.astype(np.float32)
         out[f"gt_{cond}"] = gt.astype(np.float32)
         out[f"vis_{cond}"] = vis.astype(bool)
-        overall = float((err * vis).sum() / max(vis.sum(), 1))
-        fem_vis = vis[fem_mask]
-        fem_err = err[fem_mask]
-        female = (float((fem_err * fem_vis).sum() / max(fem_vis.sum(), 1))
-                  if fem_vis.sum() > 0 else float("nan"))
-        print(f"[{cond}] overall val MPJPE: {overall:.3f}px  "
-              f"female ({a.val_recording}): {female:.3f}px")
+        overall, n_all = _mpjpe(err, vis)
+        female, n_f = _mpjpe(err, vis, female_mask)
+        male, n_m = _mpjpe(err, vis, male_mask)
+        line = (f"[{cond}] overall {overall:.3f}px (n={n_all}) | "
+                f"FEMALE {female:.3f}px (n={n_f}) | male {male:.3f}px (n={n_m})")
+        if rec_mask is not None:
+            rec_v, rec_n = _mpjpe(err, vis, rec_mask)
+            line += f" | {a.val_recording} {rec_v:.3f}px (n={rec_n})"
+        print(line)
 
     Path(a.out).parent.mkdir(parents=True, exist_ok=True)
     np.savez(a.out, **out)
