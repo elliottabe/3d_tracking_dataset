@@ -1200,3 +1200,421 @@ python $D/diag_crit1f_null.py                # 11.1, CPU, ~400 draws/wing
 python $D/diag_pitch_penetration_sweep.py    # 11.4, CPU, ~20 min
 python $D/make_scorecard.py                  # folds all of the above in
 ```
+
+---
+
+## 12. Task 10 — tracking quality, the validity gate, and more bouts
+
+*The user's scope ruling, in their own words: "our focus for correcting is when
+the flies are well tracked, so if the female is not well tracked it is ok to
+skip it." That turns §11.5's open blocker into a feature. This section builds
+the gate, measures what it does on bout 28, and takes the stage to bouts it has
+never seen.*
+
+**Nothing under the processed data root was written.** md5 manifest of all 44
+files under `.../2025_10_20_13_20_04/pose/` taken before any job and re-checked
+at the end: `md5sum -c` OK on 44/44. New bouts were written to a scratch run
+root, `/gscratch/portia/eabe/data/Johnson_lab/scratch/wingfit_task10/pose`.
+
+### 12.1 A mask-only tracking-quality score, calibrated on bout 28
+
+`jarvis_jax.tracking.mask_quality` + `scripts/analysis/mask_tracking_quality.py`.
+CPU only, ~10 s per bout, no pose and no GPU: the masks already exist for all 30
+Session0 bouts while pose artifacts existed for exactly one.
+
+**Calibration first, because a score that cannot reproduce a known split must
+not be used to pick anything.** `--calibrate 28` re-derives the three windows
+whose truth is recorded in §10.6 and prints PASS/FAIL. It reproduces §10.6
+exactly, from the packed masks, with no shared code:
+
+| fly / frames | valid | median area | slivers | usable cams | frac frames ok | verdict |
+|---|---|---|---|---|---|---|
+| fly0 0–1500 | 1.000 | 15 862 px | 0.001 | 7.00 | 1.000 | GOOD (truth GOOD) |
+| fly0 1500–1710 | 0.907 | **4 882 px** | **0.473** | **3.35** | 0.519 | BAD (truth BAD) |
+| fly0 1710–2007 | 0.580 | **2 834 px** | **0.507** | **2.00** | 0.000 | BAD (truth BAD) |
+| fly1 (all three) | 1.000 | 20 838–22 014 px | 0.000 | 7.00 | 1.000 | GOOD ×3 |
+
+**Verdict: PASS.** The 15 862 / 4 882 / 2 834 px and 100% / 90.7% / 58.0% agree
+with §10.6 to the digit.
+
+**One thing this exposed, and it changed the score.** Scored on
+`frac_frames_ok` ALONE at `min_cameras = 3` — the stage's own bar — fly0's
+1500–1710 window reads **0.519**, i.e. "MID", because with a mean of 3.35 usable
+cameras about half of those frames still scrape three. Every other signal calls
+it loudly (47% slivers against 0.1%, 3.35 cameras against 7.00, 4 882 px against
+15 862). A one-number rule that lands mid-scale on a case this extreme would not
+separate a marginal bout at all, so the verdict is taken on the SIGNAL VECTOR:
+BAD when any signal screams, GOOD only when they all agree. The bands (sliver
+≤ 0.05 / ≥ 0.25, usable cameras ≥ 0.9C / ≤ 0.6C) are far from every measured
+value on both sides.
+
+**Two candidate signals measured and REJECTED, both reported and never scored:**
+
+* **centroid jump** does not separate the known split — fly0 p95 1.19 px on her
+  clean stretch and 2.04 px on the collapsed one, against fly1's 3.73 and 5.66
+  px while he is fine throughout. It ranks MOTION, not quality.
+* **mask-area p90/p50**, the obvious wing-extension (song) proxy, is **1.119 on
+  bout 28's SINGING male and 1.215 on its non-singing female**. It measures
+  occlusion, not song. **There is therefore no mask-only way to pre-select for
+  song**, and bouts had to be chosen on quality and length alone, with the song
+  epochs measured after STAC.
+
+### 12.2 The ranking: all 30 bouts × 2 flies
+
+`figures/2026-09-01-wing-mask-fit/tracking_quality/tracking_quality.{json,md}`.
+`score = frac_frames_ok × worst_window_frac_ok × mean_cams_ok/C`. The third
+factor is a tie-break and it is not cosmetic: **all 30 males and 20 of 30
+females saturate the first two factors at 1.000**, so without it the ranking
+cannot choose; with it, 12 of 30 females score exactly 1.000.
+
+The headline finding is the same asymmetry the rest of this pipeline shows:
+**every one of the 30 males scores 1.000 with 7.00/7 usable cameras and zero
+sliver camera-frames; the females span 1.000 down to 0.000.** Twelve females
+score 1.000; **eight score below 0.5 — bouts 2, 13, 15, 22, 23, 26, 27 and 28**
+(bout 22 sits at 2.00 usable cameras for its whole 1393 frames; bouts 13, 15,
+22, 23, 27 and 28 all score 0.000 on the worst-window factor). **Bout 28 — the
+only bout that had ever been processed — has its female in that bottom group.**
+
+Chosen: **bouts 10 (T = 1741), 30 (T = 1298), 20 (T = 1160)** — the three
+longest with `min(fly0, fly1) score == 1.000`, 7.00/7 usable cameras and 0%
+slivers on BOTH flies. Length matters because criterion 1'b is scored at
+`nperseg` 64/128/256.
+
+**Figure, expectation written first** (the docstring of `plot_timelines`): on
+bout 28 the male should be a flat line at 7 usable cameras with the area ratio
+pinned near 1.0 for all 2007 frames, and the female identical to him until
+~1500 and then falling off a cliff; on a bout chosen as well tracked both flies
+should look like bout 28's male throughout. **Read back
+(`timeline_bout00028.png`, `timeline_bout00010.png`, `timeline_bout00030.png`):
+exactly that.** fly1 flat at 7 cameras and 0.95–1.05 area ratio end to end;
+fly0 at 7 cameras until ~1500, then a staircase 7→6→5→4→3→2 over 1500–1600 and
+flat at 2 — below the 3-camera line — to the end, with her area ratio at 0.07 by
+1650. Bouts 10 and 30: both flies flat at 7 cameras and 0.78–1.05 area ratio for
+every frame, never within 3× of either gate line.
+
+**And one thing the figure shows that the window table did not: the female's
+decline starts at ~frame 1050, not 1500.** Her area ratio slides 1.0 → 0.5 over
+1050–1500 before the camera count moves at all. §10.6's 1500 boundary is where
+it became catastrophic, not where it began — which is why the gate below starts
+holding frames at 1430.
+
+### 12.3 The gate, measured on bout 28: it removes the failure and leaves the rest alone
+
+`param_mode: spline`, `knot_spacing: 64`, whole bout, both flies, gate off vs on.
+Read-only on the processed tree; arms in
+`figures/2026-09-01-wing-mask-fit/gate/fly{0,1}/`.
+
+**fly0, the female (the hard fly):**
+
+| arm | pen L | pen R | wing resid | pitch L / R med | inside% | expl% | hp(Δpitch) L / R |
+|---|---|---|---|---|---|---|---|
+| control | −0.04442 | −0.04504 | 0.0161 | −8.2 / −7.7 | 80.9 | 37.7 | — |
+| gate OFF | −0.03026 | −0.02673 | 0.0123 | −33.7 / −35.3 | 87.7 | 45.7 | 0.170 / 0.172 |
+| **gate ON** | −0.03228 | −0.02765 | 0.0123 | −31.4 / −35.0 | 86.1 | 44.1 | **0.034 / 0.029** |
+
+**fly1, the male, well tracked throughout — the control that says the gate is
+not just "do less":**
+
+| arm | pen L | pen R | wing resid | pitch L / R med | inside% | expl% |
+|---|---|---|---|---|---|---|
+| control | −0.02620 | −0.03620 | 0.0088 | −5.4 / −10.4 | 84.4 | 43.8 |
+| gate OFF | −0.01219 | −0.01593 | 0.0097 | −17.9 / −30.7 | 91.9 | 47.3 |
+| **gate ON** | **−0.01218** | **−0.01593** | **0.0097** | **−17.9 / −30.7** | **91.9** | **47.3** |
+
+**On the well-tracked fly the gate is a measured no-op**: 0 gated frames, 0
+sliver camera-frames, 0 pose-rejected camera-frames, 2007/2007 refined, median
+Δpitch −12.91 vs −12.92 deg, every metric identical to 4 s.f.
+
+**Telemetry, which is where the gate's effect is actually visible:**
+
+| | fly0 gate OFF | fly0 gate ON | fly1 gate OFF | fly1 gate ON |
+|---|---|---|---|---|
+| refined / T | 1755 / 2007 | **1431 / 2007** | 2007 / 2007 | 2007 / 2007 |
+| `n_gated_frames` | 0 | **324** | 0 | **0** |
+| `n_sliver_camera_frames` | 0 | 681 | 0 | 0 |
+| `n_pose_reject_camera_frames` | 0 | 711 | 0 | 0 |
+| `n_at_dpitch_bound` | **34** | **0** | 0 | 0 |
+| `n_interpolated` | 0 | 0 | 0 | 0 |
+| wall (s) | 92.3 | 104.1 | 108.0 | 118.5 |
+
+The gate skipped **324 of fly0's 2007 frames (16.1%)** in three runs —
+1430–1436, 1438–1709, 1711–1750 — i.e. the collapsed stretch, starting 70 frames
+before §10.6's hand-drawn 1500 boundary and consistent with the area decline the
+timeline figure shows. `n_at_dpitch_bound` going 34 → 0 is the cleanest single
+statement of what happened: **with the gate on, no frame needs the bound,
+because the evidence that was driving the correction into it is gone.**
+
+**Peak excursion, the number §11.5 tabulated:**
+
+| arm | max \|Δpitch\| 0–1500 (L / R) | max \|Δpitch\| 1500–1750 (L / R) | peak `wing_pitch_right` 1500–1750 |
+|---|---|---|---|
+| gate OFF | 33.5 / 39.1 deg | **50.0 / 50.0 deg** (at the bound) | **+45.9 deg** |
+| **gate ON** | **33.5 / 39.1 deg** | **0.00 / 0.00 deg** | **+5.6 deg** |
+
+Identical on the well-tracked stretch, exactly zero on the collapsed one.
+
+**Figure, expectation written first:** the gate-OFF arm's green trace should
+show the large positive excursion on fly0's right wing in 1550–1780; the gate-ON
+arm's green trace should lie EXACTLY on the grey control there, and be
+indistinguishable from gate-OFF on 0–1500 and on both of fly1's rows.
+**Read back (`gate/traces/pitch_traces_sp64_{nogate,gate}.png`): exactly that.**
+Gate OFF, the fly0 right-wing zoom shows one clean triangle from −57 deg at
+frame 1600 to **+46 deg** at 1670 and back to −55 deg by 1730 while the control
+sits flat at −5 deg. Gate ON, the grey control trace is not visible in either of
+fly0's zoom panels **because the green fit is drawn exactly on top of it** — the
+measured Δ is 0.00 deg. fly1's two rows are unchanged between the two figures.
+
+**Criterion 1' (scorer validated against spec §8.2 before use: control MSC
+0.418 / 0.861 / 0.712 reproduced to three decimals):** on fly1's three song
+epochs, `control_copy`, gate OFF and gate ON all **PASS** 1'b–1'e (MSC 0.418 /
+0.861 / 0.710, 1'd corr +0.999–1.000, pulses 42/43, 30/30, 10/10). On fly0's
+finite run 0–1710, 1'f **PASSES** for both arms (peak/floor 1.03× off, 1.02× on,
+against the calibrated 2.0× tolerance). Criteria 2, 3', 4, 5 and the invariants
+PASS in every arm; `max |Δ|` over every non-pitch qpos address is exactly 0.0.
+
+**What the gate costs, honestly:**
+
+1. **`inside%` 87.7 → 86.1 and `explained%` 45.7 → 44.1 on fly0.** The skipped
+   frames revert to the STAC pose, which is worse on those metrics — that is the
+   point, and the price.
+2. **Criterion 3' gap closure falls slightly on the female**, 32.8% / 42.0% →
+   28.2% / 39.8%. Still "direction met, target not met" against the 50% gate;
+   the verdict does not change.
+3. **`lp_std` on fly0 rises 2.29× → 4.76× (left) and 5.87× → 6.28× (right).**
+   The gate puts a real low-frequency step into her trajectory: a corrected
+   stretch and an uncorrected one, joined over one 64-frame knot spacing. That
+   is the honest consequence of skipping rather than guessing, and it is visible
+   in the figure. `hp_rms` is unaffected (1.00× with the gate against 0.99× /
+   1.07× without), so nothing is added in the song band.
+4. **+11 s per bout-fly** (92.3 → 104.1, 108.0 → 118.5) for the body projection
+   and the inside-fraction count, against a budget already missed by 50%.
+
+### 12.4 The escape hatch, and a default that changed
+
+**The shipped default now gates and bounds.** Every number in §§1–11 predates
+both. `gate_enabled: false` ALONE does not reproduce them — the |Δpitch| bound
+fires on 34 frames of bout 28 fly0 and moves her left wing by up to 28.2 deg.
+The reproducing config is
+
+```
+wing_mask_fit.gate_enabled=false wing_mask_fit.max_dpitch_deg=null
+```
+
+Measured against the saved Task-9 `q_spline64` arm on bout 28 fly0, whole bout:
+**max |Δ| 0.028 deg, 0 frames over 0.1 deg** — and two runs of that same config
+differ from each other by **0.014 deg**, so the residue is the solver's own
+float32 non-determinism to within a factor of two, not a change of behaviour.
+Bit-for-bit is not available on a GPU Adam solve and claiming it would be false;
+what IS bit-exact is that the new code does not run — `apply_gate_and_bound`
+returns the same object when both switches are off, pinned by a pure-numpy test.
+
+### 12.5 Where the |Δpitch| bound of 50 deg comes from
+
+Measured, not chosen. Across all four `param_mode` arms of §10, on every
+WELL-TRACKED frame (0–1500) of both flies of bout 28, the largest correction any
+arm produces is **42.2 deg** (`free`, fly0 right wing); `spline64` reaches 39.1.
+On the collapsed stretch the same arms reach **71–98 deg**. 50 deg is also about
+the distance from the fitted pose (~−8 deg) to the model's own springref rest
+(−57.3 deg), so no legitimate placement correction can need more. The model's
+own joint range (−72.8…+167.3 deg) is not a constraint at all.
+
+### 12.6 Three bouts the stage had never seen
+
+Chosen by 12.2: **bouts 10 (T = 1741), 30 (T = 1298), 20 (T = 1160)**, the three
+longest with `min(fly0, fly1) score == 1.000`. Each was run end to end into
+`/gscratch/portia/eabe/data/Johnson_lab/scratch/wingfit_task10/pose` — 2D
+(ViTPose) → triangulate → Stage-B2 filter → STAC → bridges — reusing the
+recording's own `scale.json` (which records `identity: canonical`, so the
+per-fly scale check passes) and `offsets.h5`, with bout 28's own overrides
+`wing_collapse.enabled=true rigid_repair.enabled=true`. Wall clock ~28 min per
+bout-fly end to end on one L40S with three bouts sharing the node.
+
+**IDENTITY CHECKED, not assumed.** The SAM3 `sex_meta` says `male_slot: 1` on
+all four bouts, but its mask-area vote is weak on two of them — camera agreement
+**0.429 on bout 10 and 0.143 on bout 20**, against 1.0 on bouts 28 and 30. The
+behavioural invariant settles it: mean `|yawL−yawR|` on the STAC pose is
+
+| bout | fly0 | fly1 | ratio |
+|---|---|---|---|
+| 28 (reference) | 4.78° | **25.35°** | 5.3× |
+| 10 | 1.42° | **14.74°** | 10.4× |
+| 20 | 8.14° | **45.80°** | 5.6× |
+| 30 | 0.20° | **41.07°** | 205× |
+
+so fly1 is the wing-extending fly on every bout measured and `male = fly1`
+holds, weak mask-area vote notwithstanding.
+
+#### The FEMALE — the hard fly, where she is well tracked
+
+| bout-fly | control pen L/R | fitted pen L/R | gap L / R | wing resid | pitch L/R | inside% | expl% |
+|---|---|---|---|---|---|---|---|
+| 28 fly0 (worst-tracked) | −0.0444 / −0.0450 | −0.0323 / −0.0277 | 28.1% / 39.8% | 0.0161 → 0.0123 (−24%) | −31.4 / −35.0 | 80.9 → 86.1 | 37.7 → 44.1 |
+| **10 fly0** | −0.0458 / −0.0444 | −0.0246 / −0.0291 | **47.7%** / 35.5% | 0.0134 → 0.0113 (−16%) | −37.7 / −32.7 | 88.9 → 92.9 | 37.8 → 44.7 |
+| **20 fly0** | −0.0439 / −0.0451 | −0.0262 / −0.0281 | 41.6% / 38.9% | 0.0201 → 0.0149 (−26%) | −36.2 / −30.9 | 81.9 → 88.3 | 33.6 → 39.9 |
+| **30 fly0** | −0.0446 / −0.0423 | −0.0266 / −0.0217 | 41.5% / **50.3%** | 0.0100 → 0.0089 (−11%) | −34.5 / −39.0 | 87.9 → 94.0 | 41.7 → 48.3 |
+
+**The defect and the fix both generalise.** Every female's control penetration
+is −0.042 to −0.046 and her control wing pitch −6 to −12° — §1's measured defect,
+reproduced on three bouts chosen without reference to it. Every one moves into
+the −20…−40° band on both wings, penetration closes 35–50% of the gap, the
+wing-marker residual IMPROVES 11–26%, `inside%` rises 4–6 points and
+`explained%` 6–7. Criteria 2, 3′, 4, 5 and the rigid invariants PASS on all
+three, with `max |Δ|` over every non-pitch qpos address exactly 0.0.
+
+**Criterion 3′ clears on a female for the first time**: bout 30's right wing at
+**50.3%**. Across the eight female wings measured here the range is 28–50% and
+the mean ~41%, against bout 28's 28/40. Seven of eight are still short, so the
+verdict stands — but a good part of the female's historic shortfall was her
+TRACKING, not the DOF.
+
+**The gate skipped nothing on any of them.** `n_gated_frames = 0`,
+`n_sliver_camera_frames = 0` on all six new bout-flies, and
+`n_pose_reject_camera_frames` 0 except **2 camera-frames of 6 960** on bout 20
+fly0. Gate-on and gate-off agree to two decimals on every median. Measured
+straight off the masks, the minimum usable-camera count over all three bouts and
+both flies is **7 of 7** and the median area ratio never falls below **0.592**
+(bout 20 fly0's mild end-of-bout occlusion) against the 0.25 line. **The ranking
+predicted the gate would be inert here, and it was** — which is the whole point
+of calibrating it first.
+
+One exception worth naming: on bout 10 fly0 the |Δpitch| bound fires on **1
+frame of 1741** (0.06%), in both arms. At 50° it is not perfectly inert even on
+a clean bout.
+
+#### The MALE, and the song
+
+| bout-fly | extension | epochs found | criterion 1' | Δpitch extended / folded | folded gap | inside% | expl% |
+|---|---|---|---|---|---|---|---|
+| 28 fly1 | 25.4° | E1 L 0–869, E2 R 869–1515, E3 L 1515–1943 | **PASS ×3** | — | 56.3 / 58.1% | 84.4 → 91.9 | 43.8 → 47.3 |
+| **10 fly1** | 14.7° | E1 R 123–870, E2 L 933–1378 (both under the applicability gate → 1'f), E3 R 1378–1741 | **PASS ×3** | −8.28° / −15.61° | 50.7 / 62.0% | 83.0 → 90.0 | 44.0 → 47.2 |
+| **20 fly1** | 45.8° | one, L 0–1160 | **PASS** | **+0.46° / −24.66°** | **55.3%** | 84.3 → 90.8 | 44.2 → 48.0 |
+| **30 fly1** | 41.1° | E1 L 0–925 (not periodic → 1'f), E2 R 925–1298 | **PASS ×2** | **+4.55° / −22.56°** | **62.5%** | 83.5 → 90.6 | 42.3 → 46.4 |
+
+**Criterion 1' passes on every epoch of every bout, gate on and gate off.** The
+control's own coherence is reproduced to three decimals in every arm — bout 20
+E1 `MSC` 0.802 → 0.803 with 1'd corr +0.997 and pulses 32/33; bout 30 E2
+0.722 → 0.723, corr +1.000, 25/25; bout 10 E3 0.834 → 0.834, corr +1.000, 18/18.
+The epoch finder independently rediscovered the extended-wing swap on bouts 30
+(frame 925) and 10 (frames 870 and 1378), so 5.0's "the singing wing is not a
+property of a bout-fly" is confirmed on new data.
+
+Note what the criterion does with the epochs where there is no measurable phase
+lock: **5 of the 9 male epochs here have a control MSC below their own 95%
+significance floor and are reported NOT APPLICABLE and scored by 1'f instead.**
+That is the gate refusing to fire where there is nothing to protect, rather than
+passing them by default — the behaviour 9.2's second defect fix put in.
+
+**Spec 4.1's SELF-TARGETING property, confirmed cleanly on new data.** On the two
+strongly-extending males the median Δpitch is **+0.46° on the EXTENDED wing and
+−24.66° on the FOLDED one** (bout 20) and **+4.55 / −22.56°** (bout 30): the
+stage corrects the wing that is wrong and leaves the singer where it already is.
+It is weaker where extension is weaker (bout 10, 14.7°: −8.28 extended /
+−15.61 folded), and on bout 30's first epoch the extended wing moves ~+15°
+against the control — so this is a strong tendency, not a guarantee.
+
+Every male's FOLDED wing clears criterion 3''s 50% gate: **50.7–62.5%.**
+
+#### What the gate skipped, and the one place it did not fire but arguably should
+
+| bout-fly | `n_gated_frames` | sliver cam-frames | pose-reject cam-frames | `n_at_dpitch_bound` |
+|---|---|---|---|---|
+| 28 fly0 | **324 / 2007 (16.1%)** | 681 | 711 | 0 (**34** with the gate off) |
+| 28 fly1 | 0 | 0 | 0 | 0 |
+| 10 fly0 | 0 | 0 | 0 | **1** |
+| 20 fly0 | 0 | 0 | **2** | 0 |
+| 30 fly0 | 0 | 0 | 0 | 0 |
+| 10 fly1 | 0 | 0 | **1** | 0 |
+| 20 fly1 | 0 | 0 | 0 | 0 |
+| 30 fly1 | 0 | 0 | **39** | **12** |
+
+**The gate's thresholds are calibrated on a catastrophe and miss a mild one.**
+On bout 10 fly0 the correction exceeds 45° on **32 frames of 1741**, and on bout
+20 fly0 on **43 of 1160** — both in the second half, where the female's median
+mask-area ratio has drifted to 0.88–0.95 of her own p75. That is far above the
+0.25 sliver line, so the gate does not fire, and only the 50° bound contains it.
+Read off `traces_bout20/pitch_traces_sp64_gate.png`: fly0's right-wing fit makes
++42° excursions over frames 800–1050 while the control sits at −5°.
+
+**Whether those are real behaviour or fit error is NOT settled here** — the
+CONTROL pose moves in the same stretch (its own trace goes −6 → +5°), so the fly
+is doing something. What can be said is that the current thresholds do not treat
+a 40% area decline as a reason to stop fitting, and that a reader looking for the
+next weakness should look there.
+
+**Read back, `traces_bout30/pitch_traces_sp64_gate.png`** (stated first: on the
+best-tracked bout the female's green trace should sit smoothly inside the
+−20…−40° band for all 1298 frames with no excursion, and the male's extended
+wing should track the control): the female's two rows are exactly that — a
+smooth green trace in the band, control flat at −11°, no spikes. The male's
+folded wing shows the expected −20° offset; during his SECOND (right-extended)
+epoch the fitted right wing oscillates ±25° around −35° where the control
+oscillates ±10° around 0, i.e. the fit amplifies the slow swing while `hp_rms`
+stays 1.00× — visible, and consistent with `lp_std` 1.43×.
+
+### 12.8 Verdict
+
+**The bout-28 result generalises.** On three bouts the stage had never seen,
+picked by a score calibrated on bout 28 and nothing else:
+
+* the DEFECT is the same everywhere — female control penetration −0.042…−0.046,
+  control wing pitch −6…−12°;
+* placement is fixed the same way — into the −20…−40° band on every wing,
+  35–50% gap closure on the female and 50–63% on the male's folded wing, wing
+  residual improved 11–26% on the female, `inside%` +4…+7 points;
+* **criterion 1' PASSES on every epoch of every fly**, and the self-targeting
+  property is confirmed on two strongly-singing males;
+* **the gate is inert where the ranking says it should be** (0 frames skipped on
+  all six new bout-flies) and removes exactly the stretch it was built for on
+  bout 28 (324 frames, `n_at_dpitch_bound` 34 → 0).
+
+What has NOT changed: criterion 3' still fails on 7 of the 8 female wings
+measured (though one clears at 50.3%, the first ever), the stage still costs
+92–119 s against a 60 s budget, and it is still one recording with no
+human-reviewed `sex.json`. `enabled: false` is unchanged on disk.
+
+### 12.7 Regenerating
+
+CPU-only unless marked GPU. `unset LD_LIBRARY_PATH` first; nothing below writes
+to the processed tree.
+
+```bash
+M=/gscratch/portia/eabe/data/Johnson_lab/processed/courtship/Session0/2025_10_20_13_20_04/sam3_masks
+B28=/gscratch/portia/eabe/data/Johnson_lab/processed/courtship/Session0/2025_10_20_13_20_04/pose/bouts/bout_00028
+S=/gscratch/portia/eabe/data/Johnson_lab/scratch/wingfit_task10/pose
+
+# 12.1-12.2 the ranking + the calibration verdict + the timeline figures (~5 min)
+python scripts/analysis/mask_tracking_quality.py --masks-dir $M --calibrate 28 \
+  --plot-bouts 10,20,28,30 --out figures/2026-09-01-wing-mask-fit/tracking_quality
+
+# 12.3 the gate on bout 28, both flies (GPU, ~4 min per fly)
+for F in 0 1; do /path/to/gpu-env python scripts/analysis/wing_mask_fit_ab.py \
+  --bout-dir $B28 --flies $F \
+  --arm 'sp64_nogate=wing_mask_fit.param_mode=spline;wing_mask_fit.knot_spacing=64;wing_mask_fit.gate_enabled=false' \
+  --arm 'sp64_gate=wing_mask_fit.param_mode=spline;wing_mask_fit.knot_spacing=64' \
+  --t0 0 --nt 2007 --mask-frames 24 \
+  --out figures/2026-09-01-wing-mask-fit/gate/fly$F; done
+
+# 12.3 the decisive figure + criterion 1' (no GPU, no fits)
+A='figures/2026-09-01-wing-mask-fit/gate/fly{fly}/arms_fly{fly}.npz'
+JAX_PLATFORMS=cpu python scripts/analysis/wing_mask_fit_ab.py --bout-dir $B28 --flies 0,1 \
+  --plot-arm "control_copy=$A:q_control" --plot-arm "sp64_nogate=$A:q_sp64_nogate" \
+  --plot-arm "sp64_gate=$A:q_sp64_gate" --plot pitch --t0 0 --nt 2007 --zoom 1550,1780 \
+  --out figures/2026-09-01-wing-mask-fit/gate/traces
+JAX_PLATFORMS=cpu python scripts/analysis/wing_mask_fit_ab.py --bout-dir $B28 --flies 0 \
+  --plot-arm "control_copy=$A:q_control" --plot-arm "sp64_nogate=$A:q_sp64_nogate" \
+  --plot-arm "sp64_gate=$A:q_sp64_gate" --plot bilateral --t0 0 --nt 1710 \
+  --out figures/2026-09-01-wing-mask-fit/gate/crit1f_fly0_0-1710
+
+# 12.4 the escape hatch, on real data (GPU, ~2 min)
+python scripts/analysis/wing_mask_fit_ab.py --bout-dir $B28 --flies 0 \
+  --arm 'sp64_task9=wing_mask_fit.param_mode=spline;wing_mask_fit.knot_spacing=64;wing_mask_fit.gate_enabled=false;wing_mask_fit.max_dpitch_deg=null' \
+  --t0 0 --nt 2007 --mask-frames 8 --out figures/2026-09-01-wing-mask-fit/gate/repro_fly0
+
+# 12.6 the new bouts: FULL PIPELINE into a scratch root (GPU, ~28 min per bout-fly).
+# scale.json + offsets.h5 are COPIED from the recording's own pose/ first.
+for B in 10 20 30; do python scripts/run_bout.py paths=hyak ++bout_ids=$B \
+  ++wing_collapse.enabled=true ++rigid_repair.enabled=true \
+  ++outputs.out=$S ++run_id=task10_b$B ++outputs.overlay=false ++outputs.sidebyside=false; done
+# then the A/B per bout-fly, and the traces, exactly as above with --bout-dir
+# $S/bouts/bout_000NN and --nt 1741 / 1160 / 1298.
+```
