@@ -1528,18 +1528,20 @@ Every male's FOLDED wing clears criterion 3''s 50% gate: **50.7–62.5%.**
 | 30 fly1 | 0 | 0 | **39** | **12** |
 
 **The gate's thresholds are calibrated on a catastrophe and miss a mild one.**
-On bout 10 fly0 the correction exceeds 45° on **32 frames of 1741**, and on bout
-20 fly0 on **43 of 1160** — both in the second half, where the female's median
-mask-area ratio has drifted to 0.88–0.95 of her own p75. That is far above the
-0.25 sliver line, so the gate does not fire, and only the 50° bound contains it.
-Read off `traces_bout20/pitch_traces_sp64_gate.png`: fly0's right-wing fit makes
-+42° excursions over frames 800–1050 while the control sits at −5°.
+The correction exceeds 45 deg on **32 frames of bout 10 fly0** and **43 of bout
+20 fly0** — and in each case on ONE contiguous run, frames **1010–1041** and
+**1086–1128**, whose median mask-area ratio is **0.833** and **0.715** of that
+fly's own p75 against bout medians of 0.927 and 0.965. So the area signal DOES
+mark those runs as the worst of their bout; the 0.25 sliver line is simply
+nowhere near them, and only the 50 deg bound contains the result. Read off the
+trace figures: on bout 20 fly0 the right-wing fit swings to +42 deg while the
+control sits at −5 deg; on bout 10 fly0 it DIVES to the −57.3 deg springref
+(`n_clamp_hits` is 0, so this is the fit's own excursion, not a joint stop).
 
 **Whether those are real behaviour or fit error is NOT settled here** — the
-CONTROL pose moves in the same stretch (its own trace goes −6 → +5°), so the fly
-is doing something. What can be said is that the current thresholds do not treat
-a 40% area decline as a reason to stop fitting, and that a reader looking for the
-next weakness should look there.
+CONTROL pose moves in the same stretches too. What can be said is that a 20-30%
+area decline is not currently a reason to stop fitting, and that the next
+threshold to calibrate is that one.
 
 **Read back, `traces_bout30/pitch_traces_sp64_gate.png`** (stated first: on the
 best-tracked bout the female's green trace should sit smoothly inside the
