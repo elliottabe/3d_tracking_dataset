@@ -48,6 +48,10 @@ Figure 4 (L/R swap): a blue disc is painted into the RGB at ``WingL_base``
   the swap is broken -- and this repo has twice shipped confident, completely
   wrong numbers from exactly this class of index-mapping error.
 
+Figure 6 (the affine bounds fix, 2026-09-02): see ``fig6_boundsfix``'s own
+  docstring -- legacy vs fixed on the same keys, plus the realised parameter
+  histograms that decide whether the fix kept its diversity.
+
 Also measured and written to ``augmentation_stats.json``:
   * mean fraction of crop pixels actually erased by cutout over many draws
     (< 2 x 6.25% = 12.5%, because centre-sampled boxes get clipped by the
@@ -75,6 +79,7 @@ import os
 import sys
 
 import numpy as np
+from dataclasses import replace as dataclasses_replace
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, REPO)
@@ -95,12 +100,15 @@ C_INVIS = "#ff2020"
 
 
 # ----------------------------------------------------------------- config io
-def load_aug_yaml(path):
+def load_aug_yaml(path, **overrides):
     """Read a configs/aug/*.yaml into an AugParams, by field name.
 
     Deliberately does NOT fall back to the dataclass defaults for a missing
     key: the YAML is the record of what a run actually trained with, and a
-    silent default would misreport it.
+    silent default would misreport it. A field the YAML does not carry must
+    therefore be supplied explicitly as a keyword -- which is how the two
+    arms of the ``keep_kp_in_bounds`` A/B are built here (that knob is not in
+    either preset file, so the training runs take the AugParams default).
     """
     import yaml
     from jarvis_jax.data.augment import AugParams
@@ -108,14 +116,15 @@ def load_aug_yaml(path):
     with open(path) as f:
         raw = yaml.safe_load(f)
     fields = {f.name for f in __import__("dataclasses").fields(AugParams)}
-    unknown = set(raw) - fields
+    unknown = (set(raw) | set(overrides)) - fields
     if unknown:
         raise ValueError(f"{path}: keys not on AugParams: {sorted(unknown)}")
-    missing = fields - set(raw)
+    missing = fields - set(raw) - set(overrides)
     if missing:
         raise ValueError(f"{path}: missing keys (refusing dataclass defaults): "
                          f"{sorted(missing)}")
-    return AugParams(**raw), raw
+    merged = {**raw, **overrides}
+    return AugParams(**merged), merged
 
 
 # ------------------------------------------------------------- sample choice
@@ -144,7 +153,7 @@ def pick_crops(ds, explicit=None):
     for i, f in enumerate(ds.file_names):
         by_file.setdefault(f, []).append(i)
 
-    best_close, best_wall = None, None
+    best_close, best_wall, best_centred = None, None, None
     for i, sex in enumerate(ds.sex):
         if sex != "female":
             continue
@@ -161,6 +170,8 @@ def pick_crops(ds, explicit=None):
             best_close = (d, i)
         if best_wall is None or clamp > best_wall[0]:
             best_wall = (clamp, i)
+        if best_centred is None and clamp < 1.0:      # rounding only, no clamp
+            best_centred = i
 
     out = []
     if best_close:
@@ -171,6 +182,10 @@ def pick_crops(ds, explicit=None):
         c, i = best_wall
         out.append((i, "female-wall",
                     f"female, against chamber wall (crop clamped {c:.0f} px)"))
+    if best_centred is not None:
+        out.append((best_centred, "female-centred",
+                    "female, crop_origin unclamped (control: the easy case the "
+                    "bounds fix must leave alone)"))
     # keep only crops that carry a real SAM mask -- fig 3 is about that channel
     keep = []
     for i, tag, cap in out:
@@ -398,7 +413,7 @@ def fig2_fullstack(ds_item, names, lr_swap, presets, out_png, caption, seed=0,
             draw_kp(axes[r, d + 1], np.asarray(k2)[0], np.asarray(v2)[0], names, s=9)
     top = _suptitle(fig, "FULL augmentation stack, independent draws  (affine → "
                     "flip → cutout → photometric → blur → noise → per-channel "
-                    "colour)", caption,
+                    "colour); size sweep at fixed targeting", caption,
                     "cyan = LEFT-side keypoint, orange = RIGHT-side, white = "
                     "midline, red x = vis=False — the affine pushed it out of the "
                     "224-unit grid and it no longer supervises anything")
@@ -720,6 +735,440 @@ def measure_stage_strength(ds_item, names, lr_swap, p, ndraw=40, seed=0):
     return out
 
 
+
+# --------------------------------------------- affine bounds fix (Task 1)
+def _sampled_affine(key, p, B):
+    """Re-derive the affine ``affine_batch`` drew from `key`, before any
+    bounds fitting. Mirrors its key split exactly."""
+    import jax
+    import jax.numpy as jnp
+    k1, k2, k3, k4 = jax.random.split(key, 4)
+    return (jnp.deg2rad(jax.random.uniform(k1, (B,), minval=-p.rot_deg, maxval=p.rot_deg)),
+            jax.random.uniform(k2, (B,), minval=p.scale_min, maxval=p.scale_max),
+            jax.random.uniform(k3, (B,), minval=-p.translate_frac, maxval=p.translate_frac),
+            jax.random.uniform(k4, (B,), minval=-p.translate_frac, maxval=p.translate_frac))
+
+
+BOUNDS_ARMS = ("legacy", "fixed", "cropcentre")
+
+
+def measure_bounds_fix(ds_item, names, lr_swap, p, ndraw=200, seed=0):
+    """Three-arm A/B of the affine bounds fix, on ONE crop and ONE preset.
+
+    arms
+      ``legacy``     -- ``keep_kp_in_bounds=False``: the pre-2026-09-02 path.
+      ``fixed``      -- the shipped fix: transform centred on the visible-kp
+                        centroid, then translation clipped (then scale shrunk)
+                        to fit.
+      ``cropcentre`` -- the alternative that was considered and rejected: keep
+                        the crop centre and rely on the clip/shrink alone. It
+                        reaches the same 100% kept, so kept-fraction cannot
+                        choose between them; ``n_tx_clipped`` can, and does.
+
+    Measured on the AFFINE ALONE, driven with the exact sub-key
+    ``augment_batch`` hands it (``jax.random.split(key, 7)[0]``). The affine is
+    the only stage that touches ``vis``, and flip/cutout/photometric leave the
+    count alone, so ``frac_kept`` here is bit-identical to the full-stack
+    number and directly comparable to the pre-fix values in this file's git
+    history (female-wall 82.7% default / 74.4% heavy, female-occlusion 100% /
+    99.8%). Driving the affine directly is also the only way to measure the
+    ``cropcentre`` arm on the same footing -- the centre override is not a
+    training option and ``augment_batch`` has no route to it.
+
+    ``drop_rate`` counts ONLY keypoints that were visible in the unaugmented
+    crop, and is measured pre-flip for a second reason: the wall crop ships
+    with T2R_TaTip already vis=False (it lies outside the clamped 448-px
+    window), and the L/R flip shuffles that dead label into the T2L_TaTip slot
+    on half the draws. Reading a full-stack per-keypoint table therefore
+    reports "T2R_TaTip 72% / T2L_TaTip 68% dropped" for ONE annotation that
+    was never there -- which is exactly what the pre-fix table did.
+    """
+    import jax
+    import jax.numpy as jnp
+    from jarvis_jax.data.augment import (augment_batch, affine_batch,
+                                         fit_affine_to_bounds)
+
+    img4, kp, vis = ds_item
+    v0 = np.asarray(vis).astype(bool)
+    n0 = int(v0.sum())
+    hm_centre = jnp.array([HM / 2.0, HM / 2.0])
+    out = {}
+    for arm in BOUNDS_ARMS:
+        pa = dataclasses_replace(p, keep_kp_in_bounds=(arm != "legacy"))
+        kept, th, sc, tx, ty, shift, black = [], [], [], [], [], [], []
+        drops = np.zeros(len(names), np.int64)
+        n_sh = n_tc = 0
+        for d in range(ndraw):
+            key = jax.random.PRNGKey(seed + 7919 * (d + 1))
+            b = (jnp.asarray(img4)[None], jnp.asarray(kp)[None], jnp.asarray(vis)[None])
+            kkey = jax.random.split(key, 7)[0]      # augment_batch's affine key
+            i2, k2, v2 = affine_batch(
+                kkey, *b, rot_deg=p.rot_deg, scale_min=p.scale_min,
+                scale_max=p.scale_max, translate_frac=p.translate_frac,
+                heatmap_size=HM, keep_kp_in_bounds=pa.keep_kp_in_bounds,
+                fit_center=(hm_centre if arm == "cropcentre" else None))
+            if arm != "cropcentre":                 # cross-check vs the real stack
+                assert int(np.asarray(augment_batch(key, *b, pa, lr_swap, HM)[2]).sum()) \
+                    == int(np.asarray(v2).sum()), "affine-only kept count diverged"
+            v2 = np.asarray(v2)[0].astype(bool)
+            kept.append(int(v2.sum()))
+            drops += (v0 & ~v2).astype(np.int64)
+            # realised (post-fit) affine for this draw
+            t0, s0, x0, y0 = _sampled_affine(kkey, p, 1)
+            if arm == "legacy":
+                t1, s1, x1, y1 = t0, s0, x0, y0
+            else:
+                ctr = None if arm == "fixed" else hm_centre
+                t1, s1, x1, y1, _ = fit_affine_to_bounds(
+                    jnp.asarray(kp)[None], jnp.asarray(vis)[None],
+                    t0, s0, x0, y0, HM, 0.01, ctr)
+            th.append(float(jnp.rad2deg(t1[0]))); sc.append(float(s1[0]))
+            tx.append(float(x1[0])); ty.append(float(y1[0]))
+            n_sh += int(float(s1[0]) < float(s0[0]) - 1e-6)
+            n_tc += int(abs(float(x1[0]) - float(x0[0])) > 1e-6
+                        or abs(float(y1[0]) - float(y0[0])) > 1e-6)
+            shift.append(float(np.linalg.norm(
+                np.asarray(k2)[0][v0].mean(0) - np.asarray(kp)[v0].mean(0))))
+            black.append(float((np.asarray(i2)[0, ..., :3].sum(-1) == 0).mean()))
+        k = np.asarray(kept)
+        f = lambda a: dict(mean=round(float(np.mean(a)), 4), std=round(float(np.std(a)), 4),
+                           p5=round(float(np.percentile(a, 5)), 4),
+                           p95=round(float(np.percentile(a, 95)), 4))
+        order = np.argsort(-drops)[:6]
+        out[arm] = dict(
+            n_draws=ndraw, n_visible_unaugmented=n0,
+            mean_visible_after_aug=float(k.mean()),
+            frac_kept=round(float(k.mean() / max(n0, 1)), 4),
+            min_visible_after_aug=int(k.min()),
+            drop_rate={names[int(i)]: f"{100 * drops[int(i)] / ndraw:.0f}%"
+                       for i in order if drops[int(i)] > 0},
+            rot_deg=f(th), scale=f(sc), tx=f(tx), ty=f(ty),
+            n_scale_shrunk=n_sh, n_translation_clipped=n_tc,
+            fly_centroid_shift_hm=f(shift), black_pad_frac=f(black),
+            draws=dict(rot_deg=[round(v, 3) for v in th],
+                       scale=[round(v, 4) for v in sc],
+                       tx=[round(v, 4) for v in tx], ty=[round(v, 4) for v in ty]))
+    return out
+
+
+def fig6_boundsfix(ds_item, names, lr_swap, presets, stats, out_png, caption,
+                   seed=0, ndraw=6):
+    """Legacy vs fixed affine on the SAME random keys, plus the realised
+    parameter distributions.
+
+    EXPECTATION, written before the figure exists
+    ---------------------------------------------
+    Row 1 (``keep_kp_in_bounds=False``, what shipped until 2026-09-02): on a
+      wall crop several draws swing the fly partly outside the 448-px window
+      and its distal leg keypoints sit OUTSIDE the panel border as red x --
+      annotated tarsal tips that supervise nothing. Panel titles show vis N/49.
+    Row 2 (the fix, SAME keys, so flip/cutout/colour are identical and the
+      only difference is the affine): zero red x, the fly whole inside the
+      crop -- AND the six panels must still show six visibly DIFFERENT
+      rotations. If row 2 is six near-upright flies, the "fix" bought its
+      100% by collapsing the transform toward identity, which is a failure,
+      not a success, and this figure is how you would see it.
+    Row 3: realised rotation / scale / translation histograms, legacy vs
+      fixed. Rotation and scale must lie exactly on top of each other (the
+      fit never touches them); translation may be narrower for the fixed arm
+      on the wall crop only -- that is the price, and it is the cheapest of
+      the three to pay.
+    """
+    import jax
+    import jax.numpy as jnp
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from jarvis_jax.data.augment import augment_batch
+
+    p = presets["default"]
+    img4, kp, vis = ds_item
+    b = (jnp.asarray(img4)[None], jnp.asarray(kp)[None], jnp.asarray(vis)[None])
+    n0 = int(np.asarray(vis).sum())
+    fig = plt.figure(figsize=(1.85 * (ndraw + 1), 8.4))
+    gs = fig.add_gridspec(3, ndraw + 1, height_ratios=[1.0, 1.0, 0.72], hspace=0.16)
+    for r, arm in enumerate(("legacy", "fixed")):
+        pa = dataclasses_replace(p, keep_kp_in_bounds=(arm != "legacy"))
+        ax0 = fig.add_subplot(gs[r, 0])
+        show_crop(ax0, img4, "ORIGINAL")
+        draw_kp(ax0, kp, vis, names, s=9)
+        ax0.set_ylabel("keep_kp_in_bounds\n" + ("False (old)" if r == 0 else "True (fix)"),
+                       fontsize=7.5, rotation=0, ha="right", va="center", labelpad=34)
+        for d in range(ndraw):
+            key = jax.random.PRNGKey(seed + 7919 * (d + 1))
+            i2, k2, v2 = augment_batch(key, *b, pa, lr_swap, HM)
+            v2 = np.asarray(v2)[0]
+            # COUNT-based, not slot-based: flip_batch permutes vis through
+            # lr_swap, so comparing slot-for-slot against the unflipped vis
+            # reports a phantom loss of 1 on every flipped draw of a crop that
+            # carries a dead label (the wall crop's T2R_TaTip). The count is
+            # permutation-invariant and is what "supervision lost" means.
+            lost = n0 - int(v2.sum())
+            ax = fig.add_subplot(gs[r, d + 1])
+            show_crop(ax, np.asarray(i2)[0],
+                      f"draw {d+1}   vis {int(v2.sum())}/{n0}"
+                      + (f"   LOST {lost}" if lost else ""))
+            draw_kp(ax, np.asarray(k2)[0], v2, names, s=9)
+            if lost:
+                for sp in ax.spines.values():
+                    sp.set_edgecolor(C_INVIS); sp.set_linewidth(1.6)
+    hist = [("rot_deg", "rotation (deg)"), ("scale", "scale"), ("tx", "translate x (frac)")]
+    for c, (kk, lab) in enumerate(hist):
+        ax = fig.add_subplot(gs[2, c * 2:(c * 2 + 2)])
+        ax.hist(stats["fixed"]["draws"][kk], bins=22, histtype="stepfilled",
+                alpha=0.65, color="#33dd77",
+                label=f"fixed (std {stats['fixed'][kk]['std']:.3g})")
+        # legacy drawn as an OUTLINE on top: for rotation and scale the two are
+        # identical by construction, and a filled grey patch hidden underneath
+        # would read as "only one arm was plotted"
+        ax.hist(stats["legacy"]["draws"][kk], bins=22, histtype="step",
+                color="#222222", linewidth=1.1,
+                label=f"legacy (std {stats['legacy'][kk]['std']:.3g})")
+        ax.set_xlabel(lab, fontsize=7); ax.tick_params(labelsize=6)
+        ax.legend(fontsize=6, frameon=False)
+    ax = fig.add_subplot(gs[2, 6:])
+    ax.axis("off")
+    ax.text(0.0, 1.0, "\n".join(
+        [f"{a:<11}kept {stats[a]['frac_kept']*100:5.1f}%   worst draw "
+         f"{stats[a]['min_visible_after_aug']}/{n0}" for a in BOUNDS_ARMS]
+        + ["", f"fixed: scale shrunk on {stats['fixed']['n_scale_shrunk']}"
+              f"/{stats['fixed']['n_draws']} draws,",
+           f"       translation clipped on {stats['fixed']['n_translation_clipped']}",
+           f"cropcentre: translation",
+           f"       clipped on "
+           f"{stats['cropcentre']['n_translation_clipped']}  <-- why it lost"]),
+            fontsize=6.0, family="monospace", va="top")
+    top = _suptitle(fig, "AFFINE BOUNDS FIX — legacy vs fixed on the SAME keys "
+                    "(aug=default; flip/cutout/colour identical, only the "
+                    "affine differs)", caption,
+                    "cyan = LEFT-side keypoint, orange = RIGHT-side, white = "
+                    "midline, red x = vis=False. A red panel border means the "
+                    "draw destroyed supervision that the unaugmented crop had. "
+                    "Row 2 must keep the labels AND stay visibly diverse — a "
+                    "row of near-identical upright flies would mean the fix "
+                    "collapsed the augmentation.")
+    fig.tight_layout(rect=[0.0, 0.0, 1.0, top])
+    fig.savefig(out_png, dpi=135)
+    plt.close(fig)
+
+
+
+# ------------------------------------------ targeted cutout (Task 2 probe)
+# A SIZE SWEEP, not a targeting sweep. With uniform centres the box size sets
+# how OFTEN the fly is hit; once the centres are on the fly the hit rate is 1
+# and the size alone sets how MUCH is hidden. Moving the boxes onto the animal
+# without shrinking them therefore turns a mostly-wasted augmentation into an
+# aggressive one -- the fly's mask bbox is 278 +- 21 px long and the shipping
+# box is 112 px, so a mask-centred 112-px box swallows the thorax and the leg
+# bases (visible in fig 7's mask_p1.0 examples).
+CUTOUT_ARMS = (("uniform 112px (shipping)", dict()),
+               ("mask_p1.0 112px", dict(mask_target_p=1.0)),
+               ("mask_p1.0 rel-fly 0.30", dict(mask_target_p=1.0, size_rel_fly=0.30)),
+               ("mask_p1.0 rel-fly 0.20", dict(mask_target_p=1.0, size_rel_fly=0.20)),
+               ("mask_p1.0 rel-fly 0.12", dict(mask_target_p=1.0, size_rel_fly=0.12)),
+               ("mask_p0.5 rel-fly 0.20", dict(mask_target_p=0.5, size_rel_fly=0.20)))
+
+
+def measure_cutout_targeting(ds, p, indices, names, ndraw=200, seed=0):
+    """Where does cutout's erasure budget actually go?
+
+    ``cutout_batch`` samples box centres uniformly over the 448-px crop, but
+    the fly is a small object in that crop, so most of the budget lands on
+    arena floor. Reported per arm, averaged over `indices` real crops:
+
+      ``frac_erased_on_fly``  of the pixels cutout blanked, what fraction sat
+        on the SAM silhouette. Compare it against ``fly_frac_of_crop``: equal
+        means the sampler is hitting the animal no better than chance.
+      ``frac_of_fly_erased``  how much of the animal is hidden per draw.
+      ``p_any_tatip_hidden``  fraction of draws hiding at least one visible
+        tarsal tip, resolved BY NAME (``*_TaTip``). The distal tips are the
+        keypoints the detector A/B measured worst, so this is the number the
+        whole proposal is aimed at.
+
+    and, because a targeted box is far more destructive than a uniform one of
+    the same size, three budget numbers that decide whether the sample is
+    still LEARNABLE:
+
+      ``mean_kp_hidden`` / ``p95_kp_hidden``  visible keypoints under a box,
+        out of 50.
+      ``worst_leg_chain_hidden``  the largest fraction of any ONE leg chain
+        (``viz.core.colors.leg_chains``, so the limb definition is the repo's
+        and not a local invention) that a single draw hides. A box that takes
+        the tip AND the whole chain leading to it has removed the context that
+        would let the network infer the tip -- that sample is unlearnable, not
+        hard. Near 1.0 is the failure signature.
+      ``p_whole_chain_hidden``  fraction of draws that do exactly that to at
+        least one leg.
+
+    Visibility here is ``transform_keypoints``'s in-crop flag, NOT an
+    annotator occlusion judgement -- 1864/1871 val annotations are marked
+    fully visible, so the occlusion flags carry no information and nothing in
+    this proposal keys off them.
+
+    The silhouette is read at DATA-PREP time; it does not require the model to
+    see channel 3, so this applies unchanged to the promoted mask-off
+    checkpoint (v5vf_maskoff, trained with train.mask_ablation=true, whose
+    first layer provably discards the mask channel).
+    """
+    import jax
+    import jax.numpy as jnp
+    from jarvis_jax.data.augment import cutout_batch
+
+    from viz.core.colors import leg_chains
+
+    tip = [i for i, n in enumerate(names) if n.endswith("_TaTip")]
+    chains = leg_chains(names)
+    out = {}
+    fly_fracs = []
+    for arm, kw in CUTOUT_ARMS:
+        on_fly, of_fly, p_tip, cov = [], [], [], []
+        nkp, nkp95, worst_chain, p_chain, sides = [], [], [], [], []
+        for idx in indices:
+            img4, kp, vis = ds[int(idx)]
+            m = np.asarray(img4)[..., 3] > 0
+            if m.sum() < 500:
+                continue
+            fly_fracs.append(float(m.mean()))
+            b = jnp.broadcast_to(jnp.asarray(img4)[None], (ndraw,) + img4.shape)
+            o = np.asarray(jax.jit(lambda x: cutout_batch(
+                jax.random.PRNGKey(seed + int(idx)), x, p.cutout_n,
+                p.cutout_frac, **kw))(b))
+            er = (o[..., :3].sum(-1) == 0) & (np.asarray(img4)[..., :3].sum(-1) != 0)
+            hit = (er & m[None]).sum(axis=(1, 2))
+            on_fly.append(float(np.mean(hit / np.maximum(er.sum(axis=(1, 2)), 1))))
+            of_fly.append(float(np.mean(hit / m.sum())))
+            cov.append(float(er.mean()))
+            px = np.clip(np.round(np.asarray(kp) * KP2PX).astype(int), 0, CROP - 1)
+            v = np.asarray(vis).astype(bool)
+            hid = er[:, px[:, 1], px[:, 0]] & v[None, :]       # (ndraw, K)
+            nkp.append(float(hid.sum(1).mean()))
+            nkp95.append(float(np.percentile(hid.sum(1), 95)))
+            t = [j for j in tip if v[j]]
+            if t:
+                p_tip.append(float(hid[:, t].any(axis=1).mean()))
+            fr = []
+            for leg, ch in chains.items():
+                c = [j for j in ch if v[j]]
+                if c:
+                    fr.append(hid[:, c].mean(axis=1))          # (ndraw,)
+            if fr:
+                mx = np.max(np.stack(fr, 1), axis=1)           # worst leg per draw
+                worst_chain.append(float(mx.mean()))
+                p_chain.append(float((mx > 0.85).mean()))
+            sides.append(float(np.mean(np.abs(
+                hid[:, [i for i, n in enumerate(names) if side_of(n) == "L"]].sum(1)
+                - hid[:, [i for i, n in enumerate(names) if side_of(n) == "R"]].sum(1)))))
+        box = ("%d px" % round(p.cutout_frac * CROP)) if "size_rel_fly" not in kw \
+            else ("%.2f x fly (~%d px)" % (kw["size_rel_fly"],
+                                           round(kw["size_rel_fly"] * 278)))
+        out[arm] = dict(box=box, n_boxes=int(p.cutout_n),
+                        frac_erased_on_fly=round(float(np.mean(on_fly)), 4),
+                        frac_of_fly_erased=round(float(np.mean(of_fly)), 4),
+                        frac_of_crop_erased=round(float(np.mean(cov)), 4),
+                        p_any_tatip_hidden=round(float(np.mean(p_tip)), 4),
+                        mean_kp_hidden=round(float(np.mean(nkp)), 2),
+                        p95_kp_hidden=round(float(np.mean(nkp95)), 2),
+                        worst_leg_chain_hidden=round(float(np.mean(worst_chain)), 4),
+                        p_whole_chain_hidden=round(float(np.mean(p_chain)), 4),
+                        mean_LR_imbalance_kp=round(float(np.mean(sides)), 2),
+                        n_crops=len(on_fly))
+    out["fly_frac_of_crop"] = round(float(np.mean(fly_fracs)), 4)
+    out["note"] = ("frac_erased_on_fly == fly_frac_of_crop means the sampler "
+                   "hits the animal no better than chance; "
+                   "worst_leg_chain_hidden near 1.0 means the box took a whole "
+                   "limb AND the context needed to infer it back")
+    return out
+
+
+def fig7_cutout_targeting(ds_item, names, p, out_png, caption, seed=0, ndraw=300):
+    """Where the cutout boxes land: uniform (shipping) vs mask-centred.
+
+    EXPECTATION, written before the figure exists
+    ---------------------------------------------
+    This is a SIZE sweep at fixed targeting, because targeting alone is not
+    the interesting axis: once the centres sit on the animal every box hits
+    it, and the size decides whether the sample is hard or unlearnable.
+    Top row, the accumulated erase-frequency map over 300 draws with the
+      silhouette contour drawn on top:
+      * ``uniform 112px`` (what ships) -- a nearly FLAT field across the whole
+        448-px crop, dimmer only near the border where boxes get clipped, with
+        no visible relationship to the fly contour, and an on-fly percentage
+        equal to the fly's share of the crop. That flatness IS the defect.
+      * ``mask_p1.0 112px`` -- a blob on the silhouette, but WIDER than it: a
+        112-px box on a 278-px fly reaches from the thorax across the leg
+        bases. Its example panels should look alarming, and its
+        ``mean_kp_hidden`` should be large -- that is the point of showing it.
+      * shrinking to ``rel-fly 0.20`` (~56 px) and ``0.12`` (~33 px) must
+        tighten the blob onto the animal and drop the keypoints-hidden count,
+        WITHOUT the on-fly fraction collapsing back toward chance.
+      * ``mask_p0.5 rel-fly 0.20`` -- visibly a blob on a dim floor: the
+        mixture, so the model still sees plenty of unoccluded flies.
+    Bottom rows: four example crops per arm, with the count of visible
+      keypoints hidden printed per panel. In the uniform row several draws
+      leave the fly untouched; in the small targeted rows every draw covers a
+      limb-sized patch and the keypoints under it stay drawn and stay vis=True
+      (cutout must not invalidate labels -- that is its whole point).
+    The failure to look for: a box that hides a whole leg chain. The tip is
+      then unguessable because its own context went with it, and the sample
+      teaches noise. If the 112-px targeted panels show that and the small
+      ones do not, the sweep has found its answer.
+    """
+    import jax
+    import jax.numpy as jnp
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from jarvis_jax.data.augment import cutout_batch
+
+    img4, kp, vis = ds_item
+    m = np.asarray(img4)[..., 3] > 0
+    v = np.asarray(vis).astype(bool)
+    px = np.clip(np.round(np.asarray(kp) * KP2PX).astype(int), 0, CROP - 1)
+    arms = list(CUTOUT_ARMS)
+    nex = 3
+    fig, axes = plt.subplots(1 + nex, len(arms), figsize=(2.6 * len(arms),
+                                                          2.45 * (1 + nex)))
+    for c, (label, kw) in enumerate(arms):
+        b = jnp.broadcast_to(jnp.asarray(img4)[None], (ndraw,) + img4.shape)
+        o = np.asarray(jax.jit(lambda x: cutout_batch(
+            jax.random.PRNGKey(seed), x, p.cutout_n, p.cutout_frac, **kw))(b))
+        er = (o[..., :3].sum(-1) == 0) & (np.asarray(img4)[..., :3].sum(-1) != 0)
+        freq = er.mean(0)
+        ax = axes[0, c]
+        im = ax.imshow(freq, cmap="magma", vmin=0, vmax=max(0.02, freq.max()))
+        ax.contour(m.astype(float), levels=[0.5], colors="#00ffff", linewidths=1.0)
+        on = float((er & m[None]).sum()) / max(int(er.sum()), 1)
+        hid = er[:, px[:, 1], px[:, 0]] & v[None, :]
+        ax.set_title(f"{label}\n{100*on:.0f}% of erased px on the fly "
+                     f"(fly = {100*m.mean():.0f}% of crop)\n"
+                     f"hides {hid.sum(1).mean():.1f} of {int(v.sum())} "
+                     f"keypoints per draw", fontsize=6.2)
+        ax.set_xticks([]); ax.set_yticks([])
+        fig.colorbar(im, ax=ax, fraction=0.045, pad=0.02).ax.tick_params(labelsize=5)
+        for r in range(nex):
+            a = axes[1 + r, c]
+            show_crop(a, o[r * 11], None)
+            draw_kp(a, kp, vis, names, s=8)
+            hit = float((er[r * 11] & m).sum()) / max(int(er[r * 11].sum()), 1)
+            a.set_title(f"draw {r+1}: {100*hit:.0f}% on fly, "
+                        f"{int(hid[r*11].sum())} kp hidden", fontsize=6.0, pad=2)
+    top = _suptitle(fig, "CUTOUT TARGETING — box centres uniform over the crop "
+                    "(what ships) vs drawn from the SAM silhouette (proposed, "
+                    "default-off)", caption,
+                    "cyan contour = SAM silhouette; cyan/orange/white dots = "
+                    "LEFT/RIGHT/midline keypoints, which cutout must leave "
+                    "vis=True even under a box. The uniform map being flat, "
+                    "and its on-fly percentage matching the fly's share of "
+                    "the crop, is the measurement that says the erasure "
+                    "budget is spent on arena floor. But moving the boxes onto "
+                    "the animal at the SHIPPING size hides most of it: read "
+                    "the keypoints-hidden counts, not just the on-fly "
+                    "percentage. The proposal is targeting AND shrinking.")
+    fig.tight_layout(rect=[0.0, 0.0, 1.0, top])
+    fig.savefig(out_png, dpi=125)
+    plt.close(fig)
+
+
 # ------------------------------------------------------------------- driver
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
@@ -732,6 +1181,10 @@ def main():
                     help="override the automatic hard-crop selection")
     ap.add_argument("--ndraw", type=int, default=8)
     ap.add_argument("--coverage-draws", type=int, default=400)
+    ap.add_argument("--targeting-crops", type=int, default=40,
+                    help="random train crops for the cutout-targeting measurement")
+    ap.add_argument("--bounds-draws", type=int, default=200,
+                    help="draws per arm for the affine bounds-fix A/B")
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
 
@@ -744,7 +1197,13 @@ def main():
     presets = {}
     raws = {}
     for nm in ("default", "heavy"):
-        presets[nm], raws[nm] = load_aug_yaml(os.path.join(AUG_CFG_DIR, f"{nm}.yaml"))
+        # Neither preset file writes keep_kp_in_bounds or the two targeted-
+        # cutout knobs, so training takes the AugParams defaults (bounds fix
+        # ON since 2026-09-02, targeted cutout OFF -- proposed, not adopted).
+        # Name them here rather than letting load_aug_yaml pick a default.
+        presets[nm], raws[nm] = load_aug_yaml(
+            os.path.join(AUG_CFG_DIR, f"{nm}.yaml"), keep_kp_in_bounds=True,
+            cutout_mask_target_p=0.0, cutout_size_rel_fly=0.0)
         print(f"[aug/{nm}.yaml] {raws[nm]}")
 
     ds = V5Dataset(args.root, args.split)
@@ -780,6 +1239,15 @@ def main():
         lr["image_is_bitwise_mirror"] = fig5_flip_sidecolour(
             item, names, lr_swap,
             os.path.join(out, f"fig5_flip_sidecolour_{tag}.png"), caption, args.seed)
+        bf = {nm: measure_bounds_fix(item, names, lr_swap, presets[nm],
+                                     ndraw=args.bounds_draws, seed=args.seed)
+              for nm in ("default", "heavy")}
+        fig6_boundsfix(item, names, lr_swap, presets, bf["default"],
+                       os.path.join(out, f"fig6_boundsfix_{tag}.png"), caption,
+                       args.seed)
+        fig7_cutout_targeting(item, names, presets["default"],
+                              os.path.join(out, f"fig7_cutout_targeting_{tag}.png"),
+                              caption, args.seed)
         al = measure_affine_alignment(item, presets["default"], seed=args.seed)
         sl = {nm: measure_supervision_loss(item, names, lr_swap, presets[nm],
                                            seed=args.seed)
@@ -791,11 +1259,17 @@ def main():
                                    sex=ds.sex[idx], behavior=ds.behavior[idx],
                                    note=cap, channel_panels=ch, lr_swap_check=lr,
                                    affine_kp_image_alignment=al,
-                                   supervision_kept=sl, stage_strength=st)
+                                   supervision_kept=sl, bounds_fix=bf,
+                                   stage_strength=st)
         print(f"  lr_swap check: {lr}")
         print(f"  affine kp/image alignment: {al}")
         for nm, v in sl.items():
             print(f"  supervision kept ({nm}): {v}")
+        for nm, v in bf.items():
+            print(f"  bounds fix ({nm}): " + "  ".join(
+                f"{a} kept={v[a]['frac_kept']:.3f} worst={v[a]['min_visible_after_aug']}"
+                f" rot_std={v[a]['rot_deg']['std']:.2f} tclip={v[a]['n_translation_clipped']}"
+                for a in BOUNDS_ARMS))
         print("  stage |dRGB| (0-255, default): "
               + ", ".join(f"{k}={v['mean_abs_delta_rgb_0_255']:.2f}"
                           for k, v in st["default"].items()))
@@ -803,6 +1277,13 @@ def main():
     stats["cutout_coverage"] = {
         nm: measure_cutout_coverage(presets[nm], args.coverage_draws, args.seed)
         for nm in ("default", "heavy")}
+    tgt_idx = np.random.RandomState(0).choice(len(ds), args.targeting_crops,
+                                              replace=False)
+    stats["cutout_targeting"] = {
+        nm: measure_cutout_targeting(ds, presets[nm], tgt_idx, names,
+                                     ndraw=args.bounds_draws, seed=args.seed)
+        for nm in ("default", "heavy")}
+    print("\n[cutout targeting]", json.dumps(stats["cutout_targeting"], indent=2))
     print("\n[cutout coverage]", json.dumps(stats["cutout_coverage"], indent=2))
 
     with open(os.path.join(out, "augmentation_stats.json"), "w") as f:
