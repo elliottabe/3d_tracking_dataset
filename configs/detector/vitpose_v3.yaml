@@ -25,7 +25,20 @@
 # the order machine-checkable for the first time.
 # The v4 provenance above is retained: its distractor-fly overlap weakness is a
 # JAX-port gray-fill gap, not a checkpoint property, so it may still apply here.
-ckpt: ${paths.vit_runs_root}/v5_s70_bal_augdef_full/final
+# CHANGED 2026-09-02. v5vf_maskoff was trained with train.mask_ablation=true on
+# red_data_3d_v5_valfix (the CORRECTED val split -- the older red_data_3d_v5 had
+# 2026_04_07_11_33_33 in TRAIN, which valfix moves to val). The recorded
+# ablation has the mask channel roughly DOUBLING female error; a head-to-head on
+# the corrected split is running now and this line is one revert if it refutes.
+# Previous: ${paths.vit_runs_root}/v5_s70_bal_augdef_full/final (mask channel
+# populated, trained on the uncorrected root).
+ckpt: ${paths.vit_runs_root}/v5vf_maskoff/final
+# INSEPARABLE from `ckpt` above -- see predict_2d.predict_bout_2d. This
+# checkpoint's 4th channel was 0 for every training sample, so a populated mask
+# at inference is silently out-of-distribution: no error, just worse keypoints.
+# The mask is still used for the crop centre and the distractor gray-fill; only
+# the 4th CHANNEL is zeroed. Pinned by test_detector_maskoff_flag_travels_with_ckpt.
+zero_mask_channel: true
 num_keypoints: 50
 crop: 448
 heatmap_size: 224

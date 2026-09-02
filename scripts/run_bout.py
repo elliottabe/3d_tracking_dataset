@@ -1515,7 +1515,13 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
             decode_sharpen=float(cfg.detector.get("decode_sharpen", 1.0)),
             distractor_masks=_distractor,
             distractor_dilate=int(cfg.detector.get("distractor_dilate", 0)),
-            target_protect=cfg.detector.get("target_protect", None))
+            target_protect=cfg.detector.get("target_protect", None),
+            # MUST travel with `ckpt`: a checkpoint trained with
+            # train.mask_ablation=true never saw a populated 4th channel, so
+            # feeding it one raises NO error and silently degrades accuracy.
+            # The flag was added in 821bcd6 and, until now, was passed by no
+            # caller at all -- inert.
+            zero_mask_channel=bool(cfg.detector.get("zero_mask_channel", False)))
         _distractor = None          # free the (T,C,H,W) mask array promptly
         # The detector emits channels in its training (tracking/COCO) order, which
         # is NOT the XML/model order the rest of the pipeline (triangulation, STAC,

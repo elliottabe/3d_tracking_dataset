@@ -57,3 +57,43 @@ def test_pipeline_fully_resolves(monkeypatch):
     resolved = OmegaConf.to_container(cfg, resolve=True)  # MUST NOT raise
     assert resolved["dataset"]["name"] == "courtship"
     assert resolved["paths"]["data_dir"].endswith("/courtship/v1")
+
+
+def test_detector_maskoff_flag_travels_with_ckpt():
+    """`zero_mask_channel` and `ckpt` are only correct TOGETHER.
+
+    A checkpoint trained with `train.mask_ablation=true` saw a zeroed 4th
+    channel on every sample. Feeding it a populated SAM mask at inference
+    raises no error and silently degrades accuracy -- so the flag must be set
+    whenever the ckpt is a mask-ablated run, and must NOT be set otherwise.
+
+    This exists because the capability shipped in 821bcd6 as a function
+    parameter that no caller ever passed and no config ever set: the code half
+    of the promotion landed and the config half did not, leaving a flag that
+    looked wired and was inert.
+    """
+    d = _compose(["paths=hyak"]).detector
+    ckpt = str(d.ckpt)
+    zeroed = bool(d.get("zero_mask_channel", False))
+    is_maskoff_run = "maskoff" in os.path.basename(os.path.dirname(ckpt))
+    assert zeroed == is_maskoff_run, (
+        f"ckpt={ckpt!r} implies zero_mask_channel={is_maskoff_run}, config says {zeroed}")
+
+
+def test_run_bout_actually_passes_zero_mask_channel():
+    """The config key is inert unless the call site forwards it.
+
+    Pins the plumbing, not just the value -- the original defect was a
+    parameter with a default that nothing ever overrode.
+    """
+    import ast
+    src = open(os.path.join(os.path.dirname(CFG_DIR), "scripts", "run_bout.py")).read()
+    # AST, not string slicing: the call contains nested parens (int(...), .get(...)),
+    # so `split(")")[0]` stops at the first one and never reaches the kwargs.
+    kwargs = [kw.arg for n in ast.walk(ast.parse(src))
+              if isinstance(n, ast.Call)
+              and getattr(n.func, "id", getattr(n.func, "attr", None)) == "predict_bout_2d"
+              for kw in n.keywords]
+    assert "zero_mask_channel" in kwargs, (
+        "run_bout.py calls predict_bout_2d without forwarding zero_mask_channel; "
+        "the config key would be silently ignored")
