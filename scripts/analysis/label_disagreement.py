@@ -153,8 +153,8 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     # v5_valfix and v6_contentsplit were both deleted 2026-09-02. The current
     # root carries the content AND the split, so both default to it.
-    ap.add_argument("--src", default=f"{RED}/red_data_3d_v8_gm_only")
-    ap.add_argument("--split-root", default=f"{RED}/red_data_3d_v8_gm_only")
+    ap.add_argument("--src", default=f"{RED}/red_data_3d_v12_export0902")
+    ap.add_argument("--split-root", default=f"{RED}/red_data_3d_v12_export0902")
     ap.add_argument("--hash-cache", required=True)
     ap.add_argument("--csv-dir", default=os.path.join(
         _ROOT, "docs/benchmark/2026-09-02-dataset-dedup"))

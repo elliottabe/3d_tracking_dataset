@@ -16,7 +16,7 @@ fig_dir:  ${paths.save_dir}/figures/
 out_root:          ${paths.base_dir}/courtship
 processed_root:    ${paths.base_dir}/processed                       # canonical per-recording output tree: processed/<assay>/<Session>/<recording>/
 vit_runs_root:     ${paths.base_dir}/jax_vitpose_runs
-red_data_root:     ${paths.base_dir}/red_data/red_data_3d_v10_wall0902   # curated 2D/3D label root (see NOTE)
+red_data_root:     ${paths.base_dir}/red_data/red_data_3d_v12_export0902   # curated 2D/3D label root (see NOTE)
 # NOTE (2026-09-02): this key was `red_data_v3_root` and pointed at
 # red_data/red_data_unified_V3, which no longer exists -- V3 was deleted, and
 # with it red_data_3d_v5/v6/v7. Renamed rather than merely repointed because a

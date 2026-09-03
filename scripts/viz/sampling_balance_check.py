@@ -26,7 +26,7 @@ EXPECTATION IF THE FIX IS CORRECT.
 
 Regenerate:
     python scripts/viz/sampling_balance_check.py \
-        --root /gscratch/portia/eabe/data/Johnson_lab/red_data/red_data_3d_v10_wall0902 \
+        --root /gscratch/portia/eabe/data/Johnson_lab/red_data/red_data_3d_v12_export0902 \
         --out figures/2026-09-02-sampling-balance
 """
 import argparse

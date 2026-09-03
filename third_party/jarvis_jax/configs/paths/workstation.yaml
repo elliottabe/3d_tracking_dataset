@@ -1,6 +1,6 @@
 user: eabe
 # See configs/paths/hyak.yaml: red_data_unified_V3 was deleted 2026-09-02.
-data_root:      /data/Johnson_lab/red_data/red_data_3d_v10_wall0902
+data_root:      /data/Johnson_lab/red_data/red_data_3d_v12_export0902
 cache_dir:      /data/Johnson_lab/jax_repro_cache/v3
 runs_root:           /data/Johnson_lab/jax_cached3d_runs
 vit_runs_root:       /data/Johnson_lab/jax_vitpose_runs

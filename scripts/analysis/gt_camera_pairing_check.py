@@ -62,7 +62,7 @@ sys.path.insert(0, REPO)  # for viz.core.colors (shared visual language)
 from jarvis_jax.geometry.reprojection_tool import ReprojectionTool  # noqa: E402
 
 # red_data_3d_v5_valfix was deleted 2026-09-02.
-DEFAULT_ROOT = "/gscratch/portia/eabe/data/Johnson_lab/red_data/red_data_3d_v8_gm_only"
+DEFAULT_ROOT = "/gscratch/portia/eabe/data/Johnson_lab/red_data/red_data_3d_v12_export0902"
 
 
 # ----------------------------------------------------------------------------

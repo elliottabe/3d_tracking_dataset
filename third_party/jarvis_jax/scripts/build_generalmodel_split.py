@@ -2,7 +2,7 @@
 
     python third_party/jarvis_jax/scripts/build_generalmodel_split.py \
         --gm  .../red_data/general_model \
-        --out .../red_data/red_data_3d_v8_gm_only
+        --out .../red_data/red_data_3d_v12_export0902
 
 READ-ONLY on `general_model` and on `_climbonly_src`. general_model is now the
 ONLY surviving copy of this corpus -- `red_data_unified_V3`,
