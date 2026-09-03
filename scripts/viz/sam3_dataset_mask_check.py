@@ -94,26 +94,39 @@ def main():
     for r in rows:
         by[r["rec"]].append(r)
     print(f"\n{'recording':26s}{'n':>6}{'fg p50':>9}{'fg max':>9}{'kp-in min':>11}"
-          f"{'over-inc':>10}{'bad':>6}  verdict")
+          f"{'over-inc':>10}{'bad':>6}{'bad%':>7}  verdict")
     table = {}
     for rec in sorted(by):
         f = np.array([x["frac"] for x in by[rec]])
         i = np.array([x["inside"] for x in by[rec]])
         over = int((f > 0.05).sum()); bad = int((i < 0.6).sum())
-        ok = (over == 0 and bad == 0)
+        # RATE, not count. `bad == 0` called a 2,420-mask recording FAIL for a
+        # single outlier; at corpus scale that flags almost everything and the
+        # verdict stops carrying information. A handful of hard frames (fly
+        # occluded, or mostly out of shot) will always miss. Over-inclusion
+        # stays zero-tolerance because it was a systematic failure when it
+        # happened, not an outlier.
+        bad_rate = bad / max(1, len(i))
+        ok = (over == 0 and bad_rate <= 0.005)
         table[rec] = dict(n=len(f), fg_p50=float(np.median(f)), fg_max=float(f.max()),
                           kp_in_min=float(np.nanmin(i)), over_inclusive=over,
-                          badly_wrong=bad, pass_=bool(ok))
+                          badly_wrong=bad, bad_rate=float(bad_rate), pass_=bool(ok))
         print(f"{rec:26s}{len(f):>6}{np.median(f)*100:>8.2f}%{f.max()*100:>8.2f}%"
-              f"{np.nanmin(i)*100:>10.0f}%{over:>10}{bad:>6}  {'PASS' if ok else 'FAIL'}")
+              f"{np.nanmin(i)*100:>10.0f}%{over:>10}{bad:>6}{100*bad_rate:>7.2f}%"
+              f"  {'PASS' if ok else 'FAIL'}")
     n_fail = sum(1 for v in table.values() if not v["pass_"])
-    print(f"\n{len(table)} recordings, {n_fail} FAIL "
-          f"(over-inclusive = fg>5%, ~2.5x a fly; bad = <60% of its own keypoints inside)")
+    n_bad = sum(v["badly_wrong"] for v in table.values())
+    print(f"\n{len(table)} recordings, {n_fail} FAIL   |   {n_bad}/{len(rows)} masks "
+          f"badly wrong = {100*n_bad/max(1,len(rows)):.2f}% of the corpus\n"
+          f"(FAIL = any over-inclusive [fg>5%], or >0.5% of a recording's masks "
+          f"holding <60% of their own keypoints)")
 
     n = a.n
     bands = [("SMALLEST fg", rows[:n]),
              ("MEDIAN fg", rows[len(rows)//2 - n//2: len(rows)//2 - n//2 + n]),
              ("LARGEST fg  <- a swept-in shadow would be here", rows[-n:])]
+    worst = sorted(rows, key=lambda r: r["inside"])[:n]
+    bands.append(("WORST kp-in-mask  <- the real failures, not a sample", worst))
     two = [r for r in rows if r["n_fly"] > 1]
     if two:
         two.sort(key=lambda r: -r["frac"])

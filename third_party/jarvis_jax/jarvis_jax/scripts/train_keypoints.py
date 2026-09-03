@@ -256,6 +256,19 @@ def run_training(root, *, out_dir, mae_npz=DEFAULT_MAE_NPZ, tcfg=None,
     train_ds = dataset_cls(root, "train")
     val_ds = dataset_cls(root, "val", recordings=[val_recording])
     val_ds_all = dataset_cls(root, "val")     # full val = the truthful headline metric
+    if len(val_ds) == 0:
+        # An empty cohort does not error in eval_mpjpe -- it reports 0.000px,
+        # which reads as a PERFECT score. A whole 30k-step run
+        # (v12_bal_maskoff) logged "female 2026_05_27_11_56_05: 0.000px" at
+        # every eval because that recording no longer exists: the courtship
+        # pairs were re-filed under their true capture ids
+        # (2026_05_27_11_56_05 -> 2026_04_02_12_11_50). Fail at second zero
+        # instead, the way finetune_detector already does.
+        have = sorted({f.split("/")[0] for f in val_ds_all.file_names})
+        raise ValueError(
+            f"val_recording={val_recording!r} matches NO annotation in "
+            f"{root}'s val split, so the per-cohort MPJPE would be reported as "
+            f"a perfect 0.000px. Available val recordings: {have}")
 
     if tcfg.mask_ablation:
         # Mask-channel ablation: zero the 4th (SAM-mask) input channel of

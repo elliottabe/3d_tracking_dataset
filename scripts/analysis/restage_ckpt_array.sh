@@ -57,4 +57,12 @@ unset JAX_PLATFORMS
 
 echo "[task $SLURM_ARRAY_TASK_ID] $(basename "$dir") on $(hostname) $(date)"
 python scripts/run_bout.py recording="$cfg" recording.session_dir="$dir"
-echo "[task $SLURM_ARRAY_TASK_ID] rc=$? $(date)"
+rc=$?
+echo "[task $SLURM_ARRAY_TASK_ID] rc=$rc $(date)"
+# PROPAGATE IT. With `echo` last, the echo's 0 becomes the task's exit status
+# and sacct reports COMPLETED 0:0 for a task whose python died -- observed on
+# job 39501845. It matters more here than almost anywhere else in the repo:
+# this array is resumable via DONE markers, so "COMPLETED" on a task that
+# wrote nothing is indistinguishable from "COMPLETED" on a task that
+# correctly had nothing left to do.
+exit $rc

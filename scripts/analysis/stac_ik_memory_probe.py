@@ -51,11 +51,15 @@ class GpuSampler(threading.Thread):
 
     def __init__(self, period=2.0):
         super().__init__(daemon=True)
-        self.period, self._stop = period, threading.Event()
+        # NOT `self._stop`: threading.Thread has its own private _stop()
+        # method, and shadowing it with an Event makes Thread's own teardown
+        # call the Event -> TypeError, which destroyed a COMPLETED 466 s
+        # measurement on job 39502485.
+        self.period, self._halt = period, threading.Event()
         self.util, self.mem = [], []
 
     def run(self):
-        while not self._stop.is_set():
+        while not self._halt.is_set():
             try:
                 out = subprocess.run(
                     ["nvidia-smi", "--query-gpu=utilization.gpu,memory.used",
@@ -66,10 +70,10 @@ class GpuSampler(threading.Thread):
                 self.util.append(int(u)); self.mem.append(int(m))
             except Exception:
                 pass
-            self._stop.wait(self.period)
+            self._halt.wait(self.period)
 
     def stop(self):
-        self._stop.set(); self.join(timeout=15)
+        self._halt.set(); self.join(timeout=15)
 
     def summary(self):
         def pct(v, q):
@@ -100,8 +104,21 @@ def main():
     repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     cfg_dir = os.path.join(repo, "configs")
     import stac_mjx  # noqa: F401  (registers the multirun_save_dir resolver)
+    from omegaconf import OmegaConf
+    # `basename` is registered as an IMPORT SIDE EFFECT of scripts/run_bout.py,
+    # which this probe does not import. Without it, composition succeeds and
+    # then blows up later, deep inside run_stac, on
+    # recording.predictions_dir -- because omegaconf resolves interpolations
+    # LAZILY, so a probe that composes the config and reads a couple of keys
+    # looks fine while the tree is still broken (job 39502091).
+    OmegaConf.register_new_resolver(
+        "basename", lambda q: os.path.basename(os.path.normpath(str(q))),
+        replace=True)
     with initialize_config_dir(version_base=None, config_dir=cfg_dir):
         cfg = compose(config_name="pipeline", overrides=["paths=hyak"])
+    # Force the WHOLE tree to resolve now, so a bad interpolation fails here
+    # with a clear message instead of 6 minutes of imports later.
+    OmegaConf.to_container(cfg, resolve=True)
 
     from jarvis_jax.tracking.stac import ik_only_bout
 
@@ -154,13 +171,17 @@ def main():
         ik_only_bout(cfg, kp, kp_names, offsets_path="offsets.h5",
                      out_h5=f"memprobe_T{T}.h5", save_path=out_dir, scale=scale)
         wall = time.time() - t0
-        sampler.stop()
-
+        # The solve is done and its numbers exist; from here on nothing in the
+        # instrumentation is allowed to lose them.
         ms = {}
         try:
             ms = dev.memory_stats() or {}
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"  [warn] memory_stats failed: {e}", flush=True)
+        try:
+            sampler.stop()
+        except Exception as e:
+            print(f"  [warn] gpu sampler teardown failed: {e}", flush=True)
         peak = ms.get("peak_bytes_in_use")
         limit = ms.get("bytes_limit")
         row = {"T": T, "finite_frames": finite, "wall_s": round(wall, 2),
@@ -172,6 +193,12 @@ def main():
             row["fits_concurrently"] = int(limit // peak)
         results.append(row)
         print(json.dumps(row), flush=True)
+        if a.out:      # checkpoint after EVERY T, not once at the end
+            try:
+                with open(a.out, "w") as f:
+                    json.dump(results, f, indent=2)
+            except Exception as e:
+                print(f"  [warn] could not checkpoint {a.out}: {e}", flush=True)
 
     print("\n=== SUMMARY ===")
     print(f"{'T':>6}{'finite':>8}{'wall_s':>9}{'peak_GiB':>10}{'util_mean':>11}"
