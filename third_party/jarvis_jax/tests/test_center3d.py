@@ -1,10 +1,17 @@
+import os
+
 import numpy as np
 import jax.numpy as jnp
+import pytest
 from jarvis_jax.geometry.center3d import quantize_center3d, mask_centroids, centroids_to_fullpx, triangulate_dlt_batched, estimate_center3d_from_masks
 from jarvis_jax.geometry.reprojection_tool import ReprojectionTool
 from jarvis_jax.data.v3_3d import V3FramesetDataset
 
-CALIB = "/gscratch/portia/eabe/data/Johnson_lab/red_data/red_data_unified_V3/calib_params/2026_01_13_18_47_45"
+# red_data_unified_V3 was deleted 2026-09-02. This is the SAME recording's
+# calibration, from general_model, which is now its only surviving copy. These
+# tests need a valid 7-camera DLT solution, not V3 specifically.
+CALIB = ("/gscratch/portia/eabe/data/Johnson_lab/red_data/general_model"
+         "/S6male/calib_params/2026_01_13_18_47_45")
 
 
 def test_quantize_matches_v3_recipe():
@@ -80,6 +87,7 @@ def test_batched_dlt_drops_invalid_camera():
 ROOT = "/gscratch/portia/eabe/data/Johnson_lab/red_data/red_data_unified_V3"
 
 
+@pytest.mark.skipif(not os.path.isdir(ROOT), reason="V3 data absent")
 def test_estimate_center3d_close_to_gt():
     ds = V3FramesetDataset(ROOT, "val")
     s = ds[0]
@@ -95,7 +103,6 @@ def test_estimate_center3d_close_to_gt():
 
 def test_project_center_to_cameras_inverts_triangulation():
     from jarvis_jax.geometry.center3d import project_center_to_cameras
-    CALIB = "/gscratch/portia/eabe/data/Johnson_lab/red_data/red_data_unified_V3/calib_params/2026_01_13_18_47_45"
     rt = ReprojectionTool(CALIB)
     cm = rt.camera_matrices.astype(np.float32)            # (nc,4,3)
     X = np.array([4.0, -6.0, 11.0], np.float32)

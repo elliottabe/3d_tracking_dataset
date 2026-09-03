@@ -127,7 +127,7 @@ def _is_female_fly(rec: str, fly: str, recs_meta: dict) -> bool:
 def make_split(merged: dict, manifest: dict, *, val_recordings=(),
                female_val_frac: float = 0.10, guard: int = 50,
                seed: int = 0, aliases: dict[str, str] | None = None,
-               val_components_force=()) -> dict:
+               val_components_force=(), train_components_force=()) -> dict:
     """Assign every frameset to train/val/dropped-guard-band.
 
     `val_recordings` names recordings to hold out WHOLE. With `aliases` the
@@ -140,11 +140,27 @@ def make_split(merged: dict, manifest: dict, *, val_recordings=(),
     can produce an unseen-session FEMALE val number is a female-inclusive
     component, so refusing categorically means never measuring the thing the
     pipeline is worst at. Spend it explicitly, on small components, and say
-    how much female training data it costs."""
+    how much female training data it costs.
+
+    `train_components_force` is the MIRROR escape hatch, and it exists because
+    the female tail-block rule is automatic and therefore fires on components
+    where a 10% tail is not a sample of anything. `wall_frames` yields SEVEN
+    viable framesets (its camera coverage tops out at 6/7 and four of its
+    eleven frames fall below MIN_CAMS); 10% of seven is one frameset, ~4
+    annotations, which cannot support a metric while removing it from training
+    removes 100% of the corpus's wall-adjacent female supervision -- the exact
+    regime the pipeline fails at. Naming a component here keeps it WHOLLY in
+    train. It is a deliberate statement that this regime is unmeasurable by
+    held-out MPJPE and must be judged GT-free, not an accident of a rounding
+    rule. Forcing a component both ways is a contradiction and raises."""
     recs_meta = manifest.get("recordings", {})
     aliases = aliases or {}
     val_groups = {aliases.get(r, r) for r in val_recordings}
     forced_groups = {aliases.get(r, r) for r in val_components_force}
+    train_forced = {aliases.get(r, r) for r in train_components_force}
+    both = (val_groups | forced_groups) & train_forced
+    if both:
+        raise ValueError(f"components forced to BOTH train and val: {sorted(both)}")
     by_rec = _frame_groups(merged, aliases)
     split: dict[str, str] = {}
 
@@ -152,8 +168,9 @@ def make_split(merged: dict, manifest: dict, *, val_recordings=(),
         frame_nos = sorted(frames)
         is_female = _group_is_female(frames, merged, recs_meta)
 
-        if not is_female or rec in forced_groups:
-            side = "val" if (rec in val_groups or rec in forced_groups) else "train"
+        if not is_female or rec in forced_groups or rec in train_forced:
+            side = ("val" if (rec in val_groups or rec in forced_groups)
+                    and rec not in train_forced else "train")
             for fn in frame_nos:
                 for k in frames[fn]:
                     split[k] = side
