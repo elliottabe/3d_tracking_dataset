@@ -80,6 +80,7 @@ false-positive rate.
 """
 from __future__ import annotations
 
+import itertools
 import json
 import os
 from collections import defaultdict
@@ -88,6 +89,7 @@ import numpy as np
 from PIL import Image
 from scipy.ndimage import gaussian_filter
 
+from jarvis_jax.data.transforms import crop_origin, transform_keypoints
 from jarvis_jax.data.v5_2d import _load_mask
 
 # Real courtship two-fly centroid separation sits ~267-336px (task brief).
@@ -408,3 +410,152 @@ class CopyPasteCenterDetectDataset:
         centers_out = np.array([[host_c[0] * sx, host_c[1] * sy],
                                  [target_c[0] * sx, target_c[1] * sy]], dtype=np.float32)
         return composite_full, img_out, centers_out, meta
+
+
+# ---------------------------------------------------------------------------
+# 2026-09-03: the same synthesis for the 2D KEYPOINT detector
+# ---------------------------------------------------------------------------
+class CopyPasteKeypointDataset:
+    """Paste a same-camera donor fly into a `p` fraction of SINGLE-fly keypoint
+    samples; the donor's keypoints become the distractor rows ``[K:]``.
+
+    Wraps a ``data.distractor.DistractorKeypointDataset`` (TRAIN split only):
+    samples that already carry a real second fly (``vis[K:].any()``) pass
+    through untouched. Same constraints as ``CopyPasteCenterDetectDataset``
+    (same camera only, same recording preferred, randomised z-order, feathered
+    alpha), composited in FULL-image coordinates and then cropped exactly as
+    ``V5Dataset.__getitem__`` crops (``crop_origin`` of the HOST bbox), so the
+    host's own keypoints/mask channel are untouched: only RGB changes and the
+    distractor rows are filled in.
+
+    WHY. Train is 1.7% two-fly images; val is 32%. Real pairs cannot be
+    oversampled into more pose/separation diversity, and the repulsion target
+    (``train.repulsion_weight``) only teaches "not the other fly's tip" where
+    there IS another fly. Separation defaults are tighter than the CenterDetect
+    version (40-300 px) so the donor lands inside or at the edge of the 448
+    crop -- a donor a body length away is the case the detector already gets.
+
+    EXPECTATION for the preview figure (scripts/viz/distractor_aug_preview.py):
+    the pasted fly has the same scale and lighting as the host (same camera),
+    a soft edge, and its orange keypoints sit on ITS legs/wings; the host's
+    white keypoints are exactly where they were in the un-pasted sample.
+    """
+
+    def __init__(self, ds, *, root=None, p=0.3, seed=0,
+                 sep_low=40.0, sep_high=300.0, sep_near_boundary=180.0,
+                 sep_near_frac=DEFAULT_SEP_NEAR_FRAC,
+                 feather_sigma_px=DEFAULT_FEATHER_SIGMA_PX):
+        if getattr(ds, "split", "train") != "train":
+            raise ValueError("CopyPasteKeypointDataset is train-only")
+        if not hasattr(ds, "has_distractor"):
+            raise TypeError("wrap a DistractorKeypointDataset (needs rows [K:])")
+        self._ds = ds
+        self.root = root if root is not None else ds.root
+        self.p, self.seed = float(p), int(seed)
+        self.sep_low, self.sep_high = float(sep_low), float(sep_high)
+        self.sep_near_boundary, self.sep_near_frac = float(sep_near_boundary), float(sep_near_frac)
+        self.feather_sigma = float(feather_sigma_px)
+        self.K = int(ds.n_keypoints)
+        self._draws = itertools.count()
+        self.n_pasted = 0
+        self._single = {i for i in range(len(ds)) if not ds.has_distractor(i)}
+        self._by_rec_camera, self._by_camera = defaultdict(list), defaultdict(list)
+        for i in sorted(self._single):
+            rec, cam, _ = ds.file_names[i].split("/")
+            self._by_rec_camera[(rec, cam)].append(i)
+            self._by_camera[cam].append(i)
+
+    def __len__(self):
+        return len(self._ds)
+
+    def __getattr__(self, k):
+        return getattr(self._ds, k)
+
+    def _donor_pool(self, host_idx):
+        rec, cam, _ = self._ds.file_names[host_idx].split("/")
+        pool = [j for j in self._by_rec_camera.get((rec, cam), ()) if j != host_idx]
+        same_recording = bool(pool)
+        if not pool:
+            pool = [j for j in self._by_camera.get(cam, ()) if j != host_idx]
+        return pool, same_recording
+
+    def _synthesize(self, i, rng, pool):
+        ds = self._ds
+        fn = ds.file_names[i]; img_w, img_h = (int(v) for v in ds.img_wh[i])
+        j = int(rng.choice(pool)); dfn = ds.file_names[j]
+        d_w, d_h = (int(v) for v in ds.img_wh[j])
+        host_rgb = _load_rgb_full(self.root, fn)
+        donor_rgb = _load_rgb_full(self.root, dfn)
+        host_mask = _load_mask(self.root, fn, ds.ann_ids[i], ds.src_ann_ids[i], img_w, img_h)
+        donor_mask = _load_mask(self.root, dfn, ds.ann_ids[j], ds.src_ann_ids[j], d_w, d_h)
+        pad = max(20, int(round(4 * self.feather_sigma)))
+        d_rgb, d_alpha, d_center, d_origin = _feathered_sprite(
+            donor_rgb, donor_mask, ds.bboxes[j], pad=pad, sigma=self.feather_sigma)
+        h_rgb, h_alpha, _, h_origin = _feathered_sprite(
+            host_rgb, host_mask, ds.bboxes[i], pad=pad, sigma=self.feather_sigma)
+        bx, by, bw, bh = ds.bboxes[i]
+        host_center = np.array([bx + bw / 2.0, by + bh / 2.0])
+        sep = sample_separation_px(rng, low=self.sep_low, high=self.sep_high,
+                                   near_boundary=self.sep_near_boundary,
+                                   near_frac=self.sep_near_frac)
+        half_w, half_h = d_rgb.shape[1] / 2.0, d_rgb.shape[0] / 2.0
+        lo_x, hi_x = sorted((half_w, img_w - half_w)); lo_y, hi_y = sorted((half_h, img_h - half_h))
+        # Clamping to the frame can collapse the separation to ~0 (host near
+        # an edge, direction pointing off-frame) -- a donor pasted exactly on
+        # the host. Draw up to 8 directions and keep the one that preserves
+        # the most of the sampled separation; stop early once >= 80% survives.
+        best = None
+        for _ in range(8):
+            theta = rng.uniform(0.0, 2.0 * np.pi)
+            target = host_center + sep * np.array([np.cos(theta), np.sin(theta)])
+            cx_, cy_ = float(np.clip(target[0], lo_x, hi_x)), float(np.clip(target[1], lo_y, hi_y))
+            got = float(np.hypot(cx_ - host_center[0], cy_ - host_center[1]))
+            if best is None or got > best[0]:
+                best = (got, cx_, cy_)
+            if got >= 0.8 * sep:
+                break
+        _, tx, ty = best
+        dst = (tx - d_center[0], ty - d_center[1])
+        top_is_donor = bool(rng.random() < 0.5)
+        comp = _composite(host_rgb, d_rgb, d_alpha, dst)
+        if not top_is_donor:
+            comp = _composite(comp, h_rgb, h_alpha, h_origin)
+        # donor keypoints: full-image donor coords -> host coords by the sprite shift
+        shift = np.array([round(dst[0]) - d_origin[0], round(dst[1]) - d_origin[1]], np.float32)
+        d_kps = ds.keypoints[j].copy(); d_kps[:, :2] += shift
+        x0, y0 = crop_origin(ds.bboxes[i], img_w, img_h, ds.crop)
+        crop_rgb = comp[y0:y0 + ds.crop, x0:x0 + ds.crop]
+        d_kp, d_vis = transform_keypoints(d_kps, x0, y0, ds.crop, ds.heatmap_size)
+        meta = {"host_file_name": fn, "donor_file_name": dfn, "top_is_donor": top_is_donor,
+                "sep_sampled_px": float(sep),
+                "sep_achieved_px": float(np.hypot(tx - host_center[0], ty - host_center[1]))}
+        return crop_rgb, d_kp.astype(np.float32), d_vis, meta
+
+    def __getitem__(self, i):
+        img4, kp, vis = self._ds[i]
+        K = self.K
+        if i not in self._single or vis[K:].any():
+            return img4, kp, vis                      # real two-fly: untouched
+        rng = np.random.default_rng([self.seed, int(i), next(self._draws)])
+        if rng.random() >= self.p:
+            return img4, kp, vis
+        pool, _ = self._donor_pool(i)
+        if not pool:
+            return img4, kp, vis
+        crop_rgb, d_kp, d_vis, _ = self._synthesize(i, rng, pool)
+        out = img4.copy(); out[:crop_rgb.shape[0], :crop_rgb.shape[1], :3] = crop_rgb
+        kp = kp.copy(); vis = vis.copy(); kp[K:] = d_kp; vis[K:] = d_vis
+        self.n_pasted += 1
+        return out, kp, vis
+
+    def sample_with_meta(self, i, *, seed=None):
+        """Always synthesize on single-fly row `i` (for the preview figure)."""
+        if i not in self._single:
+            raise ValueError(f"row {i} already has a second fly")
+        img4, kp, vis = self._ds[i]
+        rng = np.random.default_rng([self.seed if seed is None else int(seed), int(i), 1])
+        pool, _ = self._donor_pool(i)
+        crop_rgb, d_kp, d_vis, meta = self._synthesize(i, rng, pool)
+        out = img4.copy(); out[:crop_rgb.shape[0], :crop_rgb.shape[1], :3] = crop_rgb
+        kp = kp.copy(); vis = vis.copy(); kp[self.K:] = d_kp; vis[self.K:] = d_vis
+        return out, kp, vis, meta

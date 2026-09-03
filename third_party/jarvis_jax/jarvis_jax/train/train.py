@@ -2,6 +2,7 @@
 import dataclasses
 
 import jax
+import numpy as np
 import jax.numpy as jnp
 import optax
 from flax import nnx
@@ -53,6 +54,24 @@ class TrainConfig:
     # both are set). Default False -- byte-identical to before this field
     # existed for every other caller of TrainConfig.
     center_channel_input: bool = False
+    # ---- distractor-aware supervision (2026-09-03; data/distractor.py,
+    # docs/benchmark/2026-09-03-maskoff-attention). All OFF by default =
+    # byte-identical loss and data stream for every existing run.
+    # Hard-negative background: add the mean squared error over the
+    # `hardneg_k` worst background pixels per channel, weighted. 0 = off.
+    hardneg_k: int = 0
+    hardneg_weight: float = 0.0
+    # Repulsion: penalise each channel at the OTHER fly's same-part keypoints
+    # (footprint-weighted MSE, own foreground excluded). >0 makes
+    # train_keypoints wrap the train set in DistractorKeypointDataset.
+    repulsion_weight: float = 0.0
+    # Probability per draw of gray-filling the other fly's body from its SAM
+    # mask, as inference does (DistractorGrayFillDataset). 0 = never (legacy).
+    distractor_fill_p: float = 0.0
+    # Probability per single-fly draw of pasting a same-camera donor fly into
+    # the frame (CopyPasteKeypointDataset); its keypoints become the
+    # distractor rows. 0 = off.
+    copy_paste_p: float = 0.0
 
 
 def _param_labels(params):
@@ -82,7 +101,9 @@ def make_optimizer(model, cfg):
 
 
 def make_train_step(mask_weight, aug_params=None, lr_swap=None, heatmap_size=224,
-                    sigma=7.0, joint_weight=None, mask_dilate=0, normalize_fn=None):
+                    sigma=7.0, joint_weight=None, mask_dilate=0, normalize_fn=None,
+                    *, n_keypoints=None, part_of_k=None, hardneg_k=0,
+                    hardneg_weight=0.0, repulsion_weight=0.0):
     """Return an nnx.jit train step. When aug_params.enabled, the batch is
     augmented on-device (using the per-step `key`) before normalize/render.
 
@@ -97,8 +118,18 @@ def make_train_step(mask_weight, aug_params=None, lr_swap=None, heatmap_size=224
     does not pass it) selects how the 4th input channel is rescaled; the
     ``center_channel`` ablation arm passes
     ``jarvis_jax.data.device.normalize_image_center_channel`` instead (see
-    that function's docstring for why the two differ)."""
+    that function's docstring for why the two differ).
+
+    Distractor-aware supervision (2026-09-03, ``data/distractor.py``): when the
+    batch carries ``2*n_keypoints`` keypoint rows, rows ``[n_keypoints:]`` are
+    the OTHER fly's keypoints. They are warped/flipped with the rest (with
+    ``lr_swap`` extended to cover them and ``n_fit`` keeping them out of the
+    affine fit), never rendered as targets, and -- when ``repulsion_weight >
+    0`` -- rendered through ``repulsion_footprint(part_of_k)`` into the loss.
+    ``hardneg_k``/``hardneg_weight`` are passed straight to ``heatmap_mse``.
+    A batch with exactly ``n_keypoints`` rows behaves exactly as before."""
     from jarvis_jax.data.augment import augment_batch, AugParams
+    from jarvis_jax.data.distractor import repulsion_footprint
     norm_fn = normalize_fn if normalize_fn is not None else normalize_image
     mw = float(mask_weight)
     md = int(mask_dilate)
@@ -108,12 +139,28 @@ def make_train_step(mask_weight, aug_params=None, lr_swap=None, heatmap_size=224
     swap = jnp.asarray(lr_swap) if lr_swap is not None else None
     sig = jnp.asarray(sigma, dtype=jnp.float32)
     jw = None if joint_weight is None else jnp.asarray(joint_weight, dtype=jnp.float32)
+    K = None if n_keypoints is None else int(n_keypoints)
+    rw, hk, hw = float(repulsion_weight), int(hardneg_k), float(hardneg_weight)
+    pok = None if part_of_k is None else np.asarray(part_of_k)
+    if rw > 0.0 and (K is None or pok is None):
+        raise ValueError("repulsion_weight > 0 needs n_keypoints and part_of_k")
+
+    def _split(kp_xy, vis):
+        """(target kp, target vis, distractor kp | None, distractor vis | None)."""
+        if K is not None and kp_xy.shape[1] > K:
+            return kp_xy[:, :K], vis[:, :K], kp_xy[:, K:], vis[:, K:]
+        return kp_xy, vis, None, None
 
     def loss_fn(model, img4_u8, kp_xy, vis):
+        kp_t, vis_t, kp_d, vis_d = _split(kp_xy, vis)
         img = norm_fn(img4_u8)
-        hm = render_heatmaps(kp_xy, vis, heatmap_size=heatmap_size, sigma=sig)
+        hm = render_heatmaps(kp_t, vis_t, heatmap_size=heatmap_size, sigma=sig)
         pred = model(img, use_running_average=False)
-        loss = heatmap_mse(pred, hm, vis, joint_weight=jw)
+        rep = None
+        if rw > 0.0 and kp_d is not None:
+            rep = repulsion_footprint(kp_d, vis_d, pok, heatmap_size=heatmap_size, sigma=sig)
+        loss = heatmap_mse(pred, hm, vis_t, joint_weight=jw, hardneg_k=hk,
+                           hardneg_weight=hw, rep_fp=rep, rep_weight=rw)
         if mw > 0.0:
             mask = img[..., 3]
             mask224 = jax.image.resize(
@@ -124,8 +171,11 @@ def make_train_step(mask_weight, aug_params=None, lr_swap=None, heatmap_size=224
     @nnx.jit
     def step(model, optimizer, key, img4_u8, kp_xy, vis):
         if ap.enabled:
+            extra = K is not None and kp_xy.shape[1] > K
+            swap_all = jnp.concatenate([swap, swap + K]) if extra else swap
             img4_u8, kp_xy, vis = augment_batch(
-                key, img4_u8, kp_xy, vis, ap, swap, heatmap_size)
+                key, img4_u8, kp_xy, vis, ap, swap_all, heatmap_size,
+                n_fit=K if extra else None)
         loss, grads = nnx.value_and_grad(loss_fn)(model, img4_u8, kp_xy, vis)
         optimizer.update(model, grads)
         return loss

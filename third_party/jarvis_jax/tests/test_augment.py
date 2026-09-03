@@ -526,3 +526,30 @@ def test_cutout_punch_mask_is_an_exact_noop_on_a_mask_ablated_batch():
     plain = cutout_batch(k, img, 2, 0.25)
     punched = cutout_batch(k, img, 2, 0.25, punch_mask=True)
     assert jnp.array_equal(plain, punched)
+
+
+def test_affine_n_fit_ignores_distractor_rows_but_warps_them():
+    """Rows beyond n_fit (the other fly's keypoints) must not change the fitted
+    affine: the primary rows come out identical with or without them, and the
+    extra rows go through the same warp (a distractor far off-crop stays
+    invisible rather than dragging the crop toward itself)."""
+    import jax
+    from jarvis_jax.data.augment import affine_batch
+    key = jax.random.PRNGKey(3)
+    B, K, hm = 2, 3, 224
+    img = jnp.zeros((B, 448, 448, 4), jnp.uint8)
+    prim = jnp.asarray(np.random.RandomState(0).uniform(60, 160, (B, K, 2)).astype("float32"))
+    dist = jnp.asarray(np.array([[[500.0, 500.0], [10.0, 10.0], [-300.0, 100.0]]] * B, "float32"))
+    vis_p = jnp.ones((B, K), bool)
+    kw = dict(rot_deg=30, scale_min=0.8, scale_max=1.25, translate_frac=0.1, heatmap_size=hm)
+    _, kp_alone, vis_alone = affine_batch(key, img, prim, vis_p, **kw)
+    _, kp_both, vis_both = affine_batch(
+        key, img, jnp.concatenate([prim, dist], 1), jnp.ones((B, 2 * K), bool), n_fit=K, **kw)
+    np.testing.assert_allclose(np.asarray(kp_both[:, :K]), np.asarray(kp_alone), atol=1e-4)
+    np.testing.assert_array_equal(np.asarray(vis_both[:, :K]), np.asarray(vis_alone))
+    # the far-off distractor row is out of bounds after the warp -> not visible
+    assert not bool(vis_both[:, K].any())
+    # WITHOUT n_fit the distractor rows would have been fitted in: different affine
+    _, kp_fit_all, _ = affine_batch(
+        key, img, jnp.concatenate([prim, dist], 1), jnp.ones((B, 2 * K), bool), **kw)
+    assert not np.allclose(np.asarray(kp_fit_all[:, :K]), np.asarray(kp_alone), atol=1e-3)

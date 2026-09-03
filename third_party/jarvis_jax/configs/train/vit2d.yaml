@@ -74,3 +74,31 @@ center_channel_input: false
 # sigma sets the optimisation basin, not the resolution ceiling -- full
 # derivation and refutation in data/transforms.py:gaussian_heatmaps.
 target_sigma: 7.0
+
+# ---- Distractor-aware supervision (2026-09-03; jarvis_jax/data/distractor.py,
+# docs/benchmark/2026-09-03-maskoff-attention/notes.md). Motivation: the v12
+# mask-off detector's tarsal-tip misses fire on the OTHER fly's leg tips and on
+# floor reflections while the true tip responds at 0.31 of the max; attention is
+# identical to a checkpoint that gets them right, so the fix is in the
+# supervision, not the backbone. All four default OFF = legacy stream + loss.
+# Hard-negative background: MSE over the `hardneg_k` worst background pixels
+# per channel, added at `hardneg_weight`. The plain bg term averages over
+# ~50k px at 0.1, so a confident wrong blob is ~free without this. Unswept
+# starting point for the A/B arm: k=256 (a sigma-7 blob's core), weight 0.5.
+hardneg_k: 0
+hardneg_weight: 0.0
+# Repulsion at the other fly's SAME-PART keypoints (every TaTip vs my TaTip
+# channel, etc.), own foreground excluded. 1.0 = a spurious peak on the other
+# fly costs as much as missing one's own. Wraps train in
+# DistractorKeypointDataset (rows [K:] = other fly), val untouched.
+repulsion_weight: 0.0
+# Gray-fill the other fly's SAM BODY mask with this probability per draw,
+# exactly as predict_2d/session_frameset do at inference (training never did;
+# measured 2026-09-03: v12 male 16.9 -> 15.2 px under the OOD fill). <1 keeps
+# raw two-fly crops in the stream so the model also copes with missing masks.
+# The fill leaves the other fly's LEGS visible (mask = body silhouette).
+distractor_fill_p: 0.0
+# Copy-paste a same-camera donor fly into a single-fly frame with this
+# probability (CopyPasteKeypointDataset). Train is 1.7% two-fly images vs 32%
+# of val; this closes that gap with exact donor keypoints for the repulsion.
+copy_paste_p: 0.0

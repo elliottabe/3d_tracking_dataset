@@ -4,7 +4,8 @@ import jax.numpy as jnp
 
 
 def heatmap_mse(pred, gt, vis, bg_weight=0.1, fg_thresh=0.01, eps=1e-6,
-                joint_weight=None):
+                joint_weight=None, hardneg_k=0, hardneg_weight=0.0,
+                rep_fp=None, rep_weight=0.0):
     """Foreground-weighted heatmap MSE. pred,gt: (B,H,W,K); vis: (B,K) bool.
 
     Plain mean-MSE over all H*W pixels dilutes the sparse keypoint-foreground
@@ -16,6 +17,25 @@ def heatmap_mse(pred, gt, vis, bg_weight=0.1, fg_thresh=0.01, eps=1e-6,
 
     ``joint_weight`` (optional ``(K,)``) scales each channel's contribution — used
     to emphasise hard channels (e.g. wing vertices) during a focused fine-tune.
+
+    Two optional terms (2026-09-03, docs/benchmark/2026-09-03-maskoff-attention),
+    both OFF by default so every existing caller is byte-identical:
+
+    ``hardneg_k`` / ``hardneg_weight`` -- HARD-NEGATIVE background. The plain
+    background term is a mean over ~50,000 pixels at weight 0.1, so a confident
+    spurious blob of ~300 px on the other fly's leg costs ~0.1 * 300/50,000 of a
+    missed peak -- effectively nothing, which is exactly the failure measured
+    on v12 (tip heatmaps firing on the other fly / floor reflections while the
+    true tip sits at 0.31 of the max). This adds, per channel, the MEAN squared
+    error over the ``hardneg_k`` WORST background pixels (``jax.lax.top_k``),
+    so one wrong blob costs about as much as one missed peak.
+
+    ``rep_fp`` (B,H,W,K in [0,1]) / ``rep_weight`` -- REPULSION footprint,
+    e.g. ``data.distractor.repulsion_footprint`` (Gaussians at the OTHER fly's
+    same-part keypoints). Adds the footprint-weighted mean squared error per
+    channel, EXCLUDING the channel's own foreground (a distractor tip under the
+    target's own tip is not penalised). Channels/samples with an empty
+    footprint contribute exactly 0.
     """
     d = (pred - gt) ** 2
     fg = (gt > fg_thresh).astype(pred.dtype)
@@ -23,6 +43,15 @@ def heatmap_mse(pred, gt, vis, bg_weight=0.1, fg_thresh=0.01, eps=1e-6,
     nbg = (1.0 - fg).sum(axis=(1, 2)) + eps
     per_kp = (d * fg).sum(axis=(1, 2)) / nfg + bg_weight * (
         (d * (1.0 - fg)).sum(axis=(1, 2)) / nbg)          # (B,K)
+    if hardneg_k and hardneg_weight > 0.0:
+        b, h, w_, k = d.shape
+        dbg = (d * (1.0 - fg)).reshape(b, h * w_, k).transpose(0, 2, 1)   # (B,K,HW)
+        worst = jax.lax.top_k(dbg, int(hardneg_k))[0].mean(axis=-1)      # (B,K)
+        per_kp = per_kp + hardneg_weight * worst
+    if rep_fp is not None and rep_weight > 0.0:
+        w_rep = rep_fp * (1.0 - fg)
+        rep = (d * w_rep).sum(axis=(1, 2)) / (w_rep.sum(axis=(1, 2)) + eps)
+        per_kp = per_kp + rep_weight * rep
     w = vis.astype(pred.dtype)
     if joint_weight is not None:
         w = w * jnp.asarray(joint_weight, dtype=pred.dtype)[None, :]

@@ -1,0 +1,51 @@
+{
+ "rows": [
+  {
+   "idx": 12785,
+   "kind": "two-fly",
+   "file": "2026_04_02_17_28_34/Cam2012631/Frame_587888.jpg"
+  },
+  {
+   "idx": 12792,
+   "kind": "two-fly",
+   "file": "2026_04_02_17_28_34/Cam2012631/Frame_587888.jpg"
+  },
+  {
+   "idx": 12855,
+   "kind": "two-fly",
+   "file": "2026_04_02_17_28_34/Cam2012631/Frame_617380.jpg"
+  },
+  {
+   "idx": 18295,
+   "kind": "single",
+   "file": "2026_06_10_15_05_02/Cam2012853/Frame_1978.jpg"
+  },
+  {
+   "idx": 142,
+   "kind": "single",
+   "file": "2025_10_12_15_06_46/Cam2012853/Frame_956740.jpg"
+  },
+  {
+   "idx": 9291,
+   "kind": "single",
+   "file": "2026_02_09_22_26_25/Cam2012862/Frame_6465.jpg"
+  }
+ ],
+ "parts": [
+  "Abd_A4",
+  "Abd_tip",
+  "Antenna_Base",
+  "Eye",
+  "FeTi",
+  "Scutellum",
+  "TaT1",
+  "TaT3",
+  "TaTip",
+  "ThxCx",
+  "TiTa",
+  "Tro",
+  "Wing_V12",
+  "Wing_V13",
+  "Wing_base"
+ ]
+}

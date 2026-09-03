@@ -228,6 +228,11 @@ def run_training(root, *, out_dir, mae_npz=DEFAULT_MAE_NPZ, tcfg=None,
     names = json.load(open(
         os.path.join(root, "annotations", "instances_train.json")))["keypoint_names"]
     lr_swap = build_lr_swap(names)
+    # Same-part index for the repulsion footprint (data/distractor.py); cheap,
+    # always built, only consumed when train.repulsion_weight > 0.
+    from jarvis_jax.data.distractor import (
+        build_part_index, DistractorKeypointDataset, DistractorGrayFillDataset)
+    part_of_k, parts = build_part_index(names)
     aug = aug_params if aug_params is not None else AugParams()
     # sigma explicit here (not left to make_train_step's own 7.0 default) so
     # train.target_sigma (configs/train/vit2d.yaml) actually reaches the
@@ -236,7 +241,13 @@ def run_training(root, *, out_dir, mae_npz=DEFAULT_MAE_NPZ, tcfg=None,
     # silently trained on sigma=7.0 targets.
     step = make_train_step(tcfg.mask_weight, aug, lr_swap, heatmap_size=cfg.heatmap_size,
                            sigma=tcfg.target_sigma, mask_dilate=tcfg.mask_dilate,
-                           normalize_fn=norm_fn)
+                           normalize_fn=norm_fn, n_keypoints=cfg.num_keypoints,
+                           part_of_k=part_of_k, hardneg_k=tcfg.hardneg_k,
+                           hardneg_weight=tcfg.hardneg_weight,
+                           repulsion_weight=tcfg.repulsion_weight)
+    if tcfg.hardneg_k and tcfg.hardneg_weight > 0:
+        print(f"[hard-negative] top-{tcfg.hardneg_k} background pixels per channel "
+              f"at weight {tcfg.hardneg_weight}")
     base_key = jax.random.PRNGKey(tcfg.seed)
     mesh = data_parallel_mesh()
 
@@ -269,6 +280,28 @@ def run_training(root, *, out_dir, mae_npz=DEFAULT_MAE_NPZ, tcfg=None,
             f"val_recording={val_recording!r} matches NO annotation in "
             f"{root}'s val split, so the per-cohort MPJPE would be reported as "
             f"a perfect 0.000px. Available val recordings: {have}")
+
+    # ---- distractor-aware training stream (data/distractor.py). Order:
+    # distractor keypoints -> copy-paste -> gray-fill -> (mask ablation below).
+    # Train only: val stays the raw, comparable metric.
+    if tcfg.repulsion_weight > 0 or tcfg.copy_paste_p > 0:
+        train_ds = DistractorKeypointDataset(train_ds)
+        n_two = sum(train_ds.has_distractor(i) for i in range(len(train_ds)))
+        print(f"[distractor] the other fly's keypoints ride along as rows [K:]: "
+              f"{n_two}/{len(train_ds)} train annotations share their image with "
+              f"another fly; repulsion_weight={tcfg.repulsion_weight} over "
+              f"{len(parts)} parts")
+    if tcfg.copy_paste_p > 0:
+        from jarvis_jax.data.copy_paste import CopyPasteKeypointDataset
+        train_ds = CopyPasteKeypointDataset(train_ds, root=root, p=tcfg.copy_paste_p,
+                                            seed=tcfg.seed)
+        print(f"[copy-paste] p={tcfg.copy_paste_p} of single-fly draws get a same-camera "
+              f"donor fly pasted in; donor keypoints become the distractor rows")
+    if tcfg.distractor_fill_p > 0:
+        train_ds = DistractorGrayFillDataset(train_ds, root, p=tcfg.distractor_fill_p,
+                                             seed=tcfg.seed)
+        print(f"[gray-fill] p={tcfg.distractor_fill_p} of draws gray-fill the other fly's "
+              f"SAM body mask, as inference does (dilate 15 / protect 60)")
 
     if tcfg.mask_ablation:
         # Mask-channel ablation: zero the 4th (SAM-mask) input channel of

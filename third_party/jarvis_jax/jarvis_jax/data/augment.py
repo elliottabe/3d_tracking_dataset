@@ -200,7 +200,7 @@ def fit_affine_to_bounds(kp, vis, theta, s, tx, ty, heatmap_size, margin=0.0,
 
 def affine_batch(key, img4_u8, kp_xy, vis, *, rot_deg, scale_min, scale_max,
                  translate_frac, heatmap_size, keep_kp_in_bounds=True,
-                 bounds_margin=0.01, fit_center=None):
+                 bounds_margin=0.01, fit_center=None, n_fit=None):
     """Per-sample random affine over a batch. Warps the image (mask channel
     re-binarized), transforms keypoints, and ANDs an in-bounds mask into vis.
 
@@ -210,6 +210,11 @@ def affine_batch(key, img4_u8, kp_xy, vis, *, rot_deg, scale_min, scale_max,
     the AND has nothing left to drop. Rotation is never modified. Set it False
     for the pre-2026-09-02 behaviour, which threw away 17-26% of the annotated
     keypoints on wall-adjacent crops -- read that function's docstring first.
+
+    ``n_fit``: only keypoint rows ``[:n_fit]`` constrain the fit. Rows beyond
+    are the OTHER fly's keypoints appended by ``data.distractor``; they ride
+    along through the same warp (and get the same in-bounds AND on their vis)
+    but must not pull the affine toward the distractor.
     """
     B, H, W = img4_u8.shape[0], img4_u8.shape[1], img4_u8.shape[2]
     k1, k2, k3, k4 = jax.random.split(key, 4)
@@ -219,8 +224,9 @@ def affine_batch(key, img4_u8, kp_xy, vis, *, rot_deg, scale_min, scale_max,
     ty = jax.random.uniform(k4, (B,), minval=-translate_frac, maxval=translate_frac)
 
     if keep_kp_in_bounds:
+        vis_fit = vis if n_fit is None else vis.at[:, n_fit:].set(False)
         theta, s, tx, ty, cen = fit_affine_to_bounds(
-            kp_xy, vis, theta, s, tx, ty, heatmap_size, bounds_margin, fit_center)
+            kp_xy, vis_fit, theta, s, tx, ty, heatmap_size, bounds_margin, fit_center)
     else:
         cen = jnp.full((B, 2), heatmap_size / 2.0, jnp.float32)
     # same point, expressed in image pixels (the crop is 2x the heatmap)
@@ -469,9 +475,13 @@ class AugParams:
     pc_color: float = 0.2      # per-channel multiply half-range (0 disables)
 
 
-def augment_batch(key, img4_u8, kp_xy, vis, params, lr_swap, heatmap_size=224):
+def augment_batch(key, img4_u8, kp_xy, vis, params, lr_swap, heatmap_size=224,
+                  n_fit=None):
     """Apply the full augmentation pipeline to a batch. Identity when
-    params.enabled is False. Order: affine -> flip -> cutout -> photometric."""
+    params.enabled is False. Order: affine -> flip -> cutout -> photometric.
+    ``n_fit``: see affine_batch -- keypoint rows beyond it (the other fly's,
+    from data.distractor) are warped/flipped like the rest but never constrain
+    the affine. ``lr_swap`` must then cover all rows (see train.make_train_step)."""
     if not params.enabled:
         return img4_u8, kp_xy, vis
     kg, kf, kc, kp_, kb, kn, kpc = jax.random.split(key, 7)
@@ -479,7 +489,7 @@ def augment_batch(key, img4_u8, kp_xy, vis, params, lr_swap, heatmap_size=224):
         kg, img4_u8, kp_xy, vis, rot_deg=params.rot_deg,
         scale_min=params.scale_min, scale_max=params.scale_max,
         translate_frac=params.translate_frac, heatmap_size=heatmap_size,
-        keep_kp_in_bounds=params.keep_kp_in_bounds)
+        keep_kp_in_bounds=params.keep_kp_in_bounds, n_fit=n_fit)
     img, kp, vis = flip_batch(kf, img, kp, vis, lr_swap, params.flip_p, heatmap_size)
     img = cutout_batch(kc, img, params.cutout_n, params.cutout_frac,
                        mask_target_p=params.cutout_mask_target_p,
