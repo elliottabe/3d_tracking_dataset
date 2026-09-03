@@ -46,7 +46,7 @@
 | `scripts/viz/mvq_overlay.py` (repo root `scripts/`) | figure gate 1 (and later gates 2, 4) |
 | `tests/test_dinov3.py`, `tests/test_mvq_geometry.py`, `tests/test_v12_windows.py`, `tests/test_mv_augment.py`, `tests/test_mvq_model.py`, `tests/test_mvq_losses.py`, `tests/test_train_mvq_smoke.py` | tests |
 
-Shared test fixture (Task 3 creates it, later tasks import it): `tests/mvq_fixtures.py` builds a synthetic v12-shaped root under `tmp_path` with 7 affine cameras, 1936x448 JPEGs, one recording, 3 consecutive frames, two flies in frame 1.
+Shared test fixture (Task 3 creates it, later tasks import it bare, `from mvq_fixtures import ...`, per the repo test convention — no `tests/__init__.py`): `tests/mvq_fixtures.py` builds a synthetic v12-shaped root under `tmp_path` with 7 affine cameras, 1936x448 JPEGs, one recording, 3 consecutive frames, two flies in frame 1.
 
 ---
 
@@ -878,7 +878,7 @@ def make_v12_root(tmp_path, *, n_frames=3, two_fly_frame=1, img_w=1936, img_h=44
 import json, os
 import numpy as np
 import pytest
-from tests.mvq_fixtures import make_v12_root, CAMS, REC, K
+from mvq_fixtures import make_v12_root, CAMS, REC, K
 
 
 def test_window_census_t1_and_t2(tmp_path):
@@ -1268,7 +1268,7 @@ Design notes: per-view affine samples `(theta, s, tx, ty)` per (sample, view) ab
 import numpy as np
 import jax, jax.numpy as jnp
 import pytest
-from tests.mvq_fixtures import make_v12_root
+from mvq_fixtures import make_v12_root
 
 
 def _batch(tmp_path, B=2):
@@ -2441,7 +2441,7 @@ Details:
 import os
 import numpy as np
 import pytest
-from tests.mvq_fixtures import make_v12_root
+from mvq_fixtures import make_v12_root
 
 
 def test_two_steps_cpu_and_eval(tmp_path):
