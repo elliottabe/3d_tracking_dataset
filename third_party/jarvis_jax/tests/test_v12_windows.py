@@ -1,7 +1,7 @@
 import json, os
 import numpy as np
 import pytest
-from tests.mvq_fixtures import make_v12_root, CAMS, REC, K
+from mvq_fixtures import make_v12_root, CAMS, REC, K
 
 
 def test_window_census_t1_and_t2(tmp_path):
