@@ -94,3 +94,25 @@ def test_batches_stack_and_weights(tmp_path):
     b = next(window_batches(ds, 2, shuffle=True, seed=0, weights=w, num_workers=2))
     assert b["crops"].shape == (2, 1, 7, 448, 448, 3)
     np.testing.assert_array_equal(b["center3D"][0], b["center3D"][1])   # only index 0 has weight
+
+
+def test_jitter_is_per_sample_reproducible_and_epoch_varying(tmp_path):
+    """Regression for concurrent-draw corruption: window_batches fetches
+    samples from a ThreadPoolExecutor, so a shared numpy Generator is unsafe.
+    Jitter must be a pure function of (seed, index, epoch)."""
+    from jarvis_jax.data.v12_windows import V12WindowDataset, window_batches
+    root = make_v12_root(tmp_path, n_frames=4)      # >=4 T=1 windows (fly0 x4)
+
+    d_a = V12WindowDataset(root, "train", T=1, train=True, jitter_units=3.0, seed=7)
+    d_b = V12WindowDataset(root, "train", T=1, train=True, jitter_units=3.0, seed=7)
+    np.testing.assert_array_equal(d_a[0]["center3D"], d_b[0]["center3D"])   # (a) same (seed,i,epoch)
+
+    d_a.epoch = 1
+    assert not np.array_equal(d_a[0]["center3D"], d_b[0]["center3D"])       # (b) epoch changes it
+
+    ds = V12WindowDataset(root, "train", T=1, train=True, jitter_units=3.0, seed=3)
+    assert len(ds) >= 4
+    serial = next(window_batches(ds, 4, shuffle=False, seed=3, num_workers=1))["center3D"]
+    ds2 = V12WindowDataset(root, "train", T=1, train=True, jitter_units=3.0, seed=3)
+    parallel = next(window_batches(ds2, 4, shuffle=False, seed=3, num_workers=4))["center3D"]
+    np.testing.assert_array_equal(serial, parallel)                        # (c) thread-count invariant

@@ -47,7 +47,8 @@ class V12WindowDataset:
                  train=True, recordings=None):
         self.root, self.split, self.T = root, split, int(T)
         self.max_flies, self.jitter, self.train = int(max_flies), float(jitter_units), bool(train)
-        self.rng = np.random.default_rng(seed)
+        self.seed = int(seed)
+        self.epoch = 0
         coco = json.load(open(os.path.join(root, "annotations", f"instances_{split}.json")))
         self.manifest = json.load(open(os.path.join(root, "manifest.json")))["recordings"]
         self.keypoint_names = list(coco["keypoint_names"])
@@ -167,7 +168,15 @@ class V12WindowDataset:
         pts = X3[0, 0][vis0] if vis0.any() else np.zeros((1, 3), np.float32)
         center = 0.5 * (pts.max(0) + pts.min(0))
         if self.train and self.jitter > 0:
-            center = center + self.rng.uniform(-self.jitter, self.jitter, size=3)
+            # Per-sample generator, not a shared self.rng: window_batches draws
+            # samples concurrently from a ThreadPoolExecutor, and a numpy
+            # Generator is not thread-safe for concurrent draws (corrupted or
+            # non-reproducible jitter). Seeding on (seed, index, epoch) keeps
+            # this deterministic and lock-free -- reproducible for a given
+            # (seed, i, epoch) regardless of thread interleaving, and varying
+            # across epochs since window_batches sets ds.epoch = seed.
+            rng = np.random.default_rng(np.random.SeedSequence([self.seed, int(i), int(self.epoch)]))
+            center = center + rng.uniform(-self.jitter, self.jitter, size=3)
         center = center.astype(np.float32)
 
         # --- crops around the projection of center (same origin for all frames of the window)
@@ -216,6 +225,7 @@ class V12WindowDataset:
 
 def window_batches(ds, batch_size, *, shuffle=True, seed=0, weights=None, num_workers=8,
                    drop_last=True):
+    ds.epoch = int(seed)                 # trainer passes a different seed per epoch
     rng = np.random.default_rng(seed)
     n = len(ds)
     if weights is not None:
