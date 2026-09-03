@@ -1,0 +1,39 @@
+{
+  "panelA_min_median_kp_px": 68.72046206168346,
+  "panelA_bbox_centroid_px": 68.09453986341333,
+  "panelA_image": "2026_06_18_19_23_03/Cam2012861/Frame_416555.jpg",
+  "n_two_fly_images": 499,
+  "min_median_kp_px": 68.72046206168346,
+  "min_bbox_centroid_px": 13.842694138064344,
+  "merged_pairs_below_SAME_FLY_PX": 0,
+  "panelB": {
+    "content_md5": "ac845845fc024e204dac54a6cb7d2971",
+    "camera": "Cam2012630",
+    "recording": "2026_06_09_15_38_35",
+    "frame": 13912,
+    "subsets": [
+      "headless_56_42_1_female",
+      "headless_56_42_female"
+    ],
+    "median_kp_px": 3.0
+  },
+  "totals": {
+    "train": {
+      "images": 17143,
+      "images_with_annotation": 17004,
+      "annotations": 17250,
+      "framesets": 2490,
+      "two_fly_images": 246
+    },
+    "val": {
+      "images": 1778,
+      "images_with_annotation": 1775,
+      "annotations": 2024,
+      "framesets": 291,
+      "two_fly_images": 249
+    },
+    "val_image_frac": 0.094,
+    "val_annotation_frac": 0.105,
+    "female_annotation_share": 0.0962
+  }
+}

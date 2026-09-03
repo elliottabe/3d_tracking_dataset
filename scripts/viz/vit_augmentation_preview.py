@@ -68,7 +68,7 @@ Usage
 -----
     unset LD_LIBRARY_PATH
     JAX_PLATFORMS=cpu python scripts/viz/vit_augmentation_preview.py \\
-        --root /gscratch/portia/eabe/data/Johnson_lab/red_data/red_data_3d_v5_valfix \\
+        --root /gscratch/portia/eabe/data/Johnson_lab/red_data/red_data_3d_v8_gm_only \\
         --out-dir figures/2026-09-02-vit-augmentations
 """
 from __future__ import annotations
@@ -1173,8 +1173,9 @@ def fig7_cutout_targeting(ds_item, names, p, out_png, caption, seed=0, ndraw=300
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
+    # red_data_3d_v5_valfix was deleted 2026-09-02; this is the current root.
     ap.add_argument("--root", default="/gscratch/portia/eabe/data/Johnson_lab/"
-                                      "red_data/red_data_3d_v5_valfix")
+                                      "red_data/red_data_3d_v8_gm_only")
     ap.add_argument("--split", default="train")
     ap.add_argument("--out-dir", default="figures/2026-09-02-vit-augmentations")
     ap.add_argument("--indices", type=int, nargs="*", default=None,

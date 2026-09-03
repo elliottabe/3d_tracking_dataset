@@ -1,0 +1,669 @@
+{
+  "source": "general_model ONLY (red_data_unified_V3 deliberately excluded)",
+  "n_subsets": 21,
+  "n_recordings": 18,
+  "n_image_refs": 19929,
+  "n_unique_content": 19334,
+  "n_captures": 2762,
+  "n_annotations": 19340,
+  "n_fly_samples": 2783,
+  "two_fly_images": 499,
+  "two_fly_deficit_vs_v3_root": {
+    "v3_based_root_two_fly_images": 1673,
+    "this_root_two_fly_images": 499,
+    "lost_annotations": 2321,
+    "lost_second_fly_annotations": 2014,
+    "v3_only_contents": 791,
+    "source_recordings": [
+      "2026_04_07_11_33_33",
+      "2026_04_08_14_59_45"
+    ],
+    "note": "V3 is the only source of the second animal's labels on the courtship_V2 capture. Dropping it costs those labels."
+  },
+  "sex": {
+    "read_from": "<general_model>/<subset>/sex.json",
+    "sidecars": {
+      "20_04_female_climbing": {
+        "sex": "female",
+        "sex_source": "dirname",
+        "citation": null
+      },
+      "S6male": {
+        "sex": "male",
+        "sex_source": "dirname",
+        "citation": null
+      },
+      "S8_male_R_amp": {
+        "sex": "male",
+        "sex_source": "dirname",
+        "citation": null
+      },
+      "S9_male_L_amp": {
+        "sex": "male",
+        "sex_source": "dirname",
+        "citation": null
+      },
+      "courtship_11_50_female": {
+        "sex": "female",
+        "sex_source": "dirname",
+        "citation": null
+      },
+      "courtship_11_50_male": {
+        "sex": "male",
+        "sex_source": "dirname",
+        "citation": null
+      },
+      "courtship_25_51_female": {
+        "sex": "female",
+        "sex_source": "dirname",
+        "citation": null
+      },
+      "courtship_25_51_male": {
+        "sex": "male",
+        "sex_source": "dirname",
+        "citation": null
+      },
+      "courtship_28_34_female": {
+        "sex": "female",
+        "sex_source": "dirname",
+        "citation": null
+      },
+      "courtship_28_34_male": {
+        "sex": "male",
+        "sex_source": "dirname",
+        "citation": null
+      },
+      "courtship_V2": {
+        "sex": "male",
+        "sex_source": "user_statement_2026_09_02",
+        "citation": "user, 2026-09-02: 'courtship_V2/V3/V4, grooming ... are all male, the wall_frames are female'; corrected for headless: '22_50 is female, 24_04 is male, 38_35 [=headless_56_42, rec 2026_06_09_15_38_35] is female', then '24_04_1 is male and 56_42_1 is female'. The 2026-09-02 renames encode these in the directory names."
+      },
+      "courtship_V3": {
+        "sex": "male",
+        "sex_source": "user_statement_2026_09_02",
+        "citation": "user, 2026-09-02: 'courtship_V2/V3/V4, grooming ... are all male, the wall_frames are female'; corrected for headless: '22_50 is female, 24_04 is male, 38_35 [=headless_56_42, rec 2026_06_09_15_38_35] is female', then '24_04_1 is male and 56_42_1 is female'. The 2026-09-02 renames encode these in the directory names."
+      },
+      "courtship_V4": {
+        "sex": "male",
+        "sex_source": "user_statement_2026_09_02",
+        "citation": "user, 2026-09-02: 'courtship_V2/V3/V4, grooming ... are all male, the wall_frames are female'; corrected for headless: '22_50 is female, 24_04 is male, 38_35 [=headless_56_42, rec 2026_06_09_15_38_35] is female', then '24_04_1 is male and 56_42_1 is female'. The 2026-09-02 renames encode these in the directory names."
+      },
+      "female": {
+        "sex": "female",
+        "sex_source": "dirname",
+        "citation": null
+      },
+      "grooming": {
+        "sex": "male",
+        "sex_source": "user_statement_2026_09_02",
+        "citation": "user, 2026-09-02: 'courtship_V2/V3/V4, grooming ... are all male, the wall_frames are female'; corrected for headless: '22_50 is female, 24_04 is male, 38_35 [=headless_56_42, rec 2026_06_09_15_38_35] is female', then '24_04_1 is male and 56_42_1 is female'. The 2026-09-02 renames encode these in the directory names."
+      },
+      "headless_22_50_female": {
+        "sex": "female",
+        "sex_source": "dirname",
+        "citation": null
+      },
+      "headless_24_04_1_male": {
+        "sex": "male",
+        "sex_source": "dirname",
+        "citation": null
+      },
+      "headless_24_04_male": {
+        "sex": "male",
+        "sex_source": "dirname",
+        "citation": null
+      },
+      "headless_56_42_1_female": {
+        "sex": "female",
+        "sex_source": "dirname",
+        "citation": null
+      },
+      "headless_56_42_female": {
+        "sex": "female",
+        "sex_source": "dirname",
+        "citation": null
+      },
+      "wall_frames": {
+        "sex": "female",
+        "sex_source": "user_statement_2026_09_02",
+        "citation": "user, 2026-09-02: 'courtship_V2/V3/V4, grooming ... are all male, the wall_frames are female'; corrected for headless: '22_50 is female, 24_04 is male, 38_35 [=headless_56_42, rec 2026_06_09_15_38_35] is female', then '24_04_1 is male and 56_42_1 is female'. The 2026-09-02 renames encode these in the directory names."
+      }
+    },
+    "n_female_subsets": 9,
+    "n_male_subsets": 12,
+    "note": "No general_model annotation carries a sex field (checked, all 19,382). Sex is read from the per-subset sidecar that travels with the data; there is no table in the build script and no name-parsing fallback. Nothing is inferred from an image; body size is explicitly NOT used."
+  },
+  "composition": {
+    "totals": {
+      "train": {
+        "images": 17143,
+        "images_with_annotation": 17004,
+        "annotations": 17250,
+        "framesets": 2490,
+        "two_fly_images": 246
+      },
+      "val": {
+        "images": 1778,
+        "images_with_annotation": 1775,
+        "annotations": 2024,
+        "framesets": 291,
+        "two_fly_images": 249
+      },
+      "val_image_frac": 0.094,
+      "val_annotation_frac": 0.105,
+      "female_annotation_share": 0.0962
+    },
+    "per_subset": {
+      "S6male": {
+        "train": {
+          "images": 3335,
+          "anns": 3335
+        }
+      },
+      "female": {
+        "train": {
+          "images": 616,
+          "anns": 616
+        },
+        "val": {
+          "images": 70,
+          "anns": 70
+        }
+      },
+      "S9_male_L_amp": {
+        "train": {
+          "images": 2085,
+          "anns": 2085
+        }
+      },
+      "S8_male_R_amp": {
+        "train": {
+          "images": 1330,
+          "anns": 1330
+        }
+      },
+      "courtship_V2": {
+        "train": {
+          "images": 3220,
+          "anns": 3220
+        }
+      },
+      "courtship_V4": {
+        "train": {
+          "images": 539,
+          "anns": 539
+        }
+      },
+      "grooming": {
+        "train": {
+          "images": 4592,
+          "anns": 4592
+        }
+      },
+      "headless_24_04_male": {
+        "train": {
+          "images": 462,
+          "anns": 462
+        }
+      },
+      "headless_56_42_female": {
+        "train": {
+          "images": 217,
+          "anns": 217
+        }
+      },
+      "headless_56_42_1_female": {
+        "train": {
+          "images": 168,
+          "anns": 168
+        }
+      },
+      "courtship_28_34_female": {
+        "train": {
+          "images": 251,
+          "anns": 251
+        }
+      },
+      "courtship_28_34_male": {
+        "train": {
+          "images": 302,
+          "anns": 302
+        }
+      },
+      "wall_frames": {
+        "train": {
+          "images": 28,
+          "anns": 28
+        }
+      },
+      "20_04_female_climbing": {
+        "train": {
+          "images": 105,
+          "anns": 105
+        }
+      },
+      "courtship_V3": {
+        "val": {
+          "images": 958,
+          "anns": 958
+        }
+      },
+      "courtship_11_50_female": {
+        "val": {
+          "images": 103,
+          "anns": 103
+        }
+      },
+      "courtship_11_50_male": {
+        "val": {
+          "images": 105,
+          "anns": 105
+        }
+      },
+      "headless_24_04_1_male": {
+        "val": {
+          "images": 341,
+          "anns": 341
+        }
+      },
+      "headless_22_50_female": {
+        "val": {
+          "images": 140,
+          "anns": 140
+        }
+      },
+      "courtship_25_51_female": {
+        "val": {
+          "images": 157,
+          "anns": 157
+        }
+      },
+      "courtship_25_51_male": {
+        "val": {
+          "images": 150,
+          "anns": 150
+        }
+      }
+    },
+    "per_sex": {
+      "male": {
+        "train": {
+          "images": 15619,
+          "anns": 15865
+        },
+        "val": {
+          "images": 1305,
+          "anns": 1554
+        }
+      },
+      "female": {
+        "train": {
+          "images": 1139,
+          "anns": 1385
+        },
+        "val": {
+          "images": 221,
+          "anns": 470
+        }
+      },
+      "mixed": {
+        "train": {
+          "images": 246,
+          "anns": 0
+        },
+        "val": {
+          "images": 249,
+          "anns": 0
+        }
+      }
+    },
+    "per_calib_group": {
+      "A": {
+        "train": {
+          "images": 13140,
+          "anns": 13386
+        },
+        "val": {
+          "images": 712,
+          "anns": 858
+        }
+      },
+      "B": {
+        "train": {
+          "images": 3864,
+          "anns": 3864
+        },
+        "val": {
+          "images": 958,
+          "anns": 958
+        }
+      },
+      "C": {
+        "val": {
+          "images": 105,
+          "anns": 208
+        }
+      }
+    },
+    "per_sex_source": {
+      "dirname": {
+        "train": {
+          "images": 8625,
+          "anns": 8871
+        },
+        "val": {
+          "images": 817,
+          "anns": 1066
+        }
+      },
+      "user_statement_2026_09_02": {
+        "train": {
+          "images": 8379,
+          "anns": 8379
+        },
+        "val": {
+          "images": 958,
+          "anns": 958
+        }
+      }
+    },
+    "female_budget": {
+      "female_anns_train": 1385,
+      "female_anns_val": 470,
+      "female_val_share_of_all_female": 0.2534
+    }
+  },
+  "split_policy": {
+    "ignored_general_model_own_splits": true,
+    "holdout_unit": "alias component (byte-identity), atom = whole capture (all cameras of a frame, all flies)",
+    "val_whole_components": [
+      "2026_03_18_15_31_22",
+      "2026_06_09_15_21_14"
+    ],
+    "val_components_force_female_inclusive": [
+      "2026_05_27_11_56_05",
+      "2026_06_18_19_23_03",
+      "2026_06_09_15_46_55"
+    ],
+    "train_components_force": [
+      "2026_06_15_12_12_33",
+      "2026_08_26_16_05_15",
+      "2026_06_09_15_38_35",
+      "2026_07_30_13_28_99"
+    ],
+    "female_tail_rule": "female-inclusive components not named above give their last `female_val_frac` of frames to val behind a `guard`-frame band; same-session, so OPTIMISTIC",
+    "controlled_sex_contrast": {
+      "regime": "headless",
+      "female": "headless_22_50_female (val, unseen session)",
+      "male": "headless_24_04_1_male (val, unseen session)",
+      "why": "the only female-vs-male comparison in this split that is not confounded by behaviour"
+    },
+    "female_val_is_two_tiered": {
+      "unseen_session": [
+        "courtship_11_50_female",
+        "courtship_25_51_female",
+        "headless_22_50_female"
+      ],
+      "same_session_optimistic": [
+        "female (guarded tail)"
+      ],
+      "why": "never average these into one headline number"
+    },
+    "regimes_with_no_val_coverage": [
+      "grooming (1 component, 4,592 img -- whole holdout would erase 24% of the corpus's only grooming session)",
+      "general male S6male (1 component)",
+      "amputation S8/S9 (kept in train; not a pipeline eval target)",
+      "female climbing (1 component, 15 fs)",
+      "female wall (1 component, 7 viable fs / ~28 anns) -- see TRAIN_COMPONENTS_FORCE; judge GT-free"
+    ]
+  },
+  "ambiguous_same_animal_slots": 21,
+  "ambiguous_examples": [
+    {
+      "content_md5": "ac845845fc024e204dac54a6cb7d2971",
+      "camera": "Cam2012630",
+      "recording": "2026_06_09_15_38_35",
+      "frame": 13912,
+      "subsets": [
+        "headless_56_42_1_female",
+        "headless_56_42_female"
+      ],
+      "median_kp_px": 3.0
+    },
+    {
+      "content_md5": "7bdf333d6d0de443c45480a7e08f3ebf",
+      "camera": "Cam2012631",
+      "recording": "2026_06_09_15_38_35",
+      "frame": 13912,
+      "subsets": [
+        "headless_56_42_1_female",
+        "headless_56_42_female"
+      ],
+      "median_kp_px": 3.0
+    },
+    {
+      "content_md5": "3ce89934bc1c66c447261bd56eb4455e",
+      "camera": "Cam2012853",
+      "recording": "2026_06_09_15_38_35",
+      "frame": 13912,
+      "subsets": [
+        "headless_56_42_1_female",
+        "headless_56_42_female"
+      ],
+      "median_kp_px": 3.16
+    },
+    {
+      "content_md5": "19c8df5cbe432e87c8f578c8100ea56d",
+      "camera": "Cam2012855",
+      "recording": "2026_06_09_15_38_35",
+      "frame": 13912,
+      "subsets": [
+        "headless_56_42_1_female",
+        "headless_56_42_female"
+      ],
+      "median_kp_px": 3.16
+    },
+    {
+      "content_md5": "cd87ece351191248fed6bbb632e1fc69",
+      "camera": "Cam2012857",
+      "recording": "2026_06_09_15_38_35",
+      "frame": 13912,
+      "subsets": [
+        "headless_56_42_1_female",
+        "headless_56_42_female"
+      ],
+      "median_kp_px": 3.0
+    },
+    {
+      "content_md5": "4e8e60ad19b3be510d80b2444c11195f",
+      "camera": "Cam2012861",
+      "recording": "2026_06_09_15_38_35",
+      "frame": 13912,
+      "subsets": [
+        "headless_56_42_1_female",
+        "headless_56_42_female"
+      ],
+      "median_kp_px": 3.0
+    },
+    {
+      "content_md5": "e90aa1164df8ce3e799acc41eeb4bc5e",
+      "camera": "Cam2012862",
+      "recording": "2026_06_09_15_38_35",
+      "frame": 13912,
+      "subsets": [
+        "headless_56_42_1_female",
+        "headless_56_42_female"
+      ],
+      "median_kp_px": 3.0
+    },
+    {
+      "content_md5": "559d2d01c2c39646649a2efb68ec5ec9",
+      "camera": "Cam2012630",
+      "recording": "2026_06_15_12_12_33",
+      "frame": 621799,
+      "subsets": [
+        "courtship_28_34_female",
+        "courtship_28_34_male"
+      ],
+      "median_kp_px": 7.21
+    },
+    {
+      "content_md5": "aa5df14d7cd0f2e21d27a9fe88f0ebe3",
+      "camera": "Cam2012631",
+      "recording": "2026_06_15_12_12_33",
+      "frame": 621799,
+      "subsets": [
+        "courtship_28_34_female",
+        "courtship_28_34_male"
+      ],
+      "median_kp_px": 5.66
+    },
+    {
+      "content_md5": "7336cebb716082b279f59309b2c2c007",
+      "camera": "Cam2012853",
+      "recording": "2026_06_15_12_12_33",
+      "frame": 621799,
+      "subsets": [
+        "courtship_28_34_female",
+        "courtship_28_34_male"
+      ],
+      "median_kp_px": 8.54
+    },
+    {
+      "content_md5": "e43377bf939ab77f61b82f3298ea1a0e",
+      "camera": "Cam2012855",
+      "recording": "2026_06_15_12_12_33",
+      "frame": 621799,
+      "subsets": [
+        "courtship_28_34_female",
+        "courtship_28_34_male"
+      ],
+      "median_kp_px": 8.77
+    },
+    {
+      "content_md5": "de1257a795decddb63ab45a789a56ba2",
+      "camera": "Cam2012857",
+      "recording": "2026_06_15_12_12_33",
+      "frame": 621799,
+      "subsets": [
+        "courtship_28_34_female",
+        "courtship_28_34_male"
+      ],
+      "median_kp_px": 6.89
+    },
+    {
+      "content_md5": "88a96f9198510f61c91f0c8a147b7d6a",
+      "camera": "Cam2012861",
+      "recording": "2026_06_15_12_12_33",
+      "frame": 621799,
+      "subsets": [
+        "courtship_28_34_female",
+        "courtship_28_34_male"
+      ],
+      "median_kp_px": 7.04
+    },
+    {
+      "content_md5": "0fdfd4d741e1514ff67c96fb99de579d",
+      "camera": "Cam2012862",
+      "recording": "2026_06_15_12_12_33",
+      "frame": 621799,
+      "subsets": [
+        "courtship_28_34_female",
+        "courtship_28_34_male"
+      ],
+      "median_kp_px": 6.0
+    },
+    {
+      "content_md5": "3d5993cc3af60543457dd76994b87a38",
+      "camera": "Cam2012630",
+      "recording": "2026_06_15_12_12_33",
+      "frame": 621803,
+      "subsets": [
+        "courtship_28_34_female",
+        "courtship_28_34_male"
+      ],
+      "median_kp_px": 7.81
+    },
+    {
+      "content_md5": "9b8153f35adcc88e62619504267ff0a0",
+      "camera": "Cam2012631",
+      "recording": "2026_06_15_12_12_33",
+      "frame": 621803,
+      "subsets": [
+        "courtship_28_34_female",
+        "courtship_28_34_male"
+      ],
+      "median_kp_px": 5.69
+    },
+    {
+      "content_md5": "024b9dde10b3021d3779e01e201c8188",
+      "camera": "Cam2012853",
+      "recording": "2026_06_15_12_12_33",
+      "frame": 621803,
+      "subsets": [
+        "courtship_28_34_female",
+        "courtship_28_34_male"
+      ],
+      "median_kp_px": 9.08
+    },
+    {
+      "content_md5": "d96cdd88d26ef88e2f693b1ad9496865",
+      "camera": "Cam2012855",
+      "recording": "2026_06_15_12_12_33",
+      "frame": 621803,
+      "subsets": [
+        "courtship_28_34_female",
+        "courtship_28_34_male"
+      ],
+      "median_kp_px": 8.57
+    },
+    {
+      "content_md5": "3197a9cff0adb4f13f92834c9b2ca998",
+      "camera": "Cam2012857",
+      "recording": "2026_06_15_12_12_33",
+      "frame": 621803,
+      "subsets": [
+        "courtship_28_34_female",
+        "courtship_28_34_male"
+      ],
+      "median_kp_px": 7.21
+    },
+    {
+      "content_md5": "96507780dedf531ceac01fd0a7d2401e",
+      "camera": "Cam2012861",
+      "recording": "2026_06_15_12_12_33",
+      "frame": 621803,
+      "subsets": [
+        "courtship_28_34_female",
+        "courtship_28_34_male"
+      ],
+      "median_kp_px": 6.96
+    }
+  ],
+  "split_audit": {
+    "cross_recording_leaks": 0,
+    "min_guard_distance": {
+      "2026_01_29_14_09_33": 280
+    },
+    "val_frac": 0.104638619201726,
+    "cross_fly_leaked_frames": 0,
+    "leaky_frame_ids": [],
+    "cross_capture_leaks": 0,
+    "leaky_capture_ids": [],
+    "content_overlap": 0,
+    "content_overlap_examples": [],
+    "val_content": 1778,
+    "train_content": 17143
+  },
+  "val_recordings": [
+    "2026_03_18_15_31_22",
+    "2026_06_09_15_21_14"
+  ],
+  "val_components_force": [
+    "2026_05_27_11_56_05",
+    "2026_06_18_19_23_03",
+    "2026_06_09_15_46_55"
+  ],
+  "guard": 200,
+  "female_val_frac": 0.1
+}
