@@ -105,12 +105,25 @@ class MVQModel(nnx.Module):
         return out
 
 
-def assemble(out, center3D, crop_origin, exist_thresh=0.5):
-    """numpy: model outputs -> world kp3d (NaN where absent), conf3d, full-frame kp2d."""
+def assemble(out, center3D, crop_origin, exist_thresh=0.5, cam_valid=None):
+    """numpy: model outputs -> world kp3d (NaN where absent), conf3d, full-frame kp2d.
+
+    Two independent halves of spec Sec 4.6's NaN policy: an instance that
+    doesn't exist (`exist_logit` below threshold) is NaN across every frame
+    and keypoint; a FRAME with no valid camera at all (`cam_valid`, when
+    given) is NaN across every instance and keypoint for that frame -- there
+    is no observation to have triangulated a keypoint from. Per-keypoint
+    visibility gating (a keypoint occluded in every view but the frame
+    otherwise fine) is deferred to the P4 lifter, not this assembly step.
+    """
     xyz, conf = np.asarray(out["xyz"]), 1 / (1 + np.exp(-np.asarray(out["conf_logit"])))
     exist = 1 / (1 + np.exp(-np.asarray(out["exist_logit"]))) >= exist_thresh                 # (B,I)
     kp3d = xyz + np.asarray(center3D)[:, None, None, None, :]
     kp3d = np.where(exist[:, :, None, None, None], kp3d, np.nan)
     conf3d = np.where(exist[:, :, None, None], conf, 0.0)
+    if cam_valid is not None:
+        frame_ok = np.asarray(cam_valid).any(axis=2)                                          # (B,T)
+        kp3d = np.where(frame_ok[:, None, :, None, None], kp3d, np.nan)
+        conf3d = np.where(frame_ok[:, None, :, None], conf3d, 0.0)
     kp2d = np.asarray(out["uv"]) + np.asarray(crop_origin)[:, None, None, :, None, :]
     return kp3d.astype(np.float32), conf3d.astype(np.float32), kp2d.astype(np.float32)

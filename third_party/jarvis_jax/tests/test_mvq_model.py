@@ -4,7 +4,7 @@ import pytest
 from flax import nnx
 
 TINY = dict(crop=64, patch=16, embed_dim=32, num_keypoints=5, num_cameras=3, max_frames=4,
-            n_instances=2, n_local=1, n_global=1, global_pool=2, dec_layers_3d=2, dec_layers_2d=1,
+            n_instances=2, n_local=1, n_global=1, global_pool=2, dec_layers_3d=4, dec_layers_2d=1,
             dec_heads=4, mlp_ratio=2.0, refine_passes=1, patch_rgb=3, fourier_bands=4,
             roi_scale=24.0, backbone_depth=1, backbone_heads=4, remat=False)
 
@@ -37,7 +37,18 @@ def test_output_shapes_and_aux():
     assert out["uv"].shape == (B, I, T, C, K, 2) and out["vis_logit"].shape == (B, I, T, C, K)
     assert out["aux_pass1"] is not None and set(out["aux_pass1"]) >= {"xyz", "uv", "conf_logit", "vis_logit", "exist_logit"}
     assert isinstance(out["aux_layers"], list) and all("xyz" in a for a in out["aux_layers"])
+    # dec_layers_3d=4 gives one deep-supervision readout (layer index 1) per
+    # decoder() call; refine_passes=1 means two calls (pass 1 + the refine
+    # pass), so exactly 2 entries -- pins the non-empty case fix-round-1 asked for.
+    assert len(out["aux_layers"]) == 2
     assert bool(jnp.isfinite(out["xyz"]).all()) and bool((out["uv"] >= 0).all()) and bool((out["uv"] <= 64).all())
+    # heads.xyz init: small-scale, not zero (see decoder.py Heads NOTE). At
+    # fresh init refine_in/e_pass are zero, so pass 2's query equals pass 1's
+    # and the residual add exactly doubles pass 1's xyz -- pin both the small
+    # magnitude and the exact doubling so a future init-scale change is caught.
+    assert float(jnp.abs(out["xyz"]).max()) < 1.0
+    doubling_err = jnp.abs(out["xyz"] - 2 * out["aux_pass1"]["xyz"])
+    assert float(doubling_err.max()) < 1e-4
 
 
 def test_invalid_camera_does_not_influence_outputs():
@@ -93,3 +104,36 @@ def test_assemble_nan_policy():
                                   crop_origin=np.zeros((B, C, 2)), exist_thresh=0.5)
     assert np.isnan(kp3d[0, 1]).all() and (conf3d[0, 1] == 0).all()
     np.testing.assert_allclose(kp3d[0, 0, 0, 0], [1.0, 2.0, 3.0])
+
+    # cam_valid: a frame with NO valid camera at all must be NaN/conf-0 for
+    # every instance and keypoint in that frame, independent of exist_logit
+    # (both instances "exist" here) -- the other half of spec Sec 4.6's NaN
+    # policy that exist_thresh alone does not cover.
+    T2 = 2
+    out2 = {"xyz": np.ones((B, I, T2, K, 3), np.float32), "conf_logit": np.ones((B, I, T2, K), np.float32),
+            "exist_logit": np.array([[3.0, 3.0]], np.float32),
+            "uv": np.zeros((B, I, T2, C, K, 2), np.float32), "vis_logit": np.zeros((B, I, T2, C, K), np.float32)}
+    cam_valid = np.ones((B, T2, C), bool)
+    cam_valid[0, 0, :] = False
+    kp3d2, conf3d2, _ = assemble(out2, center3D=np.array([[1.0, 2.0, 3.0]]),
+                                 crop_origin=np.zeros((B, C, 2)), exist_thresh=0.5, cam_valid=cam_valid)
+    assert np.isnan(kp3d2[0, :, 0]).all() and (conf3d2[0, :, 0] == 0).all()
+    assert np.isfinite(kp3d2[0, :, 1]).all() and (conf3d2[0, :, 1] > 0).all()
+
+
+def test_masked_attention_chunked_matches_unchunked():
+    """Chunked (q_chunk=8) and unchunked (q_chunk=None) attention must agree
+    to float32 tolerance for the same non-trivial key mask: attention is
+    independent per query row, so chunking only trades memory for a bit of
+    extra sequencing, never changes the numbers."""
+    from jarvis_jax.models.mvq.fusion import masked_attention
+    rng = np.random.default_rng(0)
+    B, Nq, Nk, H, D = 2, 30, 17, 4, 32
+    q = jnp.asarray(rng.normal(size=(B, Nq, D)).astype(np.float32))
+    k = jnp.asarray(rng.normal(size=(B, Nk, D)).astype(np.float32))
+    v = jnp.asarray(rng.normal(size=(B, Nk, D)).astype(np.float32))
+    key_valid = jnp.asarray(rng.uniform(size=(B, Nk)) > 0.3)
+    key_valid = key_valid.at[:, 0].set(True)  # keep >=1 valid key per row, avoid an all-masked degenerate case
+    full = masked_attention(q, k, v, key_valid, H, q_chunk=None)
+    chunked = masked_attention(q, k, v, key_valid, H, q_chunk=8)
+    np.testing.assert_allclose(np.asarray(full), np.asarray(chunked), atol=1e-5)

@@ -25,29 +25,33 @@ class CrossBlock(nnx.Module):
         self.ca = Attn(D, heads, rngs=rngs)
         self.nm = nnx.LayerNorm(D, rngs=rngs); self.mlp = MLP(D, ratio, rngs=rngs)
 
-    def __call__(self, q, bank, bank_valid):
+    def __call__(self, q, bank, bank_valid, q_chunk: int | None = 512):
         if self.self_attn:
             h = self.ns(q); ok = jnp.ones(q.shape[:2], bool)
-            q = q + self.sa(h, h, ok)
-        q = q + self.ca(self.nq(q), self.nk(bank), bank_valid)
+            q = q + self.sa(h, h, ok, q_chunk)
+        q = q + self.ca(self.nq(q), self.nk(bank), bank_valid, q_chunk)
         return q + self.mlp(self.nm(q))
 
 
 class Heads(nnx.Module):
     def __init__(self, D, *, rngs):
-        # NOTE(deviation from brief): the brief zero-initialises this kernel so
-        # "pass 2 starts as an identity refinement" (both passes read 0 at
-        # init). But with BOTH kernel and bias at zero, a Linear is the zero
-        # function for every input -- xyz is then identically 0 regardless of
-        # the query, at every training step until gradients move it, which
-        # makes it impossible for the prompt token (or anything else) to ever
-        # show up in xyz at init. That breaks
-        # test_prompt_changes_only_instance_zero_when_on, which needs a
-        # genuine (if small) init-time signal. Use the default (non-zero)
-        # kernel init instead; the refinement pass still starts near-identity
-        # because `refine_in` and `e_pass` are zero-initialised, so pass 2's
-        # query is (almost) identical to pass 1's at init.
-        self.xyz = nnx.Linear(D, 3, rngs=rngs)
+        # NOTE(deviation from brief, fix round 1): the brief zero-initialises
+        # this kernel AND leaves the default (also zero) bias, so at init a
+        # Linear with both zero is the zero function for every input -- xyz
+        # is then identically 0 regardless of the query, forever, which
+        # breaks test_prompt_changes_only_instance_zero_when_on (the prompt
+        # can never show up in an output that is a hard constant). The first
+        # fix (default kernel init) over-corrected the other way: because
+        # `refine_in` and `e_pass` are zero-initialised, pass 2's query is
+        # (almost) identical to pass 1's at init, so a *default-scale* kernel
+        # made the final xyz exactly ~2x pass 1's (mean |xyz| 34.7 -> 69.4 on
+        # TINY, ~3x the ROI radius) -- correct in sign but far too large to
+        # call "near-identity". Use a small-scale (not zero) kernel instead:
+        # small enough that init |xyz| is a fraction of a ROI unit (pinned by
+        # test_output_shapes_and_aux to < 1.0 and to the exact 2x-doubling
+        # relationship against aux_pass1), non-zero enough that the query
+        # still shows up in the output for the prompt test.
+        self.xyz = nnx.Linear(D, 3, rngs=rngs, kernel_init=nnx.initializers.normal(1e-3))
         self.conf = nnx.Linear(D, 1, rngs=rngs)
         self.exist = nnx.Linear(D, 1, rngs=rngs)
         self.uv = nnx.Linear(D, 2, rngs=rngs, kernel_init=nnx.initializers.zeros)
@@ -85,7 +89,9 @@ class QueryDecoder(nnx.Module):
         q = base + gcam[:, None, None, :, None, :] + femb[None, None, :, None, None, :]
         q = q.reshape(B, I * T * C * K, -1)
         for blk in self.blocks2d:
-            q = blk(q, bank, bank_valid)
+            fn = (nnx.remat(lambda m, qq: m(qq, bank, bank_valid)) if self.cfg.remat
+                  else (lambda m, qq: m(qq, bank, bank_valid)))
+            q = fn(blk, q)
         q = q.reshape(B, I, T, C, K, -1)
         return {"uv": self.cfg.crop * jax.nn.sigmoid(self.heads.uv(q)),
                 "vis_logit": self.heads.vis(q)[..., 0]}
@@ -108,7 +114,9 @@ class QueryDecoder(nnx.Module):
         q = q.reshape(B, I * T * K, -1)
         per_layer = []
         for li, blk in enumerate(self.blocks3d):
-            q = blk(q, bank, bank_valid)
+            fn = (nnx.remat(lambda m, qq: m(qq, bank, bank_valid)) if cfg.remat
+                  else (lambda m, qq: m(qq, bank, bank_valid)))
+            q = fn(blk, q)
             if li % 2 == 1 and li != len(self.blocks3d) - 1:
                 per_layer.append(self._read3d(q, I, T, K))
         out = self._read3d(q, I, T, K)

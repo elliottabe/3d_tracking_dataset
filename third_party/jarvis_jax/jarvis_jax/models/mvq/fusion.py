@@ -6,16 +6,40 @@ import jax.numpy as jnp
 from flax import nnx
 
 
-def masked_attention(q, k, v, key_valid, num_heads):
-    """q (B,Nq,D), k/v (B,Nk,D), key_valid (B,Nk) bool -> (B,Nq,D)."""
+def masked_attention(q, k, v, key_valid, num_heads, q_chunk: int | None = 512):
+    """q (B,Nq,D), k/v (B,Nk,D), key_valid (B,Nk) bool -> (B,Nq,D).
+
+    Materialising the full (B,heads,Nq,Nk) logits is the memory bottleneck of
+    every decoder block: at the shipped config the 2D path alone is
+    2100 queries x 10976 keys x 12 heads ~= 1.1GB per sample per layer. When
+    `q_chunk` is set and `Nq > q_chunk`, the query axis is processed in
+    chunks of `q_chunk` via `jax.lax.map` (sequential, not vmapped) so peak
+    logits are (B,heads,q_chunk,Nk) instead of (B,heads,Nq,Nk); math is
+    identical to the unchunked path because attention is independent per
+    query row, so chunking only trades memory for a bit of extra sequencing.
+    """
     B, Nq, D = q.shape; Nk = k.shape[1]; hd = D // num_heads
-    qh = q.reshape(B, Nq, num_heads, hd).transpose(0, 2, 1, 3)
     kh = k.reshape(B, Nk, num_heads, hd).transpose(0, 2, 1, 3)
     vh = v.reshape(B, Nk, num_heads, hd).transpose(0, 2, 1, 3)
-    logits = (qh @ kh.transpose(0, 1, 3, 2)) * (hd ** -0.5)
-    logits = jnp.where(key_valid[:, None, None, :], logits, -1e9)
-    att = jax.nn.softmax(logits, axis=-1)
-    return (att @ vh).transpose(0, 2, 1, 3).reshape(B, Nq, D)
+
+    def attend(qh):                                        # qh (B,heads,n,hd) -> (B,heads,n,hd)
+        logits = (qh @ kh.transpose(0, 1, 3, 2)) * (hd ** -0.5)
+        logits = jnp.where(key_valid[:, None, None, :], logits, -1e9)
+        att = jax.nn.softmax(logits, axis=-1)
+        return att @ vh
+
+    if q_chunk is None or Nq <= q_chunk:
+        qh = q.reshape(B, Nq, num_heads, hd).transpose(0, 2, 1, 3)
+        return attend(qh).transpose(0, 2, 1, 3).reshape(B, Nq, D)
+
+    n_chunks = -(-Nq // q_chunk)                             # ceil division
+    pad = n_chunks * q_chunk - Nq
+    q_pad = jnp.pad(q, ((0, 0), (0, pad), (0, 0))) if pad else q
+    qh = q_pad.reshape(B, n_chunks, q_chunk, num_heads, hd)
+    qh = jnp.moveaxis(qh, (1, 3), (0, 2))                    # (n_chunks,B,heads,q_chunk,hd)
+    out = jax.lax.map(attend, qh)                            # (n_chunks,B,heads,q_chunk,hd)
+    out = jnp.moveaxis(out, (0, 2), (1, 3))                  # (B,n_chunks,q_chunk,heads,hd)
+    return out.reshape(B, n_chunks * q_chunk, D)[:, :Nq]
 
 
 class Attn(nnx.Module):
@@ -23,8 +47,8 @@ class Attn(nnx.Module):
         self.q, self.k, self.v, self.o = (nnx.Linear(D, D, rngs=rngs) for _ in range(4))
         self.heads = heads
 
-    def __call__(self, x, ctx, ctx_valid):
-        return self.o(masked_attention(self.q(x), self.k(ctx), self.v(ctx), ctx_valid, self.heads))
+    def __call__(self, x, ctx, ctx_valid, q_chunk: int | None = 512):
+        return self.o(masked_attention(self.q(x), self.k(ctx), self.v(ctx), ctx_valid, self.heads, q_chunk))
 
 
 class MLP(nnx.Module):
