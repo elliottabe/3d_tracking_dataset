@@ -33,6 +33,16 @@ warm_start: ''
 # unchanged behaviour. See
 # .superpowers/sdd/2026-08-29-coarse-to-fine-3d/mask-channel-ablation.md
 mask_ablation: false
+# Recording whose val annotations form the per-cohort "female" MPJPE printed
+# beside the full-val number at every eval. MUST exist in the root's val
+# split: run_training raises otherwise (an empty cohort would otherwise report
+# a perfect 0.000px -- the whole v12_bal_maskoff run did exactly that because
+# this value was a hardcoded default and 2026_05_27_11_56_05 had been re-filed
+# as 2026_04_02_12_11_50). On red_data_3d_v12_export0902 the pure-female val
+# recording is 2026_06_09_15_46_55 (headless_22_50_female, 140 anns); the
+# courtship val recordings 2026_04_02_12_11_50 / _15_25_51 hold BOTH sexes.
+# Logging only -- does not change what is trained on.
+val_recording: '2026_06_09_15_46_55'
 # Center-channel (instance-cue) ablation arm: 4th input channel = a Gaussian
 # at the TARGET fly's own bbox center, replacing the SAM mask, instead of
 # zeroing it (mask_ablation above). Mutually exclusive with mask_ablation.

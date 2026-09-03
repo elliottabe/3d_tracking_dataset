@@ -431,6 +431,17 @@ def main_from_cfg(cfg):
     # run's own run_dir/ckpt_dir -- see run_training's warm_start handling.
     # '' -> None so run_training's `if warm_start:` is unambiguously off.
     warm_start = cfg.train.get("warm_start", "") or None
+    # Per-cohort val recording (configs/train/vit2d.yaml). Falls back to
+    # run_training's own default only for configs that predate the key.
+    val_recording = cfg.train.get("val_recording", None)
+    if val_recording is not None and not isinstance(val_recording, str):
+        # Hydra parses an unquoted digit-underscore token like
+        # 2026_06_09_15_46_55 as the INT 20260609154655 -- the underscores are
+        # gone, so it can never match a recording. Refuse rather than raise
+        # the confusing "matches NO annotation" later.
+        raise ValueError(
+            f"train.val_recording={val_recording!r} is not a string -- quote "
+            f"the override: \"train.val_recording='2026_06_09_15_46_55'\"")
     return run_training(
         cfg.paths.data_root,
         out_dir=os.path.join(run_dir, "final"),
@@ -447,6 +458,7 @@ def main_from_cfg(cfg):
         oversample=oversample,
         num_workers=cfg.train.get("num_workers", 8),
         warm_start=warm_start,
+        **({"val_recording": val_recording} if val_recording else {}),
     )
 
 
