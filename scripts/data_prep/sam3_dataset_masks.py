@@ -44,6 +44,16 @@ import tempfile
 import time
 from pathlib import Path
 
+# Pre-load huggingface_hub.file_download BEFORE anything drags in the SAM3
+# import chain (jarvis -> timm -> torch). That chain leaves `tqdm` without
+# `set_lock`, after which huggingface_hub's LAZY file_download import fails and
+# `from huggingface_hub import hf_hub_download` -- which sam3.model_builder
+# does at module scope -- raises ImportError, killing every array task at
+# import. Loading it here, while tqdm is still intact, caches the module.
+# Same guard as scripts/sam3_masks.py and predict/sam3_driver.py; this script
+# was written without it and job 39501387 died exactly that way.
+import huggingface_hub.file_download  # noqa: F401
+
 import numpy as np
 
 
