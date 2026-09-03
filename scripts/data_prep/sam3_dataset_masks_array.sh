@@ -45,4 +45,9 @@ export LD_LIBRARY_PATH="$CONDA_PREFIX/lib/python3.12/site-packages/nvidia/cu13/l
 echo "[shard $SLURM_ARRAY_TASK_ID] $(hostname) $(date) root=$ROOT"
 python scripts/data_prep/sam3_dataset_masks.py \
     --root "$ROOT" --shard "$SLURM_ARRAY_TASK_ID" --num-shards "$NSHARDS"
-echo "[shard $SLURM_ARRAY_TASK_ID] rc=$? $(date)"
+rc=$?
+echo "[shard $SLURM_ARRAY_TASK_ID] rc=$rc $(date)"
+# PROPAGATE IT -- see job 39501845: with `echo` last, sacct reported
+# COMPLETED 0:0 for a task whose python died at import. Across a 16-shard
+# array that would report 16 successes and zero masks.
+exit $rc
