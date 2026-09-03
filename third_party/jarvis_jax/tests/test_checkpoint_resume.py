@@ -1,3 +1,4 @@
+import jax
 import numpy as np
 import jax.numpy as jnp
 from flax import nnx
@@ -21,8 +22,11 @@ def test_checkpoint_resume_roundtrip(tmp_path):
     img = jnp.asarray(np.random.RandomState(0).randint(0, 256, (2, 448, 448, 4), np.uint8))
     kp = jnp.zeros((2, 50, 2), jnp.float32).at[:, 0].set(jnp.array([100., 50.]))
     vis = jnp.zeros((2, 50), bool).at[:, 0].set(True)
-    for _ in range(5):
-        step(m, opt, img, kp, vis)
+    # the step has taken a per-step PRNG key since a80f162 (2026-06-26); this
+    # test predates it (ee64b6a) and had been failing at call time ever since
+    key = jax.random.PRNGKey(0)
+    for t in range(5):
+        step(m, opt, jax.random.fold_in(key, t), img, kp, vis)
     p_before = _pval(m)
 
     mngr = make_manager(str(tmp_path / "ck"))
@@ -37,4 +41,4 @@ def test_checkpoint_resume_roundtrip(tmp_path):
     assert start == 5
     assert abs(_pval(m2r) - p_before) < 1e-6        # params restored
     # resumed training continues with finite loss
-    assert np.isfinite(float(step(m2r, opt2r, img, kp, vis)))
+    assert np.isfinite(float(step(m2r, opt2r, jax.random.fold_in(key, 99), img, kp, vis)))
