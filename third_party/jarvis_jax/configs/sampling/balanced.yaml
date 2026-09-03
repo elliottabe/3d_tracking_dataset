@@ -1,24 +1,46 @@
 # @package sampling
-# Class-balanced sampling across ALL conditions (V4 datasets only -- needs the
-# per-annotation `category` field that scripts/build_detector_dataset.py emits).
+# Class-balanced sampling across ALL conditions at once.
 #
-# Supersedes the single-class `female_courtship` preset. V4 train spans an
-# ~139x class-size spread (wall=33 anns .. grooming=4592), so boosting one
-# hand-picked class leaves every other rare condition -- wall, headless,
-# amputated, female_general -- swamped by the abundant ones. This rebalances
-# them all from the observed counts, and needs no re-tuning when a condition
-# is added.
+# Supersedes the single-class `female_courtship` preset. Boosting one
+# hand-picked class by a hand-tuned factor leaves every other rare condition
+# -- wall, climbing, headless, amputated, female_general -- swamped by the
+# abundant ones, and needs re-tuning whenever a condition is added. This
+# rebalances them all from the observed counts instead.
+#
+# WHERE THE CLASS LABELS COME FROM. On a v5-shaped root (red_data_3d_v5 and
+# every general_model-derived root after it) the per-annotation `behavior`
+# and `category` fields are absent or "unknown" -- `build_generalmodel_split`
+# deliberately does not write `behavior` onto annotations, because doing so
+# would silently re-weight roots that have already been trained against, and
+# puts the regime in `manifest.json` instead. `data/v5_2d._resolve_behavior`
+# and `_resolve_category` read it back from there, so this preset works on a
+# v5 root without a dataset rebuild. On a root where the axis really is
+# untagged, `train_keypoints.run_training` RAISES rather than silently
+# degrading to uniform.
+#
+# `category` (the default) is `<behavior>_<sex>` -- the finest axis, and the
+# reason to prefer it over `behavior`: on red_data_3d_v10_wall0902 train,
+# balancing by `behavior` lifts `wall` 3.9x but leaves the 251
+# female-courtship annotations inside one 5,292-annotation `courtship` class
+# at 0.8x, i.e. it does nothing for the hard fly. By `category` the same run
+# lifts `courtship_female` 3.2x, `wall_male` 3.4x and `climbing_female` 5.0x
+# while the four male-dominated classes fall to 0.7-0.9x. Measured, with the
+# figure that shows it, by:
+#   python scripts/viz/sampling_balance_check.py --root <v5 root> \
+#       --out figures/2026-09-02-sampling-balance
 #
 # alpha=0.5 is square-root balancing: rare classes are lifted substantially
-# but not to full parity, which would repeat the 33 wall annotations so often
-# that the model memorises them. max_repeat then hard-caps any single
-# annotation at 20x the uniform draw rate, bounding memorisation of the
-# smallest classes regardless of alpha.
+# but not to full parity, which would repeat the 105 climbing_female
+# annotations so often that the model memorises them. max_repeat then
+# hard-caps any single annotation's draw rate regardless of alpha; on v10 the
+# spread is 48x (5,041 .. 105) and the largest realised repeat is 5.0x, so
+# the cap is currently INERT -- it binds only at higher alpha or on a root
+# with a wider spread. It is kept as a guard, not as an active knob.
 #
 # PAIR WITH aug=heavy. Balanced sampling shows the rare classes many times per
 # epoch; heavy augmentation is what makes those repeats distinct rather than
 # identical. Using this with aug=default risks overfitting the small classes.
-balance_key: category   # group by category (finest axis); also accepts sex/behavior
+balance_key: category   # <behavior>_<sex>; also accepts 'behavior' or 'sex'
 balance_alpha: 0.5      # 0=uniform (overfits big classes), 1=full parity (memorises small ones)
 max_repeat: 20.0        # cap per-annotation draw rate at 20x uniform; null disables
 

@@ -132,6 +132,75 @@ def _resolve_sex(ann_sex, fly_id, rec_meta):
     return "unknown"
 
 
+def _resolve_behavior(ann_behavior, rec_meta):
+    """Resolve one annotation's behavioural regime:
+
+      1. the annotation's own `behavior`, if not "unknown"
+      2. else `rec_meta["behavior"]` -- the recording-level regime label
+      3. else "unknown"
+
+    Two steps rather than `_resolve_sex`'s four, because a regime
+    ("wall", "courtship", "grooming", "headless", "amputation", "general",
+    "climbing") is a property of the CAPTURE, not of the animal: a two-fly
+    courtship frame is courtship for both flies, so there is no per-fly
+    tier to fall back through.
+
+    WHY THIS IS NEEDED. On every general_model-derived root every annotation
+    carries `behavior: "unknown"` -- deliberately: `build_generalmodel_split`
+    declines to write the field onto annotations because doing so would
+    silently re-weight `balanced_weights` for roots already trained against,
+    and puts the regime in `manifest.json` instead. The consequence was that
+    `sampling.balance_key=behavior` could not be used at all: `class_counts`
+    returned `{"unknown": N}` and `train_keypoints.run_training` raised. This
+    reads the manifest the builder actually writes, which is the same trick
+    `_resolve_sex` already uses one function up.
+
+    Never raises: a recording missing from the manifest degrades to
+    "unknown".
+    """
+    if ann_behavior and ann_behavior != "unknown":
+        return ann_behavior
+    rec_behavior = rec_meta.get("behavior")
+    if rec_behavior and rec_behavior != "unknown":
+        return rec_behavior
+    return "unknown"
+
+
+def _resolve_category(ann_category, sex, behavior):
+    """Resolve one annotation's `category` -- the FINEST balancing axis.
+
+      1. the annotation's own `category`, if not "unknown"
+      2. else "<behavior>_<sex>" when both are known
+      3. else whichever single one of them is known
+      4. else "unknown"
+
+    Step 2 reproduces the shape of the hand-written V4 taxonomy
+    (`scripts/build_detector_dataset.SUBSET_CATEGORY`: `courtship_female`,
+    `courtship_male`, `grooming`, `wall`, `headless`, `amputated`) by
+    CROSSING two fields that already travel with the data, rather than
+    restating that table in a second place. The table is stale -- it still
+    names `headless_22_50`, a subset renamed on 2026-09-02, and knows
+    nothing of `courtship_20_04_male` or `wall_frames_15_06_46_male` -- and
+    a lookup table that has to be edited whenever a subset is renamed is the
+    same metadata-drifts-from-data failure `sex.json` exists to prevent.
+
+    The cross is also strictly finer than the V4 table where it matters
+    here: V4 lumped headless males and females into one `headless` bucket,
+    so balancing could not lift the female half of it on its own.
+    """
+    if ann_category and ann_category != "unknown":
+        return ann_category
+    known_sex = sex and sex != "unknown"
+    known_behavior = behavior and behavior != "unknown"
+    if known_behavior and known_sex:
+        return f"{behavior}_{sex}"
+    if known_behavior:
+        return behavior
+    if known_sex:
+        return sex
+    return "unknown"
+
+
 class V5Dataset:
     """Per-annotation 2D keypoint dataset over red_data_3d_v5.
 
@@ -201,10 +270,12 @@ class V5Dataset:
             self.src_ann_ids.append(a.get("src_ann_id", ann_id))
             self.img_wh.append(id2wh[a["image_id"]])
             rec_meta = self.manifest.get(fn.split("/")[0], {})
-            self.sex.append(
-                _resolve_sex(a.get("sex", "unknown"), a.get("fly_id", 0), rec_meta))
-            self.behavior.append(a.get("behavior", "unknown"))
-            self.category.append(a.get("category", "unknown"))
+            sex = _resolve_sex(a.get("sex", "unknown"), a.get("fly_id", 0), rec_meta)
+            behavior = _resolve_behavior(a.get("behavior", "unknown"), rec_meta)
+            self.sex.append(sex)
+            self.behavior.append(behavior)
+            self.category.append(
+                _resolve_category(a.get("category", "unknown"), sex, behavior))
 
     def __len__(self):
         return len(self.file_names)

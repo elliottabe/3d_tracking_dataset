@@ -391,3 +391,84 @@ def test_real_v5_amputee_recording_padding_survives():
     _, kp, vis = ds[0]
     assert kp.shape == (50, 2) and vis.shape == (50,)
     assert not vis.all()
+
+
+# --- behaviour / category resolution (the regime lives on manifest.json) ---
+#
+# `build_generalmodel_split` deliberately leaves `behavior` "unknown" on every
+# annotation and emits no `category` at all -- writing them would re-weight
+# `balanced_weights` for roots already trained against -- and puts the regime
+# in `manifest.json` instead. The consequence was that `sampling=balanced`
+# could not be used on ANY general_model-derived root: `class_counts` returned
+# {"unknown": N} and `train_keypoints.run_training` raised. `_resolve_behavior`
+# reads the manifest back; `_resolve_category` crosses it with the resolved sex
+# to reproduce the V4 taxonomy's shape without restating that stale table.
+
+def _v5_root_behavior_fallback(tmp_path):
+    """One annotation per fallback branch, matching the real shape of the
+    defect: annotations carry behavior=="unknown" and the regime lives on
+    manifest.json's `recordings[<rec>]["behavior"]`."""
+    root = tmp_path / "v5bx"
+    (root / "annotations").mkdir(parents=True)
+    images, anns = [], []
+    # rec_w: manifest says wall, annotation says nothing -> wall (+ male sex)
+    # rec_c: annotation's OWN behavior wins over the manifest
+    # rec_u: neither -> unknown, and category falls back to sex alone
+    spec = [("rec_w", "unknown", "male"),
+            ("rec_c", "courtship", "female"),
+            ("rec_u", "unknown", "unknown")]
+    for i, (rec, ann_behavior, sex) in enumerate(spec):
+        images.append({"id": i, "file_name": f"{rec}/cam0/Frame_{i}.jpg",
+                       "width": 64, "height": 64})
+        anns.append({"id": i, "image_id": i, "bbox": [0, 0, 10, 10],
+                     "keypoints": [1, 1, 2] * 50, "num_keypoints": 50,
+                     "sex": sex, "behavior": ann_behavior, "fly_id": 0})
+    with open(root / "annotations" / "instances_train.json", "w") as f:
+        json.dump({"images": images, "annotations": anns}, f)
+    with open(root / "manifest.json", "w") as f:
+        json.dump({"recordings": {
+            "rec_w": {"behavior": "wall", "sex": "male"},
+            # manifest disagrees with the annotation on purpose: the
+            # annotation must win, exactly as it does for sex.
+            "rec_c": {"behavior": "grooming", "sex": "female"},
+            "rec_u": {},
+        }}, f)
+    return root
+
+
+def test_v5dataset_behavior_falls_back_to_manifest(tmp_path):
+    from jarvis_jax.data.v5_2d import V5Dataset
+    ds = V5Dataset(str(_v5_root_behavior_fallback(tmp_path)), "train")
+    assert ds.behavior == ["wall", "courtship", "unknown"]
+    # category = "<behavior>_<sex>", degrading to whichever half is known
+    assert ds.category == ["wall_male", "courtship_female", "unknown"]
+
+
+def test_v5dataset_category_degrades_to_the_known_half(tmp_path):
+    """A known sex with no behaviour (or vice versa) must not produce a
+    label containing the literal string "unknown" -- that would create a
+    bogus `unknown_female` class for balanced_weights to balance against."""
+    from jarvis_jax.data.v5_2d import _resolve_category
+    assert _resolve_category("unknown", "female", "unknown") == "female"
+    assert _resolve_category("unknown", "unknown", "wall") == "wall"
+    assert _resolve_category("unknown", "unknown", "unknown") == "unknown"
+    # an explicit per-annotation category always wins
+    assert _resolve_category("courtship_female", "male", "wall") == "courtship_female"
+
+
+def test_balanced_sampling_is_not_a_noop_on_manifest_only_behavior(tmp_path):
+    """THE REGRESSION THIS EXISTS FOR. Before the manifest fallback, every
+    annotation on a general_model-derived root resolved to behavior/category
+    "unknown", so `class_counts` saw ONE class and balancing silently became
+    uniform (which `run_training` then refused outright). Both axes must now
+    carry real classes and actually move the weights."""
+    from jarvis_jax.data.v5_2d import V5Dataset
+    ds = V5Dataset(str(_v5_root_behavior_fallback(tmp_path)), "train")
+    for key in ("behavior", "category"):
+        counts = ds.class_counts(key)
+        assert set(counts) != {"unknown"}, f"{key} collapsed to one bucket"
+    # rec_w is 1 of 3 annotations; with 3 singleton classes alpha has no
+    # spread to work on, so assert on a root where one class IS rarer.
+    w = ds.balanced_weights(key="category", alpha=1.0)
+    assert np.isclose(w.sum(), 1.0)
+    assert np.allclose(w, 1 / 3)     # three singleton classes -> parity
