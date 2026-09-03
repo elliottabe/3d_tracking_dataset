@@ -152,7 +152,15 @@ def read_raw_csv(path: Path, ndim: int) -> tuple[str, dict[int, np.ndarray]]:
     a row that omits or reorders indices cannot shift the keypoint axis."""
     out: dict[int, np.ndarray] = {}
     with open(path) as fh:
-        skeleton = fh.readline().strip()
+        # Line 1 is a CSV row whose only meaningful field is the path. Some
+        # exports pad it out to the full column count, so
+        # `2026_04_02_15_25_51_male` declares
+        # "/home/user/red_data/skeleton/fly50.json,,,,,,,..." -- taking the
+        # whole stripped line made basename() return "fly50.json,,,,,..." and
+        # the skeleton assertion below rejected a file that is in fact fly50.
+        # Take field 0. (Checked across all 9 export recordings: every one
+        # declares basename fly50.json, under two different directories.)
+        skeleton = fh.readline().strip().split(",")[0].strip()
         for line in fh:
             line = line.strip()
             if not line:

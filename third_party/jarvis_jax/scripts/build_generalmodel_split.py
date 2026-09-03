@@ -202,8 +202,15 @@ VAL_RECORDINGS = [
 # -- the only way to get an unseen-session FEMALE number at all. Cost is stated
 # in build_report.json["composition"]["female_budget"].
 VAL_COMPONENTS_FORCE = [
-    "2026_05_27_11_56_05",   # courtship_11_50 pair (female+male), 15 fs / 105 img
-    "2026_06_18_19_23_03",   # courtship_25_51 pair (female+male), 23 fs / 161 img
+    # RECORDING IDS CHANGED 2026-09-02 (v11). These pairs were filed under two
+    # FABRICATED general_model ids a minute apart -- the female under
+    # 2026_05_27_11_56_05 and the male under _11_57_05, the same capture twice.
+    # Re-staging from courtship_label_2026_09_02 files both flies under the TRUE
+    # capture timestamp, so each pair is now one recording and cannot be split
+    # across sides by accident. (This is why the 11_56_05/11_57_05 confusion
+    # earlier in this work kept resolving to "same frames, different sex".)
+    "2026_04_02_12_11_50",   # courtship_11_50 pair (female+male), 15 fs / 105 img
+    "2026_04_02_15_25_51",   # courtship_25_51 pair (female+male), 23 fs / 161 img
                              #   The two SMALLEST two-fly captures. Two-fly and
                              #   female-in-courtship are the two documented
                              #   failure modes, so val must contain both; the
@@ -228,12 +235,16 @@ VAL_COMPONENTS_FORCE = [
 # 10%-tail rule. Each one is a female metric this split will NOT have, so each
 # needs a reason:
 TRAIN_COMPONENTS_FORCE = [
-    "2026_06_15_12_12_33",   # courtship_28_34 pair -- the LARGEST two-fly
+    "2026_04_02_17_28_34",   # courtship_28_34 pair -- the LARGEST two-fly
                              #   capture (46 fs, 322 img, 269 female anns).
                              #   Two-fly val is already covered by the two
                              #   components above, so this one is worth more as
                              #   training data than as a third val session.
-    "2026_08_26_16_05_15",   # 20_04_female_climbing -- 15 fs, the ONLY female
+    # 20_04_female_climbing was 2026_08_26_16_05_15, a fabricated id for the
+    # SAME capture as courtship_20_04_male. Both are now filed under the true
+    # 2025_10_20_13_20_04 (listed once, below), which is why CAPTURE_GROUPS no
+    # longer needs to declare that pair -- it is one recording by construction.
+    #                          # 20_04_female_climbing -- 15 fs, the ONLY female
                              #   climbing footage. A 10% tail is 2 framesets;
                              #   that measures nothing and costs the regime.
     "2026_06_09_15_38_35",   # headless_56_42_female + headless_56_42_1_female,
@@ -387,15 +398,16 @@ CAPTURE_GROUPS = [
             "identical pixels to compare, and the only surviving video is a "
             "921-frame excerpt that contains neither set.",
     },
-    {
-        "name": "2025_10_20_13_20_04 courtship pair",
-        "recordings": ["2025_10_20_13_20_04",    # courtship_20_04_male
-                       "2026_08_26_16_05_15"],   # 20_04_female_climbing
-        "evidence":
-            "User mapping. 20_04_female_climbing's internal recording id is "
-            "fabricated and carries no capture timestamp, so the builder "
-            "cannot derive the relationship from the data.",
-    },
+    # REMOVED 2026-09-02 (v11): the "2025_10_20_13_20_04 courtship pair" group
+    # (courtship_20_04_male + 20_04_female_climbing). Both subsets are now
+    # staged under the TRUE capture id 2025_10_20_13_20_04 instead of one of
+    # them carrying the fabricated 2026_08_26_16_05_15, so they are ONE
+    # recording and no declaration can be violated. A group whose members share
+    # an id is not a weaker guard than this list -- it is a stronger one, since
+    # nothing downstream can separate them in the first place. The same now
+    # holds for all three courtship pairs, which is why none of them appear
+    # here. Only the wall pair still needs declaring: its two subsets are
+    # different frames of one video and genuinely share no bytes.
 ]
 
 
