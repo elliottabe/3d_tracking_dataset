@@ -45,6 +45,29 @@ by headless_56_42 and headless_56_42_1 -- one frame of one capture filed twice
 for the SAME animal, not two animals. R15 (below) catches it and records both
 slots absent, and the two recordings are held together as one alias component.
 
+THE V2/V3/V4 MERGE (2026-09-02), and the leak it retires.
+`courtship_V2`, `courtship_V3` and `courtship_V4` were not three recordings.
+They were three arbitrary, non-overlapping frame ranges of ONE capture,
+`2025_10_20_13_20_04` (Session0), filed under three fabricated recording ids
+(2026_03_09_14_39_40 / 2026_03_18_15_31_22 / 2026_04_01_16_23_08). Proof, not
+inference: the 2026-09-02 raw label export ships that recording whole, and its
+image set is EXACTLY the union of the three -- 4,739 references, zero on either
+side of the difference -- while all three subsets carry byte-identical
+calibration.
+
+That means the previous split's largest val block was a leak. It held V3 out
+"whole" as an unseen session while training on V2 and V4, which are the same
+fly in the same session minutes away; 958 of 1,778 val images, 54% by count.
+Any courtship-male val number from the v8 root is optimistic by an unknown
+amount and must not be compared with a number from this root.
+
+The three subsets are replaced by ONE, `courtship_20_04_male`, converted from
+the raw export by `scripts/data_prep/red3d2jarvis.py` (which documents how the
+keypoint order and the vertical flip were established). It reproduces all 4,721
+previously-existing annotations EXACTLY -- keypoints, visibility and bbox -- and
+adds the 18 images V2/V3/V4 left unannotated, which is the whole reason the user
+asked for the re-export. It is forced to train, below.
+
 WHAT THIS ROOT DOES NOT HAVE. V3 was the only source of the second-fly labels
 on the courtship_V2 capture (V3 recordings 2026_04_07_11_33_33 and
 2026_04_08_14_59_45): 2,321 annotations, 2,014 of them the second animal of a
@@ -139,10 +162,14 @@ from jarvis_jax.data.split_v5 import (                 # noqa: E402
 #
 # Whole components to val. Each names a regime that survives in train:
 VAL_RECORDINGS = [
-    "2026_03_18_15_31_22",   # courtship_V3  MALE courtship, 137 fs / 959 img.
-                             #   Courtship male stays in train via V2 (463 fs)
-                             #   and V4 (77 fs). This is the regime the
-                             #   downstream pipeline actually runs on.
+    # courtship_V3 (2026_03_18_15_31_22) USED TO BE HELD OUT HERE. It is gone,
+    # and holding it out was a LEAK -- see THE V2/V3/V4 MERGE at the top of this
+    # file. V2, V3 and V4 were three arbitrary frame ranges of ONE recording
+    # (2025_10_20_13_20_04), so "hold out V3, train on V2 and V4" was a
+    # same-session, same-fly holdout wearing an unseen-session costume, and it
+    # was 54% of the whole val set by image count. Courtship MALE val now comes
+    # from the two forced two-fly components below, each of which is a genuinely
+    # different session and a different animal.
     "2026_06_09_15_21_14",   # headless_24_04_1_male  MALE headless, 49 fs /
                              #   343 img. Male headless stays in train via
                              #   headless_24_04_male (66 fs). Paired with the
@@ -200,22 +227,47 @@ TRAIN_COMPONENTS_FORCE = [
     "2026_07_30_13_28_99",   # wall_frames -- 7 viable framesets (camera
                              #   coverage tops out at 6/7 and 4 of its 11 frames
                              #   fall below MIN_CAMS=3), ~28 annotations.
-                             #   DECIDED, not defaulted. As a metric it is
-                             #   hopeless: ~28 annotations from one fly in one
-                             #   session cannot separate any realistic model
-                             #   change, and because it is the ONLY wall footage
-                             #   a val-only placement means the model never
-                             #   trains on wall-adjacent poses, so the number
-                             #   would read badly for reasons unrelated to the
-                             #   change under test. As training data it is 100%
-                             #   of the corpus's wall-adjacent female
-                             #   supervision -- the exact regime this pipeline
-                             #   is documented to fail at. Training value
-                             #   dominates. CONSEQUENCE, stated plainly: this
-                             #   val set CANNOT measure wall-adjacent female
-                             #   performance. Judge that regime GT-free
-                             #   (rendered overlays, the frozen 13-bout
-                             #   benchmark), as this repo already does.
+                             #   DECIDED, not defaulted -- and RE-DERIVED
+                             #   2026-09-02 after the user corrected this
+                             #   subset's sex to MALE (source recording
+                             #   2025_10_12_10_56_07_male_climbing). The old
+                             #   justification -- "100% of the corpus's
+                             #   wall-adjacent FEMALE supervision" -- was simply
+                             #   false and is void. It survives on its own
+                             #   merits, which are unchanged by sex: as a metric
+                             #   ~28 annotations from one fly in one session
+                             #   cannot separate any realistic model change, and
+                             #   because it is the ONLY wall footage a val-only
+                             #   placement means the model never trains on
+                             #   wall-adjacent poses, so the number would read
+                             #   badly for reasons unrelated to the change under
+                             #   test. As training data it is 100% of the
+                             #   corpus's wall-adjacent supervision, a regime
+                             #   this pipeline is documented to fail at.
+                             #   CONSEQUENCE, unchanged: this val set CANNOT
+                             #   measure wall-adjacent performance. Judge that
+                             #   regime GT-free (rendered overlays, the frozen
+                             #   13-bout benchmark), as this repo already does.
+                             #   NOTE it no longer contributes to the female
+                             #   budget at all -- it is male.
+    "2025_10_20_13_20_04",   # courtship_20_04_male -- the merged V2+V3+V4
+                             #   recording, 677 fs / 4,739 img, the corpus's
+                             #   largest courtship-male block. Forced to TRAIN
+                             #   because it is ONE session of ONE animal: a
+                             #   partial holdout would be the same leak that
+                             #   the old V3 holdout was, and a whole holdout
+                             #   would move 4,739 images (24% of the corpus)
+                             #   out of training to buy a val number that the
+                             #   11_50 and 25_51 male components already
+                             #   provide from genuinely unseen sessions.
+                             #   It is also the same CAPTURE as
+                             #   20_04_female_climbing (the user's mapping;
+                             #   that subset's internal recording id,
+                             #   2026_08_26_16_05_15, does NOT carry the
+                             #   capture timestamp so the builder cannot see
+                             #   the relationship). Both are forced to train,
+                             #   which is what keeps that hidden relationship
+                             #   from becoming a cross-side leak.
 ]
 # Left to the automatic guarded-tail rule: exactly ONE component, `female`
 # (2026_01_29_14_09_33, 100 fs / 700 img), the only single-fly female general
@@ -242,8 +294,10 @@ BEHAVIOR = {
     "courtship_11_50_female": "courtship", "courtship_11_50_male": "courtship",
     "courtship_25_51_female": "courtship", "courtship_25_51_male": "courtship",
     "courtship_28_34_female": "courtship", "courtship_28_34_male": "courtship",
-    "courtship_V2": "courtship", "courtship_V3": "courtship",
-    "courtship_V4": "courtship", "female": "general", "grooming": "grooming",
+    # Replaces courtship_V2 + courtship_V3 + courtship_V4, which were three
+    # arbitrary slices of THIS ONE recording -- see THE V2/V3/V4 MERGE below.
+    "courtship_20_04_male": "courtship",
+    "female": "general", "grooming": "grooming",
     "headless_22_50_female": "headless", "headless_24_04_male": "headless",
     "headless_24_04_1_male": "headless", "headless_56_42_female": "headless",
     "headless_56_42_1_female": "headless", "wall_frames": "wall",

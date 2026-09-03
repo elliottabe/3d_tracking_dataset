@@ -78,6 +78,10 @@ SUBSET_RULES: dict[str, tuple] = {
     "courtship_V2": "identity",
     "courtship_V3": "identity",
     "courtship_V4": "identity",
+    # The 2026-09-02 re-export of the ONE recording (2025_10_20_13_20_04) that
+    # courtship_V2/V3/V4 were three arbitrary slices of. Verified 50 names in
+    # fly50 order -- it reproduces all 4,721 of their annotations exactly.
+    "courtship_20_04_male": "identity",
     "female": "identity",
     # Female climbing the arena wall during courtship (Session0
     # 2025_10_20_13_20_04, frames inside bout_00028). Verified 50 names in
@@ -115,7 +119,7 @@ SUBSET_CATEGORY: dict[str, str] = {
     "courtship_28_34_female": "courtship_female",
     # Categorised as courtship_female, not "wall": it is a courtship female
     # (the fly this data exists to improve), and "wall" is the separate
-    # single-fly wall_frames set. Climbing is the novel CONDITION within
+    # single-fly wall_frames set (which is MALE). Climbing is the novel CONDITION within
     # courtship_female, not a different behavioural bucket.
     "20_04_female_climbing": "courtship_female",
     "courtship_11_50_male": "courtship_male",
@@ -138,6 +142,7 @@ SUBSET_CATEGORY: dict[str, str] = {
     "courtship_V2": "courtship_other",
     "courtship_V3": "courtship_other",
     "courtship_V4": "courtship_other",
+    "courtship_20_04_male": "courtship_male",
 }
 
 # Categories the val set MUST cover with >=1 recording (when they have >=2
@@ -158,7 +163,8 @@ REQUIRED_VAL_CATEGORIES: frozenset[str] = frozenset({
 #
 # The 6 subsets new in V4 (headless_*, S8/S9 amputated, wall_frames) had no
 # V3 counterpart. Their sex is taken from the subset name where it states one
-# ("S8_male_R_amp" -> male; wall_frames is the female-on-wall set) and is
+# ("S8_male_R_amp" -> male; wall_frames is the male-on-wall set -- corrected
+# 2026-09-02, it was recorded female here and that was wrong) and is
 # "unknown" for the headless prep, where the name does not say. Behavior is
 # "general" for all six: none is a courtship or grooming recording.
 SUBSET_SEX_BEHAVIOR: dict[str, tuple[str, str]] = {
@@ -180,10 +186,15 @@ SUBSET_SEX_BEHAVIOR: dict[str, tuple[str, str]] = {
     "courtship_V2": ("unknown", "courtship"),
     "courtship_V3": ("unknown", "courtship"),
     "courtship_V4": ("unknown", "courtship"),
+    "courtship_20_04_male": ("male", "courtship"),
     # --- new in V4 (no V3 counterpart) ---
     "S8_male_R_amp": ("male", "general"),
     "S9_male_L_amp": ("male", "general"),
-    "wall_frames": ("female", "general"),
+    # CORRECTED 2026-09-02 by the user: wall_frames is MALE. Its source is
+    # 2025_10_12_10_56_07_male_climbing; the subset's internal recording id
+    # (2026_07_30_13_28_99) does not carry the capture timestamp, so this
+    # mapping is not derivable from the data.
+    "wall_frames": ("male", "general"),
     "headless_22_50": ("unknown", "general"),
     "headless_24_04": ("unknown", "general"),
     "headless_24_04_1": ("unknown", "general"),
