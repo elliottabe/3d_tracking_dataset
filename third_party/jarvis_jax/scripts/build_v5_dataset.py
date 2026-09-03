@@ -63,8 +63,34 @@ VAL_RECORDINGS = [
 ]
 
 
+# RETIRED 2026-09-02. This builder is superseded by
+# scripts/build_generalmodel_split.py and cannot run any more: both source
+# roots it reads (red_data_unified_V3) and the root it writes
+# (red_data_3d_v5) were deleted, and `paths.v3_root`/`paths.v5_root` were
+# removed from configs/paths/hyak.yaml with them.
+#
+# It is kept rather than deleted because it is the record of how v5 was
+# built, and three of its decisions are the ones that were reversed:
+#   * `discover_sources` prefers V3's annotations over general_model's for
+#     the 12 overlapping recordings -- the sourcing the user retired.
+#   * `VAL_RECORDINGS` above holds out 2026_04_07_11_33_33, later shown to
+#     be a slice of the capture now filed as 2025_10_20_13_20_04; holding it
+#     out put 54% of v8's val on both sides of the split.
+#   * it splits by RECORDING NAME, which cannot see either of the above.
+# Reviving it means fixing those three things, not restoring two path keys.
+_RETIRED = (
+    "scripts/build_v5_dataset.py is retired: red_data_unified_V3 and "
+    "red_data_3d_v5 were deleted on 2026-09-02 and paths.v3_root/paths.v5_root "
+    "were removed with them. Use scripts/build_generalmodel_split.py, which "
+    "builds from general_model only and splits on content + capture group "
+    "rather than on recording name. See this module's comment for the three "
+    "decisions that were reversed.")
+
+
 @hydra.main(config_path=CONFIG_DIR, config_name="config", version_base=None)
 def main(cfg):
+    if "v5_root" not in cfg.paths or "v3_root" not in cfg.paths:
+        raise SystemExit(_RETIRED)
     out = cfg.paths.v5_root
     os.makedirs(out, exist_ok=True)
 

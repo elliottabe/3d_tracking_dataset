@@ -16,7 +16,7 @@ fig_dir:  ${paths.save_dir}/figures/
 # courtship pipeline path keys -- all build from base_dir (the Johnson_lab root)
 out_root:          ${paths.base_dir}/courtship
 vit_runs_root:     ${paths.base_dir}/jax_vitpose_runs
-red_data_v3_root:  ${paths.base_dir}/red_data/red_data_unified_V3
+red_data_root:     ${paths.base_dir}/red_data/red_data_3d_v10_wall0902   # see configs/paths/hyak.yaml for why this was renamed from red_data_v3_root
 data_dir_johnson:  ${paths.base_dir}
 
 # code / model trees (separate root from the data)

@@ -16,7 +16,17 @@ fig_dir:  ${paths.save_dir}/figures/
 out_root:          ${paths.base_dir}/courtship
 processed_root:    ${paths.base_dir}/processed                       # canonical per-recording output tree: processed/<assay>/<Session>/<recording>/
 vit_runs_root:     ${paths.base_dir}/jax_vitpose_runs
-red_data_v3_root:  ${paths.base_dir}/red_data/red_data_unified_V3   # curated real-annotation V3 dataset
+red_data_root:     ${paths.base_dir}/red_data/red_data_3d_v10_wall0902   # curated 2D/3D label root (see NOTE)
+# NOTE (2026-09-02): this key was `red_data_v3_root` and pointed at
+# red_data/red_data_unified_V3, which no longer exists -- V3 was deleted, and
+# with it red_data_3d_v5/v6/v7. Renamed rather than merely repointed because a
+# key called "v3_root" holding a general_model-derived root is the same
+# metadata-drifts-from-data trap that cost this project a 54% val leak: V3's
+# own recordings 2026_04_07_11_33_33 / 2026_04_08_14_59_45 turned out to be
+# slices of a capture already in train. The current root is built ONLY from
+# general_model by third_party/jarvis_jax/scripts/build_generalmodel_split.py
+# and is versioned, not a moving symlink, so a run's config records which one
+# it used. Bump this line when a newer root supersedes v10.
 data_dir_johnson:  ${paths.base_dir}                                 # == base_dir (back-compat alias)
 
 # code / model trees (separate root from the data)

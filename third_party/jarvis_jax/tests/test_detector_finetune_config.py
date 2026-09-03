@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 
@@ -28,7 +29,22 @@ def test_detector_finetune_config_resolves():
     assert all(isinstance(r, str) for r in d["val_recordings"])
     assert "2026_05_27_11_56_05" in d["val_recordings"]
     assert d["out_dir"].endswith("v4_kp_silbootstrap/final")
-    assert d["real_root"].endswith("red_data_unified_V3")   # resolves via paths.red_data_v3_root
+    # resolves via paths.red_data_root (renamed from red_data_v3_root on
+    # 2026-09-02, when red_data_unified_V3 was deleted -- see
+    # configs/paths/hyak.yaml). Asserted as "a root that exists on disk"
+    # rather than a hardcoded version string, because pinning the version
+    # here means this test has to be edited on every dataset rebuild and
+    # would happily pass while pointing at a root nobody has any more.
+    assert os.path.isdir(d["real_root"]), d["real_root"]
+    assert os.path.isfile(os.path.join(
+        d["real_root"], "annotations", "instances_train.json")), d["real_root"]
+    # the val recordings this config holds out must actually be IN that root's
+    # val split -- the old 2026_04_07_11_33_33 entry silently was not
+    with open(os.path.join(d["real_root"], "annotations",
+                           "instances_val.json")) as f:
+        val_recs = {im["file_name"].split("/")[0] for im in json.load(f)["images"]}
+    missing = [r for r in d["val_recordings"] if r not in val_recs]
+    assert not missing, f"val_recordings absent from the root's val split: {missing}"
     # Minor: mask_weight must be a first-class, settable knob in the
     # `finetune:` block (surfaces TrainConfig.mask_weight / finetune()'s new
     # mask_weight= param); default keeps current (mask loss off) behavior.

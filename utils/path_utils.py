@@ -99,7 +99,7 @@ def convert_dict_to_string(d):
 # (io_dict_to_hdf5.save, the batch drivers' out_path.parent.mkdir), and
 # blanket-creating every key scaffolds junk -- batch_run_stac overrides
 # paths.base_dir to the Predictions_3D_* folder, so out_root/processed_root/
-# vit_runs_root/red_data_v3_root resolve inside it, and the old behaviour
+# vit_runs_root/red_data_root resolve inside it, and the old behaviour
 # left empty courtship/, processed/, jax_vitpose_runs/ and red_data/ dirs in
 # every predictions folder.
 _MKDIR_KEYS = ("save_dir", "log_dir", "ckpt_dir", "fig_dir")

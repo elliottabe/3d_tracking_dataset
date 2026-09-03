@@ -1,5 +1,12 @@
 user: ${oc.env:USER,eabe}
-data_root:      /gscratch/portia/${paths.user}/data/Johnson_lab/red_data/red_data_unified_V3
+# CHANGED 2026-09-02: was red_data/red_data_unified_V3, deleted along with
+# red_data_3d_v5/v6/v7. This is the current curated root, built ONLY from
+# general_model by scripts/build_generalmodel_split.py. It is v5-shaped (flat
+# images/, split lives only in annotations/instances_{train,val}.json), which
+# `scripts/train_keypoints._dataset_class` detects and handles by selecting
+# V5Dataset over V3Dataset. Versioned, not a moving symlink, so a run's
+# .hydra/overrides.yaml records which root it trained on.
+data_root:      /gscratch/portia/${paths.user}/data/Johnson_lab/red_data/red_data_3d_v10_wall0902
 cache_dir:      /gscratch/portia/${paths.user}/data/Johnson_lab/jax_repro_cache/v3
 runs_root:           /gscratch/portia/${paths.user}/data/Johnson_lab/jax_cached3d_runs
 vit_runs_root:       /gscratch/portia/${paths.user}/data/Johnson_lab/jax_vitpose_runs
@@ -9,6 +16,11 @@ vitpose_ckpt:   /gscratch/portia/${paths.user}/data/Johnson_lab/jax_vitpose_runs
 mae_npz:        /gscratch/portia/${paths.user}/data/Johnson_lab/mae_vitb.npz
 body_model_dir: /gscratch/portia/${paths.user}/Research/MyRepos/fruitfly_body_models/
 project_dir:    /gscratch/portia/${paths.user}/Research/MyRepos/
-v5_root:        /gscratch/portia/${paths.user}/data/Johnson_lab/red_data/red_data_3d_v5
 general_model:  /gscratch/portia/${paths.user}/data/Johnson_lab/red_data/general_model
-v3_root:        /gscratch/portia/${paths.user}/data/Johnson_lab/red_data/red_data_unified_V3
+# REMOVED 2026-09-02: `v5_root` and `v3_root`. Both pointed at roots that no
+# longer exist (red_data_3d_v5, red_data_unified_V3), and their only consumer
+# -- scripts/build_v5_dataset.py -- is superseded by
+# scripts/build_generalmodel_split.py. build_v5_dataset sourced annotations
+# from V3 in preference to general_model for the 12 overlapping recordings,
+# which is exactly the sourcing that was retired; it now fails with a message
+# saying so rather than reading keys that would have to be invented back.

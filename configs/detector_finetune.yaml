@@ -13,9 +13,22 @@ dataset:
 version: ${dataset.version}
 run_id: 'analysis'
 
+# STALE AS OF 2026-09-02: v3_kp_maskaware/final is not on disk. Left as the
+# documented starting point of this (currently unused) pseudo-label
+# bootstrap rather than silently repointed at v5vf_maskoff, which was
+# trained with train.mask_ablation=true and so expects a ZEROED 4th channel
+# -- continuing it under this config's mask_weight/mask-aware assumptions
+# would be a different experiment, not a path fix. Set it explicitly before
+# running this config.
 v3_ckpt: ${paths.vit_runs_root}/v3_kp_maskaware/final
 out_dir: ${paths.vit_runs_root}/v4_kp_silbootstrap/final
-real_root: ${paths.red_data_v3_root}      # real annotations mixed in
+# Real annotations mixed in with the silhouette pseudo-labels. Was
+# ${paths.red_data_v3_root} (red_data_unified_V3) until that root was deleted
+# on 2026-09-02; see configs/paths/hyak.yaml. The current root is v5-shaped,
+# which `finetune_detector` handles -- `train_keypoints._dataset_class`
+# picks V5Dataset for it -- but note it has no `train/`/`val/` directories:
+# the split lives only in annotations/instances_{train,val}.json.
+real_root: ${paths.red_data_root}
 pseudo_root: ${paths.data_dir_johnson}/courtship/pseudolabels
 # Recordings whose pipeline outputs feed pseudo-labels (train-split courtship +
 # Session0). Courtship spans MANY separate recordings (Session0: 1 recording
@@ -48,7 +61,17 @@ label_sources: []
 # 2026_05_27_11_56_05 parse as YAML ints (underscore digit-separators), not
 # strings, which would silently break `V3Dataset(..., recordings=...)` string
 # matching in `finetune_detector.finetune`.
-val_recordings: ["2026_05_27_11_56_05", "2026_04_07_11_33_33"]
+# CHANGED 2026-09-02. Was ["2026_05_27_11_56_05", "2026_04_07_11_33_33"].
+# 2026_04_07_11_33_33 was dropped for two independent reasons: it does not
+# exist in any current root (it came from red_data_unified_V3, deleted), and
+# it is one of the three fabricated recording ids that turned out to be
+# slices of the SINGLE capture now filed as 2025_10_20_13_20_04 -- holding it
+# out "as an unseen session" is what put 958 of 1,778 val images (54%) on
+# both sides of the v8 split. 2026_06_18_19_23_03 replaces it: a genuinely
+# separate courtship session that IS in the current root's val split.
+# Both entries verified present in
+# red_data_3d_v10_wall0902/annotations/instances_val.json.
+val_recordings: ["2026_05_27_11_56_05", "2026_06_18_19_23_03"]
 gate:
   tau_iou: 0.05
   tau_cont: 8.0
