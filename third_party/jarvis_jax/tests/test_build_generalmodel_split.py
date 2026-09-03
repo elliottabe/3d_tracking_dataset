@@ -334,3 +334,64 @@ def test_build_report_states_the_two_fly_cost_of_dropping_v3(built):
     assert d["v3_based_root_two_fly_images"] == 1673
     assert d["lost_annotations"] == 2321
     assert d["source_recordings"] == ["2026_04_07_11_33_33", "2026_04_08_14_59_45"]
+
+
+# ---------------------------------------------------------------------------
+# CAPTURE GROUPS. Two recordings that are the SAME physical capture but share
+# no bytes (different frames of one video). Content hashing cannot see the
+# relationship -- that is the whole reason the declaration exists -- so if the
+# check does not catch a straddle, nothing does. This is the courtship_V2/V3/V4
+# leak, which put 958 of 1,778 v8 val images (54%) on both sides of the split
+# while every name-, frame-, fly- and content-level audit read 0.
+# ---------------------------------------------------------------------------
+_GRP = [{"name": "one video, two subsets", "recordings": ["recA", "recB"],
+         "evidence": "test"}]
+
+
+def _fs(pairs):
+    return {f"{rec}/Frame_{i}/fly0": {"recording": rec} for rec, i in pairs}
+
+
+def test_capture_group_together_is_accepted():
+    fs = _fs([("recA", 1), ("recB", 1)])
+    split = {k: "train" for k in fs}
+    rep = bgs.check_capture_groups(split, fs, ["recA", "recB"], groups=_GRP)
+    assert rep[0]["side"] == ["train"], rep
+
+
+def test_capture_group_straddling_train_and_val_is_fatal():
+    """The regression test. recA to val, recB to train: every existing audit
+    passes (they share no bytes and no frame numbers) and the split is still a
+    same-capture leak."""
+    fs = _fs([("recA", 1), ("recB", 1)])
+    split = {"recA/Frame_1/fly0": "val", "recB/Frame_1/fly0": "train"}
+    with pytest.raises(SystemExit, match="SPLIT across"):
+        bgs.check_capture_groups(split, fs, ["recA", "recB"], groups=_GRP)
+
+
+def test_capture_group_partially_present_is_fatal():
+    """Half a declared group in the build means the other half is silently
+    unconstrained -- refuse rather than enforce nothing."""
+    fs = _fs([("recA", 1)])
+    with pytest.raises(SystemExit, match="partially present"):
+        bgs.check_capture_groups({k: "train" for k in fs}, fs, ["recA"], groups=_GRP)
+
+
+def test_capture_group_entirely_absent_is_skipped():
+    fs = _fs([("recC", 1)])
+    assert bgs.check_capture_groups({k: "train" for k in fs}, fs, ["recC"],
+                                    groups=_GRP) == []
+
+
+def test_the_real_wall_capture_group_is_declared():
+    """wall_frames and wall_frames_15_06_46_male are different frames of ONE
+    capture (2025_10_12_15_06_46). Their frame numbers never intersect, so only
+    this declaration keeps them on the same side."""
+    recs = {r for g in bgs.CAPTURE_GROUPS for r in g["recordings"]}
+    assert {"2026_07_30_13_28_99", "2025_10_12_15_06_46"} <= recs
+    grp = next(g for g in bgs.CAPTURE_GROUPS
+               if "2025_10_12_15_06_46" in g["recordings"])
+    assert "2026_07_30_13_28_99" in grp["recordings"]
+    # both members must also be pinned to train by the policy, or the group
+    # check would be the only thing standing between them and a leak
+    assert set(grp["recordings"]) <= set(bgs.TRAIN_COMPONENTS_FORCE)

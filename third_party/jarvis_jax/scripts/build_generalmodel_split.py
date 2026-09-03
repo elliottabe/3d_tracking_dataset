@@ -68,6 +68,26 @@ previously-existing annotations EXACTLY -- keypoints, visibility and bbox -- and
 adds the 18 images V2/V3/V4 left unannotated, which is the whole reason the user
 asked for the re-export. It is forced to train, below.
 
+THE WALL CAPTURE (2026-09-02, added after v9). `general_model/wall_frames` and
+the new subset `wall_frames_15_06_46_male` are different frames of ONE capture,
+`2025_10_12_15_06_46` (male climbing). The second was reported BLOCKED under a
+wrong timestamp (`2025_10_12_10_56_07`, for which no video and no frames
+exist); the user corrected the timestamp, renamed the export directory and
+extracted the 217 jpgs, and it converts like any other recording -- except that
+its only surviving video is a 921-frame excerpt (1161383-1162303) while its
+labels run to index 1,447,731, so the shipped jpgs are the sole image source.
+
+It JOINS wall_frames rather than replacing it: the two label different moments
+(4031-8943 vs 0-1,447,731, no intersection), so a replacement would simply
+delete 28 annotations. Together they are the corpus's only wall-adjacent
+supervision, and this subset multiplies it about fourfold: 28 complete
+7-camera framesets against wall_frames' 7 viable ones.
+
+Their frame numbers never intersect, so the content merge cannot see that they
+are one capture -- exactly the V2/V3/V4 situation. They are therefore declared
+in CAPTURE_GROUPS below and the declaration is ENFORCED against the shipped
+split.
+
 WHAT THIS ROOT DOES NOT HAVE. V3 was the only source of the second-fly labels
 on the courtship_V2 capture (V3 recordings 2026_04_07_11_33_33 and
 2026_04_08_14_59_45): 2,321 annotations, 2,014 of them the second animal of a
@@ -250,6 +270,30 @@ TRAIN_COMPONENTS_FORCE = [
                              #   13-bout benchmark), as this repo already does.
                              #   NOTE it no longer contributes to the female
                              #   budget at all -- it is male.
+    "2025_10_12_15_06_46",   # wall_frames_15_06_46_male -- 28 labelled
+                             #   framesets / 196 annotated images of a male on
+                             #   the arena wall, converted 2026-09-02 after the
+                             #   user corrected the timestamp (it was reported
+                             #   BLOCKED as 2025_10_12_10_56_07, for which no
+                             #   frames and no video existed).
+                             #   TRAIN for the same reason wall_frames is, and
+                             #   it is the SAME CAPTURE as wall_frames (see
+                             #   CAPTURE_GROUPS), so the two could not go to
+                             #   opposite sides in any case. Wall footage is
+                             #   the ONE regime this corpus has almost none of
+                             #   and the one this pipeline is documented to
+                             #   fail at; putting the only 4x increase in that
+                             #   supervision into val would leave the model
+                             #   trained on essentially no wall-adjacent poses
+                             #   in order to buy a val number of ~200 images
+                             #   from one fly in one session. It also joins
+                             #   rather than replaces wall_frames: the two
+                             #   label DIFFERENT moments (4031-8943 vs
+                             #   0-1,447,731, no intersection), so replacing
+                             #   would simply delete 28 annotations.
+                             #   CONSEQUENCE, unchanged from v9: this val set
+                             #   still cannot measure wall-adjacent
+                             #   performance; judge that regime GT-free.
     "2025_10_20_13_20_04",   # courtship_20_04_male -- the merged V2+V3+V4
                              #   recording, 677 fs / 4,739 img, the corpus's
                              #   largest courtship-male block. Forced to TRAIN
@@ -301,7 +345,58 @@ BEHAVIOR = {
     "headless_22_50_female": "headless", "headless_24_04_male": "headless",
     "headless_24_04_1_male": "headless", "headless_56_42_female": "headless",
     "headless_56_42_1_female": "headless", "wall_frames": "wall",
+    # Different frames of the SAME capture as wall_frames -- see CAPTURE_GROUPS.
+    # All 31 of its labelled framesets show one male on the arena wall, checked
+    # by looking at every one of them, so the regime label is the same: wall.
+    "wall_frames_15_06_46_male": "wall",
 }
+
+
+# ---------------------------------------------------------------------------
+# CAPTURE GROUPS: recordings that are the SAME physical capture but share no
+# bytes, so the content merge above cannot see the relationship.
+#
+# This is the courtship_V2/V3/V4 failure made declarative. Those were three
+# arbitrary frame ranges of one capture under three fabricated recording ids;
+# holding one out "as an unseen session" put 958 of 1,778 val images (54%) on
+# both sides of the v8 split. Content hashing did not catch it and could not:
+# the frames genuinely differ. Only a declaration can.
+#
+# Members must land on the SAME side of the split. That is not left to the
+# accident of two independent entries in the force lists below -- it is
+# asserted against the SHIPPED split in main(), so a future policy edit that
+# separates two members fails the build instead of silently leaking.
+CAPTURE_GROUPS = [
+    {
+        "name": "2025_10_12_15_06_46 male climbing (arena wall)",
+        "recordings": ["2026_07_30_13_28_99",    # general_model/wall_frames
+                       "2025_10_12_15_06_46"],   # wall_frames_15_06_46_male
+        "evidence":
+            "User mapping (2026-09-02): general_model/wall_frames is "
+            "2025_10_12_..._male_climbing; only the timestamp was mistaken "
+            "(10_56_07 -> 15_06_46). CORROBORATED BY CONTENT, not taken on "
+            "trust: over the temporally comparable frames the median arena "
+            "background of the two subsets agrees to 2.6-3.1 grey levels on "
+            "every camera tested and is the CLOSEST of all 21 subsets -- the "
+            "next nearest capture on the same rig is 5.4-9.5 and the worst is "
+            "83. Pairwise, Frame_4012 (new) and Frame_4031 (wall_frames) are "
+            "19 frames apart and agree to 2.5-3.2 grey levels outside the fly, "
+            "against 11.6-13.7 for the same frame vs a different capture. Not "
+            "byte-level proof -- their frame numbers never intersect "
+            "(wall_frames 4031-8943; this export 0-1,447,731), so there are no "
+            "identical pixels to compare, and the only surviving video is a "
+            "921-frame excerpt that contains neither set.",
+    },
+    {
+        "name": "2025_10_20_13_20_04 courtship pair",
+        "recordings": ["2025_10_20_13_20_04",    # courtship_20_04_male
+                       "2026_08_26_16_05_15"],   # 20_04_female_climbing
+        "evidence":
+            "User mapping. 20_04_female_climbing's internal recording id is "
+            "fabricated and carries no capture timestamp, so the builder "
+            "cannot derive the relationship from the data.",
+    },
+]
 
 
 VALID_SEX = ("female", "male")
@@ -537,6 +632,48 @@ def print_composition(comp: dict) -> None:
     print(f"female annotations: train {fb['female_anns_train']}, "
           f"val {fb['female_anns_val']} "
           f"({fb['female_val_share_of_all_female']:.1%} of all female)")
+
+
+def check_capture_groups(split: dict, framesets: dict,
+                         used_recs: list, groups: list | None = None) -> list:
+    """Assert every CAPTURE_GROUPS member landed on the SAME side.
+
+    Checked against the split that was actually produced, not against the
+    policy that was intended: two recordings sitting in TRAIN_COMPONENTS_FORCE
+    is not evidence that they ended up together, and the whole point of a
+    capture group is that no content hash can catch the mistake if they did
+    not. Raises rather than warns -- a leak of this class cost 54% of the v8
+    val set and nothing in the numbers showed it."""
+    if groups is None:
+        groups = CAPTURE_GROUPS
+    used = set(used_recs)
+    report = []
+    for grp in groups:
+        if not (set(grp["recordings"]) & used):
+            continue                      # group entirely absent: nothing to enforce
+        missing = [r for r in grp["recordings"] if r not in used]
+        if missing:
+            raise SystemExit(
+                f"FATAL: CAPTURE_GROUPS {grp['name']!r} names recording(s) "
+                f"{missing}, which this build does not contain while it DOES "
+                f"contain the rest of the group. A partially present capture "
+                f"group cannot be enforced.")
+        sides = collections.defaultdict(set)
+        for k, v in split.items():
+            rec = framesets[k]["recording"]
+            if rec in grp["recordings"]:
+                sides[rec].add(v)
+        allsides = set().union(*sides.values()) if sides else set()
+        if len(allsides) > 1:
+            raise SystemExit(
+                f"FATAL: capture group {grp['name']!r} is SPLIT across "
+                f"{sorted(allsides)}: {dict(sides)}. These recordings are "
+                f"different frames of ONE video; putting them on opposite "
+                f"sides is the courtship_V2/V3/V4 leak, which content hashing "
+                f"cannot see. Fix the policy, do not relax this check.")
+        report.append({"name": grp["name"], "recordings": grp["recordings"],
+                       "side": sorted(allsides), "evidence": grp["evidence"]})
+    return report
 
 
 def main() -> None:
@@ -814,6 +951,10 @@ def main() -> None:
                        train_components_force=TRAIN_COMPONENTS_FORCE,
                        female_val_frac=args.female_val_frac, guard=args.guard,
                        aliases=aliases)
+    cap_group_report = check_capture_groups(split, framesets, used_recs)
+    for row in cap_group_report:
+        print(f"capture group OK: {row['name']} -> {row['side']}")
+
     audit = audit_split(merged, split, guard=args.guard, aliases=aliases,
                         image_hashes=image_hashes)
     print("audit:", json.dumps({k: v for k, v in audit.items()
@@ -888,6 +1029,7 @@ def main() -> None:
                 "ignored_general_model_own_splits": True,
                 "holdout_unit": "alias component (byte-identity), atom = whole "
                                 "capture (all cameras of a frame, all flies)",
+                "capture_groups": cap_group_report,
                 "val_whole_components": VAL_RECORDINGS,
                 "val_components_force_female_inclusive": VAL_COMPONENTS_FORCE,
                 "train_components_force": TRAIN_COMPONENTS_FORCE,
@@ -913,8 +1055,12 @@ def main() -> None:
                     "general male S6male (1 component)",
                     "amputation S8/S9 (kept in train; not a pipeline eval target)",
                     "female climbing (1 component, 15 fs)",
-                    "female wall (1 component, 7 viable fs / ~28 anns) -- see "
-                    "TRAIN_COMPONENTS_FORCE; judge GT-free"],
+                    "wall, MALE (one capture group: wall_frames + "
+                    "wall_frames_15_06_46_male, ~7 + 28 viable framesets) -- "
+                    "see TRAIN_COMPONENTS_FORCE and CAPTURE_GROUPS; judge "
+                    "GT-free. It was described as FEMALE wall through v9; the "
+                    "user corrected the sex on 2026-09-02 and the source "
+                    "recording is male climbing."],
             },
             "ambiguous_same_animal_slots": n_ambiguous,
             "ambiguous_examples": ambiguous_log[:20],

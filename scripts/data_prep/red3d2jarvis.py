@@ -357,14 +357,32 @@ def convert(rec_dir: Path, out_dir: Path, subset: str, recording_id: str,
     if link_from:
         index: dict[tuple[str, int], Path] = {}
         for src_subset in link_from:
-            for split in ("train", "val"):
-                base = src_subset / split
-                if not base.is_dir():
-                    continue
+            # A general_model subset files its jpgs under train/ and val/; a raw
+            # export directory holds `Cam*/Frame_*.jpg` at its own top level
+            # (2025_10_12_15_06_46_male_climbing ships its frames that way, and
+            # its video is a 921-frame excerpt that does not contain them). Both
+            # layouts are accepted; nothing is decoded either way.
+            bases = [src_subset / s for s in ("train", "val")
+                     if (src_subset / s).is_dir()] or [src_subset]
+            for base in bases:
                 for jpg in base.rglob("Cam*/Frame_*.jpg"):
                     cam = jpg.parent.name
                     frame = int(jpg.stem.split("_")[1])
                     index.setdefault((cam, frame), jpg)
+        # THE FLIP depends on image_height, which is read from the calibration
+        # yaml. If the shipped jpgs are not that size the flip is wrong and the
+        # keypoints land off the animal, so this is checked against the real
+        # pixels rather than trusted. PIL reads the header only.
+        from PIL import Image as _Image
+        for (cam, _frame), jpg in sorted(index.items()):
+            with _Image.open(jpg) as im_:
+                if im_.size != dims[cam]:
+                    raise SystemExit(
+                        f"{jpg} is {im_.size[0]}x{im_.size[1]} but the "
+                        f"calibration for {cam} says "
+                        f"{dims[cam][0]}x{dims[cam][1]}. The vertical flip "
+                        f"y = image_height - v would be wrong; refusing.")
+        print(f"verified {len(index)} source jpgs match the calibration dimensions")
         for im in images:
             _, cam, fname = im["file_name"].split("/")
             frame = int(fname.split("_")[1].split(".")[0])
@@ -422,8 +440,10 @@ def main() -> None:
     ap.add_argument("--scale-10x", dest="scale_10x", action="store_true", default=True)
     ap.add_argument("--no-scale-10x", dest="scale_10x", action="store_false")
     ap.add_argument("--link-images-from", nargs="*", type=Path, default=[],
-                    help="general_model subset dirs holding the jpgs already; "
-                         "symlinked read-only rather than re-decoded")
+                    help="dirs holding the jpgs already, symlinked read-only "
+                         "rather than re-decoded. Either a general_model subset "
+                         "(jpgs under train/ and val/) or a raw export "
+                         "recording dir (Cam*/Frame_*.jpg at top level).")
     ap.add_argument("--video-dir", type=Path, default=None,
                     help="DEFECT 3: the video dir has NO sex suffix while the "
                          "label dir does, so it is named explicitly")

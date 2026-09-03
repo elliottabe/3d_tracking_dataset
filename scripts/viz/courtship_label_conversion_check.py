@@ -48,9 +48,9 @@ REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO))
 from viz.core.colors import PALETTE, keypoint_groups, leg_chains  # noqa: E402
 
-RAW = Path("/gscratch/portia/eabe/data/Johnson_lab/red_data/coutship_label_2026_09_02")
+RAW = Path("/gscratch/portia/eabe/data/Johnson_lab/red_data/courtship_label_2026_09_02")
 GM = Path("/gscratch/portia/eabe/data/Johnson_lab/red_data/general_model")
-STAGE = Path("/gscratch/portia/eabe/data/Johnson_lab/red_data/_staging_2026_09_02")
+STAGE = Path("/gscratch/portia/eabe/data/Johnson_lab/red_data/courtship_labels_2026_09_02")
 MISSING = 1e6
 
 
