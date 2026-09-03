@@ -133,3 +133,43 @@ def test_grayfill_dataset_passes_keypoints_through_and_fills_only_with_masks(tmp
     # no mask npz on disk -> nothing to fill, image unchanged, counted
     np.testing.assert_array_equal(img4, ref)
     assert ds.n_no_distractor == 1 and ds.n_filled == 0
+
+
+def test_grayfill_resolves_own_mask_by_src_ann_id(tmp_path):
+    """Regression: a mask npz keyed by src_ann_id (not the merged id) must be
+    recognised as the target's OWN mask -- the first version treated it as a
+    distractor and erased the fly on 1187 S8_male_R_amp train rows and the
+    whole headless_22_50_female val recording (72 px under the fill)."""
+    from jarvis_jax.data.v5_2d import V5Dataset
+    root, kp_a, kp_b, kp_c, crop = _make_root(tmp_path)
+    # rewrite annotations with src_ann_id != id, and write npz keyed by src ids
+    ann_path = root / "annotations" / "instances_train.json"
+    coco = json.loads(ann_path.read_text())
+    for a in coco["annotations"]:
+        a["id"] = a["id"] + 1000; a["src_ann_id"] = a["id"] - 1000
+    ann_path.write_text(json.dumps(coco))
+    (root / "masks" / "recA" / "cam1").mkdir(parents=True)
+    m = np.zeros((120, 160), bool)
+    m0 = m.copy(); m0[24:56, 16:48] = True           # ann 1000 (src 0) fly A
+    m1 = m.copy(); m1[34:64, 46:78] = True           # ann 1001 (src 1) fly B
+    np.savez(root / "masks" / "recA" / "cam1" / "Frame_0.npz", masks=np.stack([m0, m1]),
+             ann_ids=np.array([0, 1]), matched=np.array([True, True]))
+    m2 = m.copy(); m2[54:86, 66:98] = True           # ann 1002 (src 2), single fly
+    np.savez(root / "masks" / "recA" / "cam1" / "Frame_1.npz", masks=m2[None],
+             ann_ids=np.array([2]), matched=np.array([True]))
+    # paint fly B bright so a fill (crop-mean grey) is visible; the fixture jpg is flat
+    arr = np.full((120, 160, 3), 40, np.uint8); arr[m1] = 200
+    Image.fromarray(arr).save(root / "images" / "recA" / "cam1" / "Frame_0.jpg")
+    base = V5Dataset(str(root), "train", crop=crop, heatmap_size=crop // 2)
+    ds = DistractorGrayFillDataset(base, str(root), p=1.0, seed=0, dilate=2, protect=4)
+    # single-fly image: its own (src-keyed) mask is NOT a distractor -> unchanged
+    assert ds.fill(base[2][0], 2) is None
+    # two-fly image: only fly B's pixels change for target A
+    img4, _, _ = base[0]
+    out = ds.fill(img4, 0)
+    assert out is not None
+    changed = (out[..., :3] != img4[..., :3]).any(-1)
+    x0, y0 = crop_origin(base.bboxes[0], 160, 120, crop)
+    own = m0[y0:y0 + crop, x0:x0 + crop]
+    assert not changed[own[:changed.shape[0], :changed.shape[1]]].any(), "the target's own mask was filled"
+    assert changed.any()

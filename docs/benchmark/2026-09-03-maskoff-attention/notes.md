@@ -96,3 +96,16 @@ of recordings it trained on.
   Re-run `detector_attention_maps.py --ckpt-v12 <v12_bal_maskon>/final` once
   it finishes to compare the mask-on heatmaps on the same frames.
 * Do not chase the L/R bias as a flip/label bug; it is one hard val recording.
+
+## Correction (2026-09-03, later the same day)
+
+`detector_attention_maps.masks_for` resolved the target's own mask by the
+merged annotation id only; on recordings whose mask files are keyed by
+`src_ann_id` (headless_22_50_female in val) the target's own mask was counted
+as "other fly", so 126 single-fly annotations were flagged two-fly (477
+instead of 351) and their target mass was booked under "other". Fixed and
+regenerated: the per-layer curves for v12 and v5vf still lie on top of each
+other in every group (bad two-fly n=156, good two-fly n=105), so section 2's
+conclusion stands. The readout numbers in section 3 did not use masks and are
+unchanged (v12 median 0.31 vs v5vf 1.00). The same bug in the eval/training
+gray-fill is documented in docs/benchmark/2026-09-03-distractor-supervision.

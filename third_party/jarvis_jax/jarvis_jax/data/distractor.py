@@ -153,6 +153,20 @@ class DistractorGrayFillDataset:
         self.n_filled = 0
         self.n_no_distractor = 0
         self.n_skipped = 0
+        # A mask npz keys its rows by whatever id the mask job used: the MERGED
+        # annotation id for most recordings, the SOURCE id (src_ann_id) for
+        # some (S8_male_R_amp: 1187/1330 train rows; headless_22_50_female:
+        # 126/140 val rows). `_load_mask` tries both; the first version of this
+        # fill compared against the merged id only and therefore treated the
+        # target's OWN mask as a distractor on those recordings -- erasing the
+        # fly it was supposed to protect (72 px on that val recording). Resolve
+        # "mine" by EITHER key, and "distractor" as a row keyed by another
+        # annotation on the same image; rows matching neither are ignored.
+        self._keys_by_file = defaultdict(list)     # file -> [(ann_id, src_ann_id)]
+        src = getattr(ds, "src_ann_ids", None)
+        for i, fn in enumerate(ds.file_names):
+            aid = int(ds.ann_ids[i])
+            self._keys_by_file[fn].append((aid, int(src[i]) if src is not None else aid))
 
     def __len__(self):
         return len(self._ds)
@@ -182,8 +196,14 @@ class DistractorGrayFillDataset:
         with np.load(npz) as z:
             masks, ids, matched = z["masks"], z["ann_ids"], z["matched"]
         me = int(self._ds.ann_ids[i])
-        keep = [j for j in range(len(ids)) if int(ids[j]) != me and matched[j]]
-        mine = [j for j in range(len(ids)) if int(ids[j]) == me and matched[j]]
+        mine_keys = {me, int(getattr(self._ds, "src_ann_ids", self._ds.ann_ids)[i])}
+        other_keys = set()
+        for aid, sid in self._keys_by_file[fn]:
+            if aid != me:
+                other_keys |= {aid, sid}
+        other_keys -= mine_keys
+        keep = [j for j in range(len(ids)) if matched[j] and int(ids[j]) in other_keys]
+        mine = [j for j in range(len(ids)) if matched[j] and int(ids[j]) in mine_keys]
         if not keep:
             return None
         w, h = self._ds.img_wh[i]

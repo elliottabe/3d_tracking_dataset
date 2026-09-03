@@ -129,13 +129,15 @@ def masks_for(root, ds, i):
         return tgt, oth
     with np.load(npz) as z:
         masks, ids, matched = z["masks"], z["ann_ids"], z["matched"]
-    me = int(ds.ann_ids[i])
+    # rows may be keyed by the merged id OR src_ann_id (see
+    # data/distractor.DistractorGrayFillDataset); resolve "mine" by either
+    mine_keys = {int(ds.ann_ids[i]), int(ds.src_ann_ids[i])}
     for j in range(len(ids)):
         if not matched[j]:
             continue
         m = masks[j].astype(bool)[sl]
         pad = np.zeros((CROP, CROP), bool); pad[:m.shape[0], :m.shape[1]] = m
-        if int(ids[j]) == me:
+        if int(ids[j]) in mine_keys:
             tgt |= pad
         else:
             oth |= pad
@@ -159,6 +161,10 @@ def main():
     ap.add_argument("--n-mass", type=int, default=160, help="frames per group for the mass curves")
     ap.add_argument("--layers", default="1,4,8,12")
     ap.add_argument("--skip-mass", action="store_true")
+    ap.add_argument("--populated-v12", action="store_true",
+                    help="feed --ckpt-v12 the REAL mask channel (a mask-on checkpoint); "
+                         "--ckpt-ref is always fed a zeroed channel 3")
+    ap.add_argument("--label-v12", default=None, help="display name for --ckpt-v12 (default: run dir name)")
     a = ap.parse_args()
     out = Path(a.out); out.mkdir(parents=True, exist_ok=True)
 
@@ -174,7 +180,10 @@ def main():
     tips = [name_idx[f"{leg}_TaTip"] for leg in ("T1L", "T2L", "T3L", "T1R", "T2R", "T3R")]
 
     ds_raw = V5Dataset(a.root, "val")
-    ds = ZeroMaskDataset(ds_raw)
+    ds = ZeroMaskDataset(ds_raw)                     # what the mask-off arms see
+    ds_v12 = ds_raw if a.populated_v12 else ds       # what --ckpt-v12 sees
+    lab_v12 = a.label_v12 or Path(a.ckpt_v12).parent.name
+    lab_ref = Path(a.ckpt_ref).parent.name
     z = np.load(a.eval_npz)
     assert list(z["file_name"]) == list(ds_raw.file_names), "eval npz is not in val index order"
     pred, gt, vis = z["pred_zeroed"], z["gt_zeroed"], z["vis_zeroed"]   # crop px (448)
@@ -186,14 +195,15 @@ def main():
           f"worst-tip median {np.nanmedian(tip_err):.1f}px, >30px: {(tip_err > 30).mean():.1%}")
 
     cfg = ViTPoseConfig()
-    models = {"v12_bal_maskoff": restore_model(a.ckpt_v12, "vitpose", cfg),
-              "v5vf_maskoff": restore_model(a.ckpt_ref, "vitpose", cfg)}
+    models = {lab_v12: restore_model(a.ckpt_v12, "vitpose", cfg),
+              lab_ref: restore_model(a.ckpt_ref, "vitpose", cfg)}
+    ds_of = {lab_v12: ds_v12, lab_ref: ds}
     for m in models.values():
         m.eval()
     fwd = {k: nnx.jit(forward_with_attn) for k in models}
 
     def run(mkey, i):
-        img4, kp, v = ds[i]
+        img4, kp, v = ds_of[mkey][i]
         x = normalize_image(jnp.asarray(img4[None]))
         hm, at = fwd[mkey](models[mkey], x)
         return np.asarray(img4), np.asarray(hm[0]), at[:, 0]       # at: (L,heads,N,N) device
@@ -262,7 +272,7 @@ def main():
         fig.suptitle(f"{tag}: {ds_raw.file_names[i]}  ann {int(ds_raw.ann_ids[i])}  "
                      f"{'two-fly' if oth.any() else 'single'}  v12 worst-tip err {tip_err[i]:.0f}px\n"
                      "white = GT, cyan dashed = prediction, grey = target mask, orange = other fly mask; "
-                     "channel 3 zeroed for both arms", fontsize=9)
+                     f"channel 3 {'REAL for ' + lab_v12 + ', zeroed for ' + lab_ref if a.populated_v12 else 'zeroed for both arms'}", fontsize=9)
         fig.tight_layout()
         fig.savefig(out / f"attn_query_{tag}_{i}.png", dpi=130); plt.close(fig)
         print("wrote", tag, i)
@@ -281,10 +291,10 @@ def main():
     ratios = {m: [] for m in models}; where = {m: [] for m in models}
     hm_fwd = {k: nnx.jit(lambda mdl, x: mdl(x, use_running_average=True)) for k in models}
     for i in bad:
-        img4, _, _ = ds[int(i)]
         tgt, oth = masks_for(a.root, ds_raw, int(i))
-        x = normalize_image(jnp.asarray(img4[None]))
         for mkey in models:
+            img4, _, _ = ds_of[mkey][int(i)]
+            x = normalize_image(jnp.asarray(img4[None]))
             hm = np.asarray(hm_fwd[mkey](models[mkey], x)[0])
             pk = np.asarray(heatmaps_to_keypoints(jnp.asarray(hm[None]), in_size=CROP))[0]
             for k in tips:
@@ -304,7 +314,7 @@ def main():
         axes[0].hist(rr, bins=bins, histtype="step", lw=2, label=f"{mkey} n={len(rr)} (>0.5: {(rr > 0.5).mean():.0%})")
     axes[0].set_xlabel("heatmap at GT tip / heatmap max  (v12-bad tips, err>30px)")
     axes[0].set_ylabel("count"); axes[0].legend(fontsize=8)
-    axes[0].set_title("Is GT still a mode? 1.0 = GT is the peak (v5vf gets these right)", fontsize=9)
+    axes[0].set_title("Is GT still a mode? 1.0 = GT is the peak", fontsize=9)
     cats = ["target", "other", "bg"]
     w = 0.38
     for j, mkey in enumerate(models):
@@ -313,7 +323,7 @@ def main():
     axes[1].set_xticks(range(3)); axes[1].set_xticklabels(["on target fly mask", "on OTHER fly mask", "background"])
     axes[1].set_ylabel("fraction of predictions"); axes[1].legend(fontsize=8)
     axes[1].set_title("Where does the argmax land on those tips?", fontsize=9)
-    fig.suptitle(f"v12_bal_maskoff bad tarsal tips (err>30px, {len(bad)} frames sampled): heatmap readout, both arms on identical crops", fontsize=9)
+    fig.suptitle(f"bad tarsal tips of the --eval-npz model (err>30px, {len(bad)} frames sampled): heatmap readout, both arms on identical crops", fontsize=9)
     fig.tight_layout(); fig.savefig(out / "heatmap_modes_bad_tips.png", dpi=130); plt.close(fig)
     for mkey in models:
         rr = np.asarray(ratios[mkey])
@@ -355,7 +365,7 @@ def main():
         for g, idx in groups.items():
             acc = []
             for i in idx:
-                img4, _, _ = ds[int(i)]
+                img4, _, _ = ds_of[mkey][int(i)]
                 tgt, oth = masks_for(a.root, ds_raw, int(i))
                 ft, fo = patch_fraction(tgt), patch_fraction(oth)
                 fb = np.clip(1 - ft - fo, 0, 1)
@@ -372,7 +382,7 @@ def main():
             print(mkey, g, summary[(mkey, g)].shape)
 
     fig, axes = plt.subplots(1, 3, figsize=(15, 4.4), sharex=True)
-    styles = {"v12_bal_maskoff": "-", "v5vf_maskoff": "--"}
+    styles = {lab_v12: "-", lab_ref: "--"}
     colors = {"bad_twofly (tip>30px)": "C3", "good_twofly (tip<10px)": "C2",
               "bad_single (tip>30px)": "C1", "good_single (tip<10px)": "C0"}
     for (mkey, g), arr in summary.items():
