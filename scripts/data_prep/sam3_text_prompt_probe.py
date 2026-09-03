@@ -24,6 +24,10 @@ overwrote them once already.
 import argparse, collections, json, os
 from pathlib import Path
 
+import sys
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(
+    os.path.dirname(os.path.abspath(__file__)))), "third_party", "jarvis_jax"))
+
 import huggingface_hub.file_download  # noqa: F401  (see sam3_dataset_masks.py)
 import numpy as np
 
@@ -34,11 +38,27 @@ def main():
     ap.add_argument("--recording", default=None, help="limit to one recording")
     ap.add_argument("--camera", default=None)
     ap.add_argument("--limit", type=int, default=20)
+    ap.add_argument("--frame-list", default=None,
+                    help="file of 'rec/cam/Frame_N' lines -- run on exactly these, "
+                         "e.g. the frames whose BOX mask holds <60% of its own "
+                         "annotation's keypoints")
     ap.add_argument("--text", default="insect")
     ap.add_argument("--masks-dir", default="masks_text")
     ap.add_argument("--min-inside", type=float, default=0.5,
                     help="min share of an annotation's visible keypoints inside a "
                          "detection for it to be attributed to that annotation")
+    ap.add_argument("--crop-mode", action="store_true",
+                    help="run the text prompt on a 448px CROP around each "
+                         "annotation instead of the full frame. On a 1936x448 "
+                         "frame the fly is ~2%% of pixels and set_image "
+                         "downsamples, so the animal gets very few pixels; a "
+                         "crop gives ~20x the effective resolution. One forward "
+                         "per ANNOTATION rather than per image.")
+    ap.add_argument("--with-box", action="store_true",
+                    help="after the text prompt, add the annotation's bbox as a "
+                         "positive geometric prompt. NOTE the format difference: "
+                         "add_geometric_prompt wants [cx,cy,w,h] NORMALISED, not "
+                         "the XYXY pixels predict_inst takes.")
     ap.add_argument("--conf", type=float, default=None,
                     help="SAM3 confidence threshold (default: model's own)")
     ap.add_argument("--out-json", default=None)
@@ -60,7 +80,19 @@ def main():
             if a.camera and cam != a.camera:
                 continue
             per[(rec, cam, os.path.splitext(fn)[0])].append((an, im))
-    keys = sorted(per)[:a.limit]
+    if a.frame_list:
+        want = set()
+        for line in open(a.frame_list):
+            line = line.strip()
+            if line:
+                r, c, f = line.split("/")
+                want.add((r, c, f))
+        keys = [k for k in sorted(per) if k in want]
+        missing = want - set(keys)
+        if missing:
+            print(f"  note: {len(missing)} listed frames have no annotation here")
+    else:
+        keys = sorted(per)[:a.limit]
     if not keys:
         raise SystemExit("no images matched")
     print(f"probing {len(keys)} images from "
@@ -68,6 +100,7 @@ def main():
 
     import torch
     from PIL import Image
+    from jarvis_jax.data.transforms import crop_origin
     from sam3 import build_sam3_image_model
     from sam3.model.sam3_image_processor import Sam3Processor
     # SAM3's own examples run the whole notebook under bf16 autocast, and the
@@ -87,26 +120,57 @@ def main():
     rows = []
     for (rec, cam, frame) in keys:
         anns = per[(rec, cam, frame)]
-        img = Image.open(root / "images" / anns[0][1]["file_name"]).convert("RGB")
-        W, H = img.size
-        with amp:
-            state = processor.set_image(img)
-            state = processor.set_text_prompt(a.text, state)
-        masks = state.get("masks")
-        # `state["masks"]` is a CUDA tensor (and bf16 under autocast); np.asarray
-        # on it raises. Detach -> float32 -> cpu -> numpy, in that order.
-        def _np(m):
-            if hasattr(m, "detach"):
-                m = m.detach().float().cpu()
-            return np.asarray(m).squeeze()
-        masks = [] if masks is None or len(masks) == 0 else [
-            (_np(m) > 0.0) if _np(m).dtype != bool else _np(m) for m in masks]
+        full = Image.open(root / "images" / anns[0][1]["file_name"]).convert("RGB")
+        W, H = full.size
+
+        def run(im, box_xywh=None):
+            """text (+ optional box) on `im`; returns a list of bool masks."""
+            with amp:
+                st = processor.set_image(im)
+                st = processor.set_text_prompt(a.text, st)
+                if box_xywh is not None:
+                    iw, ih = im.size
+                    x, y, bw, bh = box_xywh
+                    # [cx, cy, w, h] NORMALISED -- not XYXY pixels.
+                    st = processor.add_geometric_prompt(
+                        [(x + bw / 2) / iw, (y + bh / 2) / ih, bw / iw, bh / ih],
+                        True, st)
+            mk = st.get("masks")
+            if mk is None or len(mk) == 0:
+                return []
+            out = []
+            for m in mk:
+                if hasattr(m, "detach"):
+                    m = m.detach().float().cpu()
+                m = np.asarray(m).squeeze()
+                out.append(m > 0.0 if m.dtype != bool else m)
+            return out
+
+        if a.crop_mode:
+            # one forward PER ANNOTATION, on its own crop, pasted back to full size
+            masks, owner = [], []
+            for an, im_rec in anns:
+                x0, y0 = crop_origin(an["bbox"], W, H, crop=448)
+                sub = full.crop((x0, y0, x0 + 448, y0 + 448))
+                bx = ([an["bbox"][0] - x0, an["bbox"][1] - y0,
+                       an["bbox"][2], an["bbox"][3]] if a.with_box else None)
+                for m in run(sub, bx):
+                    fullm = np.zeros((H, W), bool)
+                    hh = min(448, H - y0); ww = min(448, W - x0)
+                    fullm[y0:y0 + hh, x0:x0 + ww] = m[:hh, :ww]
+                    masks.append(fullm); owner.append(int(an["id"]))
+        else:
+            bx = (anns[0][0]["bbox"] if a.with_box and len(anns) == 1 else None)
+            masks = run(full, bx)
+            owner = [None] * len(masks)
         out = []
         for an, im in anns:
             kp = np.asarray(an["keypoints"], float).reshape(-1, 3)
             v = kp[:, 2] > 0
             best, best_i = 0.0, -1
             for mi, m in enumerate(masks):
+                if owner[mi] is not None and owner[mi] != int(an["id"]):
+                    continue        # crop mode: this detection belongs to another annotation
                 if m.shape != (H, W):
                     continue
                 xi = np.clip(kp[v, 0].astype(int), 0, W - 1)

@@ -52,6 +52,7 @@ def main():
             per[(rec, cam, os.path.splitext(fn)[0])].append((an, im))
 
     rows = []
+    n_unmatched = {}
     for (rec, cam, frame), anns in per.items():
         npz = os.path.join(root, "masks", rec, cam, frame + ".npz")
         if not os.path.exists(npz) or os.path.islink(npz):
@@ -62,6 +63,13 @@ def main():
         except Exception:
             continue
         for k, aid in enumerate(ids):
+            if not bool(matched[k]):
+                # matched=False is an HONEST ABSENCE, not a wrong mask: the
+                # loader returns an all-zero channel for it. Counting it as
+                # "badly wrong" (0% containment, by construction) would make
+                # the gate look like the defect it exists to remove.
+                n_unmatched[rec] = n_unmatched.get(rec, 0) + 1
+                continue
             an = next((x for x in anns if x[0]["id"] == int(aid)), None)
             if an is None:
                 continue
@@ -94,7 +102,7 @@ def main():
     for r in rows:
         by[r["rec"]].append(r)
     print(f"\n{'recording':26s}{'n':>6}{'fg p50':>9}{'fg max':>9}{'kp-in min':>11}"
-          f"{'over-inc':>10}{'bad':>6}{'bad%':>7}  verdict")
+          f"{'over-inc':>10}{'bad':>6}{'bad%':>7}{'gated':>8}  verdict")
     table = {}
     for rec in sorted(by):
         f = np.array([x["frac"] for x in by[rec]])
@@ -113,7 +121,7 @@ def main():
                           badly_wrong=bad, bad_rate=float(bad_rate), pass_=bool(ok))
         print(f"{rec:26s}{len(f):>6}{np.median(f)*100:>8.2f}%{f.max()*100:>8.2f}%"
               f"{np.nanmin(i)*100:>10.0f}%{over:>10}{bad:>6}{100*bad_rate:>7.2f}%"
-              f"  {'PASS' if ok else 'FAIL'}")
+              f"{n_unmatched.get(rec,0):>8}  {'PASS' if ok else 'FAIL'}")
     n_fail = sum(1 for v in table.values() if not v["pass_"])
     n_bad = sum(v["badly_wrong"] for v in table.values())
     print(f"\n{len(table)} recordings, {n_fail} FAIL   |   {n_bad}/{len(rows)} masks "

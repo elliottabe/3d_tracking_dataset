@@ -118,11 +118,106 @@ def collect_metadata(ds):
     }
 
 
+import numpy as np   # module scope: DistractorGrayFill runs inside the loader
+                    # thread pool, where main()'s local import is not visible
+
+
+class DistractorGrayFill:
+    """Gray-fill the OTHER flies out of each crop, as inference already does.
+
+    WHY THIS EXISTS. `predict_2d`/`session_frameset` replace distractor-fly
+    pixels with the crop mean before the detector sees them
+    (configs/detector/vitpose_v3.yaml: distractor_dilate 15, target_protect
+    60). TRAINING never did -- there is no gray-fill anywhere in
+    jarvis_jax/data/ -- so a two-fly crop is genuinely ambiguous at train time
+    and the model has no way to know which animal is the target. Measured on
+    v12: in the worst 10% of val annotations, 23 of 56 two-fly cases put the
+    prediction closer to the OTHER fly's GT than its own. Evaluating WITHOUT
+    the fill therefore measures the ambiguous condition, not the deployed one.
+
+    Masks come from the root's own masks/<rec>/<cam>/<frame>.npz, which holds
+    every annotation on that image keyed by ann_id -- so the target and the
+    distractors are both available. Reading them from DISK rather than from
+    channel 3 means this wrapper composes correctly with ZeroMaskDataset in
+    either order (that wrapper has already zeroed channel 3).
+
+    Mirrors session_frameset exactly: dilate the distractor, subtract the
+    target dilated by the LARGER target_protect radius (so the target's own
+    extended wing is not erased), and fill with the crop mean taken BEFORE
+    filling.
+    """
+
+    def __init__(self, ds, root, *, dilate=15, protect=60, crop=448):
+        self._ds, self.root, self.dilate, self.protect, self.crop = ds, root, dilate, protect, crop
+        self.n_filled = 0
+        self.n_no_distractor = 0
+
+    def __len__(self):
+        return len(self._ds)
+
+    def __getattr__(self, k):
+        return getattr(self._ds, k)
+
+    @staticmethod
+    def _dil(m, r):
+        if r <= 0 or not m.any():
+            return m
+        from scipy.ndimage import binary_dilation
+        yy, xx = np.ogrid[-r:r + 1, -r:r + 1]
+        return binary_dilation(m, structure=(xx ** 2 + yy ** 2 <= r * r))
+
+    def __getitem__(self, i):
+        img4, kp_xy, vis = self._ds[i]
+        from jarvis_jax.data.transforms import crop_origin
+        fn = self._ds.file_names[i]
+        rec, cam, base = fn.split("/")
+        npz = os.path.join(self.root, "masks", rec, cam,
+                           os.path.splitext(base)[0] + ".npz")
+        if not os.path.exists(npz):
+            self.n_no_distractor += 1
+            return img4, kp_xy, vis
+        with np.load(npz) as z:
+            masks, ids, matched = z["masks"], z["ann_ids"], z["matched"]
+        me = int(self._ds.ann_ids[i])
+        keep = [j for j in range(len(ids)) if int(ids[j]) != me and matched[j]]
+        mine = [j for j in range(len(ids)) if int(ids[j]) == me and matched[j]]
+        if not keep:
+            self.n_no_distractor += 1
+            return img4, kp_xy, vis
+        w, h = self._ds.img_wh[i]
+        x0, y0 = crop_origin(self._ds.bboxes[i], int(w), int(h), crop=self.crop)
+        sl = (slice(y0, y0 + self.crop), slice(x0, x0 + self.crop))
+        d = np.zeros(masks.shape[1:], bool)
+        for j in keep:
+            d |= masks[j].astype(bool)
+        t = np.zeros(masks.shape[1:], bool)
+        for j in mine:
+            t |= masks[j].astype(bool)
+        d, t = d[sl], t[sl]
+        hh, ww = d.shape
+        d = self._dil(d, self.dilate) & ~self._dil(t, self.protect)
+        if not d.any():
+            self.n_no_distractor += 1
+            return img4, kp_xy, vis
+        out = img4.copy()
+        region = out[:hh, :ww, :3]
+        mean_color = region.reshape(-1, 3).mean(axis=0)   # BEFORE filling
+        region[d] = mean_color.astype(out.dtype)
+        self.n_filled += 1
+        return out, kp_xy, vis
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--ckpt-dir", required=True)
     ap.add_argument("--data-root", required=True)
+    ap.add_argument("--distractor-grayfill", action="store_true",
+                    help="gray-fill the OTHER annotations' flies out of the RGB "
+                         "crop, reproducing what predict_2d does at inference "
+                         "but training never did. See DistractorGrayFill below.")
+    ap.add_argument("--distractor-dilate", type=int, default=15)
+    ap.add_argument("--target-protect", type=int, default=60)
     ap.add_argument("--conditions", default="populated,zeroed",
                     help="comma-separated subset of {populated,zeroed}")
     ap.add_argument("--batch-size", type=int, default=16)
@@ -213,6 +308,10 @@ def main(argv=None):
 
     for cond in conditions:
         this_ds = ZeroMaskDataset(ds) if cond == "zeroed" else ds
+        if a.distractor_grayfill:
+            this_ds = DistractorGrayFill(this_ds, a.data_root,
+                                         dilate=a.distractor_dilate,
+                                         protect=a.target_protect)
         pred, gt, vis = build_arrays(model, this_ds, batch_size=a.batch_size)
         err = np.linalg.norm(pred - gt, axis=-1)   # (N,K) px
         out[f"pred_{cond}"] = pred.astype(np.float32)
