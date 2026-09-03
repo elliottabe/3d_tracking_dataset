@@ -12,6 +12,10 @@ translate_frac: 0.15  # +/- fraction of the crop (default.yaml: 0.1)
 flip_p: 0.5           # horizontal flip probability (with L/R keypoint swap) -- unchanged
 cutout_n: 3           # number of erased boxes (default.yaml: 2)
 cutout_frac: 0.3      # box side as a fraction of the crop (default.yaml: 0.25)
+# See configs/aug/default.yaml -- listed explicitly so they are overridable.
+cutout_mask_target_p: 0.0
+cutout_size_rel_fly: 0.0
+cutout_punch_mask: false
 brightness: 0.3       # (default.yaml: 0.2)
 contrast: 0.3         # (default.yaml: 0.2)
 gamma: 0.3            # (default.yaml: 0.2)

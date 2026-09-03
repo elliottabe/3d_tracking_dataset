@@ -293,7 +293,7 @@ def _sample_mask_centre(key, mask, pool):
 
 
 def cutout_batch(key, img4_u8, n, frac, *, mask_target_p=0.0, size_rel_fly=0.0,
-                 mask_pool=8):
+                 mask_pool=8, punch_mask=False):
     """Zero up to n random square boxes (side ~frac*W) in RGB (channels 0-2).
 
     Defaults are an EXACT no-op change: uniform box centres, side = frac*W,
@@ -319,10 +319,16 @@ def cutout_batch(key, img4_u8, n, frac, *, mask_target_p=0.0, size_rel_fly=0.0,
         distances (apparent fly size varies a lot between the 7 views).
         Falls back to ``frac * W`` for a crop with no mask.
 
-    Note that cutout writes channels 0-2 only: the silhouette in channel 3 is
-    NOT punched out, so for a mask-ON model an RGB-occluded limb is still
-    visible in the mask channel and the occlusion is much weaker than it
-    looks. That is moot for the promoted mask-off checkpoint.
+      ``punch_mask``     erase the box in channel 3 as well. Default False =
+        the historical behaviour, in which cutout writes channels 0-2 only:
+        an RGB-occluded limb stays visible in the silhouette, so for a
+        mask-ON model the occlusion is much weaker than it looks. That is a
+        no-op for a mask-OFF arm (``ZeroMaskDataset`` has already zeroed
+        channel 3, so punching zeros into zeros changes nothing -- asserted
+        in tests), which is what makes it safe to enable on BOTH arms of a
+        mask-on/mask-off A/B: it removes a free hint that would otherwise
+        advantage the mask-ON arm at exactly the moments cutout exists to
+        make hard, while leaving the mask-OFF arm bit-identical.
     """
     B, H, W, _ = img4_u8.shape
     side_u = max(1, int(round(frac * W)))
@@ -355,7 +361,10 @@ def cutout_batch(key, img4_u8, n, frac, *, mask_target_p=0.0, size_rel_fly=0.0,
         box = my[:, :, None] & mx[:, None, :]   # (B,H,W)
         keep = (~box)[..., None].astype(out.dtype)
         rgb = out[..., :3] * keep
-        out = jnp.concatenate([rgb, out[..., 3:]], axis=-1)
+        if punch_mask:
+            out = out * keep
+        else:
+            out = jnp.concatenate([rgb, out[..., 3:]], axis=-1)
     return out
 
 
@@ -448,6 +457,9 @@ class AugParams:
     # box, bit-for-bit; PROPOSED, not yet A/B-trained as of 2026-09-02.
     cutout_mask_target_p: float = 0.0
     cutout_size_rel_fly: float = 0.0
+    # Erase the cutout box in the silhouette channel too. False = historical.
+    # A no-op for a mask-ablated arm; see cutout_batch's `punch_mask`.
+    cutout_punch_mask: bool = False
     brightness: float = 0.2
     contrast: float = 0.2
     gamma: float = 0.2
@@ -471,7 +483,8 @@ def augment_batch(key, img4_u8, kp_xy, vis, params, lr_swap, heatmap_size=224):
     img, kp, vis = flip_batch(kf, img, kp, vis, lr_swap, params.flip_p, heatmap_size)
     img = cutout_batch(kc, img, params.cutout_n, params.cutout_frac,
                        mask_target_p=params.cutout_mask_target_p,
-                       size_rel_fly=params.cutout_size_rel_fly)
+                       size_rel_fly=params.cutout_size_rel_fly,
+                       punch_mask=params.cutout_punch_mask)
     img = photometric_batch(kp_, img, params.brightness, params.contrast, params.gamma)
     img = gaussian_blur_batch(kb, img, params.blur_max)
     img = gaussian_noise_batch(kn, img, params.noise_scale)

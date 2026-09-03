@@ -491,9 +491,38 @@ def test_cutout_targeting_degrades_to_uniform_on_an_empty_mask():
 
 
 def test_cutout_targeting_still_leaves_the_mask_channel_intact():
-    """cutout writes channels 0-2 only. For a mask-ON model that means an
-    RGB-occluded limb is still visible in channel 3 -- the reason targeted
-    cutout is a mask-OFF proposal."""
+    """BY DEFAULT cutout writes channels 0-2 only. For a mask-ON model that
+    means an RGB-occluded limb is still visible in channel 3 -- the occlusion
+    is much weaker than it looks. `punch_mask=True` is the opt-in fix; this
+    pins the historical default."""
     img = _crop_with_blob(16, 16, 9)
     out = cutout_batch(jax.random.PRNGKey(4), img, 2, 0.25, mask_target_p=1.0)
     assert jnp.array_equal(out[..., 3], img[..., 3])
+
+
+def test_cutout_punch_mask_erases_channel_3_without_moving_the_boxes():
+    """`punch_mask` must change ONLY channel 3: same RNG stream, same boxes,
+    byte-identical RGB. If the RGB moved too, the flag would be confounding
+    the very A/B it exists to clean up."""
+    img = _crop_with_blob(16, 16, 9)
+    k = jax.random.PRNGKey(4)
+    plain = cutout_batch(k, img, 2, 0.25, mask_target_p=1.0)
+    punched = cutout_batch(k, img, 2, 0.25, mask_target_p=1.0, punch_mask=True)
+    assert jnp.array_equal(plain[..., :3], punched[..., :3])
+    assert not jnp.array_equal(plain[..., 3], punched[..., 3])
+    # channel 3 is erased exactly where RGB was
+    erased = (plain[..., 0] == 0) & (plain[..., 1] == 0) & (plain[..., 2] == 0)
+    assert jnp.all(punched[..., 3][erased] == 0)
+
+
+def test_cutout_punch_mask_is_an_exact_noop_on_a_mask_ablated_batch():
+    """THE PROPERTY THAT MAKES IT SAFE ON BOTH ARMS OF A MASK A/B. A mask-OFF
+    arm reaches augmentation with channel 3 already zeroed by
+    ZeroMaskDataset, so punching zeros into zeros must change nothing at all
+    -- enabling the flag uniformly leaves that arm bit-identical and removes
+    the free hint only from the mask-ON arm."""
+    img = _crop_with_blob(16, 16, 9).at[..., 3].set(0)
+    k = jax.random.PRNGKey(4)
+    plain = cutout_batch(k, img, 2, 0.25)
+    punched = cutout_batch(k, img, 2, 0.25, punch_mask=True)
+    assert jnp.array_equal(plain, punched)

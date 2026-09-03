@@ -7,6 +7,13 @@ translate_frac: 0.1  # +/- fraction of the crop
 flip_p: 0.5          # horizontal flip probability (with L/R keypoint swap)
 cutout_n: 2          # number of erased boxes
 cutout_frac: 0.25    # box side as a fraction of the crop
+# Targeted / mask-aware cutout knobs. All three are at their historical
+# values here, so this preset is unchanged -- they are listed explicitly
+# because hydra's struct mode refuses to override a key that is not present,
+# and these are the knobs an augmentation A/B needs to reach.
+cutout_mask_target_p: 0.0   # P(draw box centre from the silhouette) -- 0 = uniform centres
+cutout_size_rel_fly: 0.0    # >0: box side = this fraction of the fly's mask-bbox long side
+cutout_punch_mask: false    # also erase the box in channel 3 (no-op on a mask-ablated arm)
 brightness: 0.2
 contrast: 0.2
 gamma: 0.2
