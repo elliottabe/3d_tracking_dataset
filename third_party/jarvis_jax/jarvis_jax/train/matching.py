@@ -1,27 +1,52 @@
-"""Instance <-> labelled-fly assignment by enumeration (I<=4, F<=2)."""
+"""Label-driven instance-slot assignment (P3a spec §3-4). No prediction enters:
+a slot's existence/sex target is a deterministic function of the labels and
+the prompt flag, so the existence head never sees coin-flip targets."""
 from __future__ import annotations
 
-import itertools
-
+import jax
 import jax.numpy as jnp
-import numpy as np
+
+SLOT_PROMPTED, SLOT_FEMALE, SLOT_MALE, SLOT_OTHER = 0, 1, 2, 3
+SEX_FEMALE, SEX_MALE, SEX_UNKNOWN = 0, 1, -1
+SEX_PRESENT_UNKNOWN = 2          # only in `unlabelled_sex`: an unlabelled fly of unknown sex
+N_SLOTS = 4
 
 
-def enumerate_assignments(n_inst: int, n_flies: int) -> np.ndarray:
-    return np.asarray(list(itertools.permutations(range(n_inst), n_flies)), np.int32)
+def _assign_one(sex, valid, on, dist, n_instances):
+    """One sample. sex (F,) int8, valid (F,) bool, on () bool, dist (F,) float."""
+    F = sex.shape[0]
+    # host (fly 0) first, then the others by increasing distance from the ROI origin
+    order = jnp.argsort(jnp.where(jnp.arange(F) == 0, -jnp.inf, dist))
+    typed_all = jnp.where(sex == SEX_FEMALE, SLOT_FEMALE, jnp.where(sex == SEX_MALE, SLOT_MALE, SLOT_OTHER))
+
+    def body(carry, f):
+        taken, assign = carry
+        typed = typed_all[f]
+        slot = jnp.where((f == 0) & on, SLOT_PROMPTED, jnp.where(taken[typed], SLOT_OTHER, typed))
+        slot = jnp.where(valid[f], slot, -1)
+        taken = jnp.where(valid[f], taken.at[jnp.maximum(slot, 0)].set(True) | taken, taken)
+        return (taken, assign.at[f].set(slot)), None
+
+    (taken, assign), _ = jax.lax.scan(body, (jnp.zeros((n_instances,), bool), jnp.full((F,), -1, jnp.int32)), order)
+    return assign, taken
 
 
-def match(cost, fly_valid, pin_first):
-    """cost (B,I,F) -> assign (B,F) instance index (-1 for invalid flies), inst_matched (B,I)."""
-    B, I, F = cost.shape
-    cand = jnp.asarray(enumerate_assignments(I, F))                          # (n,F)
-    c = jnp.take_along_axis(jnp.broadcast_to(cost[:, None], (B, cand.shape[0], I, F)),
-                            cand[None, :, None, :], axis=2)[:, :, 0, :]      # (B,n,F)
-    c = jnp.where(fly_valid[:, None, :], c, 0.0).sum(-1)                     # (B,n)
-    pinned_ok = (cand[:, 0] == 0)[None, :] | ~pin_first[:, None]
-    c = jnp.where(pinned_ok, c, jnp.inf)
-    best = jnp.argmin(c, axis=1)                                             # (B,)
-    assign = cand[best]                                                      # (B,F)
-    assign = jnp.where(fly_valid, assign, -1)
-    inst_matched = (jnp.arange(I)[None, :, None] == assign[:, None, :]).any(-1)
-    return assign.astype(jnp.int32), inst_matched
+def assign_slots(fly_sex, fly_valid, prompt_on, dist, n_instances=N_SLOTS):
+    """fly_sex (B,F) int8 {0 F, 1 M, -1 unknown}; fly_valid (B,F); prompt_on (B,);
+    dist (B,F) distance of each fly's labelled-3D centroid from the ROI origin.
+    Returns assign (B,F) int32 slot per fly (-1 = invalid fly) and
+    slot_target (B,I) bool = a fly was assigned to that slot. F <= 2 is assumed
+    (slot 3 can hold one fly)."""
+    return jax.vmap(lambda s, v, o, d: _assign_one(s, v, o, d, n_instances))(fly_sex, fly_valid, prompt_on, dist)
+
+
+def slot_ignore(unlabelled_sex, n_instances=N_SLOTS):
+    """(B,) int8 -> (B,I) bool: slots that get NO existence loss because an
+    unlabelled fly present in the window could legitimately occupy them.
+    -1: none; 0/1: that sex's slot and OTHER; 2: every slot but PROMPTED."""
+    u = unlabelled_sex[:, None]
+    s = jnp.arange(n_instances)[None, :]
+    other = s == SLOT_OTHER
+    return (((u == SEX_FEMALE) & ((s == SLOT_FEMALE) | other))
+            | ((u == SEX_MALE) & ((s == SLOT_MALE) | other))
+            | ((u == SEX_PRESENT_UNKNOWN) & (s != SLOT_PROMPTED)))

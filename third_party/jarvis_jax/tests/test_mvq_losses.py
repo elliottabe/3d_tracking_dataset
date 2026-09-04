@@ -1,35 +1,5 @@
 import numpy as np
 import jax, jax.numpy as jnp
-import pytest
-
-
-def test_enumerate_assignments_is_injective_and_complete():
-    from jarvis_jax.train.matching import enumerate_assignments
-    a = enumerate_assignments(3, 2)
-    assert a.shape == (6, 2) and all(len(set(r)) == 2 for r in a)
-    assert enumerate_assignments(2, 2).shape == (2, 2)
-
-
-def test_match_agrees_with_scipy_hungarian():
-    from scipy.optimize import linear_sum_assignment
-    from jarvis_jax.train.matching import match
-    rng = np.random.default_rng(0)
-    cost = rng.uniform(size=(16, 3, 2)).astype(np.float32)
-    fv = np.ones((16, 2), bool)
-    assign, inst_m = match(jnp.asarray(cost), jnp.asarray(fv), jnp.zeros(16, bool))
-    for b in range(16):
-        rows, cols = linear_sum_assignment(cost[b].T)          # flies x instances
-        ref = np.full(2, -1); ref[rows] = cols
-        assert list(np.asarray(assign[b])) == list(ref)
-    assert np.asarray(inst_m).sum(1).tolist() == [2] * 16
-
-
-def test_match_pins_fly0_to_instance0_and_ignores_invalid_flies():
-    from jarvis_jax.train.matching import match
-    cost = jnp.asarray([[[0.0, 5.0], [1.0, 0.1], [9.0, 9.0]]])        # instance 1 is best for fly 0
-    assign, inst_m = match(cost, jnp.asarray([[True, False]]), jnp.asarray([True]))
-    assert np.asarray(assign).tolist() == [[0, -1]]
-    assert np.asarray(inst_m).tolist() == [[True, False, False]]
 
 
 def _perfect_batch(B=2, I=3, T=1, C=3, K=5, seed=0):
