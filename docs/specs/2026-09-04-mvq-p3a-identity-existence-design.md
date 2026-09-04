@@ -36,10 +36,13 @@ of a later tracking step.
   directory name, 3 from user statements on 2026-09-02); none is unknown.
   For the 4 mixed recordings the directory-name convention is fly0 =
   female, fly1 = male -- a convention, so it gets a figure gate (§7).
-- Same-sex pairs exist: `2026_06_09_15_38_35` is two females (31 train
-  framesets, both labelled).
-- Two-fly-labelled framesets: train 88 + 31 (`17_28_34` mixed, `15_38_35`
-  F/F), val 74 (`12_11_50` group C, `15_25_51` group A, both mixed).
+- Same-sex pairs exist: `2026_06_09_15_38_35` is two females, but only
+  **fly0 is labelled** -- 31 train framesets, each a SINGLE-fly window with
+  an unlabelled second female (`unlabelled_sex = female`), not a
+  both-labelled pair (corrected 2026-09-04).
+- Two-fly-labelled framesets: train **88** (`17_28_34` mixed only -- the 31
+  `15_38_35` framesets are single-fly, above), val 74 (`12_11_50` group C,
+  `15_25_51` group A, both mixed) (corrected 2026-09-04).
 - Host masks exist for every window (val 100 %, train 100 % on a 120-window
   sample); the manifest's `has_masks` flag is stale and is not used.
 - Cameras are affine, so a 3D translation is an exact per-camera 2D
@@ -95,7 +98,11 @@ female and male queries see each other.
 ## 4. Existence, ignore, and sex targets
 
 **New batch keys** (all from the loader, §6):
-- `fly_sex (F,) int8`: 0 female, 1 male, -1 unknown.
+- `fly_sex (F,) int8`: 0 female, 1 male, -1 unknown. Sex resolution is PER
+  WINDOW and annotation-first, because one recording's two annotation subsets
+  label different animals under the same fly id (`2025_10_20_13_20_04`: male
+  in `courtship_20_04_male`, female in `20_04_female_climbing`), so a single
+  per-fly manifest value cannot represent it -- ruled 2026-09-04.
 - `unlabelled_sex () int8`: -1 = every animal in the window is labelled;
   else the sex code of the one unlabelled animal (2 = present, sex
   unknown). From the manifest: `n_flies(recording) - len(flies labelled in
@@ -357,9 +364,12 @@ next P3b item.
   compositing, and the F/F and mixed real pairs remain in the data. If the
   `contact_pair` metrics improve only on pasted-looking windows, P3b adds
   Poisson blending.
-- **Slot 3 starvation.** It is positive only on same-sex pairs (31 real
-  framesets plus 30 % of pastes). Acceptable: its job is to exist rarely
-  and correctly.
+- **Slot 3 starvation.** It has NO real labelled positives anywhere in
+  train -- the 31 `15_38_35` framesets turn out to have only fly0 labelled
+  (§1, corrected 2026-09-04), so slot 3 is positive only on same-sex
+  COPY-PASTE windows (30 % of pastes). Its job is to exist rarely and
+  correctly, but its precision/recall on the val split (where no same-sex
+  pair is labelled either) will be uninformative.
 - **Step-time.** +50 3D queries per window; measured at launch.
 
 ## 12. Out of scope

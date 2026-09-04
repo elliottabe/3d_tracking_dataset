@@ -18,15 +18,17 @@ training consumes.
 2025_10_20_13_20_04 is sampled from BOTH of its annotation subsets: 677
 framesets of `courtship_20_04_male` (annotation `sex` = male, frames
 84143-439478) and 15 of `20_04_female_climbing` (female, frames >= 446642),
-while its manifest says fly0 = female for all 692. The user read this figure
-on 2026-09-04 and judged EVERY 20_04 window to show a female, so resolution
-is MANIFEST-FIRST and both blocks now report `ds=female`: the expectation for
-this recording is that both blocks' labelled host looks like the SAME fly and
-that fly reads female (larger, pointed striped abdomen), with its smaller,
-darker unlabelled companion the male. A block whose host instead looks
-smaller and dark-tipped would mean the manifest is wrong for it after all.
-In that recording only one fly is labelled: `ds says <sex>` in the fly1 line
-is the unlabelled animal's sex from the manifest's fly ids.
+while its manifest says fly0 = female for all 692. Ruled 2026-09-04 after the
+user judged a full-frame render against known-sex reference recordings: the
+two subsets label DIFFERENT ANIMALS under the same fly id -- the labelled fly
+is the MALE in the courtship block and the FEMALE in the climbing block -- so
+resolution is ANNOTATION-FIRST and the manifest's single per-fly value cannot
+represent this recording. Expectation for its rows: the `courtship_20_04_male`
+rows show `ds=male` on the smaller, dark-tipped fly and the
+`20_04_female_climbing` rows `ds=female` on the larger, pale-striped one,
+each flagged `[ds!=man]` where it contradicts the manifest. Only one fly is
+labelled there, so `ds says <sex>` on the fly1 line is the UNLABELLED
+animal's sex -- the opposite of that window's host.
 
     JAX_PLATFORMS=cpu OMP_NUM_THREADS=4 PYTHONPATH=third_party/jarvis_jax:. \\
         python scripts/viz/mvq_sex_label_check.py \\

@@ -162,46 +162,57 @@ def test_fly_sex_and_unlabelled_sex_keys(tmp_path):
     assert ds[host1]["fly_sex"].tolist() == [SEX_MALE, SEX_FEMALE]
 
 
-def test_sex_resolution_is_per_window_and_manifest_first(tmp_path):
+def test_sex_resolution_is_per_window_and_annotation_first(tmp_path):
     """Sex is resolved PER WINDOW (not one collapsed value per (recording,
-    fly), which was last-frameset-wins) and MANIFEST-FIRST.
+    fly), which was last-frameset-wins) and ANNOTATION-FIRST.
 
     Real case: `2025_10_20_13_20_04` fly0 has 677 framesets annotated MALE
     (subset `courtship_20_04_male`) and 15 annotated FEMALE
     (`20_04_female_climbing`), while the manifest says fly0 = female for all
-    692. The user read the crops on 2026-09-04 and judged every window to
-    show a FEMALE, so the manifest wins and the annotation `sex` of that
-    subset is wrong at source.
+    692. The user judged a full-frame render against known-sex reference
+    recordings on 2026-09-04: the two subsets really do label DIFFERENT
+    animals under one fly id, so the annotators' `sex` is right for both
+    blocks and the manifest's single per-fly value cannot represent the
+    recording.
 
     Fixture: fly0 is annotated MALE at frame 2 only, manifest `fly_sex.fly0 =
-    female`. (a) with the manifest entry PRESENT it wins everywhere -- both
-    windows female; (b) with the entry REMOVED the per-frameset annotation is
-    used instead, so frame 2 resolves male and frame 0 female, proving the
-    resolution really is per window and not collapsed."""
+    female`, `sex: "mixed"`, `n_flies: 2`. (a) the annotation wins per
+    window, so frame 2 is male (with a FEMALE unlabelled animal) and frame 0
+    female (with a MALE unlabelled animal); (b) with the frame-2 annotation
+    `sex` blanked the manifest is used instead."""
     from jarvis_jax.data.v12_windows import V12WindowDataset
     from jarvis_jax.train.matching import SEX_FEMALE, SEX_MALE
     root = make_v12_root(tmp_path, n_frames=3, two_fly_frame=1, fly0_sex_by_frame={2: "male"})
     ds = V12WindowDataset(root, "train", T=1, train=False)
     i_ann_male = ds.windows.index((REC, 0, 2))        # fly0 ANNOTATED male here
     i_ann_female = ds.windows.index((REC, 0, 0))
-    # (a) the manifest wins over the conflicting annotation
-    assert ds.manifest[REC]["fly_sex"]["fly0"] == "female"
-    assert ds.is_female(i_ann_male) and ds.is_female(i_ann_female)
-    assert ds[i_ann_male]["fly_sex"][0] == SEX_FEMALE
-    assert ds.window_fly_sex(i_ann_male) == [SEX_FEMALE]
-    # unlabelled animal from the manifest's fly IDS: fly1 is never labelled here -> male
-    assert ds.manifest[REC]["n_flies"] == 2
-    assert ds.unlabelled_sex(i_ann_male) == SEX_MALE
+    # (a) the annotation wins over the conflicting manifest, PER WINDOW
+    assert ds.manifest[REC]["fly_sex"]["fly0"] == "female"      # manifest disagrees
+    assert not ds.is_female(i_ann_male) and ds.is_female(i_ann_female)
+    assert ds[i_ann_male]["fly_sex"][0] == SEX_MALE
+    assert ds[i_ann_female]["fly_sex"][0] == SEX_FEMALE
+    assert ds.window_fly_sex(i_ann_male) == [SEX_MALE]
+    assert ds.window_fly_sex(i_ann_female) == [SEX_FEMALE]
+    # mixed 2-fly recording, one fly labelled -> the unlabelled animal is the
+    # OPPOSITE of THIS window's host, not the manifest's missing fly id
+    assert ds.manifest[REC]["sex"] == "mixed" and ds.manifest[REC]["n_flies"] == 2
+    assert ds.unlabelled_sex(i_ann_male) == SEX_FEMALE
+    assert ds.unlabelled_sex(i_ann_female) == SEX_MALE
+    assert int(ds[i_ann_male]["unlabelled_sex"]) == SEX_FEMALE
     assert int(ds[i_ann_female]["unlabelled_sex"]) == SEX_MALE
 
-    # (b) with no manifest fly_sex entry for fly0, the per-frameset annotation is used
-    man = json.load(open(os.path.join(root, "manifest.json")))
-    man["recordings"][REC]["fly_sex"] = {"fly1": "male"}
-    json.dump(man, open(os.path.join(root, "manifest.json"), "w"))
+    # (b) with no annotation sex on frame 2, the manifest's per-fly value is used
+    p = os.path.join(root, "annotations", "instances_train.json")
+    coco = json.load(open(p))
+    fs2 = coco["framesets"][f"{REC}/Frame_2/fly0"]
+    ann_by_id = {a["id"]: a for a in coco["annotations"]}
+    for aid in fs2["ann_ids"]:
+        if aid is not None:
+            ann_by_id[aid]["sex"] = "unknown"
+    json.dump(coco, open(p, "w"))
     ds2 = V12WindowDataset(root, "train", T=1, train=False)
-    assert not ds2.is_female(i_ann_male) and ds2.is_female(i_ann_female)
-    assert ds2[i_ann_male]["fly_sex"][0] == SEX_MALE
-    assert ds2[i_ann_female]["fly_sex"][0] == SEX_FEMALE
+    assert ds2.is_female(i_ann_male) and ds2.is_female(i_ann_female)
+    assert ds2[i_ann_male]["fly_sex"][0] == SEX_FEMALE
 
 
 def test_sex_disagreement_warning_is_printed_once(tmp_path, capsys):
@@ -213,7 +224,8 @@ def test_sex_disagreement_warning_is_printed_once(tmp_path, capsys):
     assert len(lines) == 1, out
     assert REC in lines[0] and "fly0" in lines[0] and "'female'" in lines[0]
     assert "'female': 2" in lines[0] and "'male': 1" in lines[0]
-    assert "WINS" in lines[0]                       # names which value is actually used
+    # names which value is actually used (the annotation) and which disagrees (the manifest)
+    assert "ANNOTATION sex WINS" in lines[0] and "disagrees" in lines[0]
     # a self-consistent root warns about nothing
     (tmp_path / "clean").mkdir()
     clean = make_v12_root(tmp_path / "clean", n_frames=3, two_fly_frame=1)

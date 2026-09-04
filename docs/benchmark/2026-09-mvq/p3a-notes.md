@@ -24,12 +24,14 @@ Outputs: `figures/2026-09-mvq/p3a_gates/{sex_label_check,copy_paste_check}.png`
 
 ### Gate 1: sex-label check (`sex_label_check.png`, `sex_label_check.json`)
 
-> **Superseded in part** by "Fix wave 2026-09-04: sex resolution" at the end
-> of this file. This section's per-recording verdicts still stand, but its
-> 2025_10_20_13_20_04 row selection could not see that recording's two
-> annotation subsets, and the script's expectation text and panel titles have
-> since changed (per-window resolved sex + manifest value, one row per
-> subset). Read the later section for the current reading of that recording.
+> **Superseded for 2025_10_20_13_20_04** by "Fix wave 2026-09-04: sex
+> resolution" at the end of this file. Its verdicts for the other three
+> recordings still stand, but its 20_04 row selection could not see that
+> recording's two annotation subsets, and its conclusion there ("female
+> labelled, presumed-male unlabelled") is WRONG for the 677-frameset
+> `courtship_20_04_male` block: the labelled fly is the male there. The
+> script's expectation text and panel titles have also changed (per-window
+> resolved sex + manifest value, `[ds!=man]` flag, one row per subset).
 
 Expectation (script docstring, verbatim, AT THE TIME): *"for each mixed recording, the fly
 the manifest calls MALE (orange) is the smaller body with the dark abdomen
@@ -320,91 +322,118 @@ instead of being reachable only by luck of frame-position sampling. Rows
 drawn: 3 x `2025_10_20_13_20_04` (1 male-block, 2 female-block), 3 each of
 `17_28_34`, `12_11_50`, `15_25_51`.
 
-**What the PNG shows (read with the Read tool, rows 0-2 cropped for
-legibility), stated plainly.** In BOTH 20_04 blocks the labelled (cyan) host
-is the same animal in appearance: a compact dark-abdomen fly. In the
-`20_04_female_climbing` rows a second, UNLABELLED fly is visible at the upper
-left of every panel -- larger, with a visibly pale-banded, longer abdomen. In
-the `courtship_20_04_male` rows the labelled fly is alone in the crop. So the
-two blocks are not visually distinguishable from each other, which is
-consistent with one fly (one sex) across all 692 framesets -- and
-inconsistent with the annotation `sex` field flipping between them.
+**What the PNG shows (read with the Read tool, rows cropped into groups for
+legibility), stated plainly.** The `courtship_20_04_male` row (f84143) shows
+the labelled (cyan) host alone in the crop: a compact fly with a dark, blunt
+abdomen and the wings folded over it, and the panel is flagged `[ds!=man]`
+(`ds=male man=female`). The `20_04_female_climbing` rows (f446642, f446923)
+show the labelled host on the arena wall with a SECOND, unlabelled fly at the
+upper left of every panel -- that companion is the larger one, with a longer,
+visibly pale-banded abdomen. My own eye could not separate the two blocks'
+labelled hosts from each other in these 448 px crops (both read compact and
+dark, the climbing one partly obscured by its wall pose), so this figure on
+its own does not settle the question either way; what it does show is that
+the two blocks are DIFFERENT scenes -- one a lone fly, one a pair on a wall.
 
-**User verdict 2026-09-04: all 20_04 windows show a female; the annotation
-`sex` in subset `courtship_20_04_male` is wrong; the manifest is
-authoritative.** So `is_female` for 20_04 stays `female` for all 692 windows,
-the earlier female-host census (879/2661 = 0.33) and the P2 balanced sampler
-were therefore CORRECT, and the 677 windows were never mislabelled in
-training -- what was wrong was only that the value came out of an unordered
-last-one-wins loop rather than a stated rule.
+**FINAL user verdict 2026-09-04 (from a full-frame render with known-sex
+reference recordings, which is the authoritative call): the labelled fly is
+the MALE in the `courtship_20_04_male` block (677 framesets) and the FEMALE
+in the `20_04_female_climbing` block (15 framesets).** The two annotation
+subsets label DIFFERENT ANIMALS under the same fly id, so the annotators'
+own `sex` field is right for both blocks and the manifest's single per-fly
+value (`{fly0: female, fly1: male}`, `sex_source: "dirname"`) cannot
+represent this recording at all. Resolution is therefore per window and
+ANNOTATION-FIRST.
 
-**Concern to carry forward (my measurements disagree with the visual
-verdict, so it is recorded rather than buried).** Two size invariants,
-computed from labels only (no images), over the whole train split:
+**Consequence for the P2 runs: their balanced sampler treated 677 male-host
+windows as female.** The collapsed per-(rec, fly) value resolved to `female`
+for all 692 windows, so `female_weight` and the `female` cohort counted the
+courtship block's male as a female for every P2/30k training run. Val is
+unaffected (no val recording disagrees; still 67/153 female windows), so the
+30k baseline table in the next section stands as measured.
 
-| recording (block) | manifest sex | n | Antenna_Base-Abd_tip (units) | EyeL-EyeR (units) |
+**Supporting evidence: two size invariants, labels only, over the whole train
+split.** These AGREE with the verdict for the 677 (male-sized) and are
+inconclusive for the 15 (also male-sized by this metric, but n=15 in a wall
+pose, and the user's visual call from full frames is authoritative):
+
+| recording (block) | ruled sex | n | Antenna_Base-Abd_tip (units) | EyeL-EyeR (units) |
 |---|---|---|---|---|
 | 2026_01_29_14_09_33 | female | 88 | 28.63 +- 0.50 | 5.65 +- 0.43 |
 | 2026_04_02_17_28_34 fly0 | female | 44 | 26.94 +- 0.58 | 5.44 +- 0.45 |
 | 2026_01_13_18_47_45 | male | 490 | 24.29 +- 0.43 | 4.91 +- 0.50 |
 | 2026_02_09_22_26_25 | male | 301 | 23.46 +- 0.51 | 5.09 +- 0.39 |
 | 2026_04_02_17_28_34 fly1 | male | 44 | 23.37 +- 2.31 | 4.69 +- 0.31 |
-| **20_04 (`courtship_20_04_male` block)** | female (manifest) | 677 | **23.22 +- 0.73** | **4.31 +- 0.42** |
-| **20_04 (`20_04_female_climbing` block)** | female (manifest) | 15 | **23.65 +- 0.54** | **4.87 +- 0.35** |
+| **20_04 `courtship_20_04_male`** | **male** (annotation) | 677 | **23.22 +- 0.73** | **4.31 +- 0.42** |
+| **20_04 `20_04_female_climbing`** | **female** (annotation) | 15 | **23.65 +- 0.54** | **4.87 +- 0.35** |
 
-Both 20_04 blocks measure at or below the known-MALE range on both metrics,
-and are statistically indistinguishable from each other (which does support
-"one fly throughout"). The cross-group scale confound was checked and ruled
-out: calibration px/unit is 8.073 (A), 8.043 (B), 8.027 (C) -- a 0.4 %
-difference, so a world unit means the same thing in 20_04's group B as in the
-group A references. I could not reconcile this with the visual verdict; the
-ruling stands (manifest wins) and this table is here so the disagreement is
-not lost. If the 20_04 host is in fact the male, the `female` cohort and
-`female_weight` are inflated by 677/879 of their content, which would matter.
+The 677-frameset block sits squarely in the known-MALE range on both metrics
+-- direct independent support for the ruling, and for the earlier
+manifest-first reading having been wrong. The 15-frameset block measures
+male-sized too, which the ruling does not follow; that block is small (15
+windows, 0.6 % of train) and its pose is a wall climb, so the invariant is
+weak there. The cross-calibration-group scale confound was checked and ruled
+out: px per world unit is 8.073 (A), 8.043 (B), 8.027 (C) -- 0.4 %, so a unit
+means the same thing in 20_04's group B as in the group A references.
 
 ### What changed (`jarvis_jax/data/v12_windows.py`)
 
 - Sex is resolved PER WINDOW by `_resolve_fs_sex(rec, frame, fly)`, order:
-  manifest `fly_sex["fly<id>"]` -> that frameset's own annotation `sex` ->
-  recording `sex` -> unknown. This deliberately INVERTS
-  `data/v5_3d._resolve_sex` (annotation-first), which is unchanged for its
-  own callers; the inversion is the ruling above.
+  that frameset's OWN annotation `sex` -> manifest `fly_sex["fly<id>"]` ->
+  recording `sex` -> unknown. That is `data/v5_3d._resolve_sex`'s chain
+  (called directly), applied to the window's own frameset instead of once
+  per (recording, fly).
 - `is_female(i)` reads the per-window value; so do `fly_sex` in the sample,
   the donor index, `paste_window`'s `host_sex`, and the new
-  `window_fly_sex(i)`. `fly_sex_code` now takes `(rec, fly, frame)` --
-  the frame is required, because the annotation step of the chain is per
+  `window_fly_sex(i)`. `fly_sex_code` now takes `(rec, fly, frame)` -- the
+  frame is REQUIRED, because the annotation step of the chain is per
   frameset. The other labelled fly is resolved from ITS own frame-0
-  frameset, falling back to the manifest by fly id.
-- `unlabelled_sex(i)` keeps the manifest-fly-id logic: 20_04's unlabelled
-  animal is the male in all 692 windows.
+  frameset, falling back to the manifest by fly id when it has none.
+- `unlabelled_sex(i)`: in a manifest-`mixed`, `n_flies == 2` recording with
+  exactly one labelled fly, the unlabelled animal is the OPPOSITE of that
+  window's own host sex (`1 - host`; `SEX_PRESENT_UNKNOWN` if the host's sex
+  is unknown). Reading the manifest's missing fly id instead would claim a
+  male unlabelled animal in the 677 windows whose LABELLED animal is that
+  male. Every other case keeps the manifest-id logic.
 - `__init__` prints ONE warning per `(rec, fly)` whose framesets carry more
-  than one KNOWN annotation sex, naming the counts, which value wins, and
-  that the export should be checked. Observed on the real export:
+  than one KNOWN annotation sex, naming the counts, that the ANNOTATION
+  wins, and the manifest value that disagrees. Observed on the real export:
 
 ```
 [v12_windows] 2025_10_20_13_20_04 fly0: framesets disagree on annotation sex
-{'female': 15, 'male': 677} -- the manifest's fly_sex='female' WINS
-(manifest-first resolution, see the module docstring); check the export's
-annotation `sex` for this recording
+{'female': 15, 'male': 677} -- the ANNOTATION sex WINS per window
+(annotation-first resolution, see the module docstring); the manifest's single
+fly_sex='female' disagrees and is NOT used for these framesets
 ```
 
 ### Corrected census (train, resolved host sex, per window)
 
 ```
-female 879 / 2661  (0.330)      male 1782 / 2661
+female  202 / 2661  (0.0759)        male 2459 / 2661  (0.9241)
 ```
 
-Unchanged from the pre-fix numbers, by the ruling. (Had the annotation won
-instead, it would have been female 202 / 2661 = 0.076.)
+Recomputed on the real export after the flip. Under the old collapsed
+behaviour it was **female 879 / 2661 (0.330)** -- the 677 courtship-block
+male-host windows were counted as female, which is exactly what the P2
+balanced sampler and `female` cohort consumed. Val is unchanged (67 / 153
+female windows; no val recording disagrees).
 
 ### P3b follow-up
 
-- **Fix the `sex` field of the `courtship_20_04_male` annotations in the
-  v12 export** (677 framesets of `2025_10_20_13_20_04` fly0 say `male`; the
-  fly is a female per the user's read of the gate figure). Until then
-  `v12_windows` masks it by resolving manifest-first, and the init warning
-  names it on every load. Re-check the size table above when the export is
-  fixed -- if it stays male-sized, the manifest entry is what needs revisiting.
+- **The v12 export's manifest cannot express `2025_10_20_13_20_04`.** Its
+  `fly_sex` is a single value per fly id, but this recording's two annotation
+  subsets track different animals under fly id 0. The loader now handles it
+  correctly per window; the export would be cleaner with per-subset
+  `fly_sex`, or with the two subsets split into separate recording entries.
+  Until then the init warning names the recording on every load, and any code
+  reading `manifest[rec]["fly_sex"]` directly (rather than through
+  `V12WindowDataset`) is wrong for those 677 framesets -- the gate script
+  `scripts/viz/mvq_sex_label_check.py` is the reference for showing both
+  values side by side.
+- Re-check the size table above if the export changes: the 15-frameset
+  `20_04_female_climbing` block measures male-sized on both invariants, so
+  either it is a third labelling wrinkle or the size metric is unreliable in
+  a wall-climb pose.
 
 ## Fix wave 2026-09-04: tolerant checkpoint loading, one shared policy, cohort metrics
 
@@ -579,7 +608,7 @@ JAX_PLATFORMS=cpu pytest tests/test_dinov3.py tests/test_mvq_geometry.py \
 # 102 passed, 4 deselected (was 96 passed / 4 deselected before this wave)
 ```
 
-New tests: per-window manifest-first sex resolution + the disagreement
+New tests: per-window annotation-first sex resolution + the disagreement
 warning (`test_v12_windows.py`), `load_mvq_model` on a pre-P3a checkpoint and
 the warm-start skip on requeue (`test_train_mvq_smoke.py`), a labelled fly's
 slot is never ignored (`test_mvq_losses.py`), empty-mask donor rejection
@@ -587,7 +616,7 @@ slot is never ignored (`test_mvq_losses.py`), empty-mask donor rejection
 
 ### Files (fix wave)
 
-- `third_party/jarvis_jax/jarvis_jax/data/v12_windows.py` (per-window manifest-first sex, `fly_sex_code(rec, fly, frame)`, `window_fly_sex`, disagreement warning)
+- `third_party/jarvis_jax/jarvis_jax/data/v12_windows.py` (per-window annotation-first sex, `fly_sex_code(rec, fly, frame)`, `window_fly_sex`, disagreement warning)
 - `third_party/jarvis_jax/jarvis_jax/models/mvq/policy.py` (new: `policy_instance`, `typed_candidates`, `mask_containment`, `EXIST_THRESH`)
 - `third_party/jarvis_jax/jarvis_jax/models/mvq/checkpoint.py` (tolerant `load_mvq_model` both branches, `_unrestored_leaves`)
 - `third_party/jarvis_jax/jarvis_jax/train/checkpoint.py` (`merge_state_by_path`, `replicated_abstract_tree`, `restore_own_tree`; `warm_start_partial` now a one-liner over them)
