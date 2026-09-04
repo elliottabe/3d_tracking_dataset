@@ -24,10 +24,14 @@ from jarvis_jax.data.build_v5 import iter_resolved_slots
 from jarvis_jax.data.transforms import crop_origin
 from jarvis_jax.data.v5_3d import _load_mask, _resolve_sex, _frameset_own_sex
 from jarvis_jax.geometry.reprojection_tool import ReprojectionTool
+from jarvis_jax.train.matching import SEX_FEMALE, SEX_MALE, SEX_UNKNOWN, SEX_PRESENT_UNKNOWN
 
 CROP = 448
 WINDOW_KEYS = ("crops", "cam_valid", "M", "t_local", "center3D", "kp3d_local", "has3d",
-               "kp2d", "vis2d", "fly_valid", "px_scale", "is_female", "prompt_mask", "crop_origin")
+               "kp2d", "vis2d", "fly_valid", "px_scale", "is_female", "prompt_mask", "crop_origin",
+               "fly_sex", "unlabelled_sex")
+
+_SEX_CODE = {"female": SEX_FEMALE, "male": SEX_MALE}
 
 
 def _parse_key(key):
@@ -92,6 +96,46 @@ class V12WindowDataset:
         others = {k[2] for k in self._fs if k[0] == rec and f0 <= k[1] < f0 + self.T and k[2] != fly}
         return 1 + min(len(others), self.max_flies - 1)
 
+    def fly_sex_code(self, rec, fly):
+        return _SEX_CODE.get(self._sex.get((rec, fly), "unknown"), SEX_UNKNOWN)
+
+    def _window_flies(self, i):
+        """Labelled fly ids in window i, host first, capped at max_flies (same rule as __getitem__)."""
+        rec, host, f0 = self.windows[i]
+        frames = [f0 + k for k in range(self.T)]
+        others = sorted({k[2] for k in self._fs if k[0] == rec and k[1] in frames and k[2] != host})
+        return rec, [host] + others[: self.max_flies - 1]
+
+    def unlabelled_sex(self, i):
+        """-1 if every animal the manifest says is in this recording is labelled in the
+        window; else the sex code of the one unlabelled animal (SEX_PRESENT_UNKNOWN if
+        the manifest does not name its sex)."""
+        rec, flies = self._window_flies(i)
+        meta = self.manifest.get(rec, {})
+        n_present = int(meta.get("n_flies", len(flies)))
+        if n_present <= len(flies):
+            return SEX_UNKNOWN
+        named = {int(k[3:]): v for k, v in (meta.get("fly_sex") or {}).items()}
+        missing = [fid for fid in sorted(named) if fid not in flies]
+        if not missing:
+            return SEX_PRESENT_UNKNOWN
+        return _SEX_CODE.get(named[missing[0]], SEX_PRESENT_UNKNOWN)
+
+    def fly_centroids(self, i):
+        """(n_labelled_flies, 3) world centroid of each fly's DLT-able labels at frame 0
+        (host first). Labels only -- no JPEG decode -- so it is cheap enough for cohorts."""
+        rec, flies = self._window_flies(i)
+        rt = self._rt(rec); f0 = self.windows[i][2]
+        out = np.zeros((len(flies), 3), np.float32)
+        for fi, fly in enumerate(flies):
+            fsv = self._fs.get((rec, f0, fly))
+            if fsv is None:
+                out[fi] = np.nan; continue
+            kp, _ = self._labels_full(fsv, rt)
+            X, has = self._dlt(kp, rt)
+            out[fi] = X[has].mean(0) if has.any() else np.nan
+        return out
+
     def camera_names(self, i):
         """The window's camera-axis names, in the SAME order as `crops`/`kp2d`/
         `M` (`rt.cameras` order -- the calibration serials, e.g. 'Cam2012630'),
@@ -144,8 +188,7 @@ class V12WindowDataset:
 
         # --- labels per frame per fly (full-frame), 3D via DLT, host first
         frames = [f0 + k for k in range(T)]
-        others = sorted({k[2] for k in self._fs if k[0] == rec and k[1] in frames and k[2] != host})
-        flies = [host] + others[: F - 1]
+        rec_, flies = self._window_flies(i)
         kp_full = np.zeros((F, T, C, K, 3), np.float32)
         X3 = np.zeros((F, T, K, 3), np.float32); has3d = np.zeros((F, T, K), bool)
         infos = {}
@@ -229,6 +272,9 @@ class V12WindowDataset:
             "fly_valid": fly_valid, "px_scale": np.float32(px_scale),
             "is_female": np.bool_(self.is_female(i)), "prompt_mask": prompt,
             "crop_origin": origin,
+            "fly_sex": np.array([self.fly_sex_code(rec, flies[fi]) if fi < len(flies) else SEX_UNKNOWN
+                                 for fi in range(F)], np.int8),
+            "unlabelled_sex": np.int8(self.unlabelled_sex(i)),
         }
 
 

@@ -92,7 +92,7 @@ def make_v12_root(tmp_path, *, n_frames=3, two_fly_frame=1, img_w=1936, img_h=44
         json.dump(coco, open(root / "annotations" / f"instances_{split}.json", "w"))
     json.dump(names, open(root / "annotations" / "keypoint_names.json", "w"))
     json.dump({"version": "synthetic", "recordings": {REC: {
-        "calib_group": "A", "sex": "mixed", "behavior": "courtship",
+        "calib_group": "A", "sex": "mixed", "behavior": "courtship", "n_flies": 2,
         "fly_sex": {"fly0": "female", "fly1": "male"}, "split": "train"}}},
               open(root / "manifest.json", "w"))
     return str(root)

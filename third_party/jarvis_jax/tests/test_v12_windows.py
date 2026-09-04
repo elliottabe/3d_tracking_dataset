@@ -140,3 +140,37 @@ def test_jitter_is_per_sample_reproducible_and_epoch_varying(tmp_path):
     ds2 = V12WindowDataset(root, "train", T=1, train=True, jitter_units=3.0, seed=3)
     parallel = next(window_batches(ds2, 4, shuffle=False, seed=3, num_workers=4))["center3D"]
     np.testing.assert_array_equal(serial, parallel)                        # (c) thread-count invariant
+
+
+def test_fly_sex_and_unlabelled_sex_keys(tmp_path):
+    from jarvis_jax.data.v12_windows import V12WindowDataset, WINDOW_KEYS
+    from jarvis_jax.train.matching import SEX_FEMALE, SEX_MALE
+    root = make_v12_root(tmp_path)
+    ds = V12WindowDataset(root, "train", T=1, train=False)
+    assert "fly_sex" in WINDOW_KEYS and "unlabelled_sex" in WINDOW_KEYS
+    both = ds.windows.index((REC, 0, 1))           # frame 1 has fly0 + fly1 labelled
+    s = ds[both]
+    assert s["fly_sex"].dtype == np.int8 and s["fly_sex"].tolist() == [SEX_FEMALE, SEX_MALE]
+    assert s["unlabelled_sex"].dtype == np.int8 and int(s["unlabelled_sex"]) == -1
+    only_host = ds.windows.index((REC, 0, 0))      # frame 0: fly1 present per manifest, not labelled
+    s0 = ds[only_host]
+    assert s0["fly_sex"].tolist() == [SEX_FEMALE, -1]
+    assert int(s0["unlabelled_sex"]) == SEX_MALE
+    assert ds.unlabelled_sex(only_host) == SEX_MALE and ds.unlabelled_sex(both) == -1
+    # a fly1-host window in the two-fly frame: fly0 (female) is the OTHER labelled fly
+    host1 = ds.windows.index((REC, 1, 1))
+    assert ds[host1]["fly_sex"].tolist() == [SEX_MALE, SEX_FEMALE]
+
+
+def test_fly_centroids_match_sample_labels(tmp_path):
+    from jarvis_jax.data.v12_windows import V12WindowDataset
+    root = make_v12_root(tmp_path)
+    ds = V12WindowDataset(root, "train", T=1, train=False)
+    i = ds.windows.index((REC, 0, 1))
+    c = ds.fly_centroids(i)
+    s = ds[i]
+    assert c.shape == (2, 3)
+    for f in range(2):
+        has = s["has3d"][f, 0]
+        ref = (s["kp3d_local"][f, 0][has]).mean(0) + s["center3D"]
+        np.testing.assert_allclose(c[f], ref, atol=1e-3)
