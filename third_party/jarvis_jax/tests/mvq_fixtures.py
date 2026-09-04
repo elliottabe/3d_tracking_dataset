@@ -42,7 +42,7 @@ def fly_points(fly, frame, rng):
     return centre + rng.normal(size=(K, 3)) * np.array([10.0, 4.0, 2.0])
 
 
-def make_v12_root(tmp_path, *, n_frames=3, two_fly_frame=1, img_w=1936, img_h=448):
+def make_v12_root(tmp_path, *, n_frames=3, two_fly_frame=1, img_w=1936, img_h=448, manifest_n_flies=2):
     root = tmp_path / "v12"; root.mkdir()
     names = _names()
     (root / "calibrations" / "A").mkdir(parents=True)
@@ -91,7 +91,7 @@ def make_v12_root(tmp_path, *, n_frames=3, two_fly_frame=1, img_w=1936, img_h=44
             # mask npz, same layout _load_mask reads: masks/<rec>/<cam>/Frame_<f>.npz
             # with ann_ids/matched/masks keyed by each annotation's own `id` (== src_ann_id here)
             os.makedirs(root / "masks" / REC / c, exist_ok=True)
-            np.savez(root / "masks" / REC / c / f"Frame_{f}.npz",
+            np.savez_compressed(root / "masks" / REC / c / f"Frame_{f}.npz",
                      ann_ids=np.array(mask_ids, np.int64),
                      matched=np.ones(len(mask_ids), bool),
                      masks=np.stack(mask_arrs).astype(np.uint8))
@@ -105,7 +105,7 @@ def make_v12_root(tmp_path, *, n_frames=3, two_fly_frame=1, img_w=1936, img_h=44
         json.dump(coco, open(root / "annotations" / f"instances_{split}.json", "w"))
     json.dump(names, open(root / "annotations" / "keypoint_names.json", "w"))
     json.dump({"version": "synthetic", "recordings": {REC: {
-        "calib_group": "A", "sex": "mixed", "behavior": "courtship", "n_flies": 2,
+        "calib_group": "A", "sex": "mixed", "behavior": "courtship", "n_flies": manifest_n_flies,
         "fly_sex": {"fly0": "female", "fly1": "male"}, "split": "train"}}},
               open(root / "manifest.json", "w"))
     return str(root)

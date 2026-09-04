@@ -63,16 +63,25 @@ def _translate(img, shift, nearest=False):
 
 def composite(tgt, src, D, params: CopyPasteParams):
     """Paste `src`'s host fly into `tgt` as fly 1. Both are T=1 samples from
-    V12WindowDataset (numpy). Returns a NEW sample dict, or None when rejected:
-    a target-valid camera the donor lacks (cam_valid mismatch), or the shift
-    pushing the donor's ACTUAL pasted content -- its SAM mask -- entirely off
-    a target-valid camera that had donor mask content to begin with (the
-    donor would not be visible there at all). Individual label points that
-    scatter past the crop edge under the shift are marked invisible
-    per-keypoint (`vis2d` below) but do not by themselves reject the paste:
-    label spread routinely puts a few of many keypoints near/over the crop
-    edge at ordinary contact-range offsets even though the mask -- what is
-    actually composited into the pixels -- stays fully inside."""
+    V12WindowDataset (numpy). `tgt` must have exactly one labelled fly (slot 0)
+    and no unlabelled animal (raises ValueError otherwise -- the loader hook
+    is responsible for only offering such targets). Returns a NEW sample dict,
+    or None when rejected: a target-valid camera the donor lacks (cam_valid
+    mismatch), or the shift pushing the donor's ACTUAL pasted content -- its
+    SAM mask -- entirely off a target-valid camera that had donor mask
+    content to begin with (the donor would not be visible there at all).
+    Individual label points that scatter past the crop edge under the shift,
+    or that fall in a camera the donor mask never painted, are marked
+    invisible per-keypoint (`vis2d` below) rather than rejecting the whole
+    paste: label spread routinely puts a few of many keypoints near/over the
+    crop edge at ordinary contact-range offsets even though the mask -- what
+    is actually composited into the pixels -- stays fully inside. A pasted
+    keypoint invisible in EVERY view this way also loses its 3D label
+    (`has3d`/`kp3d_local`): no label may claim evidence from pixels that
+    never actually landed anywhere."""
+    if tgt["fly_valid"].shape[0] < 2 or bool(tgt["fly_valid"][1]) or int(tgt["unlabelled_sex"]) != SEX_UNKNOWN:
+        raise ValueError("composite: target must have exactly one labelled fly and no unlabelled animal "
+                         "(loader hook enforces this)")
     crops = tgt["crops"]; T, C, H, W, _ = crops.shape
     assert T == 1, "copy-paste is T=1 only (P3a)"
     tv, sv = tgt["cam_valid"][0], src["cam_valid"][0]
@@ -83,6 +92,7 @@ def composite(tgt, src, D, params: CopyPasteParams):
     vis_d = src["vis2d"][0, 0].copy()                                                # (C,K)
     inside = (kp2d_d >= 0).all(-1) & (kp2d_d[..., 0] <= W - 1) & (kp2d_d[..., 1] <= H - 1)
     shifted_masks = [None] * C
+    painted = np.zeros(C, bool)              # camera actually got donor mask pixels composited into it
     for c in range(C):
         if not tv[c]:
             continue
@@ -93,6 +103,7 @@ def composite(tgt, src, D, params: CopyPasteParams):
         if not m.any():
             return None                                  # shift pushed it entirely off the crop
         shifted_masks[c] = m
+        painted[c] = True
     out = {k: (v.copy() if isinstance(v, np.ndarray) else v) for k, v in tgt.items()}
     lo, hi = params.gain_clip
     for c in range(C):
@@ -102,7 +113,8 @@ def composite(tgt, src, D, params: CopyPasteParams):
         if m is None:
             continue
         donor = _translate(src["crops"][0, c], shifts[c])
-        gain = float(np.clip((np.median(crops[0, c]) + 1.0) / (np.median(src["crops"][0, c]) + 1.0), lo, hi))
+        gain = float(np.clip((np.median(crops[0, c, ::4, ::4]) + 1.0)
+                              / (np.median(src["crops"][0, c, ::4, ::4]) + 1.0), lo, hi))
         donor = np.clip(donor.astype(np.float32) * gain, 0, 255)
         alpha = cv2.GaussianBlur(m.astype(np.float32), (3, 3), 0)[..., None]          # 1-px feather
         out["crops"][0, c] = (crops[0, c] * (1 - alpha) + donor * alpha).astype(np.uint8)
@@ -112,11 +124,17 @@ def composite(tgt, src, D, params: CopyPasteParams):
         covered = np.zeros(hk.shape[0], bool); covered[ok] = m[hk[ok, 1], hk[ok, 0]]
         out["vis2d"][0, 0, c] &= ~covered
         out["prompt_mask"][0, c] &= ~m
+    # final per-camera visibility for the pasted fly: geometrically inside the
+    # crop AND the camera is one the donor mask was actually painted into
+    # (a camera the donor never covered, or that got rejected-empty above and
+    # skipped, shows no pixel evidence of the pasted fly either).
+    final_vis = vis_d & inside & tv[:, None] & painted[:, None]
+    dead = vis_d.any(0) & ~final_vis.any(0)     # donor labelled it, but it landed nowhere visible
     out["kp2d"][1, 0] = kp2d_d.astype(np.float32)
-    out["vis2d"][1, 0] = vis_d & inside & tv[:, None]
-    out["kp3d_local"][1, 0] = (src["kp3d_local"][0, 0] + D) * src["has3d"][0, 0][:, None]
-    out["has3d"][1, 0] = src["has3d"][0, 0]
-    out["fly_valid"] = np.array([True, True])
-    out["fly_sex"] = np.array([tgt["fly_sex"][0], src["fly_sex"][0]], np.int8)
+    out["vis2d"][1, 0] = final_vis
+    out["has3d"][1, 0] = src["has3d"][0, 0] & ~dead
+    out["kp3d_local"][1, 0] = (src["kp3d_local"][0, 0] + D) * out["has3d"][1, 0][:, None]
+    out["fly_valid"][1] = True
+    out["fly_sex"][1] = src["fly_sex"][0]
     out["unlabelled_sex"] = np.int8(SEX_UNKNOWN)
     return out
