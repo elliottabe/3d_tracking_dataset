@@ -548,3 +548,73 @@ gitignored `figures/` tree — regenerate with the commands above (overlay) and
 (baseline). `docs/benchmark/2026-09-mvq/vitpose_dlt_baseline_gate1.json` is
 the same baseline run (with the mvq comparison) committed as a small text
 artifact per CLAUDE.md's evidence-for-a-decision convention.
+
+## Task 9: Attention implementation A/B (2026-09-04) — cuDNN flash attention
+
+No figure for this one, per CLAUDE.md's own exemption ("changes that provably
+move no numbers... behavior-preserving refactors... don't need one"): this is
+an alternate compute path for the SAME attention math (backbone + decoder),
+proven equivalent by GPU parity tests (`test_mvq_attention.py`,
+`test_dinov3.py`, `test_mvq_model.py`, `-m gpu -k cudnn`) at bf16 tolerance
+(<2e-2 max abs diff, gradient cosine sim > 0.99) before this A/B ever ran —
+the A/B below is about wall-clock and confirming the swap doesn't move
+*training* numbers beyond noise at matched steps, not about correctness.
+
+**Expectation (stated before running):** cudnn should be meaningfully faster
+per step (the flash-attention kernel never materialises the (B,heads,N,Nk)
+logits the explicit path does) with val `mpjpe3d_units`/`reproj_px` matching
+xla to within a few percent at steps 150 and 300 — a big s/step win, a
+near-identical loss/val curve.
+
+**Setup:** one queue job (4x L40S, `ckpt-all`, job **39563250**), both arms
+sequential in-process, shipped config (`model=mvq train=mvq paths=hyak`,
+`train.batch_size=32`), 300 steps each, `train.eval_every=150
+train.save_every=999999`, same seed (default 0), only `model.attn_impl`
+differs: `run_id=mvq_attn_ab_xla model.attn_impl=xla` then
+`run_id=mvq_attn_ab_cudnn model.attn_impl=cudnn`. Both arms completed with no
+errors (no `NotImplementedError`/OOM/CUDA_ERROR) — cudnn compiles and runs
+cleanly on the shipped 4-GPU/batch-32 config.
+
+**s/step** (steady state, computed from the CLEAN 50-step gaps that don't
+straddle the step-150 eval call — i.e. 50→100, 100→150, 200→250, 250→300 —
+so eval time never contaminates these numbers):
+
+| mode | 50→100 | 100→150 | 200→250 | 250→300 | mean s/step |
+|---|---|---|---|---|---|
+| xla | 2.66 | 2.66 | 2.66 | 2.64 | **2.66** |
+| cudnn | 1.54 | 1.52 | 1.58 | 1.52 | **1.54** |
+
+**cudnn is 42% faster per step (1.73x)** — well above the brief's 10%
+adoption bar. (Peak memory wasn't printed by this training script — unlike
+the standalone `flash_bench2.py` microbenchmark that motivated this task,
+`train_mvq.py`'s step/eval prints don't include a memory line — so no peak-
+memory row here; the flash kernel's own design (no materialised logits)
+predicts a reduction, but that's not independently measured in this run.)
+
+**val metrics at matched steps** (mpjpe3d in dataset units / reproj in px,
+153-frameset val set, both cohorts prompted+unprompted):
+
+| step | mode | xla mpjpe3d_units | cudnn mpjpe3d_units | Δ | xla reproj_px | cudnn reproj_px | Δ |
+|---|---|---|---|---|---|---|---|
+| 150 | prompted | 11.1362 | 11.2064 | +0.63% | 85.6704 | 85.4919 | -0.21% |
+| 150 | unprompted | 11.2520 | 11.2361 | -0.14% | 89.1003 | 88.8518 | -0.28% |
+| 300 | prompted | 11.0923 | 11.0739 | -0.17% | 78.8213 | 78.1027 | -0.91% |
+| 300 | unprompted | 11.0424 | 11.0759 | +0.30% | 86.9499 | 86.2378 | -0.82% |
+
+Every val delta is under 1% — an order of magnitude inside the brief's 5%
+noise bar, consistent with the pre-existing GPU parity tests showing the two
+paths compute the same attention to bf16 precision. (`exist_prec`/`exist_rec`
+also track closely between modes at each step; not tabulated since they
+aren't part of the adoption criteria.)
+
+**Adoption verdict: ADOPT cudnn.** Both criteria cleared with margin: 42%
+wall-clock gain (>>10%) and <1% val drift (<<5%) at both checkpoints.
+`configs/model/mvq.yaml` already ships `attn_impl: cudnn` (this task's
+commit); no further config change needed.
+
+Run dirs `mvq_attn_ab_xla`/`mvq_attn_ab_cudnn` under
+`${paths.mvq_runs_root}` were deleted after this table was extracted (per
+the task brief) — re-run
+`scripts/slurm/submit_task.sh --gpus 4 --cpus 32 --mem 200 --time 1:30:00 <name> '...'`
+with the two `run_id=...model.attn_impl=...` invocations above (see
+`third_party/jarvis_jax/jarvis_jax/train/train_mvq.py`'s CLI) to reproduce.
