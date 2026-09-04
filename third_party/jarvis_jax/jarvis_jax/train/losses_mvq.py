@@ -81,18 +81,19 @@ def mvq_loss(out, batch, w: LossWeights, part_of_k):
     assign, slot_target = assign_slots(batch["fly_sex"], fv, batch["prompt_on"], dist, I)
     ignore = slot_ignore(batch["unlabelled_sex"], I)                                     # (B,I)
     inst_matched = slot_target
+    fv_eff = fv & (assign >= 0)      # a dropped fly (assign=-1) is treated like an unlabelled one
     # ---------------- gather per fly
     g = lambda d: {k: _gather_inst(d[k], assign) for k in ("xyz", "uv", "conf_logit", "vis_logit")}
     pf = g(out)
-    reproj, l3d, uv2d, per_kp, per_kp_m = _geo_terms(pf, batch, w, fv)
+    reproj, l3d, uv2d, per_kp, per_kp_m = _geo_terms(pf, batch, w, fv_eff)
     # term 4 visibility BCE (per view query, target v flag; absent cams masked)
     vis_t = batch["vis2d"].astype(jnp.float32)
     bce_v = jnp.maximum(pf["vis_logit"], 0) - pf["vis_logit"] * vis_t + jnp.log1p(jnp.exp(-jnp.abs(pf["vis_logit"])))
-    vis = _mmean(bce_v, batch["cam_valid"][:, None, :, :, None] & fv[:, :, None, None, None])
+    vis = _mmean(bce_v, batch["cam_valid"][:, None, :, :, None] & fv_eff[:, :, None, None, None])
     # term 5 confidence (D4RT): c*err - lambda*log c (log_sigmoid keeps the gradient on a saturated head)
     log_c = jax.nn.log_sigmoid(pf["conf_logit"])
     c = jnp.exp(log_c)
-    conf = _mmean(c * per_kp - w.conf * log_c, per_kp_m & fv[:, :, None, None])
+    conf = _mmean(c * per_kp - w.conf * log_c, per_kp_m & fv_eff[:, :, None, None])
     # term 6 existence -- masked mean over slots NOT ignored (an unlabelled fly could occupy an ignored slot)
     tgt = inst_matched.astype(jnp.float32)
     bce_e = jnp.maximum(out["exist_logit"], 0) - out["exist_logit"] * tgt + jnp.log1p(jnp.exp(-jnp.abs(out["exist_logit"])))
@@ -117,7 +118,7 @@ def mvq_loss(out, batch, w: LossWeights, part_of_k):
             for o in range(F):
                 if o == f:
                     continue
-                ok = fv[:, f] & fv[:, o]
+                ok = fv_eff[:, f] & fv_eff[:, o]
                 d2 = jnp.linalg.norm(pf["uv"][:, f][..., :, None, :] - batch["kp2d"][:, o][..., None, :, :], axis=-1)  # (B,T,C,K,K')
                 h2 = jax.nn.relu(w.rep_px - d2) * same_part * batch["vis2d"][:, o][..., None, :]
                 d3 = jnp.linalg.norm(pf["xyz"][:, f][..., :, None, :] - batch["kp3d_local"][:, o][..., None, :, :], axis=-1)  # (B,T,K,K')
@@ -128,18 +129,18 @@ def mvq_loss(out, batch, w: LossWeights, part_of_k):
              + w.exist * exist + w.sex * sex + w.rep * rep)
     # deep supervision
     if out.get("aux_pass1") is not None:
-        r1, l1, u1, _, _ = _geo_terms(g(out["aux_pass1"]), batch, w, fv)
+        r1, l1, u1, _, _ = _geo_terms(g(out["aux_pass1"]), batch, w, fv_eff)
         total = total + w.pass1 * (w.reproj * r1 + w.l3d * l1 + w.uv2d * u1)
     for a in out.get("aux_layers", []):                 # intermediate 3D-only readouts: terms 1-2
         xyz_f = _gather_inst(a["xyz"], assign)
         uv_re = _reproject(xyz_f, batch["M"], batch["t_local"])
-        r_ = _mmean(_huber(uv_re - batch["kp2d"], w.huber_px).mean(-1), batch["vis2d"] & fv[:, :, None, None, None])
+        r_ = _mmean(_huber(uv_re - batch["kp2d"], w.huber_px).mean(-1), batch["vis2d"] & fv_eff[:, :, None, None, None])
         l_ = _mmean(batch["px_scale"][:, None, None, None] * jnp.abs(xyz_f - batch["kp3d_local"]).mean(-1),
-                    batch["has3d"] & fv[:, :, None, None])
+                    batch["has3d"] & fv_eff[:, :, None, None])
         total = total + w.aux * (w.reproj * r_ + w.l3d * l_)
-    mp = _mmean(jnp.linalg.norm(pf["xyz"] - batch["kp3d_local"], axis=-1), batch["has3d"] & fv[:, :, None, None])
+    mp = _mmean(jnp.linalg.norm(pf["xyz"] - batch["kp3d_local"], axis=-1), batch["has3d"] & fv_eff[:, :, None, None])
     pf_reproj = _reproject(pf["xyz"], batch["M"], batch["t_local"])
-    m2_full = batch["vis2d"] & fv[:, :, None, None, None]
+    m2_full = batch["vis2d"] & fv_eff[:, :, None, None, None]
     px = _mmean(jnp.linalg.norm(pf_reproj - batch["kp2d"], axis=-1), m2_full)
     # raw (non-Huber) L2 metrics in px, reported alongside the Huber training terms:
     # uv2d_px = 2D-head prediction vs GT label; head_vs_reproj_px = 2D-head vs the

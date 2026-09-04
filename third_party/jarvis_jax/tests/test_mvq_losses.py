@@ -200,3 +200,21 @@ def test_sex_term_only_on_assigned_known_sex_slots():
     batch["fly_sex"] = batch["fly_sex"].at[:, 1].set(-1)                                     # fly 1 sex unknown -> slot 3
     _, m3 = mvq_loss(out, batch, LossWeights(), pk)
     assert float(m3["sex_acc"]) == 1.0                                                        # only slot 1 scored
+
+
+def test_dropped_valid_fly_is_masked_from_every_geometric_term():
+    # both flies valid and unknown-sex, unprompted: host -> slot 3, the other fly is DROPPED (assign=-1).
+    # Its labels must then contribute to nothing: perturbing slot 0 (the clamp target) changes no term.
+    from jarvis_jax.train.losses_mvq import mvq_loss, LossWeights
+    pk = np.arange(5, dtype=np.int32)
+    out, batch = _perfect_batch()
+    batch["fly_sex"] = jnp.full((2, 2), -1, jnp.int8)
+    o = dict(out); o["xyz"] = out["xyz"].at[:, 3].set(out["xyz"][:, 1]); o["uv"] = out["uv"].at[:, 3].set(out["uv"][:, 1])
+    o["aux_pass1"] = {k: o[k] for k in out["aux_pass1"]}
+    _, m0 = mvq_loss(o, batch, LossWeights(), pk)
+    o2 = dict(o); o2["xyz"] = o["xyz"].at[:, 0].add(500.0); o2["uv"] = o["uv"].at[:, 0].add(300.0)
+    o2["aux_pass1"] = {k: o2[k] for k in out["aux_pass1"]}
+    _, m1 = mvq_loss(o2, batch, LossWeights(), pk)
+    for k in ("reproj", "l3d", "uv2d", "vis", "conf", "rep", "match_reproj_px", "mpjpe3d_units"):
+        assert abs(float(m1[k]) - float(m0[k])) < 1e-5, k
+    assert float(m0["reproj"]) < 1e-3          # the host (slot 3) is still scored, and perfectly
