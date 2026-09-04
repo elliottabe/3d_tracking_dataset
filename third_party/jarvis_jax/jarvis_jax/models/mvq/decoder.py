@@ -25,11 +25,15 @@ class CrossBlock(nnx.Module):
         self.ca = Attn(D, heads, rngs=rngs)
         self.nm = nnx.LayerNorm(D, rngs=rngs); self.mlp = MLP(D, ratio, rngs=rngs)
 
-    def __call__(self, q, bank, bank_valid, q_chunk: int | None = 512):
+    def __call__(self, q, bank, bank_valid, q_chunk: int | None = 512, impl: str = "xla"):
         if self.self_attn:
-            h = self.ns(q); ok = jnp.ones(q.shape[:2], bool)
-            q = q + self.sa(h, h, ok, q_chunk)
-        q = q + self.ca(self.nq(q), self.nk(bank), bank_valid, q_chunk)
+            # No key mask: every query attends every other query, so there is
+            # no such thing as an "invalid" key here -- passing None (instead
+            # of an all-True mask) lets flash_attention skip masking entirely
+            # (measured ~2x faster than a same-shape masked call).
+            h = self.ns(q)
+            q = q + self.sa(h, h, None, q_chunk, impl)
+        q = q + self.ca(self.nq(q), self.nk(bank), bank_valid, q_chunk, impl)
         return q + self.mlp(self.nm(q))
 
 
@@ -88,10 +92,10 @@ class QueryDecoder(nnx.Module):
         base = self.to_view(h3d).reshape(B, I, T, 1, K, -1)
         q = base + gcam[:, None, None, :, None, :] + femb[None, None, :, None, None, :]
         q = q.reshape(B, I * T * C * K, -1)
-        qc = self.cfg.q_chunk
+        qc, imp = self.cfg.q_chunk, self.cfg.attn_impl
         for blk in self.blocks2d:
-            fn = (nnx.remat(lambda m, qq: m(qq, bank, bank_valid, qc)) if self.cfg.remat
-                  else (lambda m, qq: m(qq, bank, bank_valid, qc)))
+            fn = (nnx.remat(lambda m, qq: m(qq, bank, bank_valid, qc, imp)) if self.cfg.remat
+                  else (lambda m, qq: m(qq, bank, bank_valid, qc, imp)))
             q = fn(blk, q)
         q = q.reshape(B, I, T, C, K, -1)
         return {"uv": self.cfg.crop * jax.nn.sigmoid(self.heads.uv(q)),
@@ -113,10 +117,10 @@ class QueryDecoder(nnx.Module):
         if refine_ctx is not None:
             q = q + self.refine_in(refine_ctx)
         q = q.reshape(B, I * T * K, -1)
-        per_layer = []; qc = cfg.q_chunk
+        per_layer = []; qc, imp = cfg.q_chunk, cfg.attn_impl
         for li, blk in enumerate(self.blocks3d):
-            fn = (nnx.remat(lambda m, qq: m(qq, bank, bank_valid, qc)) if cfg.remat
-                  else (lambda m, qq: m(qq, bank, bank_valid, qc)))
+            fn = (nnx.remat(lambda m, qq: m(qq, bank, bank_valid, qc, imp)) if cfg.remat
+                  else (lambda m, qq: m(qq, bank, bank_valid, qc, imp)))
             q = fn(blk, q)
             if li % 2 == 1 and li != len(self.blocks3d) - 1:
                 per_layer.append(self._read3d(q, I, T, K))

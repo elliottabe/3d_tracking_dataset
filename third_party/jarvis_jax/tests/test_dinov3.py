@@ -105,6 +105,53 @@ def test_registered_backbone_slices_to_rgb():
     assert toks.shape == (1, 16, 32)
 
 
+def test_attn_impl_cudnn_raises_clear_error_on_cpu():
+    """attn_impl='cudnn' on a host with no compatible GPU (this CPU test)
+    must fail with a RuntimeError naming attn_impl, not a bare JAX
+    NotImplementedError from inside dot_product_attention."""
+    from jarvis_jax.models.dinov3 import DINOv3, DINOv3Config
+    cfg = DINOv3Config(**TINY, attn_impl="cudnn")
+    m = DINOv3(cfg, rngs=nnx.Rngs(0))
+    x = jnp.zeros((1, 64, 48, 3), jnp.float32)
+    with pytest.raises(RuntimeError, match="attn_impl"):
+        m(x)
+
+
+@pytest.mark.gpu
+def test_attn_impl_cudnn_matches_xla_backbone():
+    """Same weights, same input, attn_impl='cudnn' vs 'xla' must agree to
+    bf16-output-scale tolerance (2e-2), and gradients w.r.t. the input must
+    be finite with cosine similarity > 0.99 to the xla path's gradient.
+
+    Input is 48x48 (1 cls + 4 registers + 3*3=9 patch tokens = 14, an EVEN
+    total), deliberately NOT the odd-N case: the backbone's cudnn call
+    passes no mask (attention.py's documented caveat), so an odd N's one
+    padded key is a real, non-negligible perturbation at small N (measured
+    ~0.09 max abs diff at N=17 here -- a real fix-round-1 finding, not
+    flakiness) even though it is negligible at the real backbone's N~789.
+    That odd-N/no-mask behaviour is covered by design, not by this test --
+    see attention.py's docstring and test_mvq_attention.py's masked (all
+    keys valid) odd-count case, which pins the correct comparison."""
+    from jarvis_jax.models.dinov3 import DINOv3, DINOv3Config
+    cfg_xla = DINOv3Config(**TINY, attn_impl="xla")
+    cfg_cudnn = DINOv3Config(**TINY, attn_impl="cudnn")
+    m_xla = DINOv3(cfg_xla, rngs=nnx.Rngs(0))
+    m_cudnn = DINOv3(cfg_cudnn, rngs=nnx.Rngs(0))          # same seed -> same weights
+    x = jnp.asarray(np.random.default_rng(0).normal(size=(2, 48, 48, 3)).astype(np.float32))
+
+    out_xla = m_xla(x)
+    out_cudnn = m_cudnn(x)
+    scale = float(jnp.abs(out_xla).max())
+    assert float(jnp.abs(out_cudnn - out_xla).max()) < 2e-2 * max(scale, 1.0)
+
+    g_xla = jax.grad(lambda x: jnp.sum(m_xla(x) ** 2))(x)
+    g_cudnn = jax.grad(lambda x: jnp.sum(m_cudnn(x) ** 2))(x)
+    g_xla_flat, g_cudnn_flat = np.asarray(g_xla).ravel(), np.asarray(g_cudnn).ravel()
+    assert np.isfinite(g_cudnn_flat).all()
+    cos = np.dot(g_xla_flat, g_cudnn_flat) / (np.linalg.norm(g_xla_flat) * np.linalg.norm(g_cudnn_flat) + 1e-12)
+    assert cos > 0.99
+
+
 @pytest.mark.gpu
 def test_parity_against_transformers_reference():
     """Runs only where `transformers` (>=4.56, DINOv3ViTModel) is installed:

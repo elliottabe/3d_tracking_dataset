@@ -6,8 +6,8 @@ import jax.numpy as jnp
 from flax import nnx
 
 
-def masked_attention(q, k, v, key_valid, num_heads, q_chunk: int | None = 512):
-    """q (B,Nq,D), k/v (B,Nk,D), key_valid (B,Nk) bool -> (B,Nq,D).
+def masked_attention(q, k, v, key_valid, num_heads, q_chunk: int | None = 512, impl: str = "xla"):
+    """q (B,Nq,D), k/v (B,Nk,D), key_valid (B,Nk) bool or None -> (B,Nq,D).
 
     Materialising the full (B,heads,Nq,Nk) logits is the memory bottleneck of
     every decoder block: at the shipped config the 2D path alone is
@@ -17,14 +17,28 @@ def masked_attention(q, k, v, key_valid, num_heads, q_chunk: int | None = 512):
     logits are (B,heads,q_chunk,Nk) instead of (B,heads,Nq,Nk); math is
     identical to the unchunked path because attention is independent per
     query row, so chunking only trades memory for a bit of extra sequencing.
+
+    `key_valid=None` means every key is valid (no masking at all) -- used for
+    query self-attention, where there is no such thing as an invalid query.
+
+    `impl="cudnn"` instead routes to `mvq.attention.flash_attention`, which
+    never materialises logits at all (chunking is irrelevant there; `q_chunk`
+    is ignored in that branch).
     """
     B, Nq, D = q.shape; Nk = k.shape[1]; hd = D // num_heads
+    if impl == "cudnn":
+        from jarvis_jax.models.mvq.attention import flash_attention
+        qh = q.reshape(B, Nq, num_heads, hd)
+        kh = k.reshape(B, Nk, num_heads, hd); vh = v.reshape(B, Nk, num_heads, hd)
+        return flash_attention(qh, kh, vh, key_valid).reshape(B, Nq, D)
+
     kh = k.reshape(B, Nk, num_heads, hd).transpose(0, 2, 1, 3)
     vh = v.reshape(B, Nk, num_heads, hd).transpose(0, 2, 1, 3)
 
     def attend(qh):                                        # qh (B,heads,n,hd) -> (B,heads,n,hd)
         logits = (qh @ kh.transpose(0, 1, 3, 2)) * (hd ** -0.5)
-        logits = jnp.where(key_valid[:, None, None, :], logits, -1e9)
+        if key_valid is not None:
+            logits = jnp.where(key_valid[:, None, None, :], logits, -1e9)
         att = jax.nn.softmax(logits, axis=-1)
         return att @ vh
 
@@ -50,8 +64,8 @@ class Attn(nnx.Module):
         self.q, self.k, self.v, self.o = (nnx.Linear(D, D, rngs=rngs) for _ in range(4))
         self.heads = heads
 
-    def __call__(self, x, ctx, ctx_valid, q_chunk: int | None = 512):
-        return self.o(masked_attention(self.q(x), self.k(ctx), self.v(ctx), ctx_valid, self.heads, q_chunk))
+    def __call__(self, x, ctx, ctx_valid, q_chunk: int | None = 512, impl: str = "xla"):
+        return self.o(masked_attention(self.q(x), self.k(ctx), self.v(ctx), ctx_valid, self.heads, q_chunk, impl))
 
 
 class MLP(nnx.Module):
@@ -69,9 +83,9 @@ class SelfBlock(nnx.Module):
         self.n2 = nnx.LayerNorm(D, rngs=rngs); self.mlp = MLP(D, ratio, rngs=rngs)
         self.ls1 = nnx.Param(jnp.full((D,), ls_init)); self.ls2 = nnx.Param(jnp.full((D,), ls_init))
 
-    def __call__(self, x, valid):
+    def __call__(self, x, valid, impl: str = "xla"):
         h = self.n1(x)
-        x = x + self.ls1[...] * self.attn(h, h, valid)
+        x = x + self.ls1[...] * self.attn(h, h, valid, impl=impl)
         return x + self.ls2[...] * self.mlp(self.n2(x))
 
 
@@ -92,18 +106,19 @@ class FusionStack(nnx.Module):
         """tokens (B,V,N,D) with V = T*C views, valid (B,V)."""
         B, V, N, D = tokens.shape
         g = int(round(N ** 0.5)); p = self.cfg.global_pool
+        impl = self.cfg.attn_impl
         for kind, blk in zip(self.kinds, self.blocks):
             if kind == "local":
                 x = tokens.reshape(B * V, N, D)
                 ok = jnp.broadcast_to(valid.reshape(B * V, 1), (B * V, N))
-                tokens = blk(x, ok).reshape(B, V, N, D)
+                tokens = blk(x, ok, impl).reshape(B, V, N, D)
             else:
                 grid = tokens.reshape(B, V, g, g, D)
                 pooled = grid.reshape(B, V, g // p, p, g // p, p, D).mean(axis=(3, 5))     # (B,V,g/p,g/p,D)
                 q = (g // p) ** 2
                 flat = pooled.reshape(B, V * q, D)
                 ok = jnp.repeat(valid, q, axis=1)
-                upd = blk(flat, ok) - flat                                                  # (B,V*q,D)
+                upd = blk(flat, ok, impl) - flat                                            # (B,V*q,D)
                 upd = upd.reshape(B, V, g // p, 1, g // p, 1, D)
                 upd = jnp.broadcast_to(upd, (B, V, g // p, p, g // p, p, D)).reshape(B, V, N, D)
                 tokens = tokens + upd

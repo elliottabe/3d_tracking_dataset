@@ -28,3 +28,7 @@ remat: true
 # 2.2GB -- not worth it once the attention-chunk remat fix let the unchunked
 # path fit at 4-8 samples/GPU. null = unchunked.
 q_chunk: null
+# cuDNN flash attention for the backbone and decoder (see
+# docs/benchmark/2026-09-mvq/ notes for the A/B). "xla" (CPU-safe) is the
+# dataclass default; this config ships the GPU path.
+attn_impl: cudnn

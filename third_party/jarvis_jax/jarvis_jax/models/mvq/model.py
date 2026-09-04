@@ -48,6 +48,12 @@ class MVQConfig:
     # cost again -- see tests/test_mvq_model.py's chunked==unchunked tests,
     # which exercise q_chunk=8 explicitly regardless of this default.
     q_chunk: int | None = None
+    # "xla" (default; CPU-safe explicit-softmax path, unchanged behaviour) or
+    # "cudnn" (mvq/attention.py's flash-attention path -- GPU only). Threaded
+    # into the backbone (DINOv3Config.attn_impl) and every Attn/SelfBlock/
+    # CrossBlock call the same way q_chunk is threaded. configs/model/mvq.yaml
+    # ships "cudnn"; unit tests keep "xla" so they run on CPU.
+    attn_impl: str = "xla"
 
     @property
     def grid(self):
@@ -60,7 +66,8 @@ class MVQModel(nnx.Module):
         D = cfg.embed_dim
         base = DINOv3Config.vitl16() if cfg.backbone == "dinov3_l16" else DINOv3Config.vitb16()
         self.backbone = DINOv3(dataclasses.replace(base, embed_dim=D, depth=cfg.backbone_depth,
-                                                   num_heads=cfg.backbone_heads), rngs=rngs)
+                                                   num_heads=cfg.backbone_heads,
+                                                   attn_impl=cfg.attn_impl), rngs=rngs)
         nf = 2 * cfg.fourier_bands + 1
         self.geom = nnx.Linear(6 * nf, D, rngs=rngs)
         self.e_frame = nnx.Param(jax.random.normal(rngs.params(), (cfg.max_frames, D)) * 0.02)

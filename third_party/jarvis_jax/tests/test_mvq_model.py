@@ -121,6 +121,48 @@ def test_assemble_nan_policy():
     assert np.isfinite(kp3d2[0, :, 1]).all() and (conf3d2[0, :, 1] > 0).all()
 
 
+def test_attn_impl_cudnn_raises_clear_error_on_cpu():
+    """attn_impl='cudnn' on a host with no compatible GPU (this CPU test)
+    must fail with a RuntimeError naming attn_impl -- the backbone and the
+    decoder both route through mvq/attention.py::flash_attention."""
+    from jarvis_jax.models.mvq import MVQConfig, MVQModel
+    cfg = MVQConfig(**{**TINY, "attn_impl": "cudnn"})
+    m = MVQModel(cfg, rngs=nnx.Rngs(0))
+    crops, cv, M, tl, pm = _inputs()
+    with pytest.raises(RuntimeError, match="attn_impl"):
+        m(crops, cv, M, tl, pm)
+
+
+@pytest.mark.gpu
+def test_attn_impl_cudnn_matches_xla_model():
+    """Same weights (same rngs seed), same inputs: attn_impl='cudnn' end to
+    end (backbone + fusion + decoder self/cross-attention) vs 'xla' must
+    agree on xyz/uv to bf16-output-scale tolerance, and gradients of a
+    scalar loss w.r.t. the crops must be finite with cosine similarity > 0.99
+    to the xla path's gradient."""
+    from jarvis_jax.models.mvq import MVQConfig, MVQModel
+    cfg_xla = MVQConfig(**{**TINY, "attn_impl": "xla"})
+    cfg_cudnn = MVQConfig(**{**TINY, "attn_impl": "cudnn"})
+    m_xla = MVQModel(cfg_xla, rngs=nnx.Rngs(0))
+    m_cudnn = MVQModel(cfg_cudnn, rngs=nnx.Rngs(0))         # same seed -> same weights
+    crops, cv, M, tl, pm = _inputs()
+
+    out_xla = m_xla(crops, cv, M, tl, pm)
+    out_cudnn = m_cudnn(crops, cv, M, tl, pm)
+    for key in ("xyz", "uv"):
+        scale = float(jnp.abs(out_xla[key]).max())
+        diff = float(jnp.abs(out_cudnn[key] - out_xla[key]).max())
+        assert diff < 2e-2 * max(scale, 1.0), (key, diff, scale)
+
+    loss = lambda m, c: jnp.sum(m(c, cv, M, tl, pm)["xyz"] ** 2) + jnp.sum(m(c, cv, M, tl, pm)["uv"] ** 2)
+    g_xla = jax.grad(lambda c: loss(m_xla, c))(crops)
+    g_cudnn = jax.grad(lambda c: loss(m_cudnn, c))(crops)
+    g_xla_flat, g_cudnn_flat = np.asarray(g_xla).ravel(), np.asarray(g_cudnn).ravel()
+    assert np.isfinite(g_cudnn_flat).all()
+    cos = np.dot(g_xla_flat, g_cudnn_flat) / (np.linalg.norm(g_xla_flat) * np.linalg.norm(g_cudnn_flat) + 1e-12)
+    assert cos > 0.99
+
+
 def test_masked_attention_chunked_matches_unchunked():
     """Chunked (q_chunk=8) and unchunked (q_chunk=None) attention must agree
     to float32 tolerance for the same non-trivial key mask: attention is

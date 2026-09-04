@@ -36,6 +36,9 @@ class DINOv3Config:
     layer_norm_eps: float = 1e-5
     in_ch: int = 3
     rope_dtype: str = "bfloat16"
+    # "xla" (default; the explicit fp32-softmax path below) or "cudnn" (the
+    # flash-attention path in mvq/attention.py -- no mask, all tokens valid).
+    attn_impl: str = "xla"
 
     @classmethod
     def vitb16(cls):
@@ -108,14 +111,20 @@ class _Attention(nnx.Module):
         self.o_proj = nnx.Linear(D, D, use_bias=True, rngs=rngs)
         self.num_heads, self.head_dim = cfg.num_heads, cfg.head_dim
         self.rope_dtype = jnp.dtype(cfg.rope_dtype)
+        self.attn_impl = cfg.attn_impl
 
     def __call__(self, x, cos, sin, n_prefix):
         b, n, d = x.shape
         split = lambda t: t.reshape(b, n, self.num_heads, self.head_dim).transpose(0, 2, 1, 3)
         q, k, v = split(self.q_proj(x)), split(self.k_proj(x)), split(self.v_proj(x))
         q, k = _apply_rope(q, k, cos, sin, n_prefix, self.rope_dtype)
-        att = jax.nn.softmax((q @ k.transpose(0, 1, 3, 2)) * (self.head_dim ** -0.5), axis=-1)
-        out = (att @ v).transpose(0, 2, 1, 3).reshape(b, n, d)
+        if self.attn_impl == "cudnn":
+            from jarvis_jax.models.mvq.attention import flash_attention
+            bthd = lambda t: t.transpose(0, 2, 1, 3)                          # (B,heads,N,hd) -> (B,N,heads,hd)
+            out = flash_attention(bthd(q), bthd(k), bthd(v)).reshape(b, n, d)
+        else:
+            att = jax.nn.softmax((q @ k.transpose(0, 1, 3, 2)) * (self.head_dim ** -0.5), axis=-1)
+            out = (att @ v).transpose(0, 2, 1, 3).reshape(b, n, d)
         return self.o_proj(out)
 
 
