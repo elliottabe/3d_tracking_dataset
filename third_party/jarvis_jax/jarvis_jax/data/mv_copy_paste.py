@@ -70,9 +70,12 @@ def composite(tgt, src, D, params: CopyPasteParams):
     and no unlabelled animal (raises ValueError otherwise -- the loader hook
     is responsible for only offering such targets). Returns a NEW sample dict,
     or None when rejected: a target-valid camera the donor lacks (cam_valid
-    mismatch), or the shift pushing the donor's ACTUAL pasted content -- its
+    mismatch), the shift pushing the donor's ACTUAL pasted content -- its
     SAM mask -- entirely off a target-valid camera that had donor mask
-    content to begin with (the donor would not be visible there at all).
+    content to begin with (the donor would not be visible there at all), or
+    the donor having NO mask content in any target-valid camera at all
+    (nothing to composite, so its labels would claim a fly with zero pixel
+    evidence in every view).
     Individual label points that scatter past the crop edge under the shift,
     or that fall in a camera the donor mask never painted, are marked
     invisible per-keypoint (`vis2d` below) rather than rejecting the whole
@@ -107,6 +110,9 @@ def composite(tgt, src, D, params: CopyPasteParams):
             return None                                  # shift pushed it entirely off the crop
         shifted_masks[c] = m
         painted[c] = True
+    if not painted.any():
+        return None      # donor has no mask content in ANY target-valid camera: nothing to paste,
+                         # and pasting its labels anyway would claim a fly with zero pixel evidence
     out = {k: (v.copy() if isinstance(v, np.ndarray) else v) for k, v in tgt.items()}
     lo, hi = params.gain_clip
     for c in range(C):

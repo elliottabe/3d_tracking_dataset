@@ -207,3 +207,44 @@ def test_composite_prompt_mask_and_gain_on_hand_built_samples():
 
     # (iii) host vis2d cleared for the keypoint under the donor mask, kept for the other
     assert out["vis2d"][0, 0, 0].tolist() == [False, True]
+
+
+def test_composite_rejects_donor_with_no_mask_content_anywhere():
+    """A donor whose `prompt_mask` is empty in EVERY target-valid camera has
+    nothing to composite: the old code skipped every camera, painted nothing,
+    and still wrote the donor's 2D/3D labels into the sample -- a fly claimed
+    with zero pixel evidence in any view, the exact invariant `composite`'s
+    docstring promises never to break. It must reject the draw instead."""
+    from jarvis_jax.data.mv_copy_paste import CopyPasteParams, composite
+    from jarvis_jax.train.matching import SEX_UNKNOWN
+
+    H = W = 64
+    M = np.eye(2, 3, dtype=np.float32)[None]
+    t_local = np.zeros((1, 1, 2), np.float32)
+
+    def _sample(mask):
+        return {
+            "crops": np.full((1, 1, H, W, 3), 100, np.uint8),
+            "cam_valid": np.ones((1, 1), bool),
+            "M": M, "t_local": t_local,
+            "kp2d": np.zeros((2, 1, 1, 2, 2), np.float32),
+            "vis2d": np.zeros((2, 1, 1, 2), bool),
+            "kp3d_local": np.zeros((2, 1, 2, 3), np.float32),
+            "has3d": np.zeros((2, 1, 2), bool),
+            "fly_valid": np.array([True, False]),
+            "fly_sex": np.array([0, -1], np.int8),
+            "unlabelled_sex": np.int8(SEX_UNKNOWN),
+            "prompt_mask": mask[None, None].copy(),
+        }
+
+    host_mask = np.zeros((H, W), bool); host_mask[20:30, 20:30] = True
+    tgt = _sample(host_mask)
+    src = _sample(np.zeros((H, W), bool))              # donor mask empty everywhere
+    src["vis2d"][0, 0, 0] = [True, True]
+    src["has3d"][0, 0] = [True, True]
+    assert not src["prompt_mask"].any()
+    assert composite(tgt, src, np.zeros(3, np.float32), CopyPasteParams()) is None
+    # sanity: the SAME donor with mask content is accepted, so the rejection is
+    # about the empty mask and nothing else
+    src["prompt_mask"] = host_mask[None, None].copy()
+    assert composite(tgt, src, np.zeros(3, np.float32), CopyPasteParams()) is not None

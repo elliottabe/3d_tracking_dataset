@@ -169,6 +169,31 @@ def test_existence_ignores_unlabelled_fly_slots():
     assert float(m_cnt["exist"]) > float(m_ign["exist"]) + 1.0 and float(m_cnt["exist_acc"]) < 1.0
 
 
+def test_slot_holding_a_labelled_fly_is_never_ignored():
+    """A slot that HOLDS a labelled fly certainly exists, so `slot_ignore`'s
+    unlabelled-animal mask must not swallow it. Here the host female sits in
+    slot 1 AND the unlabelled animal is also female (a same-sex pair with one
+    fly labelled, e.g. `2026_06_09_15_38_35`), so `slot_ignore` marks slots 1
+    and 3 -- before the `& ~slot_target` fix, slot 1's existence, the one
+    answer known for certain, got no gradient at all."""
+    from jarvis_jax.train.losses_mvq import mvq_loss, LossWeights
+    from jarvis_jax.train.matching import SEX_FEMALE
+    pk = np.arange(5, dtype=np.int32)
+    out, batch = _perfect_batch()
+    batch["fly_valid"] = batch["fly_valid"].at[:, 1].set(False)      # only the host is labelled
+    batch["unlabelled_sex"] = jnp.full((2,), SEX_FEMALE, jnp.int8)   # ...and the other fly is female too
+    _, m_ref = mvq_loss(out, batch, LossWeights(), pk)
+    # slot 1 (the host's own slot) IS supervised: flipping its logit changes `exist`
+    o1 = dict(out); o1["exist_logit"] = out["exist_logit"].at[:, 1].set(-6.0)
+    _, m_flip = mvq_loss(o1, batch, LossWeights(), pk)
+    assert float(m_flip["exist"]) > float(m_ref["exist"]) + 1.0
+    assert float(m_flip["exist_acc"]) < float(m_ref["exist_acc"])
+    # slot 3 (which the unlabelled female could legitimately occupy) is still ignored
+    o3 = dict(out); o3["exist_logit"] = out["exist_logit"].at[:, 3].set(6.0)
+    _, m_ign = mvq_loss(o3, batch, LossWeights(), pk)
+    assert abs(float(m_ign["exist"]) - float(m_ref["exist"])) < 1e-6
+
+
 def test_prompted_host_moves_to_slot0():
     from jarvis_jax.train.losses_mvq import mvq_loss, LossWeights
     pk = np.arange(5, dtype=np.int32)

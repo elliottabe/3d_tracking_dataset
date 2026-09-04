@@ -34,6 +34,10 @@ def test_two_steps_cpu_and_eval(tmp_path):
         assert {"sex_acc", "mask_containment", "cohort_contact_pair"} <= set(v)
         assert {f"exist_prec_slot{i}" for i in range(4)} | {f"exist_rec_slot{i}" for i in range(4)} <= set(v)
         assert np.isnan(v["mask_containment"]) or 0.0 <= v["mask_containment"] <= 1.0
+        # the three acceptance metrics PER COHORT, incl. the new single_fly cohort
+        assert {"policy_miss_frac_single_fly", "sex_acc_group_A", "mask_containment_two_fly",
+                "cohort_single_fly"} <= set(v)
+        assert np.isnan(v["policy_miss_frac_single_fly"]) or 0.0 <= v["policy_miss_frac_single_fly"] <= 1.0
     assert os.path.isdir(tmp_path / "final") and os.path.isdir(tmp_path / "ckpt")
 
 
@@ -358,3 +362,38 @@ def test_warm_start_config_seeds_step0_from_another_run(tmp_path):
                        tcfg=dataclasses.replace(base, warm_start=str(a / "final")),
                        aug=MVAugParams(enabled=False), weights=LossWeights())
     assert res["resumed_from"] == 0 and np.isfinite(res["final_loss"])
+
+
+def test_warm_start_is_skipped_when_the_run_already_has_a_checkpoint(tmp_path, capsys):
+    """A requeue must not re-read the warm-start source only to discard it:
+    resume beats warm start, so once this run's OWN ckpt/ has a step the
+    source checkpoint is never opened (tens of GB of Orbax reads on every
+    preemption of a long fine-tune otherwise)."""
+    from jarvis_jax.models.mvq import MVQConfig
+    from jarvis_jax.train.train_mvq import run_training, MVQTrainConfig
+    from jarvis_jax.train.losses_mvq import LossWeights
+    from jarvis_jax.data.mv_augment import MVAugParams
+    root = make_v12_root(tmp_path)
+    mcfg = MVQConfig(crop=448, patch=16, embed_dim=32, num_keypoints=50, num_cameras=7, n_instances=4,
+                     n_local=1, n_global=1, dec_layers_3d=2, dec_layers_2d=1, dec_heads=4, mlp_ratio=2.0,
+                     refine_passes=1, patch_rgb=3, fourier_bands=2, backbone="tiny", backbone_depth=1,
+                     backbone_heads=4, remat=False)
+    base = MVQTrainConfig(batch_size=2, warmup_steps=1, eval_every=100, save_every=1, log_every=1,
+                          num_workers=1, pretrained=False, window_lengths=(1,), smoke=True)
+    src = tmp_path / "src"
+    run_training(root, out_dir=str(src / "final"), ckpt_dir=str(src / "ckpt"), mcfg=mcfg,
+                 tcfg=dataclasses.replace(base, total_steps=1),
+                 aug=MVAugParams(enabled=False), weights=LossWeights())
+    ft = tmp_path / "ft"
+    warm = dataclasses.replace(base, total_steps=1, warm_start=str(src / "final"))
+    run_training(root, out_dir=str(ft / "final"), ckpt_dir=str(ft / "ckpt"), mcfg=mcfg, tcfg=warm,
+                 aug=MVAugParams(enabled=False), weights=LossWeights())
+    out = capsys.readouterr().out
+    assert "warm start from" in out and "SKIPPED" not in out          # first launch: warm start ran
+    # requeue: same ckpt_dir, one more step -> resume, and the source is not re-read
+    res = run_training(root, out_dir=str(ft / "final"), ckpt_dir=str(ft / "ckpt"), mcfg=mcfg,
+                       tcfg=dataclasses.replace(warm, total_steps=2),
+                       aug=MVAugParams(enabled=False), weights=LossWeights())
+    out2 = capsys.readouterr().out
+    assert res["resumed_from"] == 1
+    assert "SKIPPED" in out2 and "restored" not in out2

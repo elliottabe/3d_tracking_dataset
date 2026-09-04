@@ -80,6 +80,11 @@ def mvq_loss(out, batch, w: LossWeights, part_of_k):
     dist = jnp.linalg.norm(cen, axis=-1)                                                 # (B,F) from the ROI origin
     assign, slot_target = assign_slots(batch["fly_sex"], fv, batch["prompt_on"], dist, I)
     ignore = slot_ignore(batch["unlabelled_sex"], I)                                     # (B,I)
+    # A slot that HOLDS a labelled fly certainly exists, so it is supervised even when
+    # the unlabelled animal's sex points at the same slot. Without this, a window with a
+    # female host in slot 1 and an unlabelled female present had slot 1's existence
+    # ignored -- the one slot whose answer is known for certain got no gradient.
+    ignore = ignore & ~slot_target
     inst_matched = slot_target
     fv_eff = fv & (assign >= 0)      # a dropped fly (assign=-1) is treated like an unlabelled one
     # ---------------- gather per fly
