@@ -333,6 +333,16 @@ def _save_step(mngr, steps_done, model, optimizer, ema, ema_updates: int):
         ema_meta=ocp.args.JsonSave({"ema_updates": int(ema_updates), "ema_zero_seeded": True})))
 
 
+def _replicated_abstract(tree):
+    """Abstract (ShapeDtypeStruct) twin of `tree` with a replicated sharding
+    over all current devices, for topology-independent Orbax restores."""
+    from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
+    repl = NamedSharding(Mesh(jax.devices(), axis_names=("data",)), P())
+    return jax.tree_util.tree_map(
+        lambda v: jax.ShapeDtypeStruct(v.shape, v.dtype, sharding=repl)
+        if hasattr(v, "shape") and hasattr(v, "dtype") else v, tree)
+
+
 def _restore_latest(mngr, model, optimizer, ema):
     """(model, optimizer, ema, ema_updates, start_step); ema restored using the
     freshly-built `ema` pytree as the abstract target, same pattern
@@ -356,11 +366,18 @@ def _restore_latest(mngr, model, optimizer, ema):
         return model, optimizer, ema, 0, 0
     gm, am = nnx.split(model)
     go, ao = nnx.split(optimizer)
+    # Restore targets carry an explicit REPLICATED sharding over the current
+    # devices (the same pattern as train/checkpoint.py::warm_start_restore).
+    # Without it Orbax infers the sharding from the checkpoint's own metadata
+    # and refuses with "Topology mismatch" whenever the device count differs
+    # from the one that saved it (8-GPU save -> 4-GPU or CPU resume). The
+    # arrays are re-replicated by `replicate(..., mesh)` right after restore.
+    am, ao, ema_t = (_replicated_abstract(t) for t in (am, ao, ema))
     try:
         r = mngr.restore(latest, args=ocp.args.Composite(
             model=ocp.args.StandardRestore(am),
             opt=ocp.args.StandardRestore(ao),
-            ema=ocp.args.StandardRestore(ema),
+            ema=ocp.args.StandardRestore(ema_t),
             ema_meta=ocp.args.JsonRestore()))
     except KeyError as e:
         raise ValueError(
