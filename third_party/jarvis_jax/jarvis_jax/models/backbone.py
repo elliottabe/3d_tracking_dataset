@@ -46,3 +46,12 @@ def build_backbone(name_or_module, cfg, *, rngs):
                 f"unknown backbone '{name_or_module}'; registered: {sorted(BACKBONES)}") from e
         return factory(cfg, rngs=rngs)
     return name_or_module      # already a built module
+
+
+def _register_optional():
+    # DINOv3 lives in its own module; registering here keeps `BACKBONES`
+    # the single lookup table without importing it at package import.
+    from jarvis_jax.models import dinov3
+    dinov3.register()
+
+_register_optional()

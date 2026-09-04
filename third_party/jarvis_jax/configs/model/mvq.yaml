@@ -1,0 +1,39 @@
+# @package model
+arch: mvq
+crop: 448
+patch: 16
+embed_dim: 768
+num_keypoints: 50
+num_cameras: 7
+max_frames: 8
+n_instances: 3
+n_local: 2
+n_global: 2
+global_pool: 2
+dec_layers_3d: 8
+dec_layers_2d: 4
+dec_heads: 12
+mlp_ratio: 4.0
+refine_passes: 1
+patch_rgb: 9
+fourier_bands: 8
+roi_scale: 24.0
+camera_slot_embed: true
+# dinov3_b16/dinov3_l16 are REAL presets (MVQConfig.__post_init__): the
+# preset's own embed_dim/depth/num_heads are authoritative for the backbone,
+# and embed_dim above must equal the preset's (l16 needs embed_dim: 1024).
+# backbone_depth/backbone_heads below are pinned to b16's own values here
+# (12/12) -- null lets a preset's own depth/heads apply instead.
+backbone: dinov3_b16
+backbone_depth: 12
+backbone_heads: 12
+remat: true
+# Profiled 2026-09-04: chunking the 2D cross-attention path (q_chunk=512, the
+# implicit default before this field existed) cost +13% step time to save
+# 2.2GB -- not worth it once the attention-chunk remat fix let the unchunked
+# path fit at 4-8 samples/GPU. null = unchunked.
+q_chunk: null
+# cuDNN flash attention for the backbone and decoder (see
+# docs/benchmark/2026-09-mvq/ notes for the A/B). "xla" (CPU-safe) is the
+# dataclass default; this config ships the GPU path.
+attn_impl: cudnn

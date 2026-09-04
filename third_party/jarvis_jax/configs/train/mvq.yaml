@@ -1,0 +1,54 @@
+# @package train
+lr: 3.0e-4
+weight_decay: 0.05
+warmup_steps: 500
+total_steps: 30000
+batch_size: 32          # 8 per GPU x 4 GPUs
+backbone_lr_mult: 0.1
+grad_clip: 1.0
+ema: 0.999
+seed: 0
+window_lengths: [1]     # P2 = T=1 only; P3 adds 2
+prompt_p_start: 1.0
+prompt_p_end: 0.5
+prompt_anneal_steps: 2000
+female_weight: 1.0
+balance_alpha: 0.5
+log_every: 50
+eval_every: 2000
+save_every: 1000
+num_workers: 16
+pretrained: true
+smoke: false
+val_cohorts: [female, two_fly]
+# loss weights (spec 2026-09-03 §5) -- starting points, swept in P3
+loss:
+  reproj: 1.0
+  l3d: 0.5
+  uv2d: 0.5
+  vis: 0.1
+  conf: 0.2
+  exist: 1.0
+  rep: 0.5
+  pass1: 0.5
+  aux: 0.3
+  huber_px: 8.0
+  rep_px: 20.0
+  rep_units: 2.5
+mv_aug:
+  enabled: true
+  rot_deg: 30.0
+  scale_min: 0.8
+  scale_max: 1.25
+  translate_frac: 0.1
+  world_yaw: true
+  world_tilt_deg: 30.0
+  mirror_p: 0.5
+  cam_drop_p: 0.3
+  cam_drop_max: 2
+  brightness: 0.2
+  contrast: 0.2
+  gamma: 0.2
+  blur_max: 0.5
+  noise_scale: 0.02
+  pc_color: 0.2

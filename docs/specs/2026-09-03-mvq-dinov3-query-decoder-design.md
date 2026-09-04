@@ -95,7 +95,10 @@ to.
 - `cam_valid` (T, C) bool. Absent cameras (None frameset slots, dropped
   views) are masked out of attention and all losses.
 - `M` (C, 2, 3), `t` (C, 2) affine rows in full-frame px; `crop_origin`
-  (T, C, 2); `center3D` (3,), one per window (the host fly's).
+  (C, 2) full-frame px, one per window PER CAMERA (shared by every T frame
+  of the window -- every frame is cropped at the SAME per-camera origin,
+  the projection of the window's single `center3D`, computed once from
+  frame 0); `center3D` (3,), one per window (the host fly's).
 - Optional `prompt_mask` (T, C, 448, 448) bool for the prompted mode.
 
 ### 4.2 Backbone: DINOv3 ViT-B/16
@@ -169,7 +172,8 @@ ROI-local world units scaled by 1/24, plus a confidence logit.
 `q = proj(final 3D query feature) + E_geom[c] + E_frame[t]`, where `E_geom`
 is the Fourier embedding of the camera's affine rows (not a slot index).
 Four cross-attention-only blocks, D4RT style; 2,100 queries for T=2. Head:
-(u, v) in crop-normalised [0,1] plus a visibility logit.
+(u, v) in CROP px (`crop * sigmoid(...)`, range [0, 448], not normalised
+[0,1]) plus a visibility logit.
 
 **Refinement pass** (`refine_passes: 1`, default on). For every 3D query,
 gather what pass 1 committed to: bilinear samples of the token grid and a
@@ -179,10 +183,15 @@ decoder weights with a pass embedding, predict residuals on 3D and 2D. This
 is the direct reuse of D4RT's (u, v, t) point query and the sub-pixel
 mechanism regression heads otherwise lack.
 
-**Assembly.** `kp3d_world = center3D + 24 * offset`; `kp2d_full = crop_origin
-+ 448 * uv`; `conf3d = sigmoid(conf logit)`. A keypoint with no valid view,
-or belonging to an instance with existence below `exist_thresh` (0.5), is
-emitted as NaN with conf3d 0.
+**Assembly** (`models/mvq/model.py::assemble(out, center3D, crop_origin,
+exist_thresh=0.5, cam_valid=None)`). `kp3d_world = center3D + 24 * offset`;
+`kp2d_full = crop_origin + uv` (uv is already in crop px, see above --
+`crop_origin` is `(B, C, 2)`, broadcast over instances/frames/keypoints,
+since it is one value per (sample, camera), not per frame); `conf3d =
+sigmoid(conf logit)`. A keypoint with no valid view, or belonging to an
+instance with existence below `exist_thresh` (0.5), is emitted as NaN with
+conf3d 0; a FRAME with no valid camera at all (`cam_valid`, when given) is
+NaN across every instance and keypoint for that frame too.
 
 ## 5. Losses and matching
 
@@ -202,9 +211,14 @@ receive only the existence loss.
 | 2 | 3D L1 | joints with >=2 labelled views | `s * |offset - offset_gt|_1` | 0.5 |
 | 3 | 2D view head | each labelled view, v>0 | Huber(8 px) of view (u,v) vs human 2D | 0.5 |
 | 4 | visibility BCE | each view query | target = label v flag; absent cameras masked | 0.1 |
-| 5 | confidence (D4RT) | each 3D query | `c * err_reproj - lambda log c`, c = sigmoid | 0.2 |
+| 5 | confidence (D4RT) | each 3D query | `c * err_reproj - lambda log c`, c = sigmoid | 1.0 (lambda=0.2) |
 | 6 | existence BCE | each instance | matched 1, unmatched 0 | 1.0 |
 | 7 | repulsion | two-fly frames | hinge `max(0, r - dist)` to the other fly's same-part labels (15-part index from `data/distractor.py`): r = 20 px per view, 2.5 world units in 3D | 0.5 |
+
+Term 5's `0.2` (`LossWeights.conf`) is `lambda` INSIDE that term's own
+formula, not an outer weight on the term as a whole -- the term always
+contributes to the total loss at weight 1.0; `conf` only trades off how
+hard `c` is penalised for saturating toward 0 (`train/losses_mvq.py`).
 
 **Deep supervision.** Terms 1-3 also on pass-1 outputs at weight 0.5 and on
 every second decoder block through the shared heads at weight 0.3.
@@ -260,14 +274,15 @@ Geometric, all exact under affine cameras:
   every M.
 - **No per-view flips** (an unrealisable camera).
 
-Robustness: photometric per view from `augment.py` defaults, cutout, camera
+Robustness: photometric per view from `augment.py` defaults, camera
 dropout (`cam_drop_p: 0.3`, 1-2 views).
 
-Two-fly synthesis: distractor gray-fill with `fill_p` (15/60 dilation rule
-from `data/distractor.py`); multi-view copy-paste of a donor frameset at a
-3D translation Delta, each view shifted by `M Delta`, same calibration group
-only (`copy_paste_p`, default 0.0 in the first run, on for the two-fly
-ablation).
+**NOT implemented in P2** (P3 candidates, per §8's ruling that mvq trains
+as a set predictor with the other fly visible rather than gray-filled):
+distractor gray-fill with `fill_p` (15/60 dilation rule from
+`data/distractor.py`); multi-view copy-paste of a donor frameset at a 3D
+translation Delta, each view shifted by `M Delta`, same calibration group
+only (`copy_paste_p`).
 
 ### 6.4 Split
 
@@ -286,10 +301,44 @@ backbone 0.1x, fusion+decoder 1x. Weight EMA (`ema: 0.999`, on). Orbax
 checkpoints, auto-resume.
 
 Eval every 2k steps on v12 val in both prompted and unprompted modes: 3D
-MPJPE (world units and mm), per-view 2D px error, cohorts (sex, calibration
-group, one-/two-fly), instance existence precision/recall on two-fly frames,
-rigid length spread, 2D-head vs reprojection disagreement. The trainer raises
-if a named cohort is empty.
+MPJPE (world units and mm; both an ORACLE number, matched to GT, and a
+POLICY number, what a real inference call without GT would actually
+report -- see `train/train_mvq.py::evaluate`'s docstring), per-view 2D px
+error, cohorts (sex, calibration group, one-/two-fly), instance existence
+precision/recall on two-fly frames, rigid length spread, 2D-head vs
+reprojection disagreement. The trainer raises if a named cohort is empty.
+
+**Implemented deviations from this section** (P2, recorded rather than
+silently drifting from the description above):
+
+- `female_weight` is a SAMPLING weight (`train_mvq.py::_balanced_weights`,
+  scales a window's probability of being drawn), not the per-sample LOSS
+  weight §5's "Balance" paragraph describes.
+- `rigid_length_weight` is NOT implemented -- rigid segment length stays a
+  metric only (as this section's "Not losses, always metrics" bullet
+  already says); there is no such field on `LossWeights`.
+- Intermediate-layer deep supervision (every second decoder block) covers
+  only terms 1-2 (reprojection, 3D L1), not 1-3: those per-layer readouts
+  are 3D-only (`decoder.py::_read3d`), with no 2D-head output to score term
+  3 against. Only pass-1's full readout gets all three terms.
+- No model-wide bf16 compute: matmuls run fp32 (TF32 on GPU), not bf16 as
+  originally planned. `attn_impl: cudnn` (not in the original design, added
+  Task 9, `models/mvq/attention.py`) instead casts to bf16 only inside the
+  cuDNN flash-attention kernel itself (backbone and decoder attention),
+  everything else stays fp32.
+- Strip cache (§6.2) is DEFERRED, not built: profiled loader time (0.24
+  s/batch at `num_workers=16`) is under a tenth of measured per-step GPU
+  compute (~2.78 s/step/GPU) -- the mitigation's own stated trigger
+  ("evidence the loader is the bottleneck") was not met. Revisit if a
+  future profile shows otherwise.
+- EMA is seeded at ZERO (not step-0 params) and debiased by `1 -
+  decay**ema_updates` at read time (`train_mvq.py::_with_ema`), with
+  `ema_updates` persisted explicitly in a mandatory `ema_meta` checkpoint
+  item -- not the plain running EMA §7 implies. A checkpoint predating this
+  fix is refused on resume rather than silently mis-debiased.
+- `evaluate()` shards every batch across the training mesh (`shard_batch`)
+  rather than plain `jnp.asarray` -- an unsharded eval batch was found to
+  fragment device 0's memory pool and OOM the very next training step.
 
 Compute placement per CLAUDE.md: compute nodes only; on an idle GPU node run
 directly, otherwise `scripts/slurm/submit_task.sh`.
@@ -298,8 +347,13 @@ directly, otherwise `scripts/slurm/submit_task.sh`.
 
 `pipeline.lifter: dlt | mvq` in `scripts/run_bout.py`. The `mvq` path
 (`jarvis_jax/tracking/lift_mvq.py`) replaces Stages A and B: synchronized
-frames via `read_window`, crops from mask-centroid `center3D` exactly as
-`build_frameset`, windows of T frames, and it writes the same artifacts:
+frames via `read_window`, crops CENTRED as `build_frameset` centres them
+(mask-centroid `center3D`) but WITHOUT `build_frameset`'s distractor
+gray-fill (controller ruling 2026-09-04: mvq is trained as a SET predictor
+with the other fly left visible plus the repulsion term (§5, term 7)
+rather than gray-filled out; gray-fill remains only a possible P3
+augmentation, see §6.3), windows of T frames, and it writes the same
+artifacts:
 
 - `kp2d.npz`: view-head output in full-frame px, `conf` = view visibility
   sigmoid; keypoint axis in v12 order (== detector order), so
@@ -341,6 +395,19 @@ window forward, a 3,000-frame bout well under a minute on an L40S.
 1. **Geometry sanity, 1k steps:** reprojected pass-1 3D on val frames lands
    on the fly in all views. If not, the geometry tokens are wrong before
    anything else is.
+   **PASS** (2026-09-04, `mvq_t1_b16_gate1`, step 2000, T=1): all 12 PNGs
+   (`figures/2026-09-mvq/mvq_t1_b16_gate1/{unprompted,prompted}/gate1_{female,two_fly,worst}.png`,
+   gitignored -- regenerate with `scripts/viz/mvq_overlay.py`, command in
+   `docs/benchmark/2026-09-mvq/p2-t1-notes.md`) show no constant per-camera
+   offset, no rotation/mirroring divergence across cameras, and points never
+   attach to the wrong fly on two-fly windows. Cyan (2D head) and green
+   (reprojected 3D) move together in every panel. **Caveat**: this
+   checkpoint predates the EMA zero-seed/debias fix (§7) -- its `final/` was
+   evaluated with an EMA silently shrunk toward the step-0 (near-random)
+   init, biasing every mm/units NUMBER in that run (not the geometry-sanity
+   verdict itself, which does not depend on absolute scale). Re-running this
+   gate against a post-fix checkpoint is the natural next step, not yet done
+   (see `p2-t1-notes.md`'s "Fix round 1" section).
 2. **Bout 28 female wall/occlusion frames, 3+ cameras,** new vs ViTPose+DLT
    via `python -m viz overlay --compare`: tarsal tips stay on the leg
    through the wall band; no keypoint sits on the male.

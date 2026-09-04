@@ -17,6 +17,7 @@ mae_npz:        /gscratch/portia/${paths.user}/data/Johnson_lab/mae_vitb.npz
 body_model_dir: /gscratch/portia/${paths.user}/Research/MyRepos/fruitfly_body_models/
 project_dir:    /gscratch/portia/${paths.user}/Research/MyRepos/
 general_model:  /gscratch/portia/${paths.user}/data/Johnson_lab/red_data/general_model
+mvq_runs_root:       /gscratch/portia/${paths.user}/data/Johnson_lab/jax_mvq_runs
 # REMOVED 2026-09-02: `v5_root` and `v3_root`. Both pointed at roots that no
 # longer exist (red_data_3d_v5, red_data_unified_V3), and their only consumer
 # -- scripts/build_v5_dataset.py -- is superseded by
