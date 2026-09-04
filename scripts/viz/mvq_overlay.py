@@ -22,7 +22,20 @@ sys.path.insert(0, os.path.join(ROOT, "third_party", "jarvis_jax")); sys.path.in
 from jarvis_jax.models.mvq.checkpoint import load_mvq_model
 from jarvis_jax.models.mvq.geometry import project_local
 from jarvis_jax.data.v12_windows import V12WindowDataset, WINDOW_KEYS
+from jarvis_jax.data.mv_copy_paste import CopyPasteParams
 from jarvis_jax.train.train_mvq import normalize_crops, MM_PER_UNIT
+
+CONTACT_SEP = CopyPasteParams().contact_sep[1]   # 15 world units -- same rule copy-paste calls "contact"
+
+
+def _is_contact(ds, i):
+    """True when window i has >=2 labelled flies whose frame-0 centroids
+    (`ds.fly_centroids`) are within CONTACT_SEP world units -- the identical
+    threshold `mv_copy_paste.composite` uses to tag a paste 'contact'."""
+    c = ds.fly_centroids(i)
+    if c.shape[0] < 2 or not np.isfinite(c[:2]).all():
+        return False
+    return float(np.linalg.norm(c[0] - c[1])) <= CONTACT_SEP
 
 
 def _policy_instance(xyz, exist_logit, prompted: bool):
@@ -49,7 +62,7 @@ def main():
     ap.add_argument("--attn_impl", default=None, help="override the run's own attn_impl (e.g. 'xla' on CPU)")
     ap.add_argument("--root", default=None)
     ap.add_argument("--split", default="val"); ap.add_argument("--n", type=int, default=6)
-    ap.add_argument("--cases", default="female,two_fly,worst"); ap.add_argument("--out", required=True)
+    ap.add_argument("--cases", default="female,two_fly,contact_pair,worst"); ap.add_argument("--out", required=True)
     ap.add_argument("--prompted", action="store_true")
     a = ap.parse_args()
     root = a.root or "/gscratch/portia/eabe/data/Johnson_lab/red_data/red_data_3d_v12_export0902"
@@ -75,11 +88,13 @@ def main():
         uv2 = np.asarray(out["uv"][0, inst, 0])                                                     # (C,K,2)
         vis = s["vis2d"][0, 0]                                                                     # (C,K)
         re = np.linalg.norm(uv3.transpose(1, 0, 2) - s["kp2d"][0, 0], axis=-1)
+        sex_prob = float(1 / (1 + np.exp(-np.asarray(out["sex_logit"][0, inst]))))
         rows.append(dict(i=i, mpjpe_units=float(d[inst][has].mean()) if has.any() else np.nan,
                          mpjpe_policy_units=mpjpe_policy, policy_miss=inst_policy is None,
                          reproj_px=float(re[vis].mean()) if vis.any() else np.nan,
                          exist=[float(x) for x in 1 / (1 + np.exp(-np.asarray(out["exist_logit"][0])))],
                          female=bool(ds.is_female(i)), two_fly=ds.n_flies(i) > 1, group=ds.calib_group(i),
+                         contact=_is_contact(ds, i), slot=inst, sex_prob=sex_prob,
                          cam_names=ds.camera_names(i), sample=s, uv3=uv3, uv2=uv2, inst=inst))
     finite = lambda vals: [v for v in vals if np.isfinite(v)]
     oracle_mean = float(np.mean(finite([r["mpjpe_units"] for r in rows]))) if rows else float("nan")
@@ -93,6 +108,7 @@ def main():
     for case in a.cases.split(","):
         if case == "female": sel = [r for r in rows if r["female"]]
         elif case == "two_fly": sel = [r for r in rows if r["two_fly"]]
+        elif case == "contact_pair": sel = [r for r in rows if r["contact"]]
         else: sel = sorted(rows, key=lambda r: -np.nan_to_num(r["reproj_px"], nan=1e9))
         sel = sel[: a.n]
         if not sel:
@@ -119,6 +135,7 @@ def main():
                 e = np.linalg.norm(r["uv3"][:, c] - g2, axis=-1)[vis]
                 ax.set_title(f"{cam} {e.mean():.1f}px" if e.size else cam, fontsize=7)
             axes[r_i, 0].set_ylabel(f"#{r['i']} {'F' if r['female'] else 'M'} grp{r['group']}\n"
+                                    f"slot{r['slot']} pF={r['sex_prob']:.2f}\n"
                                     f"{r['mpjpe_units']*MM_PER_UNIT:.2f}mm", fontsize=7)
         fig.legend(*axes[0, 0].get_legend_handles_labels(), fontsize=6, loc="upper left",
                   bbox_to_anchor=(0.0, 1.0), bbox_transform=fig.transFigure)
