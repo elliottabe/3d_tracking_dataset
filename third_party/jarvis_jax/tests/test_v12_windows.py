@@ -215,3 +215,25 @@ def test_copy_paste_hook_is_deterministic_and_skips_unlabelled_present(tmp_path)
     assert r is not None and set(r[1]) == {"donor", "D", "sep", "contact"}
     val = V12WindowDataset(root, "val", T=1, train=False, copy_paste=CopyPasteParams(p=1.0))
     assert val[i]["fly_valid"].tolist() == [True, False]               # never in eval mode
+
+
+def test_paste_window_falls_back_to_other_sex_pool(tmp_path):
+    """host_sex's own pool may be empty (after excluding i itself) while a donor
+    of the OTHER sex is available in the same calib group -- paste_window must
+    fall back rather than give up on the first empty draw."""
+    from jarvis_jax.data.v12_windows import V12WindowDataset
+    from jarvis_jax.data.mv_copy_paste import CopyPasteParams
+    root = make_v12_root(tmp_path, n_frames=3, two_fly_frame=1, manifest_n_flies=1)
+    import json, os
+    man = json.load(open(os.path.join(root, "manifest.json")))
+    man["recordings"][REC]["fly_sex"] = {"fly0": "female"}
+    json.dump(man, open(os.path.join(root, "manifest.json"), "w"))
+    ds = V12WindowDataset(root, "train", T=1, train=True,
+                          copy_paste=CopyPasteParams(p=1.0, opposite_sex_p=0.0, max_tries=4))
+    i = ds.windows.index((REC, 0, 0))
+    j = ds.windows.index((REC, 1, 1))               # fly1, the two-fly frame: annotation sex "male"
+    ds._donors = {("A", 0): [i], ("A", 1): [j]}     # female pool == {i} only; usable donor is male j
+    r = ds.paste_window(i, np.random.default_rng(0))
+    assert r is not None and r[1]["donor"] == j
+    ds._donors = {("A", 0): [i]}                    # no donor of either sex once i excludes itself
+    assert ds.paste_window(i, np.random.default_rng(0)) is None

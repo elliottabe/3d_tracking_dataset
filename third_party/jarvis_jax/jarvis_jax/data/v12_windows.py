@@ -292,10 +292,11 @@ class V12WindowDataset:
         axes = body_plane_axes(tgt["kp3d_local"][0, 0], tgt["has3d"][0, 0])
         for _ in range(p.max_tries):
             want = (1 - host_sex) if (host_sex in (0, 1) and rng.uniform() < p.opposite_sex_p) else host_sex
-            pool = self._donors.get((grp, want)) or self._donors.get((grp, host_sex)) or []
-            pool = [j for j in pool if j != i]
+            other = (1 - want) if want in (0, 1) else host_sex
+            pool = [j for j in self._donors.get((grp, want), []) if j != i] \
+                or [j for j in self._donors.get((grp, other), []) if j != i]
             if not pool:
-                return None
+                return None          # no donor of either sex in this calibration group
             j = int(pool[rng.integers(len(pool))])
             D = sample_offset(rng, axes, p)
             out = composite(tgt, self._build(j), D, p)
