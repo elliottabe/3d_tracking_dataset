@@ -23,8 +23,9 @@ def _assign_one(sex, valid, on, dist, n_instances):
         taken, assign = carry
         typed = typed_all[f]
         slot = jnp.where((f == 0) & on, SLOT_PROMPTED, jnp.where(taken[typed], SLOT_OTHER, typed))
+        slot = jnp.where((slot >= 0) & taken[jnp.maximum(slot, 0)], -1, slot)
         slot = jnp.where(valid[f], slot, -1)
-        taken = jnp.where(valid[f], taken.at[jnp.maximum(slot, 0)].set(True) | taken, taken)
+        taken = jnp.where(valid[f] & (slot >= 0), taken.at[jnp.maximum(slot, 0)].set(True) | taken, taken)
         return (taken, assign.at[f].set(slot)), None
 
     (taken, assign), _ = jax.lax.scan(body, (jnp.zeros((n_instances,), bool), jnp.full((F,), -1, jnp.int32)), order)
@@ -36,7 +37,8 @@ def assign_slots(fly_sex, fly_valid, prompt_on, dist, n_instances=N_SLOTS):
     dist (B,F) distance of each fly's labelled-3D centroid from the ROI origin.
     Returns assign (B,F) int32 slot per fly (-1 = invalid fly) and
     slot_target (B,I) bool = a fly was assigned to that slot. F <= 2 is assumed
-    (slot 3 can hold one fly)."""
+    (slot 3 can hold one fly). A fly whose resolved slot is already taken is
+    dropped (assigned -1) rather than colliding with another fly."""
     return jax.vmap(lambda s, v, o, d: _assign_one(s, v, o, d, n_instances))(fly_sex, fly_valid, prompt_on, dist)
 
 

@@ -50,6 +50,11 @@ def test_batched_and_jittable():
     assert np.asarray(t).shape == (2, 4)
 
 
+def test_second_unknown_sex_fly_is_dropped_not_collided():
+    a, t = _run([[-1, -1]], [[True, True]], [False], [[10.0, 2.0]])
+    assert a == [[3, -1]] and t == [[False, False, False, True]]
+
+
 def test_slot_ignore_codes():
     from jarvis_jax.train.matching import slot_ignore
     ig = np.asarray(slot_ignore(jnp.asarray([-1, 0, 1, 2], jnp.int8)))
