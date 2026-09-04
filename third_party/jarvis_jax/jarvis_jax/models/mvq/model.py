@@ -39,7 +39,7 @@ class MVQConfig:
     backbone_heads: int = 12
     remat: bool = True
     # Query-chunk size for the 2D cross-attention path's masked_attention call
-    # (None = unchunked). Profiled 2026-09-04: chunking (q_chunk=8, the shipped
+    # (None = unchunked). Profiled 2026-09-04: chunking (q_chunk=512, the shipped
     # default before this field existed) cost +13% step time to save 2.2GB --
     # a bad trade once the attention-chunk remat fix (fusion.py) made the
     # unchunked path fit comfortably at the 4-8 samples/GPU this model trains

@@ -23,7 +23,7 @@ backbone: dinov3_b16
 backbone_depth: 12
 backbone_heads: 12
 remat: true
-# Profiled 2026-09-04: chunking the 2D cross-attention path (q_chunk=8, the
+# Profiled 2026-09-04: chunking the 2D cross-attention path (q_chunk=512, the
 # implicit default before this field existed) cost +13% step time to save
 # 2.2GB -- not worth it once the attention-chunk remat fix let the unchunked
 # path fit at 4-8 samples/GPU. null = unchunked.

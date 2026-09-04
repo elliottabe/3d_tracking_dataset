@@ -72,7 +72,10 @@ def test_resume_from_checkpoint(tmp_path):
     """Resume must restore the EMA too (not re-seed it from raw params): run 2
     steps saving every step, then relaunch (fresh model/optimizer/EMA, as a
     real preempt+requeue would) with total_steps=3 against the SAME ckpt_dir
-    and confirm it picks up at step 2."""
+    and confirm it picks up at step 2. Also confirms the ema_updates counter
+    (persisted in the new `ema_meta` Orbax item) round-trips: it must equal
+    the completed step count both before and after resume, since the EMA
+    updates exactly once per training step with no skips."""
     from jarvis_jax.models.mvq import MVQConfig
     from jarvis_jax.train.train_mvq import run_training, MVQTrainConfig
     from jarvis_jax.train.losses_mvq import LossWeights
@@ -88,11 +91,50 @@ def test_resume_from_checkpoint(tmp_path):
     res1 = run_training(root, out_dir=str(tmp_path / "final1"), ckpt_dir=ckpt_dir, mcfg=mcfg, tcfg=tcfg1,
                         aug=MVAugParams(enabled=False), weights=LossWeights())
     assert res1["resumed_from"] == 0
+    assert res1["ema_updates"] == 2
     tcfg2 = MVQTrainConfig(total_steps=3, **common)
     res2 = run_training(root, out_dir=str(tmp_path / "final2"), ckpt_dir=ckpt_dir, mcfg=mcfg, tcfg=tcfg2,
                         aug=MVAugParams(enabled=False), weights=LossWeights())
     assert res2["resumed_from"] == 2
+    assert res2["ema_updates"] == 3
     assert np.isfinite(res2["final_loss"])
+
+
+def test_resume_refuses_checkpoint_without_ema_meta(tmp_path):
+    """A checkpoint saved without the `ema_meta` item (i.e. by pre-fix-round-2
+    code) must be REFUSED on resume with a ValueError naming the checkpoint
+    dir, not silently resumed as though ema_zero_seeded were True -- see
+    _restore_latest's docstring for why guessing here is unsafe (a pre-fix
+    EMA seeded from live params would be silently rescaled by the debiasing
+    divisor as though it needed the same correction, which it does not)."""
+    import orbax.checkpoint as ocp
+    from flax import nnx
+    from jarvis_jax.models.mvq import MVQConfig, MVQModel
+    from jarvis_jax.train.train_mvq import _restore_latest, make_optimizer, MVQTrainConfig
+    mcfg = MVQConfig(crop=32, patch=16, embed_dim=16, num_keypoints=4, num_cameras=2, max_frames=2,
+                     n_instances=1, n_local=1, n_global=0, dec_layers_3d=1, dec_layers_2d=1, dec_heads=2,
+                     mlp_ratio=2.0, refine_passes=0, patch_rgb=3, fourier_bands=1, backbone_depth=1,
+                     backbone_heads=2, remat=False)
+    model = MVQModel(mcfg, rngs=nnx.Rngs(0))
+    opt = make_optimizer(model, MVQTrainConfig())
+    ema = jax.tree_util.tree_map(lambda p: p, nnx.state(model, nnx.Param))   # OLD (pre-fix) seeding: from params
+    ckpt_dir = str(tmp_path / "ckpt_old_format")
+    import os
+    os.makedirs(ckpt_dir, exist_ok=True)
+    # Old-format manager: only 3 items (no ema_meta), matching pre-fix-round-2 code.
+    old_mngr = ocp.CheckpointManager(os.path.abspath(ckpt_dir),
+                                     options=ocp.CheckpointManagerOptions(max_to_keep=1, save_interval_steps=1),
+                                     item_names=("model", "opt", "ema"))
+    old_mngr.save(5, args=ocp.args.Composite(
+        model=ocp.args.StandardSave(nnx.split(model)[1]),
+        opt=ocp.args.StandardSave(nnx.split(opt)[1]),
+        ema=ocp.args.StandardSave(ema)))
+    old_mngr.wait_until_finished()
+
+    from jarvis_jax.train.train_mvq import _make_manager
+    new_mngr = _make_manager(ckpt_dir)
+    with pytest.raises(ValueError, match="ema_meta"):
+        _restore_latest(new_mngr, model, opt, ema)
 
 
 def test_ema_debias_matches_constant_params():
@@ -155,9 +197,19 @@ def test_evaluate_ragged_batch_matches_full_batch(tmp_path):
     kw = dict(cohorts=cohorts, part_of_k=part_of_k, weights=LossWeights(), mesh=mesh, num_workers=1)
     val3 = evaluate(model, ds, 3, **kw)
     val2 = evaluate(model, ds, 2, **kw)
+    # mpjpe3d_units/cohort_* are computed in plain numpy from independent per-sample
+    # arrays -- insensitive to batch shape, so held to a tight 1e-6. reproj_px/uv2d_px/
+    # head_vs_reproj_px come from mvq_loss's own JAX batch reductions (huber means over
+    # a (B,...)-shaped tensor), which legitimately differ at the ~1e-6 ABSOLUTE level
+    # between batch_size=3 and 2 from ordinary floating-point non-associativity (measured
+    # ~4.8e-6 here, ~4e-8 RELATIVE) -- real, harmless numerical noise, not a batch-grouping
+    # dependence bug, so those three get a looser (still tight) 1e-4 tolerance.
+    tight = {"mpjpe3d_units", "cohort_female", "cohort_two_fly"}
     for mode in ("prompted", "unprompted"):
-        for k in ("mpjpe3d_units", "cohort_female", "cohort_two_fly"):
+        for k in ("mpjpe3d_units", "cohort_female", "cohort_two_fly",
+                  "reproj_px", "uv2d_px", "head_vs_reproj_px"):
             a, b = val3[mode][k], val2[mode][k]
             if np.isnan(a) and np.isnan(b):
                 continue
-            assert abs(a - b) < 1e-6, (mode, k, a, b)
+            tol = 1e-6 if k in tight else 1e-4
+            assert abs(a - b) < tol, (mode, k, a, b)

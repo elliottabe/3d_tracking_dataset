@@ -140,9 +140,14 @@ def evaluate(model, ds, batch_size, *, cohorts: dict, part_of_k, weights, mesh, 
     a plain mean-of-batches would let how samples happen to fall into batches
     change the reported number (a batch with more occluded/invisible entries
     contributes the SAME weight as a fully-visible one). Each batch's triple
-    is instead weighted by its OWN valid-entry count (computed host-side from
-    the padded batch `b`, matching exactly what `mvq_loss` averaged over) when
-    combining across batches, so the result is batch-grouping-independent."""
+    is instead weighted by its OWN valid-entry count when combining across
+    batches, so the result is batch-grouping-independent. That count is
+    computed from only the `B0` REAL rows (`b["vis2d"][:B0]`), not the padded
+    `batch_size`-shaped array `mvq_loss` itself saw -- a ragged last batch's
+    OWN reported value can still carry a small bias from its duplicated pad
+    row(s) (mvq_loss averaged over them too), but weighting the CROSS-BATCH
+    combination by real-only counts stops that one batch's padding from also
+    distorting every OTHER batch's contribution."""
     names = ds.keypoint_names
     ii = lambda n: names.index(n)
     seg_names = [(a, c) for a, c in
@@ -164,7 +169,10 @@ def evaluate(model, ds, batch_size, *, cohorts: dict, part_of_k, weights, mesh, 
         B = batch_size
         jb = {k: shard_batch(jnp.asarray(v), mesh) for k, v in b.items()}
         has_mask = jb["prompt_mask"].reshape(B, -1).any(-1)
-        weight = int((b["vis2d"] & b["fly_valid"][:, :, None, None, None]).sum())
+        # weight from the REAL rows only ([:B0]) -- not the padded batch_size-shaped
+        # arrays -- so a ragged last batch's padding inflates neither its own nor any
+        # other batch's contribution to the cross-batch weighted mean below.
+        weight = int((b["vis2d"][:B0] & b["fly_valid"][:B0, :, None, None, None]).sum())
         for mode, prompted in (("prompted", True), ("unprompted", False)):
             on = jnp.full((B,), prompted) & has_mask
             out = _fwd(model, normalize_crops(jb["crops"]), jb["cam_valid"], jb["M"], jb["t_local"],
@@ -200,9 +208,13 @@ def evaluate(model, ds, batch_size, *, cohorts: dict, part_of_k, weights, mesh, 
         samples = per_sample[mode]
         mp = np.array([p[0] for p in samples]); n = np.array([p[1] for p in samples])
         ok = np.isfinite(mp)
-        bstats = np.array(batch_stats[mode])                    # (n_batches, 4)
+        # np.zeros((0, 4)), not np.array([]), when there were no batches at all (e.g. an
+        # empty ds) -- keeps the [:, k] column slices below 1-D-empty instead of IndexError.
+        bstats = np.array(batch_stats[mode]) if batch_stats[mode] else np.zeros((0, 4))
         w = bstats[:, 3]
         def _wmean(col):
+            if col.size == 0:
+                return float("nan")
             return float(np.average(col, weights=w)) if w.sum() > 0 else float(np.mean(col))
         res = {"mpjpe3d_units": float(np.average(mp[ok], weights=n[ok])) if ok.any() else float("nan"),
                "reproj_px": _wmean(bstats[:, 0]), "uv2d_px": _wmean(bstats[:, 1]),
@@ -259,37 +271,70 @@ def _balanced_weights(ds, alpha, female_weight):
 
 
 def _make_manager(ckpt_dir, *, max_to_keep=3):
-    """mvq-local checkpoint manager: model + optimizer + EMA (a 3rd Orbax item
-    the shared `train/checkpoint.py` doesn't know about -- kept local here
-    rather than widening that shared module for one caller)."""
+    """mvq-local checkpoint manager: model + optimizer + EMA + ema_meta (Orbax
+    items the shared `train/checkpoint.py` doesn't know about -- kept local
+    here rather than widening that shared module for one caller). `ema_meta`
+    is a small JSON dict ({"ema_updates": int, "ema_zero_seeded": True}); see
+    `_restore_latest` for why it must be explicit rather than inferred."""
     os.makedirs(ckpt_dir, exist_ok=True)
     opts = ocp.CheckpointManagerOptions(max_to_keep=max_to_keep, save_interval_steps=1)
     return ocp.CheckpointManager(os.path.abspath(ckpt_dir), options=opts,
-                                 item_names=("model", "opt", "ema"))
+                                 item_names=("model", "opt", "ema", "ema_meta"))
 
 
-def _save_step(mngr, steps_done, model, optimizer, ema):
+def _save_step(mngr, steps_done, model, optimizer, ema, ema_updates: int):
     mngr.save(steps_done, args=ocp.args.Composite(
         model=ocp.args.StandardSave(nnx.split(model)[1]),
         opt=ocp.args.StandardSave(nnx.split(optimizer)[1]),
-        ema=ocp.args.StandardSave(ema)))
+        ema=ocp.args.StandardSave(ema),
+        ema_meta=ocp.args.JsonSave({"ema_updates": int(ema_updates), "ema_zero_seeded": True})))
 
 
 def _restore_latest(mngr, model, optimizer, ema):
-    """(model, optimizer, ema, start_step); ema restored using the freshly-built
-    `ema` pytree as the abstract target, same pattern train/checkpoint.py's
-    restore_latest uses for model/optimizer. (model, optimizer, ema, 0)
-    unchanged if no checkpoint exists yet."""
+    """(model, optimizer, ema, ema_updates, start_step); ema restored using the
+    freshly-built `ema` pytree as the abstract target, same pattern
+    train/checkpoint.py's restore_latest uses for model/optimizer.
+    (model, optimizer, ema, 0, 0) unchanged if no checkpoint exists yet.
+
+    `_with_ema` divides by `(1 - decay**t)` unconditionally to debias a
+    zero-seeded EMA -- but a PRE-fix checkpoint (EMA seeded from live params,
+    not zero; every checkpoint before 2026-09-04) would be silently rescaled
+    by that same divisor as though it needed the same correction, and there
+    is no way to tell the two apart from the `ema` pytree's contents alone.
+    `ema_meta` (saved alongside `ema` from this fix onward) makes the
+    provenance explicit instead of inferred: its `ema_updates` becomes `t`,
+    and a checkpoint missing this item (KeyError from Orbax, since `mngr`'s
+    `item_names` declares it mandatory) or whose `ema_zero_seeded` is not
+    True is REFUSED (ValueError) rather than guessed at -- resume with a
+    fresh run instead of trying to convert it.
+    """
     latest = mngr.latest_step()
     if latest is None:
-        return model, optimizer, ema, 0
+        return model, optimizer, ema, 0, 0
     gm, am = nnx.split(model)
     go, ao = nnx.split(optimizer)
-    r = mngr.restore(latest, args=ocp.args.Composite(
-        model=ocp.args.StandardRestore(am),
-        opt=ocp.args.StandardRestore(ao),
-        ema=ocp.args.StandardRestore(ema)))
-    return nnx.merge(gm, r["model"]), nnx.merge(go, r["opt"]), r["ema"], latest
+    try:
+        r = mngr.restore(latest, args=ocp.args.Composite(
+            model=ocp.args.StandardRestore(am),
+            opt=ocp.args.StandardRestore(ao),
+            ema=ocp.args.StandardRestore(ema),
+            ema_meta=ocp.args.JsonRestore()))
+    except KeyError as e:
+        raise ValueError(
+            f"checkpoint at {mngr.directory} (step {latest}) has no 'ema_meta' item -- "
+            f"it predates the zero-seeded, debiased EMA (fix round 2, 2026-09-04) and "
+            f"cannot be resumed: its EMA was seeded from live params, not zero, so "
+            f"_with_ema's /(1-decay**t) debiasing would silently rescale it as though "
+            f"it needed the same correction, which it does not. Start a fresh run "
+            f"instead -- do not attempt to resume or convert this checkpoint.") from e
+    meta = r["ema_meta"]
+    if not meta.get("ema_zero_seeded", False):
+        raise ValueError(
+            f"checkpoint at {mngr.directory} (step {latest}) has ema_meta={meta!r} -- "
+            f"'ema_zero_seeded' is not True, so its EMA cannot be resumed by this code. "
+            f"Start a fresh run instead.")
+    return (nnx.merge(gm, r["model"]), nnx.merge(go, r["opt"]), r["ema"],
+           int(meta["ema_updates"]), latest)
 
 
 def run_training(root, *, out_dir, ckpt_dir, mcfg: MVQConfig, tcfg: MVQTrainConfig,
@@ -330,8 +375,11 @@ def run_training(root, *, out_dir, ckpt_dir, mcfg: MVQConfig, tcfg: MVQTrainConf
     ema = jax.tree_util.tree_map(jnp.zeros_like, nnx.state(model, nnx.Param))
     mngr = _make_manager(ckpt_dir) if ckpt_dir else None
     start = 0
+    ema_updates = 0     # tracked explicitly (not inferred from the step count -- see
+                        # _restore_latest); incremented once per training step below,
+                        # exactly like `start`/`i+1`, and persisted alongside `ema`.
     if mngr is not None:
-        model, opt, ema, start = _restore_latest(mngr, model, opt, ema)
+        model, opt, ema, ema_updates, start = _restore_latest(mngr, model, opt, ema)
         if start:
             print(f"resume @ {start}", flush=True)
     mesh = data_parallel_mesh()
@@ -358,12 +406,12 @@ def run_training(root, *, out_dir, ckpt_dir, mcfg: MVQConfig, tcfg: MVQTrainConf
         batch = dict(zip(WINDOW_KEYS, next(streams[T])))
         pp = tcfg.prompt_p_start + (tcfg.prompt_p_end - tcfg.prompt_p_start) * min(i / max(tcfg.prompt_anneal_steps, 1), 1.0)
         loss, metrics, ema = step_fns[T](model, opt, ema, jax.random.fold_in(key, i), batch, jnp.float32(pp))
-        loss = float(loss)
+        loss = float(loss); ema_updates += 1
         if (i + 1) % tcfg.log_every == 0:
             ms = " ".join(f"{k}={float(v):.4f}" for k, v in metrics.items() if k != "total")
             print(f"step {i+1}/{tcfg.total_steps} T={T} loss {loss:.4f} {ms} ({time.time()-t0:.0f}s)", flush=True)
         if (i + 1) % tcfg.eval_every == 0 or i + 1 == tcfg.total_steps:
-            em = _with_ema(model, ema, tcfg.ema, i + 1)
+            em = _with_ema(model, ema, tcfg.ema, ema_updates)
             val = evaluate(em, val_ds, tcfg.batch_size, cohorts=cohorts, part_of_k=part_of_k,
                            weights=weights, mesh=mesh, num_workers=tcfg.num_workers)
             for mode, r in val.items():
@@ -382,10 +430,10 @@ def run_training(root, *, out_dir, ckpt_dir, mcfg: MVQConfig, tcfg: MVQTrainConf
             del em
             jax.clear_caches()
         if mngr is not None and (i + 1) % tcfg.save_every == 0:
-            _save_step(mngr, i + 1, model, opt, ema)
+            _save_step(mngr, i + 1, model, opt, ema, ema_updates)
     if mngr is not None:
-        _save_step(mngr, tcfg.total_steps, model, opt, ema); mngr.wait_until_finished()
-    em = _with_ema(model, ema, tcfg.ema, tcfg.total_steps)
+        _save_step(mngr, tcfg.total_steps, model, opt, ema, ema_updates); mngr.wait_until_finished()
+    em = _with_ema(model, ema, tcfg.ema, ema_updates)
     val = evaluate(em, val_ds, tcfg.batch_size, cohorts=cohorts, part_of_k=part_of_k,
                    weights=weights, mesh=mesh, num_workers=tcfg.num_workers)
     os.makedirs(out_dir, exist_ok=True)
@@ -393,7 +441,8 @@ def run_training(root, *, out_dir, ckpt_dir, mcfg: MVQConfig, tcfg: MVQTrainConf
     with open(os.path.join(out_dir, "mvq_run.json"), "w") as f:
         json.dump({"model": dataclasses.asdict(mcfg), "train": dataclasses.asdict(tcfg), "val": val,
                   "keypoint_names": names}, f, indent=1)
-    return {"final_loss": loss, "val": val, "steps": tcfg.total_steps, "resumed_from": start}
+    return {"final_loss": loss, "val": val, "steps": tcfg.total_steps, "resumed_from": start,
+           "ema_updates": ema_updates}
 
 
 def _with_ema(model, ema, decay: float, t: int):
