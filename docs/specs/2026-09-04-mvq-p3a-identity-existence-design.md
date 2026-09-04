@@ -146,13 +146,38 @@ sex. Donor sex: opposite of the host with probability 0.7, else same. A
 donor whose valid cameras do not cover the target's valid cameras is
 rejected (up to 8 draws, then no paste). Val windows are never donors.
 
+**Donor pool** (amended 2026-09-04, final review): the draw takes the WANTED
+sex's pool for this calibration group, falls back to the OTHER sex's pool
+when that is empty, and excludes the target window itself from both. With no
+donor of either sex in the group there is no paste at all. (Measured on the
+real export: every eligible copy-paste target is in calibration group A --
+group B's 692 windows all carry an unlabelled second fly and are therefore
+ineligible, and group C has no train windows -- so donors never enter a
+group B or C crop.)
+
 **Placement.** `D` (3, ROI-local world units) is sampled in the host's
 body plane -- the plane of the two largest principal axes of the host's
 labelled 3D points -- at a random in-plane direction and separation
 `sep`: with probability 0.3 "contact" `sep ~ U(8, 30)` (amended 2026-09-04
 after the gate: real mounting pairs are 24-30 units apart) (0.8-3.0 mm, the
-stacked-pair regime), else `sep ~ U(15, 60)`. Pasted labels that would
-leave the crop in a target-valid camera reject the draw.
+stacked-pair regime), else `sep ~ U(15, 60)`.
+
+**Rejection and label rules** (amended 2026-09-04, final review -- the
+original "pasted labels that would leave the crop in a target-valid camera
+reject the draw" was too strict to be usable: at ordinary contact-range
+offsets a few of ~50 keypoints routinely sit near the crop edge while the
+donor's MASK, which is what is actually composited, stays fully inside).
+A draw is REJECTED when
+  - the donor lacks a camera the target has (`cam_valid` mismatch), or
+  - the shifted donor mask is empty in a camera where it had content
+    (the shift pushed the pasted body off that view entirely), or
+  - the donor has no mask content in ANY target-valid camera (nothing to
+    composite at all).
+Otherwise the draw stands and individual labels are downgraded rather than
+rejecting the whole paste: a pasted keypoint outside the crop, or in a camera
+the donor mask never painted, is marked INVISIBLE (`vis2d`), and a keypoint
+left invisible in EVERY view also loses its 3D label (`has3d`/`kp3d_local`)
+-- no label may claim evidence from pixels that never landed anywhere.
 
 **Exactness.** With `t_local` from both samples, the per-camera shift in
 crop px is `shift_c = M_c D + t_local_src[c] - t_local_tgt[c]` (real
@@ -221,10 +246,22 @@ shape-tolerant `warm_start_partial(model, src_dir)` in
 `train/checkpoint.py` restores every leaf whose path AND shape match, copies
 the three old slot rows into rows 0-2 of `e_inst` (row 3 keeps its fresh
 init), leaves `heads.sex` fresh, and prints the list of leaves it did not
-restore (must be exactly those two). Fresh optimizer, zero-seeded EMA, step
-0; a requeue then resumes from the fine-tune's own `ckpt/` (resume beats
-warm start, as `warm_start_restore`'s docstring already rules).
+restore. Verified against the real checkpoint on 2026-09-04: `restored
+605/608`, with THREE entries in that list -- `decoder/e_inst (partial rows
+0:3)`, `decoder/heads/sex/bias`, `decoder/heads/sex/kernel` (amended
+2026-09-04, final review: the earlier text said "exactly those two",
+overlooking that the partially-restored `e_inst` is itself reported).
+Fresh optimizer, zero-seeded EMA, step 0; a requeue then resumes from the
+fine-tune's own `ckpt/` and does NOT re-read the source at all (resume beats
+warm start, as `warm_start_restore`'s docstring already rules; `run_training`
+skips the warm start outright once its own `ckpt/` has a step).
 `MVQTrainConfig.warm_start: str | None` carries the source dir.
+
+`models/mvq/checkpoint.py::load_mvq_model` shares that same merge
+(`train/checkpoint.py::merge_state_by_path`) so figure and benchmark scripts
+can OPEN this checkpoint at all (amended 2026-09-04, final review). Loading
+it as ITSELF (its own `mvq_run.json`, so `n_instances = 3`) reports only the
+two sex-head leaves unrestored, since `e_inst` matches at 3 rows.
 
 | | value |
 |---|---|
@@ -278,7 +315,10 @@ next P3b item.
   prompt still touches only slot 0.
 - `test_checkpoint_warm_start_partial.py`: a 3-slot tiny model's final/ warm-starts a
   4-slot tiny model -- matching leaves equal, `e_inst[:3]` equal, row 3 and
-  `heads.sex` untouched, the unrestored list is exactly those two paths.
+  `heads.sex` untouched, the unrestored list is exactly those three paths
+  (`e_inst (partial rows 0:3)` + the two `heads.sex` leaves); plus
+  `test_train_mvq_smoke.py::test_load_mvq_model_tolerates_pre_p3a_checkpoint`
+  for the same tolerance in `load_mvq_model`.
 - `test_train_mvq_smoke.py`: run-dir `mvq_run.json` written before step 0
   and loadable mid-run; evaluate emits per-slot existence, `sex_acc`,
   `mask_containment`, and the `contact_pair` cohort; prompted policy falls

@@ -24,7 +24,14 @@ Outputs: `figures/2026-09-mvq/p3a_gates/{sex_label_check,copy_paste_check}.png`
 
 ### Gate 1: sex-label check (`sex_label_check.png`, `sex_label_check.json`)
 
-Expectation (script docstring, verbatim): *"for each mixed recording, the fly
+> **Superseded in part** by "Fix wave 2026-09-04: sex resolution" at the end
+> of this file. This section's per-recording verdicts still stand, but its
+> 2025_10_20_13_20_04 row selection could not see that recording's two
+> annotation subsets, and the script's expectation text and panel titles have
+> since changed (per-window resolved sex + manifest value, one row per
+> subset). Read the later section for the current reading of that recording.
+
+Expectation (script docstring, verbatim, AT THE TIME): *"for each mixed recording, the fly
 the manifest calls MALE (orange) is the smaller body with the dark abdomen
 tip; the FEMALE (cyan) is larger with a pointed, pale-striped abdomen. In
 2025_10_20_13_20_04 only the female is labelled: the unlabelled fly in the
@@ -276,3 +283,319 @@ pairs are 24-30 units apart)".
 - `third_party/jarvis_jax/jarvis_jax/data/mv_copy_paste.py` (modified, Ruling B: `CopyPasteParams.contact_sep` default `(8.0, 15.0)` -> `(8.0, 30.0)`)
 - `docs/specs/2026-09-04-mvq-p3a-identity-existence-design.md` (modified, Ruling B: §6/§7 contact range/rule amended to 30 units)
 - `figures/2026-09-mvq/p3a_gates/{sex_label_check,copy_paste_check}.{png,json}` (gitignored, not committed; regenerate with the commands above -- copy_paste_check regenerated post-Ruling-B, sex_label_check unaffected by either ruling)
+
+## Fix wave 2026-09-04: sex resolution
+
+Whole-branch review finding C1: `V12WindowDataset.__init__` collapsed sex to
+ONE value per `(recording, fly)` in a loop over framesets -- last one wins,
+i.e. a silent coin flip whenever a `(rec, fly)` pair spans annotation subsets
+that disagree. Verified on the real export
+(`red_data_3d_v12_export0902`, train split): exactly one pair does.
+
+```
+2025_10_20_13_20_04 fly0
+  courtship_20_04_male    677 framesets  annotation sex = male    frames  84143-439478
+  20_04_female_climbing    15 framesets  annotation sex = female  frames 446642-447638
+  manifest: sex "mixed", n_flies 2, fly_sex {fly0: female, fly1: male}, sex_source "dirname"
+```
+
+Every other `(recording, fly)` in train and val is single-subset and
+self-consistent (checked exhaustively, both splits).
+
+### Gate figure reading (`figures/2026-09-mvq/p3a_gates/sex_label_check.png`)
+
+Regenerate:
+
+```bash
+JAX_PLATFORMS=cpu OMP_NUM_THREADS=4 PYTHONPATH=third_party/jarvis_jax:. \
+    python scripts/viz/mvq_sex_label_check.py --out figures/2026-09-mvq/p3a_gates
+```
+
+The script now (a) titles every panel with BOTH the per-window resolved sex
+(`ds=`, what training consumes) and the manifest value (`man=`), flagging
+disagreements with `[ds!=man]`, and (b) guarantees one row per annotation
+SUBSET of each recording, so 20_04's 15-frameset `20_04_female_climbing`
+block is sampled alongside its 677-frameset `courtship_20_04_male` block
+instead of being reachable only by luck of frame-position sampling. Rows
+drawn: 3 x `2025_10_20_13_20_04` (1 male-block, 2 female-block), 3 each of
+`17_28_34`, `12_11_50`, `15_25_51`.
+
+**What the PNG shows (read with the Read tool, rows 0-2 cropped for
+legibility), stated plainly.** In BOTH 20_04 blocks the labelled (cyan) host
+is the same animal in appearance: a compact dark-abdomen fly. In the
+`20_04_female_climbing` rows a second, UNLABELLED fly is visible at the upper
+left of every panel -- larger, with a visibly pale-banded, longer abdomen. In
+the `courtship_20_04_male` rows the labelled fly is alone in the crop. So the
+two blocks are not visually distinguishable from each other, which is
+consistent with one fly (one sex) across all 692 framesets -- and
+inconsistent with the annotation `sex` field flipping between them.
+
+**User verdict 2026-09-04: all 20_04 windows show a female; the annotation
+`sex` in subset `courtship_20_04_male` is wrong; the manifest is
+authoritative.** So `is_female` for 20_04 stays `female` for all 692 windows,
+the earlier female-host census (879/2661 = 0.33) and the P2 balanced sampler
+were therefore CORRECT, and the 677 windows were never mislabelled in
+training -- what was wrong was only that the value came out of an unordered
+last-one-wins loop rather than a stated rule.
+
+**Concern to carry forward (my measurements disagree with the visual
+verdict, so it is recorded rather than buried).** Two size invariants,
+computed from labels only (no images), over the whole train split:
+
+| recording (block) | manifest sex | n | Antenna_Base-Abd_tip (units) | EyeL-EyeR (units) |
+|---|---|---|---|---|
+| 2026_01_29_14_09_33 | female | 88 | 28.63 +- 0.50 | 5.65 +- 0.43 |
+| 2026_04_02_17_28_34 fly0 | female | 44 | 26.94 +- 0.58 | 5.44 +- 0.45 |
+| 2026_01_13_18_47_45 | male | 490 | 24.29 +- 0.43 | 4.91 +- 0.50 |
+| 2026_02_09_22_26_25 | male | 301 | 23.46 +- 0.51 | 5.09 +- 0.39 |
+| 2026_04_02_17_28_34 fly1 | male | 44 | 23.37 +- 2.31 | 4.69 +- 0.31 |
+| **20_04 (`courtship_20_04_male` block)** | female (manifest) | 677 | **23.22 +- 0.73** | **4.31 +- 0.42** |
+| **20_04 (`20_04_female_climbing` block)** | female (manifest) | 15 | **23.65 +- 0.54** | **4.87 +- 0.35** |
+
+Both 20_04 blocks measure at or below the known-MALE range on both metrics,
+and are statistically indistinguishable from each other (which does support
+"one fly throughout"). The cross-group scale confound was checked and ruled
+out: calibration px/unit is 8.073 (A), 8.043 (B), 8.027 (C) -- a 0.4 %
+difference, so a world unit means the same thing in 20_04's group B as in the
+group A references. I could not reconcile this with the visual verdict; the
+ruling stands (manifest wins) and this table is here so the disagreement is
+not lost. If the 20_04 host is in fact the male, the `female` cohort and
+`female_weight` are inflated by 677/879 of their content, which would matter.
+
+### What changed (`jarvis_jax/data/v12_windows.py`)
+
+- Sex is resolved PER WINDOW by `_resolve_fs_sex(rec, frame, fly)`, order:
+  manifest `fly_sex["fly<id>"]` -> that frameset's own annotation `sex` ->
+  recording `sex` -> unknown. This deliberately INVERTS
+  `data/v5_3d._resolve_sex` (annotation-first), which is unchanged for its
+  own callers; the inversion is the ruling above.
+- `is_female(i)` reads the per-window value; so do `fly_sex` in the sample,
+  the donor index, `paste_window`'s `host_sex`, and the new
+  `window_fly_sex(i)`. `fly_sex_code` now takes `(rec, fly, frame)` --
+  the frame is required, because the annotation step of the chain is per
+  frameset. The other labelled fly is resolved from ITS own frame-0
+  frameset, falling back to the manifest by fly id.
+- `unlabelled_sex(i)` keeps the manifest-fly-id logic: 20_04's unlabelled
+  animal is the male in all 692 windows.
+- `__init__` prints ONE warning per `(rec, fly)` whose framesets carry more
+  than one KNOWN annotation sex, naming the counts, which value wins, and
+  that the export should be checked. Observed on the real export:
+
+```
+[v12_windows] 2025_10_20_13_20_04 fly0: framesets disagree on annotation sex
+{'female': 15, 'male': 677} -- the manifest's fly_sex='female' WINS
+(manifest-first resolution, see the module docstring); check the export's
+annotation `sex` for this recording
+```
+
+### Corrected census (train, resolved host sex, per window)
+
+```
+female 879 / 2661  (0.330)      male 1782 / 2661
+```
+
+Unchanged from the pre-fix numbers, by the ruling. (Had the annotation won
+instead, it would have been female 202 / 2661 = 0.076.)
+
+### P3b follow-up
+
+- **Fix the `sex` field of the `courtship_20_04_male` annotations in the
+  v12 export** (677 framesets of `2025_10_20_13_20_04` fly0 say `male`; the
+  fly is a female per the user's read of the gate figure). Until then
+  `v12_windows` masks it by resolving manifest-first, and the init warning
+  names it on every load. Re-check the size table above when the export is
+  fixed -- if it stays male-sized, the manifest entry is what needs revisiting.
+
+## Fix wave 2026-09-04: tolerant checkpoint loading, one shared policy, cohort metrics
+
+### Warm start against the real 30k checkpoint (verified output)
+
+`warm_start_partial` into a 4-slot P3a model, source
+`/gscratch/portia/eabe/data/Johnson_lab/jax_mvq_runs/mvq_t1_b16_local8_20260904/final`
+(verified in the whole-branch review):
+
+```
+[mvq] warm start from .../mvq_t1_b16_local8_20260904/final: restored 605/608 leaves;
+not restored: ['decoder/e_inst (partial rows 0:3)', 'decoder/heads/sex/bias',
+               'decoder/heads/sex/kernel']
+```
+
+THREE entries, not two: `e_inst` is reported because it is only partially
+restored (its 3 source rows land in rows 0-2, row 3 keeps its fresh init).
+Spec §8 said "exactly those two" and has been amended.
+
+`load_mvq_model` is now tolerant through the SAME merge
+(`train/checkpoint.py::merge_state_by_path`, also used by
+`warm_start_partial`; `replicated_abstract_tree` + `restore_own_tree` build
+the target from the CHECKPOINT's own stored tree). Before this it built the
+target from the fresh model and raised on every pre-P3a checkpoint -- so no
+figure or benchmark script could open the checkpoint that IS the P3a
+baseline. Loading the 30k run as ITSELF (its own `mvq_run.json`, so
+`n_instances = 3`) reports only the sex head:
+
+```
+[mvq] load .../mvq_t1_b16_local8_20260904/final: 2 leaf/leaves NOT restored
+(kept at fresh init): ['decoder/heads/sex/bias', 'decoder/heads/sex/kernel']
+```
+
+`meta["_unrestored_leaves"]` carries that list to callers, and
+`mvq_overlay.py` uses it to report `sex_prob = nan` rather than a number from
+a randomly-initialised head.
+
+### 30k baseline: `mask_containment` on val (the P3a acceptance reference)
+
+Produced by `scripts/viz/mvq_overlay.py` (which now computes containment with
+the SAME shared `models/mvq/policy.mask_containment` `train_mvq.evaluate`
+uses, so this is directly comparable to a run's own val numbers):
+
+```bash
+module load cuda/12.9.1; export LD_PRELOAD=$CONDA_PREFIX/lib/libstdc++.so.6
+unset LD_LIBRARY_PATH JAX_PLATFORMS
+export HF_HOME=/gscratch/portia/eabe/data/Johnson_lab/sam3 HF_TOKEN= \
+       CUDA_VISIBLE_DEVICES=0 XLA_PYTHON_CLIENT_MEM_FRACTION=0.5 \
+       PYTHONPATH=third_party/jarvis_jax:.
+RUN=/gscratch/portia/eabe/data/Johnson_lab/jax_mvq_runs/mvq_t1_b16_local8_20260904/final
+python scripts/viz/mvq_overlay.py --run $RUN --split val --n 6 \
+    --cases female,two_fly,contact_pair,worst \
+    --out figures/2026-09-mvq/mvq_t1_b16_local8_final30k/unprompted
+python scripts/viz/mvq_overlay.py --run $RUN --split val --n 6 \
+    --cases female,two_fly,contact_pair,worst --prompted \
+    --out figures/2026-09-mvq/mvq_t1_b16_local8_final30k/prompted
+```
+
+| metric (val, 153 windows) | prompted | unprompted |
+|---|---|---|
+| **mask_containment (mean)** | **0.8768** (153/153 scored) | **0.8323** (49/153 scored) |
+| mask_containment, contact_pair | 0.7766 (n=26) | 0.7862 (n=25) |
+| mask_containment, two_fly | 0.8310 (n=74) | 0.8323 (n=49) |
+| mask_containment, single_fly | 0.9197 (n=79) | n/a (0 scored) |
+| mask_containment, female | 0.8541 (n=67) | 0.8126 (n=25) |
+| mpjpe3d oracle / policy (units) | 1.096 / 1.096 | 1.082 / 1.594 |
+| policy_miss_frac | 0.000 | 0.680 |
+| policy_miss_frac, single_fly | 0.000 | **1.000** |
+| policy_miss_frac, contact_pair | 0.000 | 0.038 |
+
+The unprompted column only scores containment where the policy named an
+instance at all, which is why its n is 49, not 153. `policy_miss_frac` 1.000
+on single-fly windows reproduces the step-14000 finding (spec §1: "misses
+99 % of single-fly ... val windows") on the FINAL checkpoint -- it did not
+improve over training. These are the numbers P3a's acceptance targets
+(unprompted miss < 5 % on single-fly; containment HIGHER on `contact_pair`)
+are measured against. Note the containment baseline is high in absolute terms
+(0.78-0.92): the host mask is generous relative to a 50-keypoint skeleton, so
+the informative comparison is the DELTA, not the level.
+
+`sex_prob` is `nan` everywhere in this baseline (the 30k run has no trained
+sex head); its slots are labelled `untyped, legacy` in the figures because
+`n_instances = 3`.
+
+### Contact-pair figure reading (unprompted)
+
+`figures/2026-09-mvq/mvq_t1_b16_local8_final30k/unprompted/gate1_contact_pair.png`,
+6 rows (val #42-#47, all `2026_04_02_15_25_51` mounting pairs, seps
+20.9-26.0 units) x 7 cameras. Rows 0-1 and 4-5 read with the Read tool.
+
+Expectation stated before looking: on a real mounting pair each existing
+slot's points should stay on ONE animal; a slot straddling both bodies is the
+step-14000 mixing failure. For a LEGACY untyped 3-slot model the weaker
+expectation is just "each existing slot is a coherent single body".
+
+**What the PNG shows.** In every row exactly one slot sits on the host fly
+and sits on it well -- dots coincide with the white human-label x's at
+2.6-3.7 px per camera (panel titles), e.g. #42 cyan slot1, #43 magenta slot0,
+#46 cyan slot1, #47 magenta slot0. Slot 2 (orange), which carries the HIGHEST
+existence probability in all 26 contact windows (0.95, vs 0.58-0.61 for slot
+0 and 0.41-0.44 for slot 1), is a degenerate instance: its points start near
+the host's head or abdomen tip and trail off into the crop's blank
+out-of-frame padding, in every one of the 7 cameras, in all four rows read.
+It is not on the other fly -- it is off the image. That is the uncalibrated,
+meaning-free slot P3a's typed slots and label-driven existence targets exist
+to remove, and it is exactly what makes the unprompted policy a coin flip:
+the always-on slot's centroid competes with the real one on distance to the
+ROI origin.
+
+Limitation of this figure, stated so it is not over-read: the white labels
+drawn are the HOST fly's only (`vis2d[0]`), so it cannot show whether a slot
+lands on the SECOND animal. The per-sample `mask_containment` in
+`summary.json` is the quantity that answers that, and on `contact_pair` it is
+the lowest of any cohort (0.777 prompted / 0.786 unprompted vs 0.920 on
+single-fly) -- consistent with mixing being worst exactly there.
+
+### Spec facts corrected here rather than in the spec
+
+- **Slot 3 has no real positives in train.** Spec §1/§11 treat
+  `2026_06_09_15_38_35` as "two females, both labelled, 31 train framesets".
+  Verified against the export: only **fly0** is labelled in that recording
+  (31 single-fly windows, manifest `n_flies: 2`, `fly_sex {fly0: female,
+  fly1: female}`), so its windows carry `unlabelled_sex = female` and are the
+  same-sex-pair case with ONE label. Slot 3's only positives in training are
+  therefore same-sex COPY-PASTE windows (30 % of pastes); there is no real
+  labelled same-sex pair anywhere in train. Spec §11's "slot 3 starvation"
+  risk is real and slightly worse than written.
+- **Copy-paste never enters a group B or C crop.** Eligible targets (one
+  labelled fly AND no unlabelled animal) are 1850 windows, ALL in calibration
+  group A. Group B's 692 windows are the 20_04 recording, whose second fly is
+  always present-but-unlabelled, so they are ineligible as targets; group C
+  has no train windows at all. Donors are drawn from the target's own group,
+  so donors are group A only. Spec §11's "donors of both sexes into every
+  recording's crops decouple sex from background" therefore holds only within
+  group A.
+
+### Other fixes in this wave
+
+- **I1**: `slot_ignore`'s unlabelled-animal mask could ignore a slot that
+  HOLDS a labelled fly (a female host in slot 1 with an unlabelled female
+  present -- i.e. all 31 `15_38_35` windows). `ignore & ~slot_target` now
+  applies in BOTH `mvq_loss` and `evaluate`'s per-slot counting, so the one
+  existence answer known for certain is supervised and eval counts the same
+  slots the loss did.
+- **I2**: `evaluate` emits `sex_acc_{cohort}`, `mask_containment_{cohort}`
+  and `policy_miss_frac_{cohort}` for every cohort, and `_cohorts` gains
+  `single_fly`. Spec §8 grades `sex_acc` on group C, containment on
+  `contact_pair` and the miss fraction on single-fly windows; no aggregate
+  could answer those.
+- **I3/I4**: new `jarvis_jax/models/mvq/policy.py` holds the ONE
+  `policy_instance` (typed slots 1..I-1 for a 4-slot model, all slots for a
+  legacy one) and `mask_containment`. `evaluate`, `mvq_overlay.py` and
+  `mvq_val_baselines.py` all call them; the three inline copies (two of them
+  commented "exactly train_mvq.evaluate's policy" while already differing)
+  are gone.
+- **I5**: `composite` rejects a donor with no mask content in ANY
+  target-valid camera. It used to paint nothing and still write the donor's
+  labels -- a fly claimed with zero pixel evidence in every view.
+- **Launch hygiene**: `run_training` skips `warm_start_partial` when its own
+  `ckpt/` already has a step (resume beats warm start, so a requeue was
+  reading the source only to discard it). The skip is printed.
+
+### Tests
+
+```bash
+cd third_party/jarvis_jax
+JAX_PLATFORMS=cpu pytest tests/test_dinov3.py tests/test_mvq_geometry.py \
+  tests/test_mvq_model.py tests/test_mvq_losses.py tests/test_mvq_matching.py \
+  tests/test_mvq_attention.py tests/test_v12_windows.py tests/test_mv_augment.py \
+  tests/test_mv_copy_paste.py tests/test_train_mvq_smoke.py \
+  tests/test_checkpoint_warm_start_partial.py -q -m "not gpu"
+# 102 passed, 4 deselected (was 96 passed / 4 deselected before this wave)
+```
+
+New tests: per-window manifest-first sex resolution + the disagreement
+warning (`test_v12_windows.py`), `load_mvq_model` on a pre-P3a checkpoint and
+the warm-start skip on requeue (`test_train_mvq_smoke.py`), a labelled fly's
+slot is never ignored (`test_mvq_losses.py`), empty-mask donor rejection
+(`test_mv_copy_paste.py`).
+
+### Files (fix wave)
+
+- `third_party/jarvis_jax/jarvis_jax/data/v12_windows.py` (per-window manifest-first sex, `fly_sex_code(rec, fly, frame)`, `window_fly_sex`, disagreement warning)
+- `third_party/jarvis_jax/jarvis_jax/models/mvq/policy.py` (new: `policy_instance`, `typed_candidates`, `mask_containment`, `EXIST_THRESH`)
+- `third_party/jarvis_jax/jarvis_jax/models/mvq/checkpoint.py` (tolerant `load_mvq_model` both branches, `_unrestored_leaves`)
+- `third_party/jarvis_jax/jarvis_jax/train/checkpoint.py` (`merge_state_by_path`, `replicated_abstract_tree`, `restore_own_tree`; `warm_start_partial` now a one-liner over them)
+- `third_party/jarvis_jax/jarvis_jax/train/losses_mvq.py` (I1)
+- `third_party/jarvis_jax/jarvis_jax/train/train_mvq.py` (shared policy/containment, I1 in eval, per-cohort metrics, `single_fly` cohort, warm-start skip)
+- `third_party/jarvis_jax/jarvis_jax/data/mv_copy_paste.py` (I5)
+- `scripts/viz/mvq_sex_label_check.py` (per-window + manifest sex in titles, one row per annotation subset)
+- `scripts/viz/mvq_overlay.py` (all existing slots drawn per-slot-coloured, `mask_containment` in summary.json, legacy-checkpoint safe)
+- `scripts/benchmark/mvq_val_baselines.py` (shared policy)
+- `docs/specs/2026-09-04-mvq-p3a-identity-existence-design.md` (§6 rejection/label + donor-pool rules, §8 three unrestored leaves + tolerant loader, §9 test list)
+- `figures/2026-09-mvq/p3a_gates/{sex_label_check.{png,json},sex_20_04_zoom.png}` and `figures/2026-09-mvq/mvq_t1_b16_local8_final30k/{prompted,unprompted}/{gate1_*.png,summary.json}` (gitignored; regenerate with the commands above)
