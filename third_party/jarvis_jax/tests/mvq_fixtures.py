@@ -42,8 +42,16 @@ def fly_points(fly, frame, rng):
     return centre + rng.normal(size=(K, 3)) * np.array([10.0, 4.0, 2.0])
 
 
-def make_v12_root(tmp_path, *, n_frames=3, two_fly_frame=1, img_w=1936, img_h=448, manifest_n_flies=2):
+def make_v12_root(tmp_path, *, n_frames=3, two_fly_frame=1, img_w=1936, img_h=448, manifest_n_flies=2,
+                  fly0_sex_by_frame=None):
+    """`fly0_sex_by_frame`: {frame: "male"|"female"|...} overriding the
+    ANNOTATION-level `sex` of fly0 in those frames only (the manifest keeps
+    saying fly0 = female). Emulates the real export's
+    `2025_10_20_13_20_04`, whose fly0 framesets come from two annotation
+    subsets with different `sex` values while the manifest's dirname-parsed
+    `fly_sex` names just one -- see data/v12_windows.py's module docstring."""
     root = tmp_path / "v12"; root.mkdir()
+    fly0_sex_by_frame = dict(fly0_sex_by_frame or {})
     names = _names()
     (root / "calibrations" / "A").mkdir(parents=True)
     for i, c in enumerate(CAMS):
@@ -82,8 +90,11 @@ def make_v12_root(tmp_path, *, n_frames=3, two_fly_frame=1, img_w=1936, img_h=44
                              "bbox": [float(uv[:, 0].min()), float(uv[:, 1].min()),
                                       float(np.ptp(uv[:, 0])), float(np.ptp(uv[:, 1]))],
                              "keypoints": [float(v) for v in kps.ravel()], "num_keypoints": K,
-                             "sex": "female" if fly == 0 else "male", "fly_id": fly,
-                             "subset": "synthetic", "src_ann_id": ann_id})
+                             "sex": (fly0_sex_by_frame.get(f, "female") if fly == 0 else "male"),
+                             "fly_id": fly,
+                             "subset": ("synthetic_override" if (fly == 0 and f in fly0_sex_by_frame)
+                                        else "synthetic"),
+                             "src_ann_id": ann_id})
                 per_fly[fly]["frames"].append(img_id); per_fly[fly]["ann_ids"].append(ann_id)
                 ann_id += 1
             os.makedirs(root / "images" / REC / c, exist_ok=True)

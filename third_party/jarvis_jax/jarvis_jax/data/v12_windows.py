@@ -10,9 +10,25 @@ instance (fly_valid), so the model can be trained as a set predictor.
 Camera order is rt.cameras' sorted-glob order and slots are placed BY NAME
 (see data/v5_3d.py docstring for why). Keypoint order is asserted against
 annotations/keypoint_names.json.
+
+Sex is resolved PER WINDOW, never per (recording, fly): a (recording, fly)
+pair can carry framesets from more than one annotation subset with DIFFERENT
+annotation-level `sex` values, and the manifest's own `fly_sex` can disagree
+with all of them. Measured on `red_data_3d_v12_export0902`:
+`2025_10_20_13_20_04` fly0 has 677 framesets from subset
+`courtship_20_04_male` (annotation `sex` = male, frames 84143-439478) and 15
+from `20_04_female_climbing` (female, frames 446642-447638), while the
+manifest's `fly_sex` (parsed from the concatenated directory name,
+`sex_source: dirname`) says fly0 = female for all 692. Collapsing to one
+value per (recording, fly) therefore mislabelled 677 male-host windows as
+female -- which the balanced sampler's `female_weight` and the `female`
+val cohort both read. Every per-window/per-fly sex here goes through
+`_resolve_fs_sex` on THAT fly's own frameset (annotation sex first, then the
+manifest per fly, then the recording, then unknown).
 """
 from __future__ import annotations
 
+import collections
 import json
 import os
 from concurrent.futures import ThreadPoolExecutor
@@ -77,14 +93,36 @@ class V12WindowDataset:
         for (rec, frame, fly) in sorted(self._fs):
             if all((rec, frame + k, fly) in self._fs for k in range(self.T)):
                 self.windows.append((rec, fly, frame))
-        self._sex = {}
-        for (rec, frame, fly), fsv in self._fs.items():
-            self._sex[(rec, fly)] = _resolve_sex(_frameset_own_sex(fsv, self._ann), fly,
-                                                 self.manifest.get(rec, {}))
+        # Per-WINDOW host sex (host's own frame-0 frameset), not per (rec, fly):
+        # see the module docstring for the 677-window mislabelling this fixes.
+        self._win_sex = [self._resolve_fs_sex(rec, f0, fly) for (rec, fly, f0) in self.windows]
+        self._warn_sex_disagreements()
         self._donors = {}
         if self.copy_paste is not None and self.T == 1:
             for i, (rec, fly, _) in enumerate(self.windows):
-                self._donors.setdefault((self.manifest[rec]["calib_group"], self.fly_sex_code(rec, fly)), []).append(i)
+                self._donors.setdefault((self.manifest[rec]["calib_group"],
+                                         _SEX_CODE.get(self._win_sex[i], SEX_UNKNOWN)), []).append(i)
+
+    def _warn_sex_disagreements(self):
+        """Print ONE warning per (recording, fly) whose framesets carry more
+        than one KNOWN annotation-level sex -- the state that made a per-(rec,
+        fly) sex wrong in the first place (module docstring). "unknown" is not
+        counted as a disagreeing value: an R15-unresolved frameset (every
+        camera slot None, see data/v5_3d.py) simply has no annotation sex of
+        its own and falls back to the manifest, which is the documented chain,
+        not a conflict. Today `2025_10_20_13_20_04` fly0 is the only pair in
+        `red_data_3d_v12_export0902` that triggers this."""
+        census = collections.defaultdict(collections.Counter)
+        for (rec, frame, fly), fsv in self._fs.items():
+            s = _frameset_own_sex(fsv, self._ann)
+            if s and s != "unknown":
+                census[(rec, fly)][s] += 1
+        for (rec, fly), c in sorted(census.items()):
+            if len(c) > 1:
+                man_sex = (self.manifest.get(rec, {}).get("fly_sex") or {}).get(f"fly{fly}")
+                print(f"[v12_windows] {rec} fly{fly}: framesets disagree on annotation sex "
+                      f"{dict(sorted(c.items()))} (manifest fly_sex={man_sex!r}) -- sex is "
+                      f"resolved PER WINDOW from each frameset's own annotation", flush=True)
 
     def __len__(self):
         return len(self.windows)
@@ -93,16 +131,40 @@ class V12WindowDataset:
         return self.manifest[self.windows[i][0]]["calib_group"]
 
     def is_female(self, i):
-        rec, fly, _ = self.windows[i]
-        return self._sex[(rec, fly)] == "female"
+        """Host sex of THIS window (its own frame-0 frameset annotation), not of
+        the (recording, fly) pair -- read by the balanced sampler's
+        `female_weight` and by the `female` val cohort."""
+        return self._win_sex[i] == "female"
 
     def n_flies(self, i):
         rec, fly, f0 = self.windows[i]
         others = {k[2] for k in self._fs if k[0] == rec and f0 <= k[1] < f0 + self.T and k[2] != fly}
         return 1 + min(len(others), self.max_flies - 1)
 
-    def fly_sex_code(self, rec, fly):
-        return _SEX_CODE.get(self._sex.get((rec, fly), "unknown"), SEX_UNKNOWN)
+    def _resolve_fs_sex(self, rec, frame, fly):
+        """Resolved sex STRING of one (recording, frame, fly): that frameset's
+        OWN annotation `sex` first, then the manifest's per-fly `fly_sex`, then
+        the recording's `sex`, then "unknown" (`v5_3d._resolve_sex`'s chain).
+        A frame this fly has no frameset for (e.g. the other fly of a T=2
+        window that is labelled only in the second frame) degrades to the
+        manifest-by-fly-id fallback rather than raising."""
+        fsv = self._fs.get((rec, frame, fly))
+        own = _frameset_own_sex(fsv, self._ann) if fsv is not None else "unknown"
+        return _resolve_sex(own, fly, self.manifest.get(rec, {}))
+
+    def fly_sex_code(self, rec, fly, frame):
+        """Sex code of ONE fly at ONE frame (0 female, 1 male, -1 unknown).
+        `frame` is REQUIRED (it was not, before 2026-09-04): the same
+        (recording, fly) can be male in one annotation subset and female in
+        another -- see the module docstring."""
+        return _SEX_CODE.get(self._resolve_fs_sex(rec, frame, fly), SEX_UNKNOWN)
+
+    def window_fly_sex(self, i):
+        """Sex code per LABELLED fly of window i (host first, `_window_flies`
+        order), each resolved from that fly's own frame-0 frameset."""
+        rec, flies = self._window_flies(i)
+        f0 = self.windows[i][2]
+        return [self.fly_sex_code(rec, fly, f0) for fly in flies]
 
     def _window_flies(self, i):
         """Labelled fly ids in window i, host first, capped at max_flies (same rule as __getitem__)."""
@@ -114,12 +176,23 @@ class V12WindowDataset:
     def unlabelled_sex(self, i):
         """-1 if every animal the manifest says is in this recording is labelled in the
         window; else the sex code of the one unlabelled animal (SEX_PRESENT_UNKNOWN if
-        the manifest does not name its sex)."""
+        the manifest does not name its sex).
+
+        A MIXED-sex pair with exactly one of its two animals labelled is
+        resolved from the HOST's own per-window sex (`1 - host`), not from the
+        manifest's fly ids: in `2025_10_20_13_20_04` the manifest says fly0 =
+        female / fly1 = male for all 692 framesets, but 677 of them are
+        annotated male (subset `courtship_20_04_male`) -- for those the
+        unlabelled animal is the FEMALE, and reading the manifest's "the
+        missing fly id is fly1, so male" would have made both slots male."""
         rec, flies = self._window_flies(i)
         meta = self.manifest.get(rec, {})
         n_present = int(meta.get("n_flies", len(flies)))
         if n_present <= len(flies):
             return SEX_UNKNOWN
+        if meta.get("sex") == "mixed" and n_present == 2 and len(flies) == 1:
+            host = self.fly_sex_code(rec, flies[0], self.windows[i][2])
+            return (1 - host) if host in (SEX_FEMALE, SEX_MALE) else SEX_PRESENT_UNKNOWN
         named = {int(k[3:]): v for k, v in (meta.get("fly_sex") or {}).items()}
         missing = [fid for fid in sorted(named) if fid not in flies]
         if not missing:
@@ -277,7 +350,7 @@ class V12WindowDataset:
             "fly_valid": fly_valid, "px_scale": np.float32(px_scale),
             "is_female": np.bool_(self.is_female(i)), "prompt_mask": prompt,
             "crop_origin": origin,
-            "fly_sex": np.array([self.fly_sex_code(rec, flies[fi]) if fi < len(flies) else SEX_UNKNOWN
+            "fly_sex": np.array([self.fly_sex_code(rec, flies[fi], f0) if fi < len(flies) else SEX_UNKNOWN
                                  for fi in range(F)], np.int8),
             "unlabelled_sex": np.int8(self.unlabelled_sex(i)),
         }
@@ -287,7 +360,8 @@ class V12WindowDataset:
         from jarvis_jax.data.mv_copy_paste import body_plane_axes, composite, sample_offset
         p = self.copy_paste
         rec, host, _ = self.windows[i]
-        grp = self.manifest[rec]["calib_group"]; host_sex = self.fly_sex_code(rec, host)
+        grp = self.manifest[rec]["calib_group"]
+        host_sex = _SEX_CODE.get(self._win_sex[i], SEX_UNKNOWN)   # this window's host, not the (rec, fly) pair's
         tgt = self._build(i)
         axes = body_plane_axes(tgt["kp3d_local"][0, 0], tgt["has3d"][0, 0])
         for _ in range(p.max_tries):

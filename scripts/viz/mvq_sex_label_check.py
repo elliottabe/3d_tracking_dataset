@@ -3,12 +3,25 @@
 the fly actually looks like, in every mixed-sex recording the mvq lifter
 trains/evals on?
 
-EXPECTATION: for each mixed recording, the fly the manifest calls MALE
+EXPECTATION: for each mixed recording, the fly the DATASET resolves as MALE
 (orange) is the smaller body with the dark abdomen tip; the FEMALE (cyan) is
-larger with a pointed, pale-striped abdomen. In 2025_10_20_13_20_04 only the
-female is labelled: the unlabelled fly in the crop must be the smaller,
-darker one. If any recording shows the reverse, its `fly_sex` convention is
-wrong and the export must be fixed before training.
+larger with a pointed, pale-striped abdomen. If any recording shows the
+reverse, its `fly_sex` convention is wrong and the export must be fixed
+before training.
+
+Each panel title carries BOTH sexes per fly: `ds=<per-window resolved sex>`
+(what `V12WindowDataset` actually ships in `fly_sex` / `is_female`, from that
+frameset's own annotation) and `man=<manifest fly_sex>`. Where the two
+disagree, believe the picture over the manifest and read `ds` as the value
+training consumes. 2025_10_20_13_20_04 is sampled from BOTH of its annotation
+subsets: 677 framesets of `courtship_20_04_male` (fly0 annotated MALE, frames
+84143-439478) and 15 of `20_04_female_climbing` (fly0 FEMALE, frames >=
+446642), while its manifest says fly0 = female for all 692. So its
+`courtship_20_04_male` rows must show a MALE host (smaller, dark abdomen tip)
+and its `20_04_female_climbing` rows a FEMALE host -- the specific
+disagreement this gate exists to settle. In that recording only one fly is
+labelled: the unlabelled fly in the crop must be the OPPOSITE sex of the
+labelled one.
 
     JAX_PLATFORMS=cpu OMP_NUM_THREADS=4 PYTHONPATH=third_party/jarvis_jax:. \\
         python scripts/viz/mvq_sex_label_check.py \\
@@ -36,8 +49,48 @@ RECORDINGS = [
     ("2026_04_02_15_25_51", "val"),
 ]
 N_FRAMES = 3
+SEX_NAME = {0: "female", 1: "male", -1: "unknown"}
+# `unlabelled_sex` codes (train/matching.py): -1 = nobody unlabelled, 2 = an
+# unlabelled animal of unknown sex, 0/1 = that sex.
+UNLAB_NAME = {-1: "none", 0: "female", 1: "male", 2: "present/unknown"}
 
 FLY_RGB = {f: tuple(c / 255.0 for c in reversed(PALETTE[f])) for f in ("fly0", "fly1")}  # BGR->RGB
+
+
+def _window_subset(ds, i):
+    """The annotation SUBSET of window i's host frameset. A recording can
+    concatenate several subsets with different annotation-level `sex` values
+    (`2025_10_20_13_20_04` = `courtship_20_04_male` + `20_04_female_climbing`),
+    and that is exactly what this gate has to look at, so rows are chosen to
+    cover every subset rather than by frame position alone."""
+    rec, fly, f0 = ds.windows[i]
+    return (ds._fs.get((rec, f0, fly)) or {}).get("subset", "?")
+
+
+def _cover_subsets(ds, pool, n, rank=None):
+    """<= `n` window indices from `pool` covering EVERY annotation subset the
+    pool contains (one each, round-robin, best-first), then filling the rest
+    best-first overall. `rank`: i -> sort key (lower is better); default
+    spreads across each subset's frame order."""
+    by_sub = {}
+    for i in pool:
+        by_sub.setdefault(_window_subset(ds, i), []).append(i)
+    for s in by_sub:
+        by_sub[s] = sorted(by_sub[s], key=rank) if rank else by_sub[s]
+    picked, rest = [], []
+    for s in sorted(by_sub):
+        picked.append(by_sub[s][0]); rest.extend(by_sub[s][1:])
+    picked = picked[:n]
+    if rank is not None:
+        rest = sorted(rest, key=rank)
+    else:                       # no ranking signal: spread over the remaining frame order
+        rest = [rest[k] for k in np.linspace(0, len(rest) - 1, min(len(rest), max(n - len(picked), 0)))
+                .round().astype(int)] if rest else []
+    for i in rest:
+        if len(picked) >= n:
+            break
+        picked.append(i)
+    return picked
 
 
 def _camera_spread(s):
@@ -84,18 +137,25 @@ def _pick_windows(ds):
     check. Picks the 3 windows with the most fly1 coverage (not spread across
     the whole recording -- coverage is what makes the panel checkable at
     all); falls back to plain `fly_valid[1]`, then to any host-fly0 window,
-    if nothing clears the coverage bar."""
+    if nothing clears the coverage bar.
+
+    Every distinct annotation SUBSET of the recording is guaranteed at least
+    one row (`_cover_subsets`): `2025_10_20_13_20_04` concatenates
+    `courtship_20_04_male` (677 framesets, fly0 annotated male) and
+    `20_04_female_climbing` (15, female), and the whole point of this gate is
+    to check the resolved sex of BOTH blocks, not whichever one frame-position
+    sampling happens to land in.
+    """
     host0 = [i for i in range(len(ds)) if ds.windows[i][1] == 0]
     has_fly1 = any(ds.windows[i][1] == 1 for i in range(len(ds)))
     if not has_fly1:
-        cand = host0 if len(host0) <= N_FRAMES else [
-            host0[k] for k in np.linspace(0, len(host0) - 1, N_FRAMES).round().astype(int)]
-        return [(i, ds[i]) for i in cand]
+        return [(i, ds[i]) for i in _cover_subsets(ds, host0, N_FRAMES)]
     built = {i: ds[i] for i in host0}
     best_cov = {i: int(built[i]["vis2d"][1, 0].sum(1).max()) if built[i]["fly_valid"][1] else 0
                for i in host0}
-    covered = sorted([i for i in host0 if best_cov[i] > 0], key=lambda i: -best_cov[i])
-    cand = covered[:N_FRAMES] if covered else host0[:N_FRAMES]
+    covered = [i for i in host0 if best_cov[i] > 0]
+    pool = covered or host0
+    cand = _cover_subsets(ds, pool, N_FRAMES, rank=lambda i: -best_cov[i])
     return [(i, built[i]) for i in cand]
 
 
@@ -109,20 +169,29 @@ def main():
     rows = []
     for rec, split in RECORDINGS:
         ds = V12WindowDataset(a.root, split, T=1, train=False, recordings=[rec])
-        sex0 = ds.manifest[rec]["fly_sex"].get("fly0")
-        sex1_manifest = ds.manifest[rec]["fly_sex"].get("fly1")
+        man0 = ds.manifest[rec]["fly_sex"].get("fly0")
+        man1 = ds.manifest[rec]["fly_sex"].get("fly1")
         for i, s in _pick_windows(ds):
             top2 = _select_cameras(s)
             cam_names = ds.camera_names(i)
             fly1_labelled = bool(s["fly_valid"][1])
-            sex1 = sex1_manifest if fly1_labelled else None
-            rows.append(dict(rec=rec, split=split, i=i, cams=[int(c) for c in top2],
+            # `ds_sex*` is what the dataset actually SHIPS for this window (per-window,
+            # from the host frameset's own annotation); `man_sex*` is the manifest's
+            # dirname-parsed convention. They disagree for 677 of 2025_10_20_13_20_04's
+            # 692 windows -- believe the picture, and read ds_sex as the training value.
+            ds_sex = [int(x) for x in s["fly_sex"]]
+            rows.append(dict(rec=rec, split=split, i=i, frame=int(ds.windows[i][2]),
+                             subset=_window_subset(ds, i),
+                             cams=[int(c) for c in top2],
                              cam_names=[cam_names[c] for c in top2],
-                             sex0=sex0, sex1=sex1, fly1_labelled=fly1_labelled,
-                             sample=s))
+                             ds_sex0=SEX_NAME.get(ds_sex[0], "?"),
+                             ds_sex1=SEX_NAME.get(ds_sex[1], "?") if fly1_labelled else None,
+                             man_sex0=man0, man_sex1=man1 if fly1_labelled else None,
+                             unlabelled_sex=UNLAB_NAME.get(int(s["unlabelled_sex"]), "?"),
+                             fly1_labelled=fly1_labelled, sample=s))
 
     n_rows = len(rows)
-    fig, axes = plt.subplots(n_rows, 2, figsize=(7.6, 2.6 * n_rows), squeeze=False)
+    fig, axes = plt.subplots(n_rows, 2, figsize=(7.6, 2.9 * n_rows), squeeze=False)
     for r_i, r in enumerate(rows):
         s = r["sample"]
         for c_i, c in enumerate(r["cams"]):
@@ -137,11 +206,17 @@ def main():
                 pts = s["kp2d"][f, 0, c][vis]
                 ax.scatter(pts[:, 0], pts[:, 1], s=8, c=[FLY_RGB[key]], label=key)
             cam = r["cam_names"][c_i]
-            ax.set_title(f"{r['rec']}\n{cam}  fly0={r['sex0']}  fly1={r['sex1'] or 'unlabelled'}",
-                        fontsize=6.5, linespacing=1.4)
+            f1 = (f"fly1 ds={r['ds_sex1']} man={r['man_sex1']}" if r["fly1_labelled"]
+                  else f"fly1 unlabelled (ds says {r['unlabelled_sex']})")
+            flag = "  [ds!=man]" if (r["ds_sex0"] != r["man_sex0"]
+                                     or (r["fly1_labelled"] and r["ds_sex1"] != r["man_sex1"])) else ""
+            ax.set_title(f"{r['rec']} f{r['frame']} [{r['subset']}]{flag}\n{cam}  "
+                        f"fly0 ds={r['ds_sex0']} man={r['man_sex0']}\n{f1}",
+                        fontsize=6.0, linespacing=1.35)
     fig.legend(*axes[0, 0].get_legend_handles_labels(), fontsize=7, loc="upper left",
               bbox_to_anchor=(0.0, 1.0), bbox_transform=fig.transFigure)
-    fig.suptitle("mvq sex-label gate  --  cyan=fly0  orange=fly1", fontsize=9)
+    fig.suptitle("mvq sex-label gate  --  cyan=fly0  orange=fly1  --  ds=per-window resolved "
+                "(what training sees), man=manifest fly_sex", fontsize=8)
     fig.tight_layout(rect=(0, 0, 1, 0.975), h_pad=2.2, w_pad=1.5)
     png = os.path.join(a.out, "sex_label_check.png")
     fig.savefig(png, dpi=140); plt.close(fig)
