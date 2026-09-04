@@ -28,6 +28,7 @@ from jarvis_jax.train.checkpoint import warm_start_partial
 from jarvis_jax.train.losses_mvq import LossWeights, mvq_loss
 
 MM_PER_UNIT = 0.1
+CONTACT_UNITS = 30.0  # 3 mm; real mounting pairs have centroid gaps of ~24-30 units, see p3a-notes.md
 
 
 @dataclasses.dataclass
@@ -364,7 +365,7 @@ def _cohorts(ds):
         if ds.n_flies(i) < 2:
             return False
         c = ds.fly_centroids(i)
-        return bool(np.isfinite(c).all() and np.linalg.norm(c[0] - c[1]) < 15.0)
+        return bool(np.isfinite(c).all() and np.linalg.norm(c[0] - c[1]) < CONTACT_UNITS)
     c["contact_pair"] = np.array([_contact(i) for i in range(n)])
     return c
 

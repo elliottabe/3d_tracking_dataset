@@ -7,15 +7,20 @@ EXPECTATION: in every one of the 7 cameras the pasted donor (orange labels)
 sits at the same place relative to the host (cyan) -- never floating,
 offset, or missing in one view -- its labels lie on its own body, host
 keypoints under the donor are drawn hollow (occluded), and the contact rows
-(sep <= 15 units) show the two bodies touching or overlapping like a
-mounting pair.
+(sep <= 30 units -- amended 2026-09-04, see p3a-notes.md Ruling B: real
+mounting pairs are 24-30 units apart) show the two bodies touching or
+overlapping like a mounting pair.
 
-Both host and donor are required to be full, non-amputated flies (a visible
-head in at least one camera -- see `HEAD_NAMES`): an early run of this gate
-picked a genuinely headless donor window at random (no Antenna/Eye keypoint
-visible in any of its 7 cameras) and it read as a compositor bug in the
-figure until traced back to that single anomalous window, so such windows
-are now skipped rather than shown.
+Both host and donor are required to have a visible head landmark in at
+least one camera (see `HEAD_NAMES`): an early run of this gate picked a
+donor with no visible Antenna/Eye keypoint in any of its 7 cameras, and it
+read as a compositor bug until traced back to that one window. It wasn't --
+the manifest carries `behavior: "headless"` for 5 recordings (a real
+experimental condition, e.g. `2026_06_09_15_38_35`, that donor's own
+recording), so a headless-looking fly is a legitimate appearance and the
+production loader/augmentation applies no such filter. This script keeps the
+filter anyway, purely so this CHECK FIGURE demonstrates placement geometry
+on an anatomically unambiguous pair rather than for any label-quality reason.
 
     JAX_PLATFORMS=cpu OMP_NUM_THREADS=4 PYTHONPATH=third_party/jarvis_jax:. \\
         python scripts/viz/mvq_copy_paste_check.py \\
@@ -41,10 +46,14 @@ N_CONTACT, N_FAR = 3, 3
 SEX_NAME = {0: "female", 1: "male", -1: "unknown"}
 FLY_RGB = {f: tuple(c / 255.0 for c in reversed(PALETTE[f])) for f in ("fly0", "fly1")}  # BGR->RGB
 # Antenna/eye landmarks -- a fly with NONE of these visible in ANY camera is
-# either amputated/injured or has its head occluded/off-crop in every view;
-# either way it is not a representative "full fly" pair for this gate (a real
-# such specimen was caught by inspection 2026-09-04: donor window with a
-# genuinely headless body, picked at random before this filter existed).
+# either a genuinely headless specimen (5 recordings are labelled
+# `behavior: "headless"` in the manifest -- a real experimental condition,
+# NOT a data defect) or has its head occluded/off-crop in every view for this
+# one window. Either way this check figure skips it for legibility only: it
+# exists to demonstrate placement geometry, and an anatomically ambiguous
+# donor obscures that regardless of cause. The production loader/augmentation
+# (V12WindowDataset.paste_window / mv_copy_paste.composite) has NO such
+# filter and is not meant to.
 HEAD_NAMES = ("Antenna_Base", "EyeL", "EyeR")
 
 
@@ -69,8 +78,9 @@ def _try_paste(ds, i, rng, head_idx):
 
 def _collect(ds, ds_ref, seed=0, max_pool=800):
     """Draw random single-fly windows and call `ds.paste_window` until 3
-    contact (sep<=15u) and 3 far pastes are collected, at least one same-sex,
-    both flies fully headed (see `HEAD_NAMES`). `ds_ref` is a copy-paste-free
+    contact (sep<=30u, `CopyPasteParams.contact_sep[1]`) and 3 far pastes are
+    collected, at least one same-sex, both flies with a visible head
+    landmark (see `HEAD_NAMES`). `ds_ref` is a copy-paste-free
     twin (same seed/jitter) used to recover the HOST's pre-paste `vis2d`, so
     keypoints the donor occludes can be told apart from keypoints that were
     never visible."""

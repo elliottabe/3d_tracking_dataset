@@ -22,20 +22,21 @@ sys.path.insert(0, os.path.join(ROOT, "third_party", "jarvis_jax")); sys.path.in
 from jarvis_jax.models.mvq.checkpoint import load_mvq_model
 from jarvis_jax.models.mvq.geometry import project_local
 from jarvis_jax.data.v12_windows import V12WindowDataset, WINDOW_KEYS
-from jarvis_jax.data.mv_copy_paste import CopyPasteParams
-from jarvis_jax.train.train_mvq import normalize_crops, MM_PER_UNIT
-
-CONTACT_SEP = CopyPasteParams().contact_sep[1]   # 15 world units -- same rule copy-paste calls "contact"
+from jarvis_jax.train.train_mvq import normalize_crops, MM_PER_UNIT, CONTACT_UNITS
 
 
 def _is_contact(ds, i):
     """True when window i has >=2 labelled flies whose frame-0 centroids
-    (`ds.fly_centroids`) are within CONTACT_SEP world units -- the identical
-    threshold `mv_copy_paste.composite` uses to tag a paste 'contact'."""
+    (`ds.fly_centroids`) are within CONTACT_UNITS world units -- the SAME
+    constant `train_mvq._cohorts`'s `contact_pair` val cohort uses (imported,
+    not re-hardcoded, and decoupled from `mv_copy_paste.CopyPasteParams` --
+    the augmentation's `contact_sep` and this diagnostic threshold are
+    allowed to move independently). Amended 2026-09-04: real mounting pairs
+    in the labelled data sit at ~24-30 units, not <=15 (see p3a-notes.md)."""
     c = ds.fly_centroids(i)
     if c.shape[0] < 2 or not np.isfinite(c[:2]).all():
         return False
-    return float(np.linalg.norm(c[0] - c[1])) <= CONTACT_SEP
+    return float(np.linalg.norm(c[0] - c[1])) < CONTACT_UNITS
 
 
 def _policy_instance(xyz, exist_logit, prompted: bool):

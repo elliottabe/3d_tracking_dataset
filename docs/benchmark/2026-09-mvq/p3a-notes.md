@@ -87,49 +87,67 @@ its own body, host keypoints under the donor are drawn hollow (occluded), and
 the contact rows (sep <= 15 units) show the two bodies touching or
 overlapping like a mounting pair."*
 
-6 rows (3 contact, sep<=15u; 3 far, sep>15u; naturally included one
+6 rows (3 contact, sep<=30u; 3 far, sep>30u; naturally included one
 male-donor/male-host same-sex pair, so no forced substitution was needed) x 7
 camera columns, drawn from `V12WindowDataset(root, "train", T=1, train=True,
 copy_paste=CopyPasteParams(p=1.0, max_tries=30))` and `ds.paste_window(i,
 rng)` over random single-fly windows (`n_flies(i)==1 and
 unlabelled_sex(i)==-1`, the documented guard). `paste_window` never rejected
-(0/18 draws returned `None`) -- no rejection-pattern concern to report.
+(0/25 draws returned `None`) -- no rejection-pattern concern to report. (This
+run is AFTER Ruling B's `contact_sep` widening below; row seps and counts
+below reflect the re-run, not the original 15-unit figure.)
 
-**Mid-task finding (user-flagged) -- a genuinely headless donor, not a
-compositing bug.** The first render (before the fix below) put a real
-anomalous window in row 0: donor window `(2026_06_09_15_38_35, fly0, frame
-412)` has ZERO visible Antenna/Eye keypoints in ALL 7 of its own cameras
-(`has3d` false at every head landmark, independent of copy-paste) -- an
-actual amputated/headless-looking specimen in the labelled data, not an
-artifact of the paste. Verified directly against the dataset (not just the
-figure): `ds[2608]["vis2d"][0,0][:, head_idx].sum(0)` is `[0,0,0,0,0,0,0]`
-across all 7 cameras for the 3 head keypoints, vs. 7/7 for every other
-window checked. Confirmed the compositor itself was NOT at fault (view_shifts
-consistent, keypoints landed at the geometrically correct shifted location
-in every camera that had donor mask content) -- the fly in the source data is
-simply missing its head. **Fix**: `mvq_copy_paste_check.py` now requires both
-host and donor to have at least one visible Antenna/Eye keypoint in some
-camera (`HEAD_NAMES`/`_has_head`) before accepting a draw; 8/18 draws in the
-final run were skipped for this reason (~44% -- worth noting as a real data
-quality signal: a non-trivial fraction of single-fly windows in this dataset
-have no visible head in any view, so a production run of the augmentation
-itself has no such filter and will occasionally paste one of these). This is
-a note for the P3a controller, not a blocking defect in `composite()`.
+**Mid-task finding (user-flagged), then corrected by the controller: headless
+donors are by design, not a defect.** The first render put a real anomalous
+window in row 0: donor window `(2026_06_09_15_38_35, fly0, frame 412)` has
+ZERO visible Antenna/Eye keypoints in ALL 7 of its own cameras (`has3d` false
+at every head landmark, independent of copy-paste). Verified directly
+against the dataset (not just the figure):
+`ds[2608]["vis2d"][0,0][:, head_idx].sum(0)` is `[0,0,0,0,0,0,0]` across all
+7 cameras for the 3 head keypoints, vs. 7/7 for every other window checked.
+Confirmed the compositor itself was NOT at fault (view_shifts consistent,
+keypoints landed at the geometrically correct shifted location in every
+camera that had donor mask content). **Controller ruling: this is not a
+label/data defect.** The manifest carries `behavior: "headless"` for 5
+recordings (verified directly -- `2026_06_09_15_00_41`, `2026_06_09_15_21_14`,
+`2026_06_09_15_38_35`, `2026_06_09_15_46_55`, `2026_06_10_15_05_02`; the
+offending donor's recording, `2026_06_09_15_38_35`, is one of them) -- a real
+experimental condition, so a headless donor is a legitimate fly appearance
+and the production loader/augmentation applies NO head filter. Kept the
+check-script-only `HEAD_NAMES`/`_has_head` filter purely for figure
+legibility (a check figure meant to demonstrate placement geometry is
+clearer without an anatomically ambiguous specimen in it); 12/25 draws in the
+re-run below were skipped for this reason. Re-checked the cause of that
+fraction directly (not just accepted the controller's framing): of 11 skips
+logged in a separate instrumented run, 8 had their skipped fly (donor or
+host) drawn from one of the 5 headless-behaviour recordings above, and 3 came
+from otherwise-ordinary recordings where that one window's 7 crops simply
+didn't happen to contain a visible head (ordinary per-window
+framing/occlusion, not a labelling gap either way). So the ~44% figure is
+mostly, not entirely, "recording mix of the donor pool" -- the remainder is
+ordinary single-window head-visibility variance, and neither component is
+label loss. No QC pass or upstream filter is warranted; this is purely a
+check-script legibility choice.
 
-Observations against the expectation, on the head-filtered final render:
+Observations against the expectation, on the head-filtered, `contact_sep=(8,
+30)` render (post-Ruling-B):
 
-- **Contact rows (3/3, sep 9.5u/13.8u/10.6u)**: in every camera the donor
-  (orange) appears directly overlapping/adjacent to the host (cyan) at a
+- **Contact rows (3/3, sep 27.6u/26.7u/21.7u)**: in every camera the donor
+  (orange) appears directly adjacent to/overlapping the host (cyan) at a
   consistent position -- no floating or per-camera offset. Host keypoints
-  under the donor are drawn as hollow cyan circles exactly where the two
-  bodies overlap (e.g. row 2, Cam2012855/Cam2012857), and solid cyan
-  elsewhere. All three contact rows read as a plausible mounting/contact
-  pair, matching the expectation.
-- **Far rows (3/3, sep 26.7u/27.6u/42.6u)**: the two bodies are clearly
-  separated, not overlapping -- expected. At the largest separation
-  (42.6u) the donor appears as only a partial cluster of points at the
-  frame edge in 4/7 cameras and is absent (no donor content at all) in the
-  other 3 (Cam2012630, Cam2012853, Cam2012855) -- **this is the correct
+  under the donor are drawn as hollow cyan circles where the two bodies
+  overlap (e.g. row 1, Cam2012857/Cam2012861), and solid cyan elsewhere. At
+  this wider (still-realistic, see Ruling B) separation the two bodies read
+  as two DISTINGUISHABLE flies in contact/touching rather than one fused
+  blob, which is if anything a closer match to the real mounting poses seen
+  in gate 1 (`2026_04_02_17_28_34`, `2026_04_02_15_25_51`) than the original
+  9-14u renders were. All three contact rows still read as a plausible
+  mounting/contact pair.
+- **Far rows (3/3, sep 42.6u/41.4u/35.2u)**: bodies clearly separated, not
+  overlapping -- expected, and clearly distinct from the contact rows'
+  separations even with the widened threshold. At the largest separation
+  (42.6u) the donor appears as only a partial cluster of points at the frame
+  edge in some cameras and is absent in others -- **this is the correct
   behaviour of `composite()`, not floating/offset geometry**: those cameras'
   panels show no donor pixels because the SHIFTED donor mask/keypoints
   landed outside the 448px crop for that specific view, and `composite()`'s
@@ -139,31 +157,102 @@ Observations against the expectation, on the head-filtered final render:
   holds for pairs close enough that both bodies fit in every crop; the "far"
   bucket exists precisely to also cover far, asymmetric-per-camera framing.
 - No offset/mirrored/floating donor was seen in any of the 42 camera panels
-  (6 rows x 7 cams) once the headless-donor issue above was fixed.
+  (6 rows x 7 cams) with the head filter in place. The `contact`/`far` split
+  still reads sensibly at the new threshold -- re-verified by re-reading the
+  regenerated PNG, not assumed from the JSON alone.
 
 **Verdict: the copy-paste compositor is geometrically consistent within its
-own documented visibility rule.** No blocking defect found. Two follow-ups
-for the controller, neither blocking this launch: (1) the headless-fly
-fraction in the underlying labelled data (~44% of a small random sample hit
-it) may be worth a dedicated QC pass or an upstream filter in
-`mv_copy_paste`/`V12WindowDataset` itself, since the production augmentation
-path has no such guard; (2) `_is_contact`'s 15-unit rule (added to
-`mvq_overlay.py`'s `contact_pair` case, see below) never fires on REAL
-labelled data in either split -- the closest two real labelled flies in any
-window are 24.3 units apart (train split, 88 two-fly windows checked; `sep
-<= 15` count = 0, `sep <= 25` count = 2) -- so `--cases contact_pair` will
-print "no samples" against real val/train checkpoints until a future
-diagnostic run also covers copy-pasted windows. This is consistent with,
-not contradictory to, copy-paste's whole reason for existing (real contact
-pairs are essentially absent from the labelled set).
+own documented visibility rule.** No blocking defect found; see Ruling B
+below for the corrected `contact_sep`/`CONTACT_UNITS` threshold and its
+effect on real-data selection.
+
+## Ruling B (2026-09-04): the 15-unit contact threshold was wrong -- corrected to 30
+
+The controller's independent check of real mating-pair windows (val
+`#60`-`#67`, the step-14000 failure cohort the `contact_pair` cohort exists
+for) found centroid separations of ~20-26 units -- ABOVE the original 15-unit
+"contact" cutoff used in three places, so the cohort/case that exists
+specifically to surface those failures was silently selecting nothing.
+Fixed by widening the threshold to 30 units (3mm) everywhere it appears,
+with a single source of truth:
+
+1. `third_party/jarvis_jax/jarvis_jax/train/train_mvq.py`: new module-level
+   `CONTACT_UNITS = 30.0` (comment: "3 mm; real mounting pairs have centroid
+   gaps of ~24-30 units, see p3a-notes.md"); `_cohorts`'s `_contact` now
+   compares against it instead of a bare `15.0`.
+2. `scripts/viz/mvq_overlay.py`: `_is_contact` now imports and uses that same
+   `CONTACT_UNITS` from `jarvis_jax.train.train_mvq` (decoupled from
+   `mv_copy_paste.CopyPasteParams` -- the diagnostic threshold and the
+   augmentation's own `contact_sep` are now independent knobs, per the
+   controller's explicit ask, even though they happen to share a value
+   today).
+3. `third_party/jarvis_jax/jarvis_jax/data/mv_copy_paste.py`:
+   `CopyPasteParams.contact_sep` default `(8.0, 15.0)` -> `(8.0, 30.0)`,
+   comment updated to explain the stacked-pair regime now brackets the real
+   24-30-unit mounting-pair range (with the low end still giving heavier
+   overlap than reality is ever this close).
+
+**Real-data census re-run with the new threshold** (`_is_contact` over the
+val split, 153 windows, same code path `mvq_overlay.py` uses):
+
+```
+CONTACT_UNITS 30.0
+n_windows(val) 153   n_contact_pairs 26
+```
+
+All 26 hits are in `2026_04_02_15_25_51` (the same recording gate 1 flagged
+as the clearest mounting-pose confirmation) at window indices **42-67**,
+seps 20.95-25.97 units, i.e. exactly the mating-pair failure cohort the
+`contact_pair` case exists for -- **val #60-#67 ARE selected**, as the
+controller expected:
+
+```
+i=42  frame416375  sep=25.97   i=43  frame416375  sep=25.97
+i=44  frame416376  sep=25.92   i=45  frame416376  sep=25.92
+i=46  frame416377  sep=25.83   i=47  frame416377  sep=25.83
+i=48  frame416378  sep=25.73   i=49  frame416378  sep=25.73
+i=50  frame416379  sep=25.65   i=51  frame416379  sep=25.65
+i=52  frame416380  sep=25.50   i=53  frame416380  sep=25.50
+i=54  frame416381  sep=25.46   i=55  frame416381  sep=25.46
+i=56  frame416382  sep=25.42   i=57  frame416382  sep=25.42
+i=58  frame416408  sep=25.64   i=59  frame416408  sep=25.64
+i=60  frame416555  sep=23.09   i=61  frame416555  sep=23.09
+i=62  frame416576  sep=22.26   i=63  frame416576  sep=22.26
+i=64  frame416617  sep=20.95   i=65  frame416617  sep=20.95
+i=66  frame416662  sep=22.56   i=67  frame416662  sep=22.56
+```
+
+(Windows come in host0/host1 pairs at the same frame, hence the doubled
+indices -- both hosts of the same two-fly frame separately qualify.) At the
+old 15-unit threshold this count was 0.
+
+**Effect on `mvq_copy_paste_check.png`**: re-ran with the widened
+`contact_sep=(8, 30)` default (see "Observations" above, now updated in
+place) -- contact rows now sit at 21.7-27.6u instead of 9.5-13.8u, reading as
+two distinguishable touching/mounting bodies rather than one fused blob
+(arguably closer to the real courtship poses in gate 1), and the contact/far
+split remains visually unambiguous.
+
+**Tests**: `cd third_party/jarvis_jax && JAX_PLATFORMS=cpu pytest
+tests/test_mv_copy_paste.py tests/test_train_mvq_smoke.py -q` -> **18 passed**
+(193s), pristine. `test_sample_offset_respects_separation_and_plane` (asserts
+`8.0 <= |D| <= 60.0` across both contact_sep and far_sep draws) and
+`test_composite_labels_are_geometrically_exact_and_host_is_occluded` (uses a
+fixed `D=12.0`, inside both the old and new contact range, and doesn't read
+`contact_sep` at all) both still hold as anticipated.
+
+**Spec updated**: `docs/specs/2026-09-04-mvq-p3a-identity-existence-design.md`
+§6 (`sep ~ U(8, 30)`) and §7 (`contact_pair`: "closer than 30 units"), each
+with a parenthetical "(amended 2026-09-04 after the gate: real mounting
+pairs are 24-30 units apart)".
 
 ## Overlay script changes (`scripts/viz/mvq_overlay.py`)
 
 - Added `contact_pair` case: `sel = [r for r in rows if r["contact"]]`, where
   `contact` is computed per-window via a new `_is_contact(ds, i)` helper using
-  `ds.fly_centroids(i)` and the SAME 15-unit threshold copy-paste calls
-  "contact" (`CopyPasteParams().contact_sep[1]`, single source of truth,
-  imported rather than re-hardcoded).
+  `ds.fly_centroids(i)` and `CONTACT_UNITS` (see Ruling B -- imported from
+  `jarvis_jax.train.train_mvq`, the same constant `_cohorts`'s
+  `contact_pair` val cohort uses, decoupled from `mv_copy_paste`).
 - Added `slot` (the oracle instance index already computed as `inst`) and
   `sex_prob` (`sigmoid(out["sex_logit"][0, inst])`) to each row dict and to
   the y-axis row label: `f"#{i} {F/M} grp{g}\nslot{inst}
@@ -173,14 +262,17 @@ pairs are essentially absent from the labelled set).
   yet for P3a). Verified import-clean
   (`python -c "import ast; ast.parse(open('scripts/viz/mvq_overlay.py').read())"`)
   and `python scripts/viz/mvq_overlay.py --help` both pass. `_is_contact` was
-  additionally smoke-tested directly against the real dataset (train+val,
-  no model needed) -- see the "never fires on real data" note above; the
-  function itself runs cleanly, it simply has nothing to select in either
-  split of real (non-copy-pasted) data at inference time.
+  additionally smoke-tested directly against the real dataset (train+val, no
+  model needed) -- with `CONTACT_UNITS=30` it now selects the real
+  `#60`-`#67` mating-pair cohort in val (see Ruling B census above), unlike
+  the original 15-unit version which selected nothing in either split.
 
 ## Files
 
 - `scripts/viz/mvq_sex_label_check.py` (new)
 - `scripts/viz/mvq_copy_paste_check.py` (new)
-- `scripts/viz/mvq_overlay.py` (modified: `contact_pair` case, `slot`/`sex_prob` row fields + label, new default `--cases`)
-- `figures/2026-09-mvq/p3a_gates/{sex_label_check,copy_paste_check}.{png,json}` (gitignored, not committed; regenerate with the commands above)
+- `scripts/viz/mvq_overlay.py` (modified: `contact_pair` case, `slot`/`sex_prob` row fields + label, new default `--cases`, `CONTACT_UNITS` import)
+- `third_party/jarvis_jax/jarvis_jax/train/train_mvq.py` (modified, Ruling B: `CONTACT_UNITS = 30.0` module constant, `_cohorts`'s `_contact` uses it)
+- `third_party/jarvis_jax/jarvis_jax/data/mv_copy_paste.py` (modified, Ruling B: `CopyPasteParams.contact_sep` default `(8.0, 15.0)` -> `(8.0, 30.0)`)
+- `docs/specs/2026-09-04-mvq-p3a-identity-existence-design.md` (modified, Ruling B: §6/§7 contact range/rule amended to 30 units)
+- `figures/2026-09-mvq/p3a_gates/{sex_label_check,copy_paste_check}.{png,json}` (gitignored, not committed; regenerate with the commands above -- copy_paste_check regenerated post-Ruling-B, sex_label_check unaffected by either ruling)

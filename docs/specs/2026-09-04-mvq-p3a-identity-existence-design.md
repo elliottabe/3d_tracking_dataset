@@ -149,7 +149,8 @@ rejected (up to 8 draws, then no paste). Val windows are never donors.
 **Placement.** `D` (3, ROI-local world units) is sampled in the host's
 body plane -- the plane of the two largest principal axes of the host's
 labelled 3D points -- at a random in-plane direction and separation
-`sep`: with probability 0.3 "contact" `sep ~ U(8, 15)` (0.8-1.5 mm, the
+`sep`: with probability 0.3 "contact" `sep ~ U(8, 30)` (amended 2026-09-04
+after the gate: real mounting pairs are 24-30 units apart) (0.8-3.0 mm, the
 stacked-pair regime), else `sep ~ U(15, 60)`. Pasted labels that would
 leave the crop in a target-valid camera reject the draw.
 
@@ -187,7 +188,8 @@ photometric aug applies to the whole composite afterwards).
   measure of cross-fly mixing; the 30k run's value at its final checkpoint
   is the baseline.
 - New cohort `contact_pair`: two-fly windows whose labelled centroids are
-  closer than 15 units. The step-14000 failures live here.
+  closer than 30 units (amended 2026-09-04 after the gate: real mounting
+  pairs are 24-30 units apart). The step-14000 failures live here.
 
 Figure gates, expectation stated in each script's docstring before it
 renders, PNGs read back with the Read tool, regeneration command in the

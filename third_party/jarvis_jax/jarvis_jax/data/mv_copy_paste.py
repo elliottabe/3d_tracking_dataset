@@ -19,7 +19,10 @@ class CopyPasteParams:
     p: float = 0.5
     opposite_sex_p: float = 0.7
     contact_p: float = 0.3
-    contact_sep: tuple = (8.0, 15.0)      # world units (0.1 mm): the stacked-pair regime
+    contact_sep: tuple = (8.0, 30.0)      # world units (0.1 mm): the stacked-pair regime -- real
+                                          # mounting pairs sit at ~24-30 units; the low end gives
+                                          # heavier overlap than reality (amended 2026-09-04, see
+                                          # docs/benchmark/2026-09-mvq/p3a-notes.md)
     far_sep: tuple = (15.0, 60.0)
     max_tries: int = 8
     gain_clip: tuple = (0.7, 1.4)
