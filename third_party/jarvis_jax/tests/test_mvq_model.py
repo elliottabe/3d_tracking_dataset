@@ -137,3 +137,28 @@ def test_masked_attention_chunked_matches_unchunked():
     full = masked_attention(q, k, v, key_valid, H, q_chunk=None)
     chunked = masked_attention(q, k, v, key_valid, H, q_chunk=8)
     np.testing.assert_allclose(np.asarray(full), np.asarray(chunked), atol=1e-5)
+
+
+def test_masked_attention_chunked_grad_matches_unchunked():
+    """jax.grad through the chunked (q_chunk=8) path must be finite and match
+    the unchunked (q_chunk=None) gradient to 1e-5 -- regression test for the
+    lax.map/remat fix: before it, chunking was numerically a no-op (the test
+    above) but under grad it retained every chunk's logits simultaneously
+    (worse than not chunking at all), which this test cannot see unless it
+    actually differentiates."""
+    from jarvis_jax.models.mvq.fusion import masked_attention
+    rng = np.random.default_rng(0)
+    B, Nq, Nk, H, D = 2, 30, 17, 4, 32
+    q = jnp.asarray(rng.normal(size=(B, Nq, D)).astype(np.float32))
+    k = jnp.asarray(rng.normal(size=(B, Nk, D)).astype(np.float32))
+    v = jnp.asarray(rng.normal(size=(B, Nk, D)).astype(np.float32))
+    key_valid = jnp.asarray(rng.uniform(size=(B, Nk)) > 0.3)
+    key_valid = key_valid.at[:, 0].set(True)
+
+    def loss(q, chunk):
+        return masked_attention(q, k, v, key_valid, H, q_chunk=chunk).sum()
+
+    g_full = jax.grad(lambda q: loss(q, None))(q)
+    g_chunked = jax.grad(lambda q: loss(q, 8))(q)
+    assert np.isfinite(np.asarray(g_chunked)).all()
+    np.testing.assert_allclose(np.asarray(g_full), np.asarray(g_chunked), atol=1e-5)

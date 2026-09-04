@@ -37,7 +37,10 @@ def masked_attention(q, k, v, key_valid, num_heads, q_chunk: int | None = 512):
     q_pad = jnp.pad(q, ((0, 0), (0, pad), (0, 0))) if pad else q
     qh = q_pad.reshape(B, n_chunks, q_chunk, num_heads, hd)
     qh = jnp.moveaxis(qh, (1, 3), (0, 2))                    # (n_chunks,B,heads,q_chunk,hd)
-    out = jax.lax.map(attend, qh)                            # (n_chunks,B,heads,q_chunk,hd)
+    # jax.remat per chunk: lax.map's reverse-mode grad otherwise retains EVERY
+    # chunk's logits+softmax simultaneously (no forward-memory saving survives
+    # differentiation) -- measured 8.5GB -> 1.9GB for the 4-layer 2D stack at bs4.
+    out = jax.lax.map(jax.remat(attend), qh)                  # (n_chunks,B,heads,q_chunk,hd)
     out = jnp.moveaxis(out, (0, 2), (1, 3))                  # (B,n_chunks,q_chunk,heads,hd)
     return out.reshape(B, n_chunks * q_chunk, D)[:, :Nq]
 
