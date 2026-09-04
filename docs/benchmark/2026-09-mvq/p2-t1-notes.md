@@ -73,6 +73,22 @@ figures; two independent attempts agree to ~1%.
 
 ## Numbers
 
+**Oracle vs policy (read before citing any `mpjpe3d` number below).** Every
+`mpjpe3d`/`mpjpe3d_units`/`mpjpe3d_mm` figure in this document -- Step 1000,
+Step 2000, and the mvq-vs-baseline comparison below -- is the ORACLE number:
+`train_mvq.py::evaluate` (as it stood for this whole P2 run) always scored
+the instance nearest the ground truth, a match no real inference call can
+make (there is no GT to match against at inference time). The final-review
+fix wave (2026-09-04, after this run) added a POLICY number alongside it --
+prompted mode: instance 0 (the prompt's own query slot); unprompted mode:
+among instances the model itself claims exist, the one nearest the ROI
+centre, with a window scored a MISS (excluded from the mean) if none does
+-- as `mpjpe3d_policy_units`/`_mm` plus `policy_miss_frac`, in
+`evaluate`'s return dict, `mvq_run.json`, and both benchmark/viz scripts.
+This run's own checkpoint was never re-evaluated under the policy metric
+(no new training happened in that fix wave); a future gate-1 rerun should
+report both, not just the oracle number this document is stuck with.
+
 **Step 1000 (train, from an earlier same-config attempt):** `match_reproj_px`
 17.0 px (an earlier print: 16.97 px; a later independent attempt: 18.78 px —
 consistent to ~1%), `exist_acc` 0.906-0.917 (near 1.0, as expected on
@@ -219,9 +235,12 @@ otherwise) -- checked and PASSES on this root (both 50-name lists are
 identical, position-for-position; this is a belt-and-suspenders check, not a
 fix for a mismatch that existed here). Re-run on GPU 4, then a second full
 CPU pass (`JAX_PLATFORMS=cpu`, GPUs 0-7 owned by the 8-GPU local 30k run --
-see below) adding the mvq-comparison arms:
+see below) adding the mvq-comparison arms. Both mvq columns below are the
+ORACLE instance (GT-nearest, see the "Oracle vs policy" note above) -- run
+against the final-review checkpoint loader, this script now also reports a
+`_policy` variant of each `mvq_same_joints_*` field, not reproduced here:
 
-| cohort | baseline mpjpe (units/mm) | coverage | mvq SAME joints, unprompted (units/mm) | mvq ALL joints, unprompted (units/mm) [=official] |
+| cohort | baseline mpjpe (units/mm) | coverage | mvq SAME joints, unprompted, oracle (units/mm) | mvq ALL joints, unprompted, oracle (units/mm) [=official] |
 |---|---|---|---|---|
 | overall | 1.070 / 0.107 | 1.000 | 3.760 / 0.376 | 3.760 / 0.376 |
 | female | 0.723 / 0.072 | 1.000 | 4.040 / 0.404 | 4.040 / 0.404 |
@@ -716,3 +735,71 @@ adoption criteria -- wall-clock and val parity -- were already comfortably
 cleared with margin before the fix, and the fix only removes a small,
 already-negligible-at-real-N approximation in the direction of MORE
 correctness, not less).
+
+## Final review (2026-09-04): P0-P2 final-fix wave
+
+A last review pass over the whole `mvq-p0-p2` branch (HEAD `317fd38`) found
+and fixed ten library-level issues plus doc drift, none of which required
+retraining or re-running gate 1 (all are correctness/precision/reporting
+fixes, not architecture changes). Full detail: per-item commit messages and
+`.superpowers/sdd/2026-09-03-mvq-dinov3-query-decoder-p0-p2/final-fix-report.md`.
+Summary:
+
+- **Camera dropout** (`data/mv_augment.py::_camera_dropout`) keyed its
+  "already invalid" penalty and its `n_valid - 3` floor on frame 0's
+  `cam_valid` alone; a camera invalid only in a LATER frame of a T>1 window
+  could be miscounted either way. Now keyed on `cam_valid.all(axis=1)`
+  (valid in every frame).
+- **`px_scale` went stale under the per-view affine augmentation**
+  (`_per_view_affine` rewrites `M` but was not updating the `px_scale`
+  scalar every `px_scale`-weighted loss term reads) -- now recomputed from
+  the augmented `M` every call.
+- Added a composed-augmentation test (all geometric ops at their defaults
+  at once, not one at a time) -- GT 3D still reprojects onto GT 2D exactly.
+- **`has_mask` in the training step** (`train_mvq.py::make_train_step`) did
+  not require the masked view to also be a valid camera post-augmentation
+  -- camera dropout could invalidate the only camera carrying the prompt
+  mask, silently turning the prompt into a zeroed-out mean. Now gated on
+  `cam_valid` too.
+- **`FusionStack` never threaded `cfg.q_chunk`/`cfg.attn_impl`** into its
+  local/global `SelfBlock`s -- every fusion block silently used `Attn`'s
+  hardcoded default (`q_chunk=512`, `impl="xla"`) regardless of model
+  config. Now baked in at construction.
+- **`backbone="dinov3_l16"` was cosmetic** -- `backbone_depth`/
+  `backbone_heads` always overrode the preset's own shape (12/12,
+  `dinov3_b16`'s), so naming `dinov3_l16` silently built a b16-shaped
+  backbone unless the user ALSO manually set `embed_dim=1024,
+  backbone_depth=24, backbone_heads=16`. Presets are now real: an
+  `embed_dim`/`backbone_depth`/`backbone_heads` conflicting with a named
+  preset raises; `backbone="tiny"` is the new test-only escape that keeps
+  the old override-everything behaviour (TINY test configs updated).
+- **`crop_origin`** (full-frame px per window per camera) is now a first-
+  class `WINDOW_KEYS` field, so it survives batching/augmentation/prefetch
+  without a separate side channel -- was previously only reconstructable
+  ad hoc.
+- **Oracle-vs-policy metric** (see the "Oracle vs policy" note in the
+  Numbers section above): `evaluate()`, `mvq_overlay.py`, and
+  `mvq_val_baselines.py` all now report a policy-instance number (what a
+  real inference call without GT would pick) alongside the pre-existing
+  oracle number, plus `policy_miss_frac` for unprompted windows where no
+  instance clears the existence threshold.
+- **Shared checkpoint loader** (`models/mvq/checkpoint.py::load_mvq_model`)
+  replaces the two near-identical restore blocks `mvq_overlay.py` and
+  `mvq_val_baselines.py` each carried, and adds a `ckpt/<step>` path (raw
+  EMA sum, debiased on load using the persisted `ema_meta`) alongside the
+  existing `final/` path -- useful for inspecting a run before it reaches
+  its final save.
+- Several stale docstrings/comments corrected (backbone attn_impl masking,
+  `q_chunk` threading scope, the benchmark script's 4th-channel condition,
+  `LossWeights.conf` being an inner lambda not an outer weight) and the
+  design spec (`docs/specs/2026-09-03-mvq-dinov3-query-decoder-design.md`)
+  brought back in line with the shipped code: no gray-fill in the mvq
+  pipeline path, gray-fill/copy-paste marked not-implemented in P2, `uv`/
+  `crop_origin`/`assemble` signatures corrected, term 5's weight clarified
+  as an inner lambda, §7's implementation deviations recorded, and gate 1
+  recorded PASS with its EMA-bias caveat.
+
+None of the above moves any number reported earlier in this document (the
+gate-1 checkpoint was not retrained) except the two metric ADDITIONS
+(policy MPJPE, `policy_miss_frac`), which have no prior value to compare
+against.
