@@ -5,6 +5,7 @@ cache_dir:      /data/Johnson_lab/jax_repro_cache/v3
 runs_root:           /data/Johnson_lab/jax_cached3d_runs
 vit_runs_root:       /data/Johnson_lab/jax_vitpose_runs
 hybridnet_runs_root: /data/Johnson_lab/jax_hybridnet_runs
+mvq_runs_root:       /data/Johnson_lab/jax_mvq_runs
 processed_root:      /data/Johnson_lab/processed
 vitpose_ckpt:   /data/Johnson_lab/jax_vitpose_runs/v3_8gpu_20260620/final
 mae_npz:        /data/Johnson_lab/mae_vitb.npz

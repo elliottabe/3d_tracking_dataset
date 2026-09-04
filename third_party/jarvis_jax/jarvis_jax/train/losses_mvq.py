@@ -126,9 +126,15 @@ def mvq_loss(out, batch, w: LossWeights, part_of_k):
                     batch["has3d"] & fv[:, :, None, None])
         total = total + w.aux * (w.reproj * r_ + w.l3d * l_)
     mp = _mmean(jnp.linalg.norm(pf["xyz"] - batch["kp3d_local"], axis=-1), batch["has3d"] & fv[:, :, None, None])
-    px = _mmean(jnp.linalg.norm(_reproject(pf["xyz"], batch["M"], batch["t_local"]) - batch["kp2d"], axis=-1),
-                batch["vis2d"] & fv[:, :, None, None, None])
+    pf_reproj = _reproject(pf["xyz"], batch["M"], batch["t_local"])
+    m2_full = batch["vis2d"] & fv[:, :, None, None, None]
+    px = _mmean(jnp.linalg.norm(pf_reproj - batch["kp2d"], axis=-1), m2_full)
+    # raw (non-Huber) L2 metrics in px, reported alongside the Huber training terms:
+    # uv2d_px = 2D-head prediction vs GT label; head_vs_reproj_px = 2D-head vs the
+    # SAME instance's reprojected 3D estimate (head/3D-branch self-consistency).
+    uv2d_px = _mmean(jnp.linalg.norm(pf["uv"] - batch["kp2d"], axis=-1), m2_full)
+    head_vs_reproj_px = _mmean(jnp.linalg.norm(pf["uv"] - pf_reproj, axis=-1), m2_full)
     metrics = {"total": total, "reproj": reproj, "l3d": l3d, "uv2d": uv2d, "vis": vis, "conf": conf,
                "exist": exist, "rep": rep, "exist_acc": exist_acc, "match_reproj_px": px,
-               "mpjpe3d_units": mp}
+               "mpjpe3d_units": mp, "uv2d_px": uv2d_px, "head_vs_reproj_px": head_vs_reproj_px}
     return total, metrics

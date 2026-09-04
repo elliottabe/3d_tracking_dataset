@@ -68,6 +68,8 @@ def test_loss_near_zero_at_ground_truth_and_metrics():
     assert float(m["reproj"]) < 1e-3 and float(m["l3d"]) < 1e-3 and float(m["uv2d"]) < 1e-3
     assert float(m["rep"]) == 0.0 and float(m["exist_acc"]) == 1.0
     assert float(m["match_reproj_px"]) < 1e-2 and float(m["mpjpe3d_units"]) < 1e-3
+    assert {"uv2d_px", "head_vs_reproj_px"} <= set(m)
+    assert float(m["uv2d_px"]) < 1e-2 and float(m["head_vs_reproj_px"]) < 1e-2
     # vis must equal the per-entry BCE of a logit of 6.0 against target 1, independent of K
     # (a broadcast-mask bug previously made this K-times too large)
     expected_vis = float(jnp.log1p(jnp.exp(-6.0)))
