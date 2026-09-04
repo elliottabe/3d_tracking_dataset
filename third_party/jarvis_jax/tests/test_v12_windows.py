@@ -70,9 +70,9 @@ def test_labels_are_consistent_with_geometry(tmp_path):
     # assemble() must reconstruct the SAME full-frame coordinates from uv=kp2d.
     from jarvis_jax.models.mvq.model import assemble
     out = {"xyz": s["kp3d_local"][None, 0:1], "conf_logit": np.zeros((1, 1, 1, K), np.float32),
-          "exist_logit": np.array([[10.0]], np.float32), "uv": s["kp2d"][None, 0:1],
-          "vis_logit": np.zeros((1, 1, 1, 7, K), np.float32)}
-    _, _, kp2d_full = assemble(out, center3D=s["center3D"][None], crop_origin=s["crop_origin"][None])
+          "exist_logit": np.array([[10.0]], np.float32), "sex_logit": np.array([[0.0]], np.float32),
+          "uv": s["kp2d"][None, 0:1], "vis_logit": np.zeros((1, 1, 1, 7, K), np.float32)}
+    _, _, kp2d_full, _ = assemble(out, center3D=s["center3D"][None], crop_origin=s["crop_origin"][None])
     np.testing.assert_allclose(kp2d_full[0, 0, 0][vis], full[vis], atol=1e-3)
 
 

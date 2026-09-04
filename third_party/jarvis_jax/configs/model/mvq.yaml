@@ -6,7 +6,7 @@ embed_dim: 768
 num_keypoints: 50
 num_cameras: 7
 max_frames: 8
-n_instances: 3
+n_instances: 4  # P3a: prompted / female / male / other (fixed meaning, spec 2026-09-04 §3)
 n_local: 2
 n_global: 2
 global_pool: 2

@@ -29,6 +29,7 @@ loss:
   vis: 0.1
   conf: 0.2
   exist: 1.0
+  sex: 0.5
   rep: 0.5
   pass1: 0.5
   aux: 0.3

@@ -58,6 +58,7 @@ class Heads(nnx.Module):
         self.xyz = nnx.Linear(D, 3, rngs=rngs, kernel_init=nnx.initializers.normal(1e-3))
         self.conf = nnx.Linear(D, 1, rngs=rngs)
         self.exist = nnx.Linear(D, 1, rngs=rngs)
+        self.sex = nnx.Linear(D, 1, rngs=rngs)
         self.uv = nnx.Linear(D, 2, rngs=rngs, kernel_init=nnx.initializers.zeros)
         self.vis = nnx.Linear(D, 1, rngs=rngs)
 
@@ -85,7 +86,8 @@ class QueryDecoder(nnx.Module):
         h4 = h.reshape(B, I, T, K, -1)
         return {"xyz": self.cfg.roi_scale * self.heads.xyz(h4),
                 "conf_logit": self.heads.conf(h4)[..., 0],
-                "exist_logit": self.heads.exist(h4.mean(axis=(2, 3)))[..., 0]}
+                "exist_logit": self.heads.exist(h4.mean(axis=(2, 3)))[..., 0],
+                "sex_logit": self.heads.sex(h4.mean(axis=(2, 3)))[..., 0]}
 
     def _path2d(self, h3d, bank, bank_valid, gcam, femb, I, T, K):
         B, C = h3d.shape[0], gcam.shape[1]

@@ -14,7 +14,7 @@ def test_two_steps_cpu_and_eval(tmp_path):
     from jarvis_jax.train.losses_mvq import LossWeights
     from jarvis_jax.data.mv_augment import MVAugParams
     root = make_v12_root(tmp_path)
-    mcfg = MVQConfig(crop=448, patch=16, embed_dim=32, num_keypoints=50, num_cameras=7, n_instances=2,
+    mcfg = MVQConfig(crop=448, patch=16, embed_dim=32, num_keypoints=50, num_cameras=7, n_instances=4,
                      n_local=1, n_global=1, dec_layers_3d=2, dec_layers_2d=1, dec_heads=4, mlp_ratio=2.0,
                      refine_passes=1, patch_rgb=3, fourier_bands=2, backbone="tiny", backbone_depth=1, backbone_heads=4, remat=False)
     tcfg = MVQTrainConfig(total_steps=2, batch_size=2, warmup_steps=1, eval_every=2, save_every=2,
@@ -46,7 +46,7 @@ def test_load_mvq_model_ckpt_matches_final(tmp_path):
     from jarvis_jax.train.losses_mvq import LossWeights
     from jarvis_jax.data.mv_augment import MVAugParams
     root = make_v12_root(tmp_path)
-    mcfg = MVQConfig(crop=448, patch=16, embed_dim=32, num_keypoints=50, num_cameras=7, n_instances=2,
+    mcfg = MVQConfig(crop=448, patch=16, embed_dim=32, num_keypoints=50, num_cameras=7, n_instances=4,
                      n_local=1, n_global=1, dec_layers_3d=2, dec_layers_2d=1, dec_heads=4, mlp_ratio=2.0,
                      refine_passes=1, patch_rgb=3, fourier_bands=2, backbone="tiny", backbone_depth=1,
                      backbone_heads=4, remat=False)
@@ -75,7 +75,7 @@ def test_empty_cohort_raises(tmp_path):
     from jarvis_jax.train.losses_mvq import LossWeights
     from jarvis_jax.data.mv_augment import MVAugParams
     root = make_v12_root(tmp_path, two_fly_frame=99)        # no two-fly frame anywhere
-    mcfg = MVQConfig(embed_dim=32, n_instances=2, n_local=1, n_global=0, dec_layers_3d=2, dec_layers_2d=1,
+    mcfg = MVQConfig(embed_dim=32, n_instances=4, n_local=1, n_global=0, dec_layers_3d=2, dec_layers_2d=1,
                      dec_heads=4, backbone="tiny", backbone_depth=1, backbone_heads=4, remat=False, fourier_bands=2, patch_rgb=3)
     tcfg = MVQTrainConfig(total_steps=1, batch_size=2, pretrained=False, num_workers=1, smoke=True)
     with pytest.raises(ValueError, match="two_fly"):
@@ -121,7 +121,7 @@ def test_resume_from_checkpoint(tmp_path):
     from jarvis_jax.train.losses_mvq import LossWeights
     from jarvis_jax.data.mv_augment import MVAugParams
     root = make_v12_root(tmp_path)
-    mcfg = MVQConfig(crop=448, patch=16, embed_dim=32, num_keypoints=50, num_cameras=7, n_instances=2,
+    mcfg = MVQConfig(crop=448, patch=16, embed_dim=32, num_keypoints=50, num_cameras=7, n_instances=4,
                      n_local=1, n_global=1, dec_layers_3d=2, dec_layers_2d=1, dec_heads=4, mlp_ratio=2.0,
                      refine_passes=1, patch_rgb=3, fourier_bands=2, backbone="tiny", backbone_depth=1, backbone_heads=4, remat=False)
     ckpt_dir = str(tmp_path / "ckpt")
@@ -226,7 +226,7 @@ def test_evaluate_ragged_batch_matches_full_batch(tmp_path):
     root = make_v12_root(tmp_path)
     ds = V12WindowDataset(root, "val", T=1, train=False)
     assert len(ds) == 4
-    mcfg = MVQConfig(crop=448, patch=16, embed_dim=32, num_keypoints=50, num_cameras=7, n_instances=2,
+    mcfg = MVQConfig(crop=448, patch=16, embed_dim=32, num_keypoints=50, num_cameras=7, n_instances=4,
                      n_local=1, n_global=1, dec_layers_3d=2, dec_layers_2d=1, dec_heads=4, mlp_ratio=2.0,
                      refine_passes=1, patch_rgb=3, fourier_bands=2, backbone="tiny", backbone_depth=1, backbone_heads=4, remat=False)
     model = MVQModel(mcfg, rngs=nnx.Rngs(0))

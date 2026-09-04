@@ -26,7 +26,7 @@ class MVQConfig:
     num_keypoints: int = 50
     num_cameras: int = 7
     max_frames: int = 8
-    n_instances: int = 3
+    n_instances: int = 4
     n_local: int = 2
     n_global: int = 2
     global_pool: int = 2
@@ -174,7 +174,7 @@ class MVQModel(nnx.Module):
 
 
 def assemble(out, center3D, crop_origin, exist_thresh=0.5, cam_valid=None):
-    """numpy: model outputs -> world kp3d (NaN where absent), conf3d, full-frame kp2d.
+    """numpy: model outputs -> world kp3d (NaN where absent), conf3d, full-frame kp2d, sex_prob.
 
     Two independent halves of spec Sec 4.6's NaN policy: an instance that
     doesn't exist (`exist_logit` below threshold) is NaN across every frame
@@ -189,6 +189,12 @@ def assemble(out, center3D, crop_origin, exist_thresh=0.5, cam_valid=None):
     window's single center3D, computed once from frame 0), so there is only
     one origin per (sample, camera), shared across all T frames -- broadcast
     below, not indexed by T.
+
+    Instance-slot meaning is fixed (P3a spec Sec 3): slot 0 = prompted,
+    1 = female, 2 = male, 3 = other. `sex_prob` is `sigmoid(out["sex_logit"])`
+    per slot, P(female) -- independent of `exist`/`cam_valid` gating above,
+    since a slot's sex prediction is meaningful whether or not that slot's
+    xyz/conf survived the NaN policy.
     """
     xyz, conf = np.asarray(out["xyz"]), 1 / (1 + np.exp(-np.asarray(out["conf_logit"])))
     exist = 1 / (1 + np.exp(-np.asarray(out["exist_logit"]))) >= exist_thresh                 # (B,I)
@@ -200,4 +206,5 @@ def assemble(out, center3D, crop_origin, exist_thresh=0.5, cam_valid=None):
         kp3d = np.where(frame_ok[:, None, :, None, None], kp3d, np.nan)
         conf3d = np.where(frame_ok[:, None, :, None], conf3d, 0.0)
     kp2d = np.asarray(out["uv"]) + np.asarray(crop_origin)[:, None, None, :, None, :]
-    return kp3d.astype(np.float32), conf3d.astype(np.float32), kp2d.astype(np.float32)
+    sex_prob = 1 / (1 + np.exp(-np.asarray(out["sex_logit"])))
+    return kp3d.astype(np.float32), conf3d.astype(np.float32), kp2d.astype(np.float32), sex_prob.astype(np.float32)
