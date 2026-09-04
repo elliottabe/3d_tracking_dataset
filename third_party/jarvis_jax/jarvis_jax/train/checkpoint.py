@@ -107,13 +107,13 @@ def warm_start_partial(model, src_dir):
     two are matched by name, or every lookup below would silently miss and
     every source leaf would report itself skipped.
 
-    `decoder/heads/sex/{kernel,bias}` is ALWAYS left fresh, even when
-    `src_dir` happens to carry a leaf at that same path and shape (as a
-    same-arch smoke-test source does): this warm start exists specifically
-    to seed a fine-tune from the P3a-era 30k-step run whose model predates
-    the sex head (P3a spec §5/§8), so the sex head must always train from
-    scratch, not inherit an unrelated run's coincidentally-shaped weights."""
-    ALWAYS_FRESH = {"decoder/heads/sex/kernel", "decoder/heads/sex/bias"}
+    No leaf name is special-cased. In particular `decoder/heads/sex/*` is
+    NOT hardcoded here: the real warm-start source this exists for (the
+    P3a-era 30k-step run) predates the sex head entirely, so those two
+    leaves are simply absent from `src_flat` and fall through the ordinary
+    `s is None` path-miss branch below like any other architecture change
+    would -- e.g. a genuinely NEW checkpoint that already has a sex head
+    correctly restores it."""
     gdef, state = nnx.split(model)
     pure = nnx.to_pure_dict(state)
     repl = NamedSharding(Mesh(jax.devices(), axis_names=("data",)), P())
@@ -133,8 +133,6 @@ def warm_start_partial(model, src_dir):
 
     def merge(path, v):
         name = _keypath_to_name(path)
-        if name in ALWAYS_FRESH:
-            skipped.append(name); return v
         s = src_flat.get(name)
         if s is None or not hasattr(v, "shape"):
             skipped.append(name); return v
