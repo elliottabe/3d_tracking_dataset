@@ -551,14 +551,22 @@ artifact per CLAUDE.md's evidence-for-a-decision convention.
 
 ## Task 9: Attention implementation A/B (2026-09-04) — cuDNN flash attention
 
-No figure for this one, per CLAUDE.md's own exemption ("changes that provably
-move no numbers... behavior-preserving refactors... don't need one"): this is
-an alternate compute path for the SAME attention math (backbone + decoder),
-proven equivalent by GPU parity tests (`test_mvq_attention.py`,
-`test_dinov3.py`, `test_mvq_model.py`, `-m gpu -k cudnn`) at bf16 tolerance
-(<2e-2 max abs diff, gradient cosine sim > 0.99) before this A/B ever ran —
-the A/B below is about wall-clock and confirming the swap doesn't move
-*training* numbers beyond noise at matched steps, not about correctness.
+No figure for this one: this is an alternate compute path for the SAME
+attention math (backbone + decoder), not a change to what the model computes
+in the mathematical sense (no reordering, rescaling, or reparameterisation
+of anything the pipeline's usual "visualize what you change" cases cover).
+But the numbers DO move — a different kernel, different fp32/bf16
+accumulation order, gives a different floating-point answer, not a bit-
+identical one — so "no figure needed" rests on the evidence actually being
+checked at the right precision, not on an a-priori exemption. That evidence
+is two-fold: (1) GPU parity tests (`test_mvq_attention.py`, `test_dinov3.py`,
+`test_mvq_model.py`, `-m gpu -k cudnn`) bound the per-call numerical
+difference directly (2e-3 relative at the backbone, <2e-2 absolute at the
+full-model level, gradient cosine sim > 0.99); (2) the matched-step val A/B
+below is the *training*-level check that those per-call differences don't
+compound into a real regression, checked per cohort **including female**
+(the pipeline's hard case per CLAUDE.md) — not assumed via the parity tests
+alone.
 
 **Expectation (stated before running):** cudnn should be meaningfully faster
 per step (the flash-attention kernel never materialises the (B,heads,N,Nk)
@@ -602,15 +610,52 @@ predicts a reduction, but that's not independently measured in this run.)
 | 300 | unprompted | 11.0424 | 11.0759 | +0.30% | 86.9499 | 86.2378 | -0.82% |
 
 Every val delta is under 1% — an order of magnitude inside the brief's 5%
-noise bar, consistent with the pre-existing GPU parity tests showing the two
-paths compute the same attention to bf16 precision. (`exist_prec`/`exist_rec`
-also track closely between modes at each step; not tabulated since they
-aren't part of the adoption criteria.)
+noise bar, consistent with the GPU parity tests (backbone: 2e-3 relative;
+full model: <2e-2 absolute) showing the two paths compute nearly the same
+attention. **Female cohort specifically** (`cohort_female`, the pipeline's
+hard case per CLAUDE.md, not just the overall/male-leaning average above):
+
+| step | mode | xla cohort_female | cudnn cohort_female | Δ |
+|---|---|---|---|---|
+| 150 | prompted | 11.6953 | 11.6712 | -0.21% |
+| 150 | unprompted | 11.6470 | 11.6512 | +0.04% |
+| 300 | prompted | 11.6076 | 11.5108 | -0.83% |
+| 300 | unprompted | 11.6073 | 11.6332 | +0.22% |
+
+Also under 1%, same order as the overall numbers — the swap does not
+disproportionately hurt the hard cohort.
+
+**`exist_prec`/`exist_rec` do NOT track closely — corrected.** An earlier
+draft of this note claimed they did; that was false, caught in review. Three
+of the four (step, mode) cells agree exactly, but step 300 unprompted does
+not:
+
+| step | mode | xla exist_prec / exist_rec | cudnn exist_prec / exist_rec |
+|---|---|---|---|
+| 150 | prompted | 1.0000 / 0.5968 | 1.0000 / 0.5968 |
+| 150 | unprompted | 0.0000 / 0.0000 | 0.0000 / 0.0000 |
+| 300 | prompted | 1.0000 / 0.5968 | 1.0000 / 0.5968 |
+| 300 | unprompted | **0.0000 / 0.0000** | **0.6917 / 0.6694** |
+
+At step 300 unprompted, xla never predicts a second instance exists
+(`exist_logit` sigmoid stays under 0.5 for every val window) while cudnn
+crosses that same 0.5 threshold on most of them. This is a genuine
+divergence, not a rounding artifact — but it is a **binary-threshold
+knife-edge** on a continuous `exist_logit` that the two kernels' small
+floating-point differences are enough to flip, at an early (300-step),
+under-trained checkpoint where that logit sits close to the decision
+boundary for many windows. It is explicitly **outside this task's adoption
+criteria** (brief: `mpjpe3d_units`/`reproj_px` only) and is not evidence
+against adopting cudnn -- but it is a real number that moved by a lot, so
+it is reported plainly rather than folded into "tracks closely".
 
 **Adoption verdict: ADOPT cudnn.** Both criteria cleared with margin: 42%
-wall-clock gain (>>10%) and <1% val drift (<<5%) at both checkpoints.
-`configs/model/mvq.yaml` already ships `attn_impl: cudnn` (this task's
-commit); no further config change needed.
+wall-clock gain (>>10%) and <1% val drift (<<5%) at both checkpoints,
+including the female cohort. `configs/model/mvq.yaml` already ships
+`attn_impl: cudnn` (this task's commit); no further config change needed.
+The `exist_prec`/`exist_rec` knife-edge above is noted for anyone using
+existence numbers from an early/short run as a signal -- it is not part of
+what this A/B was adopted on.
 
 Run dirs `mvq_attn_ab_xla`/`mvq_attn_ab_cudnn` under
 `${paths.mvq_runs_root}` were deleted after this table was extracted (per
@@ -618,3 +663,56 @@ the task brief) — re-run
 `scripts/slurm/submit_task.sh --gpus 4 --cpus 32 --mem 200 --time 1:30:00 <name> '...'`
 with the two `run_id=...model.attn_impl=...` invocations above (see
 `third_party/jarvis_jax/jarvis_jax/train/train_mvq.py`'s CLI) to reproduce.
+
+### Fix round 1 (2026-09-04): backbone's no-mask pad key was an approximation, not exact -- now fixed
+
+**Critical finding from review**: the original implementation padded the
+backbone's odd token count to even but left the one pad key UNMASKED (no
+`mask` argument at all), reasoning the even-length requirement only applied
+when a mask/bias was present. Reading the installed
+`jax/_src/cudnn/fused_attention_stablehlo.py` directly suggested that (the
+raise is gated `is_training and has_bias`), but source-reading is not the
+same as testing the actual custom-call path end to end, and the reviewer
+was right to demand the latter. Resolved empirically with one short queue
+job (1 GPU, job **39568764**, bf16 `(2,789,12,64)` under `jax.grad`, matching
+the shipped backbone shape):
+
+| variant | result | ms/iter | peak mem |
+|---|---|---|---|
+| (a) `mask=None`, T=789 odd, UNPADDED | **FAILED** (`NotImplementedError: Unsupported sequence length Q 789, KV 789`) | — | — |
+| (b) T=790 padded, `mask=None`, `query_seq_lengths=key_value_seq_lengths=789` (native `MaskType.PADDING`, no bias tensor) | **PASSED** | 7.94 | 1.62 GiB |
+| (c) T=790 padded, explicit bool key-mask (today's decoder path, `has_bias=True`) | **PASSED** | 18.02 | 2.36 GiB |
+
+So (a) does NOT work (contradicting the naive source-reading -- the actual
+even-length requirement is unconditional in this installed build, not
+gated on `has_bias` the way the Python-level guard alone suggests) -- but
+**(b) does**, and it is both **exact** (cuDNN natively excludes the padded
+key via the sequence-length argument, no unmasked contamination) and
+**faster than the boolean-mask path** (7.94 vs 18.02 ms/iter, since no bias
+tensor is materialised).
+
+**Implemented (b)**: `attention.py::flash_attention` now passes
+`key_value_seq_lengths` (the true, pre-pad key count) whenever `key_valid is
+None` and padding actually occurred, instead of leaving the pad key
+unmasked. This applies to the backbone (`dinov3.py`, always `key_valid=
+None`) and to the decoder's query self-attention (`decoder.py::CrossBlock`,
+which also passes `key_valid=None` since there is no such thing as an
+invalid query) -- both are now EXACT, with no more odd-N caveat. The
+decoder's cross-attention against the multi-view bank keeps the explicit
+boolean-mask path (option (c) above): `query_seq_lengths`/
+`key_value_seq_lengths` only support a single prefix-valid/suffix-invalid
+split per batch row, and the bank's `key_valid` (per-camera validity) is an
+ARBITRARY pattern across the sequence, not a prefix/suffix, so it cannot be
+expressed that way.
+
+**Re-verified**: `tests/test_dinov3.py::test_attn_impl_cudnn_matches_xla_backbone`
+now runs at the SHIPPED odd-N shape (N=17: 1 cls + 4 registers + 12 patch
+tokens, matching the real backbone's odd N~789) rather than a reshaped
+even-N workaround, with a tightened 2e-3 relative bound (was 2e-2) that
+would catch a 0.5% regression; re-ran the full CPU suite (40 passed, 4
+deselected) and the GPU parity suite (job **39568992**, 1x GPU: 3 passed).
+The 4-GPU training A/B above was NOT re-run for this fix (the brief's
+adoption criteria -- wall-clock and val parity -- were already comfortably
+cleared with margin before the fix, and the fix only removes a small,
+already-negligible-at-real-N approximation in the direction of MORE
+correctness, not less).
