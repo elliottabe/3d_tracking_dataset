@@ -88,9 +88,10 @@ class QueryDecoder(nnx.Module):
         base = self.to_view(h3d).reshape(B, I, T, 1, K, -1)
         q = base + gcam[:, None, None, :, None, :] + femb[None, None, :, None, None, :]
         q = q.reshape(B, I * T * C * K, -1)
+        qc = self.cfg.q_chunk
         for blk in self.blocks2d:
-            fn = (nnx.remat(lambda m, qq: m(qq, bank, bank_valid)) if self.cfg.remat
-                  else (lambda m, qq: m(qq, bank, bank_valid)))
+            fn = (nnx.remat(lambda m, qq: m(qq, bank, bank_valid, qc)) if self.cfg.remat
+                  else (lambda m, qq: m(qq, bank, bank_valid, qc)))
             q = fn(blk, q)
         q = q.reshape(B, I, T, C, K, -1)
         return {"uv": self.cfg.crop * jax.nn.sigmoid(self.heads.uv(q)),
@@ -112,10 +113,10 @@ class QueryDecoder(nnx.Module):
         if refine_ctx is not None:
             q = q + self.refine_in(refine_ctx)
         q = q.reshape(B, I * T * K, -1)
-        per_layer = []
+        per_layer = []; qc = cfg.q_chunk
         for li, blk in enumerate(self.blocks3d):
-            fn = (nnx.remat(lambda m, qq: m(qq, bank, bank_valid)) if cfg.remat
-                  else (lambda m, qq: m(qq, bank, bank_valid)))
+            fn = (nnx.remat(lambda m, qq: m(qq, bank, bank_valid, qc)) if cfg.remat
+                  else (lambda m, qq: m(qq, bank, bank_valid, qc)))
             q = fn(blk, q)
             if li % 2 == 1 and li != len(self.blocks3d) - 1:
                 per_layer.append(self._read3d(q, I, T, K))

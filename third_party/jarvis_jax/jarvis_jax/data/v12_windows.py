@@ -92,6 +92,14 @@ class V12WindowDataset:
         others = {k[2] for k in self._fs if k[0] == rec and f0 <= k[1] < f0 + self.T and k[2] != fly}
         return 1 + min(len(others), self.max_flies - 1)
 
+    def camera_names(self, i):
+        """The window's camera-axis names, in the SAME order as `crops`/`kp2d`/
+        `M` (`rt.cameras` order -- the calibration serials, e.g. 'Cam2012630'),
+        for labelling figures by name instead of a bare `cam{c+1}` index (see
+        CLAUDE.md's keypoint/camera-order-trap history)."""
+        rec = self.windows[i][0]
+        return list(self._rt(rec).cameras.keys())
+
     # ------------------------------------------------------------------ helpers
     def _rt(self, rec):
         return self._tools[self.manifest[rec]["calib_group"]]

@@ -115,11 +115,15 @@ def _fwd(model, crops, cam_valid, M, t_local, prompt_mask, prompt_on):
 def evaluate(model, ds, batch_size, *, cohorts: dict, part_of_k, weights, mesh, num_workers=8):
     """One pass over `ds` (JPEGs decoded ONCE per window via `window_batches`,
     not once per prompted/unprompted mode) running BOTH the prompted and the
-    unprompted forward on every decoded batch. `cohorts`: name -> bool array
-    over ds indices (by dataset index, recovered from `window_batches`'
-    shuffle=False, drop_last=False order: batches are yielded in dataset-index
-    order, so the sample seen at running position `offset+bi` IS ds index
-    `offset+bi`). Returns {"prompted": {...}, "unprompted": {...}}.
+    unprompted forward on every decoded batch. `batch_size` should be
+    `tcfg.batch_size` (the SAME as training), so eval's per-device batch
+    matches training's -- a smaller eval batch changes both the sharding
+    layout and the batch-composition of the reproj/uv2d/head_vs_reproj
+    aggregates below. `cohorts`: name -> bool array over ds indices (by
+    dataset index, recovered from `window_batches`' shuffle=False,
+    drop_last=False order: batches are yielded in dataset-index order, so the
+    sample seen at running position `offset+bi` IS ds index `offset+bi`).
+    Returns {"prompted": {...}, "unprompted": {...}}.
 
     Batches are sharded across `mesh` (`shard_batch`, same as the training
     step) rather than left as plain `jnp.asarray` -- unsharded eval arrays
@@ -129,19 +133,28 @@ def evaluate(model, ds, batch_size, *, cohorts: dict, part_of_k, weights, mesh, 
     hang on the NCCL clique rendezvous). The ragged last batch is padded (by
     repeating its final row) up to `batch_size` so every batch shards evenly
     across the mesh; the per-sample loop below still only reads the first
-    `B0` (real) rows, so padding never contaminates a per-sample statistic --
-    only the batch-level `uv2d_px`/`head_vs_reproj_px` prints average in a
-    duplicated real row for that one batch, a rounding-level effect."""
+    `B0` (real) rows, so padding never contaminates a per-sample statistic.
+
+    `reproj_px`/`uv2d_px`/`head_vs_reproj_px` are themselves BATCH-level means
+    (from `mvq_loss`, over that batch's valid (vis2d & fly_valid) entries) --
+    a plain mean-of-batches would let how samples happen to fall into batches
+    change the reported number (a batch with more occluded/invisible entries
+    contributes the SAME weight as a fully-visible one). Each batch's triple
+    is instead weighted by its OWN valid-entry count (computed host-side from
+    the padded batch `b`, matching exactly what `mvq_loss` averaged over) when
+    combining across batches, so the result is batch-grouping-independent."""
     names = ds.keypoint_names
     ii = lambda n: names.index(n)
     seg_names = [(a, c) for a, c in
                  [("EyeL", "EyeR")] + [(f"T{i}{s}_Tro", f"T{i}{s}_FeTi") for i in (1, 2, 3) for s in "LR"]
                  if a in names and c in names]
     seg_idx = [(ii(a), ii(c)) for a, c in seg_names]           # kept in lock-step with seg_names -- never re-filter one alone
-    # per_sample[mode] rows: (mpjpe_units, n_joints_with_gt, match_reproj_px,
-    # uv2d_px, head_vs_reproj_px, n_exist_pred, n_flies_true, seg_lengths|None,
-    # ds_index, is_two_fly_window)
+    # per_sample[mode] rows: (mpjpe_units, n_joints_with_gt, n_exist_pred,
+    # n_flies_true, seg_lengths_pred|None, seg_lengths_gt|None, ds_index,
+    # is_two_fly_window)
     per_sample = {"prompted": [], "unprompted": []}
+    # batch_stats[mode] rows: (reproj_px, uv2d_px, head_vs_reproj_px, valid_entry_count)
+    batch_stats = {"prompted": [], "unprompted": []}
     offset = 0
     for b in window_batches(ds, batch_size, shuffle=False, drop_last=False, num_workers=num_workers):
         B0 = b["crops"].shape[0]
@@ -151,6 +164,7 @@ def evaluate(model, ds, batch_size, *, cohorts: dict, part_of_k, weights, mesh, 
         B = batch_size
         jb = {k: shard_batch(jnp.asarray(v), mesh) for k, v in b.items()}
         has_mask = jb["prompt_mask"].reshape(B, -1).any(-1)
+        weight = int((b["vis2d"] & b["fly_valid"][:, :, None, None, None]).sum())
         for mode, prompted in (("prompted", True), ("unprompted", False)):
             on = jnp.full((B,), prompted) & has_mask
             out = _fwd(model, normalize_crops(jb["crops"]), jb["cam_valid"], jb["M"], jb["t_local"],
@@ -158,7 +172,8 @@ def evaluate(model, ds, batch_size, *, cohorts: dict, part_of_k, weights, mesh, 
             jb_m = dict(jb); jb_m["prompt_on"] = on
             _, m = mvq_loss(out, jb_m, weights, part_of_k)      # reuses the matching
             xyz = np.asarray(out["xyz"])                          # (B,I,T,K,3)
-            uv2d_px, head_vs_reproj_px = float(m["uv2d_px"]), float(m["head_vs_reproj_px"])
+            batch_stats[mode].append((float(m["match_reproj_px"]), float(m["uv2d_px"]),
+                                      float(m["head_vs_reproj_px"]), weight))
             # per-sample numbers from the matched instance (fly 0 = host): redo the cheap host match
             for bi in range(B0):        # only the REAL rows -- padding never enters a per-sample stat
                 i_ds = offset + bi
@@ -166,41 +181,59 @@ def evaluate(model, ds, batch_size, *, cohorts: dict, part_of_k, weights, mesh, 
                 d = np.linalg.norm(xyz[bi] - gt[None], axis=-1)      # (I,T,K)
                 inst = int(np.argmin(np.where(has[None], d, 0).sum((1, 2)) / max(has.sum(), 1)))
                 e = d[inst][has]
-                L = ([np.linalg.norm(xyz[bi, inst, 0, a] - xyz[bi, inst, 0, c]) for a, c in seg_idx]
-                     if has.sum() > 0 else None)
+                L_pred = ([np.linalg.norm(xyz[bi, inst, 0, a] - xyz[bi, inst, 0, c]) for a, c in seg_idx]
+                         if has.sum() > 0 else None)
+                # GT segment length per-segment gated on BOTH endpoints having GT (NaN otherwise,
+                # so a segment missing one endpoint doesn't silently pull rigid_len_ratio toward 0).
+                # gt/has are (T,K,.)/(T,K) -- index frame 0 explicitly (T==1 here), matching L_pred's
+                # own xyz[bi, inst, 0, a] indexing just above.
+                L_gt = ([np.linalg.norm(gt[0, a] - gt[0, c]) if has[0, a] and has[0, c] else np.nan
+                        for a, c in seg_idx] if has.sum() > 0 else None)
                 exist = 1 / (1 + np.exp(-np.asarray(out["exist_logit"][bi]))) > 0.5
                 two_fly = ds.n_flies(i_ds) > 1
                 per_sample[mode].append((float(e.mean()) if e.size else np.nan, int(e.size),
-                                         float(m["match_reproj_px"]), uv2d_px, head_vs_reproj_px,
-                                         int(exist.sum()), int(b["fly_valid"][bi].sum()), L, i_ds, two_fly))
+                                         int(exist.sum()), int(b["fly_valid"][bi].sum()),
+                                         L_pred, L_gt, i_ds, two_fly))
         offset += B0
 
     def _finish(mode):
         samples = per_sample[mode]
         mp = np.array([p[0] for p in samples]); n = np.array([p[1] for p in samples])
         ok = np.isfinite(mp)
+        bstats = np.array(batch_stats[mode])                    # (n_batches, 4)
+        w = bstats[:, 3]
+        def _wmean(col):
+            return float(np.average(col, weights=w)) if w.sum() > 0 else float(np.mean(col))
         res = {"mpjpe3d_units": float(np.average(mp[ok], weights=n[ok])) if ok.any() else float("nan"),
-               "reproj_px": float(np.mean([p[2] for p in samples])),
-               "uv2d_px": float(np.mean([p[3] for p in samples])),
-               "head_vs_reproj_px": float(np.mean([p[4] for p in samples]))}
+               "reproj_px": _wmean(bstats[:, 0]), "uv2d_px": _wmean(bstats[:, 1]),
+               "head_vs_reproj_px": _wmean(bstats[:, 2])}
         res["mpjpe3d_mm"] = res["mpjpe3d_units"] * MM_PER_UNIT
         # exist precision/recall (spec §7): two-fly windows only -- a single-fly
         # crop has nothing for a 2nd/3rd instance to correctly NOT exist against.
-        two_fly = np.array([p[9] for p in samples])
+        two_fly = np.array([p[7] for p in samples])
         if two_fly.any():
-            pred = np.array([p[5] for p in samples])[two_fly]
-            true = np.array([p[6] for p in samples])[two_fly]
+            pred = np.array([p[2] for p in samples])[two_fly]
+            true = np.array([p[3] for p in samples])[two_fly]
             res["exist_prec"] = float(np.sum(np.minimum(pred, true)) / max(np.sum(pred), 1))
             res["exist_rec"] = float(np.sum(np.minimum(pred, true)) / max(np.sum(true), 1))
         else:
             res["exist_prec"] = float("nan"); res["exist_rec"] = float("nan")
-        Ls = [p[7] for p in samples if p[7] is not None]        # skip samples with no 3D-labelled joint
+        Ls = [p[4] for p in samples if p[4] is not None]        # skip samples with no 3D-labelled joint
+        Ls_gt = [p[5] for p in samples if p[5] is not None]     # same gate as Ls -- see the shared `has.sum()>0` above
         if Ls:
-            Ls = np.array(Ls)
-            for (a, c), col in zip(seg_names, Ls.T):
-                res[f"rigid_spread_mm/{a}-{c}"] = float(np.std(col) * MM_PER_UNIT)
+            Ls = np.array(Ls); Ls_gt = np.array(Ls_gt)
+            for j, (a, c) in enumerate(seg_names):
+                res[f"rigid_spread_mm/{a}-{c}"] = float(np.std(Ls[:, j]) * MM_PER_UNIT)
+                gt_col = Ls_gt[:, j]; gt_ok = np.isfinite(gt_col)
+                # mean predicted / mean GT length, over samples where THIS segment's
+                # GT is available -- a collapsed pair (predicted length -> 0 while GT
+                # stays real) shows up here as a ratio near 0, which rigid_spread_mm
+                # alone cannot: a collapsed-but-STEADY pair is smoother, not noisier
+                # (CLAUDE.md's "check a rigid invariant" history).
+                res[f"rigid_len_ratio/{a}-{c}"] = (
+                    float(np.mean(Ls[gt_ok, j]) / np.mean(gt_col[gt_ok])) if gt_ok.any() else float("nan"))
         for name, mask in cohorts.items():
-            sel = np.array([mask[p[8]] for p in samples]) & ok
+            sel = np.array([mask[p[6]] for p in samples]) & ok
             res[f"cohort_{name}"] = float(np.average(mp[sel], weights=n[sel])) if sel.any() else float("nan")
         return res
 
@@ -282,7 +315,19 @@ def run_training(root, *, out_dir, ckpt_dir, mcfg: MVQConfig, tcfg: MVQTrainConf
         model.backbone = load_dinov3_safetensors(model.backbone, dinov3_snapshot(HF_REPOS[mcfg.backbone]))
         print(f"[mvq] loaded {HF_REPOS[mcfg.backbone]}")
     opt = make_optimizer(model, tcfg)
-    ema = jax.tree_util.tree_map(lambda p: p, nnx.state(model, nnx.Param))
+    # EMA seeded at ZERO (not the step-0 params): a running sum, debiased by
+    # `_with_ema`'s `/(1-decay**t)` divisor at read time (t = the number of
+    # updates so far, which is always exactly the current absolute step count
+    # `i+1` since the EMA is seeded once at true step 0 -- including across a
+    # resume, since `ema` is restored from the checkpoint below along with
+    # `start` -- and updated exactly once per training step; no separate
+    # counter needs to be saved/restored, the step count already is one).
+    # Seeding from params (the old behaviour) meant the near-zero init xyz
+    # head still carried 0.999**2000 = 13.5% weight at step 2000 -- measured
+    # as a uniform SHRINK of every predicted joint toward the crop centre,
+    # worse for distal legs (radial dist/GT ratio 0.68-0.83) than proximal
+    # body joints (0.86-0.93), since distal joints sit furthest from centre.
+    ema = jax.tree_util.tree_map(jnp.zeros_like, nnx.state(model, nnx.Param))
     mngr = _make_manager(ckpt_dir) if ckpt_dir else None
     start = 0
     if mngr is not None:
@@ -318,24 +363,29 @@ def run_training(root, *, out_dir, ckpt_dir, mcfg: MVQConfig, tcfg: MVQTrainConf
             ms = " ".join(f"{k}={float(v):.4f}" for k, v in metrics.items() if k != "total")
             print(f"step {i+1}/{tcfg.total_steps} T={T} loss {loss:.4f} {ms} ({time.time()-t0:.0f}s)", flush=True)
         if (i + 1) % tcfg.eval_every == 0 or i + 1 == tcfg.total_steps:
-            em = _with_ema(model, ema)
+            em = _with_ema(model, ema, tcfg.ema, i + 1)
             val = evaluate(em, val_ds, tcfg.batch_size, cohorts=cohorts, part_of_k=part_of_k,
                            weights=weights, mesh=mesh, num_workers=tcfg.num_workers)
             for mode, r in val.items():
                 print(f"  val[{mode}] " + " ".join(f"{k}={v:.4f}" for k, v in r.items()), flush=True)
-            # eval's own _fwd executable + its Python-held device arrays otherwise
-            # linger past this point; on a 4-GPU node that fragmented GPU0's BFC
-            # pool enough that the VERY NEXT training step (its ~19GB arena) OOM'd
-            # and the other 3 ranks hung on the NCCL clique rendezvous (measured
-            # 2026-09-03). Drop the eval module and clear the compilation cache
-            # before returning to training.
+            # `del em` frees nothing by itself -- em's arrays alias the SAME
+            # underlying device buffers as `ema` (nnx.update wrote references,
+            # not copies), which are still live via the `ema` pytree in this
+            # scope. The actual relief is `jax.clear_caches()`, which discards
+            # eval's own compiled `_fwd` executable and its cached buffers;
+            # WITHOUT it those otherwise linger and fragment GPU 0's BFC pool
+            # enough that the VERY NEXT training step's ~19GB arena OOMs, and
+            # the other 3 ranks hang on the NCCL clique rendezvous (measured
+            # 2026-09-03). Cost: the training step recompiles on the next
+            # call after every eval (a multi-second one-time hit each time,
+            # not per-step).
             del em
             jax.clear_caches()
         if mngr is not None and (i + 1) % tcfg.save_every == 0:
             _save_step(mngr, i + 1, model, opt, ema)
     if mngr is not None:
         _save_step(mngr, tcfg.total_steps, model, opt, ema); mngr.wait_until_finished()
-    em = _with_ema(model, ema)
+    em = _with_ema(model, ema, tcfg.ema, tcfg.total_steps)
     val = evaluate(em, val_ds, tcfg.batch_size, cohorts=cohorts, part_of_k=part_of_k,
                    weights=weights, mesh=mesh, num_workers=tcfg.num_workers)
     os.makedirs(out_dir, exist_ok=True)
@@ -346,13 +396,23 @@ def run_training(root, *, out_dir, ckpt_dir, mcfg: MVQConfig, tcfg: MVQTrainConf
     return {"final_loss": loss, "val": val, "steps": tcfg.total_steps, "resumed_from": start}
 
 
-def _with_ema(model, ema):
-    """A NEW module holding the EMA weights, independent of `model`'s own
-    Variable objects. `nnx.split`/`nnx.merge` on `model` itself would return a
-    module aliasing the SAME Variables as `model` (flax 0.12.8), so
+def _with_ema(model, ema, decay: float, t: int):
+    """A NEW module holding the DEBIASED EMA weights, independent of `model`'s
+    own Variable objects. `nnx.split`/`nnx.merge` on `model` itself would
+    return a module aliasing the SAME Variables as `model` (flax 0.12.8), so
     `nnx.update(em, ema)` would silently overwrite the training model's live
-    params too -- `nnx.clone` makes a real copy first."""
+    params too -- `nnx.clone` makes a real copy first.
+
+    `ema` is a raw running sum seeded from ZERO (see run_training), so after
+    `t` updates it still carries a `decay**t` shortfall relative to the true
+    average -- the same bias Adam corrects for its moment estimates. `t=0`
+    (no updates yet) returns the live params undebiased, since 0/0 is
+    undefined and this case should not arise in normal use (eval/save always
+    happen at t>=1)."""
     em = nnx.clone(model)
-    nnx.update(em, ema)
+    if t > 0:
+        correction = 1.0 - decay ** t
+        ema = jax.tree_util.tree_map(lambda e: e / correction, ema)
+        nnx.update(em, ema)
     em.eval()
     return em
