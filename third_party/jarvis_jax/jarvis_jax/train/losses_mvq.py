@@ -8,7 +8,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from jarvis_jax.models.mvq.geometry import project_local
-from jarvis_jax.train.matching import match
+from jarvis_jax.train.matching import assign_slots, slot_ignore, SEX_FEMALE, N_SLOTS
 
 
 @dataclasses.dataclass(frozen=True)
@@ -23,6 +23,7 @@ class LossWeights:
     # just trades off how hard `c` is penalised for saturating toward 0.
     conf: float = 0.2
     exist: float = 1.0
+    sex: float = 0.5
     rep: float = 0.5
     pass1: float = 0.5
     aux: float = 0.3
@@ -71,17 +72,15 @@ def _geo_terms(pred, batch, w, valid_f):
 def mvq_loss(out, batch, w: LossWeights, part_of_k):
     B, I = out["xyz"].shape[:2]; F = batch["kp3d_local"].shape[1]
     fv = batch["fly_valid"]
-    # ---------------- matching on the final pass (no gradient)
-    xyz_sg = jax.lax.stop_gradient(out["xyz"])
-    uv_all = _reproject(xyz_sg, batch["M"], batch["t_local"])                   # (B,I,T,C,K,2)
-    e2 = _huber(uv_all[:, :, None] - batch["kp2d"][:, None], w.huber_px).mean(-1)   # (B,I,F,T,C,K)
-    m2 = batch["vis2d"][:, None]
-    c2 = (e2 * m2).sum((3, 4, 5)) / jnp.maximum(m2.sum((3, 4, 5)), 1.0)
-    e3 = batch["px_scale"][:, None, None, None, None] * jnp.abs(xyz_sg[:, :, None] - batch["kp3d_local"][:, None]).mean(-1)
-    m3 = batch["has3d"][:, None]
-    c3 = (e3 * m3).sum((3, 4)) / jnp.maximum(m3.sum((3, 4)), 1.0)
-    cost = jnp.where(fv[:, None, :], c2 + c3, 1e6)
-    assign, inst_matched = match(cost, fv, batch["prompt_on"])
+    if I != N_SLOTS:
+        raise ValueError(f"mvq_loss expects n_instances == {N_SLOTS} (slots prompted/female/male/other), got {I}")
+    # ---------------- label-driven slot assignment (P3a §3): no prediction enters
+    has_f = batch["has3d"].astype(jnp.float32)                                          # (B,F,T,K)
+    cen = (batch["kp3d_local"] * has_f[..., None]).sum((2, 3)) / jnp.maximum(has_f.sum((2, 3)), 1.0)[..., None]
+    dist = jnp.linalg.norm(cen, axis=-1)                                                 # (B,F) from the ROI origin
+    assign, slot_target = assign_slots(batch["fly_sex"], fv, batch["prompt_on"], dist, I)
+    ignore = slot_ignore(batch["unlabelled_sex"], I)                                     # (B,I)
+    inst_matched = slot_target
     # ---------------- gather per fly
     g = lambda d: {k: _gather_inst(d[k], assign) for k in ("xyz", "uv", "conf_logit", "vis_logit")}
     pf = g(out)
@@ -94,11 +93,20 @@ def mvq_loss(out, batch, w: LossWeights, part_of_k):
     log_c = jax.nn.log_sigmoid(pf["conf_logit"])
     c = jnp.exp(log_c)
     conf = _mmean(c * per_kp - w.conf * log_c, per_kp_m & fv[:, :, None, None])
-    # term 6 existence
+    # term 6 existence -- masked mean over slots NOT ignored (an unlabelled fly could occupy an ignored slot)
     tgt = inst_matched.astype(jnp.float32)
     bce_e = jnp.maximum(out["exist_logit"], 0) - out["exist_logit"] * tgt + jnp.log1p(jnp.exp(-jnp.abs(out["exist_logit"])))
-    exist = bce_e.mean()
-    exist_acc = ((out["exist_logit"] > 0) == inst_matched).astype(jnp.float32).mean()
+    keep = ~ignore
+    exist = _mmean(bce_e, keep)
+    exist_acc = _mmean(((out["exist_logit"] > 0) == inst_matched).astype(jnp.float32), keep)
+    # term 8 sex (P3a §4): BCE female=1 on assigned slots whose fly has a known sex
+    oh = ((assign[:, :, None] == jnp.arange(I)[None, None, :]) & fv[:, :, None]).astype(jnp.int32)   # (B,F,I)
+    slot_sex = (oh * (batch["fly_sex"].astype(jnp.int32) + 1)[:, :, None]).sum(1) - 1               # (B,I) -1 = none/unknown
+    m_sex = slot_sex >= 0
+    sex_t = (slot_sex == SEX_FEMALE).astype(jnp.float32)
+    bce_s = jnp.maximum(out["sex_logit"], 0) - out["sex_logit"] * sex_t + jnp.log1p(jnp.exp(-jnp.abs(out["sex_logit"])))
+    sex = _mmean(bce_s, m_sex)
+    sex_acc = _mmean(((out["sex_logit"] > 0) == (slot_sex == SEX_FEMALE)).astype(jnp.float32), m_sex)
     # term 7 repulsion against OTHER flies' same-part labels
     pok = jnp.asarray(np.asarray(part_of_k))
     same_part = (pok[:, None] == pok[None, :]).astype(jnp.float32)              # (K,K')
@@ -117,7 +125,7 @@ def mvq_loss(out, batch, w: LossWeights, part_of_k):
                 rep = rep + (h2.sum((1, 2, 3, 4)) * ok).sum() / jnp.maximum(ok.sum() * h2.shape[1] * h2.shape[2] * h2.shape[3], 1.0) \
                           + (h3.sum((1, 2, 3)) * ok).sum() / jnp.maximum(ok.sum() * h3.shape[1] * h3.shape[2], 1.0)
     total = (w.reproj * reproj + w.l3d * l3d + w.uv2d * uv2d + w.vis * vis + conf
-             + w.exist * exist + w.rep * rep)
+             + w.exist * exist + w.sex * sex + w.rep * rep)
     # deep supervision
     if out.get("aux_pass1") is not None:
         r1, l1, u1, _, _ = _geo_terms(g(out["aux_pass1"]), batch, w, fv)
@@ -139,6 +147,6 @@ def mvq_loss(out, batch, w: LossWeights, part_of_k):
     uv2d_px = _mmean(jnp.linalg.norm(pf["uv"] - batch["kp2d"], axis=-1), m2_full)
     head_vs_reproj_px = _mmean(jnp.linalg.norm(pf["uv"] - pf_reproj, axis=-1), m2_full)
     metrics = {"total": total, "reproj": reproj, "l3d": l3d, "uv2d": uv2d, "vis": vis, "conf": conf,
-               "exist": exist, "rep": rep, "exist_acc": exist_acc, "match_reproj_px": px,
-               "mpjpe3d_units": mp, "uv2d_px": uv2d_px, "head_vs_reproj_px": head_vs_reproj_px}
+               "exist": exist, "rep": rep, "exist_acc": exist_acc, "sex": sex, "sex_acc": sex_acc,
+               "match_reproj_px": px, "mpjpe3d_units": mp, "uv2d_px": uv2d_px, "head_vs_reproj_px": head_vs_reproj_px}
     return total, metrics
