@@ -803,3 +803,86 @@ None of the above moves any number reported earlier in this document (the
 gate-1 checkpoint was not retrained) except the two metric ADDITIONS
 (policy MPJPE, `policy_miss_frac`), which have no prior value to compare
 against.
+
+## Step-14000 check of the 30k T=1 run (2026-09-04, mid-run, resumed run `mvq_t1_b16_local8_20260904`)
+
+Rendered on a ckpt-all GPU job (39576003) from the converted step-14000 checkpoint
+through a view-only staging dir (`jax_mvq_runs/mvq_t1_b16_local8_20260904_view14k/`:
+`ckpt` symlink + `final/mvq_run.json` built from the run's `.hydra/config.yaml`,
+no weights of its own). Same script, same val split, same cases as gate 1, so the
+`female` / `two_fly` rows are the SAME framesets as the gate-1 figures (paired
+comparison); `worst` is re-sorted per run. Regenerate:
+```
+S=/gscratch/portia/eabe/data/Johnson_lab/jax_mvq_runs/mvq_t1_b16_local8_20260904_view14k
+PYTHONPATH=third_party/jarvis_jax:. python scripts/viz/mvq_overlay.py --run $S --step 14000 \
+  --split val --n 6 --cases female,two_fly,worst [--prompted] \
+  --out figures/2026-09-mvq/mvq_t1_b16_local8_step14000/{unprompted,prompted}
+PYTHONPATH=third_party/jarvis_jax:. python scripts/benchmark/mvq_val_baselines.py --mvq_run $S --mvq_step 14000 \
+  --out docs/benchmark/2026-09-mvq/mvq_step14000_vs_vitpose_dlt_val.json
+```
+
+EXPECTATION (written before looking): gate 1's failure was reach -- green/cyan
+paralleled the legs but stopped short of the tarsal tips (17-23 px on the female
+cohort) and collapsed to a thorax blob on the worst frames (36-60 px). At 14k
+steps (val oracle 0.117 mm at step 10k vs DLT 0.107 mm) the female cohort should
+be at a few px with green ON the white tips, the gate-1 worst wall-females
+(#10/#30/#24/#28, group C) should be recovered, and whatever is still worst should
+be the courtship/mating pairs; the one thing that must NOT appear is points on
+the other fly.
+
+SAW (all six PNGs opened and read):
+- `unprompted/gate1_female.png` (same 6 group-A females as gate 1): 3.6-5.9 px per
+  panel, 0.07-0.09 mm per frameset (gate 1: 17-23 px, 0.29-0.31 mm). Green sits on
+  the white labels out to the tarsal tips in all 7 cameras incl. the dark cam5/cam6
+  side views; cyan is hidden under green (2D head agrees with the reprojection).
+  Meets the strict few-px bar the docstring reserved for easy male frames.
+- `unprompted/gate1_two_fly.png` (group C, held-out calibration): 2.3-3.7 px on
+  5/6 rows; row #10 (fly half out of the crop edge in cam1/cam3) 10-17 px, 0.24 mm.
+  Second fly at the frame edge in #12/#13: no points on it.
+- `unprompted/gate1_worst.png`: now ALL six are group-A courtship/mating pairs
+  (#62 #60 #67 #65 #64 #63), 21-97 px, 0.54-1.20 mm. NEW failure mode: on the
+  stacked pairs (#62, #60, #64 female; #65 male) the selected instance's points are
+  SPLIT ACROSS BOTH FLIES -- e.g. #62 cam1 (Cam2012630): white on the lower fly,
+  green on the upper fly's head/thorax AND on the lower fly's legs. This is
+  cross-fly mixing, which gate 1 did not show (gate 1 stayed on the host and
+  collapsed). The gate-1 pair frames #67/#65 did not improve (56->62 px, 54->59 px).
+- `prompted/gate1_worst.png`: the SAME frames with the SAME errors (#62 1.19 vs
+  1.20 mm; #65 1.10 vs 0.96 mm). Prompt masks exist for all six (val is 100 %
+  prompt-covered), so the mask prompt does NOT resolve the mixing on stacked pairs.
+- Gate-1 worst wall-females recovered: #10 50->14 px, #30 50->13 px, #24 49->15 px,
+  #28 47->17 px.
+
+Paired numbers (153 val framesets, oracle instance, all GT joints, mm; gate 1 -> 14k):
+
+| cohort | n | mean | median | >0.3 mm | reproj px |
+|---|---|---|---|---|---|
+| all | 153 | 0.375 -> 0.113 | 0.331 -> 0.064 | 91% -> 5% | 23.1 -> 6.9 |
+| female | 67 | 0.403 -> 0.137 | 0.332 -> 0.066 | 85% -> 6% | 24.3 -> 8.3 |
+| male | 86 | 0.353 -> 0.094 | 0.330 -> 0.063 | 95% -> 5% | 22.2 -> 5.8 |
+| two_fly | 74 | 0.429 -> 0.163 | 0.354 -> 0.062 | 85% -> 11% | 26.3 -> 9.9 |
+| single | 79 | 0.323 -> 0.066 | 0.326 -> 0.065 | 96% -> 0% | 20.2 -> 4.1 |
+| group A | 123 | 0.349 -> 0.114 | 0.329 -> 0.065 | 92% -> 7% | 21.8 -> 7.0 |
+| group C | 30 | 0.480 -> 0.109 | 0.366 -> 0.058 | 87% -> 0% | 28.7 -> 6.5 |
+
+Mean without the 10 worst framesets (8 of them the group-A mating pairs #60-#67):
+0.071 mm. Prompted@14k means are within 0.003 mm of unprompted-oracle everywhere.
+
+Same-joint comparison vs ViTPose+DLT (`mvq_step14000_vs_vitpose_dlt_val.json`,
+joints DLT could triangulate, mm): overall DLT 0.107 vs mvq 0.114; female 0.072 vs
+0.139; two_fly 0.170 vs 0.163; group A 0.117 vs 0.116; group C 0.067 vs 0.109.
+So at 14k mvq is at parity with DLT on group A / two-fly, behind on the held-out
+calibration group C and on the female mean, and the female gap is the mating-pair
+mixing above, not the wall frames (the female median is 0.066 mm).
+
+Existence head / unprompted policy: `exist` sigmoid means per slot 0.45 / 0.48 /
+0.37; only 33 % of framesets have any slot >= 0.5, and on SINGLE-fly framesets the
+unprompted policy misses 99 % (two-fly 34 %). The head is uncalibrated around the
+0.5 threshold (train exist_acc ~0.80), so the unprompted policy number (0.239 mm
+on the 33 % it answers) is not meaningful yet. Prompted policy = slot 0, no misses,
+same accuracy as oracle -- the pipeline route (SAM masks available) is unaffected.
+
+Follow-ups added to the P3 list: (1) mating-pair cross-fly mixing incl. under the
+mask prompt -- inspect the prompt token / repulsion on stacked pairs, consider
+gray-fill of the other instance's mask as in JARVIS, and check how many train
+framesets are stacked pairs; (2) existence-head calibration (threshold sweep on
+val, or per-slot bias) before any unprompted number is quoted.

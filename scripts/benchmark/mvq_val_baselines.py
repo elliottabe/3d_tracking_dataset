@@ -315,7 +315,10 @@ def run(args):
         # are the ORACLE number (GT-nearest instance); mpjpe3d_policy_units/_mm alongside them
         # is what a real (unprompted) inference call would actually report -- see
         # train_mvq.evaluate's docstring for the oracle-vs-policy distinction.
-        result["mvq_meta_val"] = mvq_meta["val"]
+        # A mid-run view (--mvq_step) has no final val, and a final/ json's val is
+        # the FINAL step's -- keep it only when it exists and label the step.
+        result["mvq_meta_val"] = mvq_meta.get("val")
+        result["mvq_meta_val_is_final_step"] = args.mvq_step is None
         result["mvq_policy_miss_frac"] = float(mvq_policy_miss.mean()) if len(rows) else float("nan")
         for name, mask in cohorts.items():
             result[f"mvq_same_joints_{name}_units"] = cohort_mvq_same(mask)          # (b) oracle instance
