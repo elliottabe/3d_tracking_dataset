@@ -67,11 +67,65 @@ def test_load_mvq_model_ckpt_matches_final(tmp_path):
     assert len(pf) == len(pc) and len(pf) > 0
     for a, c in zip(pf, pc):
         np.testing.assert_allclose(np.asarray(a), np.asarray(c), atol=1e-5)
+    # a run whose architecture MATCHES the current code restores every leaf
+    assert meta_final["_unrestored_leaves"] == [] and meta_ckpt["_unrestored_leaves"] == []
     # "latest" resolves the same as the explicit last step
     m_latest, _ = load_mvq_model(str(tmp_path), step="latest")
     pl = jax.tree_util.tree_leaves(nnx.state(m_latest, nnx.Param))
     for a, l in zip(pf, pl):
         np.testing.assert_allclose(np.asarray(a), np.asarray(l), atol=1e-5)
+
+
+def test_load_mvq_model_tolerates_pre_p3a_checkpoint(tmp_path):
+    """`load_mvq_model` must OPEN a pre-P3a checkpoint, not raise on it.
+
+    The real warm-start/baseline source (`mvq_t1_b16_local8_20260904/final`,
+    606 leaves) predates the sex head and has `n_instances = 3`; today's
+    model has 608 leaves and 4 slots. Building the restore target from the
+    fresh model -- the old behaviour -- raised, so no figure or benchmark
+    script could measure the very baseline that checkpoint IS the baseline
+    for. The source here emulates it exactly: a 3-slot model whose
+    `decoder/heads/sex` subtree is DELETED before saving (so those leaves are
+    absent, not merely differently shaped), with an `mvq_run.json` that asks
+    for 4 slots. Expected unrestored list: `decoder/e_inst (partial rows
+    0:3)` plus the two sex-head leaves -- exactly the three the P3a spec §8
+    names for the real checkpoint."""
+    import orbax.checkpoint as ocp
+    from jarvis_jax.models.mvq import MVQConfig, MVQModel
+    from jarvis_jax.models.mvq.checkpoint import load_mvq_model
+    kw = dict(crop=448, patch=16, embed_dim=32, num_keypoints=50, num_cameras=7,
+              n_local=1, n_global=1, dec_layers_3d=2, dec_layers_2d=1, dec_heads=4, mlp_ratio=2.0,
+              refine_passes=1, patch_rgb=3, fourier_bands=2, backbone="tiny", backbone_depth=1,
+              backbone_heads=4, remat=False)
+    src = MVQModel(MVQConfig(n_instances=3, **kw), rngs=nnx.Rngs(0))
+    src.decoder.e_inst.value = src.decoder.e_inst.value + 1.0
+    pure = nnx.to_pure_dict(nnx.split(src)[1])
+    del pure["decoder"]["heads"]["sex"]                 # a source that predates the sex head
+    final = tmp_path / "final"
+    ck = ocp.StandardCheckpointer(); ck.save(str(final), pure); ck.wait_until_finished()
+    json.dump({"model": dict(n_instances=4, **kw), "train": {"ema": 0.999}, "val": None,
+              "keypoint_names": [f"k{i}" for i in range(50)]},
+              open(final / "mvq_run.json", "w"))
+
+    model, meta = load_mvq_model(str(final))
+    assert sorted(meta["_unrestored_leaves"]) == sorted(
+        ["decoder/e_inst (partial rows 0:3)", "decoder/heads/sex/bias", "decoder/heads/sex/kernel"])
+    # the three source slots landed in rows 0-2; row 3 and the sex head stay fresh
+    fresh = MVQModel(MVQConfig(n_instances=4, **kw), rngs=nnx.Rngs(0))
+    np.testing.assert_allclose(np.asarray(model.decoder.e_inst.value[:3]),
+                               np.asarray(src.decoder.e_inst.value))
+    np.testing.assert_allclose(np.asarray(model.decoder.e_inst.value[3]),
+                               np.asarray(fresh.decoder.e_inst.value[3]))
+    np.testing.assert_allclose(np.asarray(model.decoder.heads.sex.kernel.value),
+                               np.asarray(fresh.decoder.heads.sex.kernel.value))
+    # a matching-architecture source restores everything (no false skips)
+    full = tmp_path / "final_full"
+    ck.save(str(full), nnx.split(fresh)[1]); ck.wait_until_finished()
+    json.dump({"model": dict(n_instances=4, **kw), "train": {"ema": 0.999}, "val": None,
+              "keypoint_names": [f"k{i}" for i in range(50)]},
+              open(full / "mvq_run.json", "w"))
+    _, meta_full = load_mvq_model(str(full))
+    assert meta_full["_unrestored_leaves"] == []
 
 
 def test_empty_cohort_raises(tmp_path):

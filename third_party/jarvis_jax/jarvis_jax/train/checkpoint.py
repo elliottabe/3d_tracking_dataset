@@ -89,42 +89,74 @@ def _keypath_to_name(path_or_key):
     return key.strip("/")
 
 
-def warm_start_partial(model, src_dir):
-    """Shape-tolerant warm start (P3a spec §8): restore every leaf of `src_dir`
-    (a `final/` written by StandardCheckpointer) whose path AND shape match
-    `model`'s state; for `decoder/e_inst` with fewer source rows copy the
-    leading rows; leave everything else at its fresh init. Returns the new
-    model and the list of leaves NOT fully restored (human-readable paths).
+def replicated_abstract_tree(meta_tree):
+    """ShapeDtypeStruct twin of an Orbax METADATA tree (what
+    `StandardCheckpointer.metadata(dir).item_metadata.tree` or
+    `CheckpointManager.item_metadata(step)[item]` returns), replicated over
+    every currently-visible device.
+
+    Two properties matter and both are deliberate:
+      - the shapes/dtypes come from the CHECKPOINT, not from any live model,
+        so a checkpoint whose architecture differs from the current code's
+        (a leaf added since, a slot count changed) can be read at all --
+        building the target from the fresh model instead is what made
+        `load_mvq_model` raise on every pre-P3a checkpoint;
+      - the sharding is REPLICATED rather than the checkpoint's own, which
+        raises "Topology mismatch detected" the moment the current process's
+        device count differs from the training run's (8-GPU save -> 1-GPU or
+        CPU restore).
+    Non-array metadata entries pass through untouched."""
+    repl = NamedSharding(Mesh(jax.devices(), axis_names=("data",)), P())
+    is_arr = lambda x: hasattr(x, "shape") and hasattr(x, "dtype")
+    return jax.tree_util.tree_map(
+        lambda m: jax.ShapeDtypeStruct(tuple(m.shape), m.dtype, sharding=repl) if is_arr(m) else m,
+        meta_tree, is_leaf=is_arr)
+
+
+def restore_own_tree(src_dir):
+    """Restore `src_dir` (a StandardCheckpointer dir, e.g. a run's `final/`)
+    as ITS OWN pytree via `replicated_abstract_tree`, ready to hand to
+    `merge_state_by_path`."""
+    ck = ocp.StandardCheckpointer()
+    meta = ck.metadata(os.path.abspath(src_dir)).item_metadata.tree
+    return ck.restore(os.path.abspath(src_dir), target=replicated_abstract_tree(meta))
+
+
+def merge_state_by_path(model, restored_tree):
+    """Merge an already-restored checkpoint tree onto `model`'s state BY PATH
+    AND SHAPE: every leaf whose normalised path and shape match is taken from
+    the checkpoint, `decoder/e_inst` with fewer source rows contributes its
+    leading rows, and everything else keeps `model`'s own (fresh-init, or
+    previously-merged) value. Returns the new model and the list of leaves NOT
+    fully restored (human-readable paths) -- the caller reports them.
+
+    Shared by `warm_start_partial` (P3a spec §8) and
+    `models/mvq/checkpoint.py::load_mvq_model`, which need the identical
+    tolerance for the identical reason: the real pre-P3a 30k-step run predates
+    the sex head and has 3 instance slots, so a strict restore against
+    today's model raises instead of loading.
 
     The two trees being compared flatten to DIFFERENT key spellings: `pure`
     (below, from `nnx.to_pure_dict` on the live `model`'s split state) has
-    paths like `['decoder']['e_inst']`, while `src` (the raw `nnx.split(...)`
-    State restored from `src_dir`, i.e. what `warm_start_restore`/training
-    actually saves -- each leaf is a `VariableState` with its own `.value`)
-    flattens with a trailing `['value']`: `['decoder']['e_inst']['value']`.
-    Both are normalised to plain `a/b/c` form here, and that trailing
-    `/value` segment (present only on the `src` side) is stripped before the
-    two are matched by name, or every lookup below would silently miss and
-    every source leaf would report itself skipped.
+    paths like `['decoder']['e_inst']`, while the restored State (each leaf a
+    `VariableState` with its own `.value`, which is what training actually
+    saves) flattens with a trailing `['value']`:
+    `['decoder']['e_inst']['value']`. Both are normalised to plain `a/b/c`
+    form here, and that trailing `/value` segment is stripped before the two
+    are matched by name, or every lookup would silently miss and every leaf
+    would report itself skipped. A tree that is already plain (e.g. a raw
+    `nnx.state(model, nnx.Param)` EMA pytree) needs no stripping and matches
+    the same way.
 
     No leaf name is special-cased. In particular `decoder/heads/sex/*` is
-    NOT hardcoded here: the real warm-start source this exists for (the
-    P3a-era 30k-step run) predates the sex head entirely, so those two
-    leaves are simply absent from `src_flat` and fall through the ordinary
-    `s is None` path-miss branch below like any other architecture change
-    would -- e.g. a genuinely NEW checkpoint that already has a sex head
-    correctly restores it."""
+    NOT hardcoded: a source that predates the sex head simply has those
+    leaves absent and they fall through the ordinary path-miss branch like
+    any other architecture change, while a source that DOES carry a sex head
+    restores it like any other matching leaf."""
     gdef, state = nnx.split(model)
     pure = nnx.to_pure_dict(state)
-    repl = NamedSharding(Mesh(jax.devices(), axis_names=("data",)), P())
-    ck = ocp.StandardCheckpointer()
-    meta = ck.metadata(os.path.abspath(src_dir)).item_metadata.tree
-    is_arr = lambda x: hasattr(x, "shape") and hasattr(x, "dtype")
-    target = jax.tree_util.tree_map(
-        lambda m: jax.ShapeDtypeStruct(tuple(m.shape), m.dtype, sharding=repl) if is_arr(m) else m, meta, is_leaf=is_arr)
-    src = ck.restore(os.path.abspath(src_dir), target=target)
     src_flat = {}
-    for k, v in jax.tree_util.tree_flatten_with_path(src)[0]:
+    for k, v in jax.tree_util.tree_flatten_with_path(restored_tree)[0]:
         name = _keypath_to_name(k)
         if name.endswith("/value"):
             name = name[: -len("/value")]
@@ -146,3 +178,14 @@ def warm_start_partial(model, src_dir):
     new_pure = jax.tree_util.tree_map_with_path(merge, pure)
     nnx.replace_by_pure_dict(state, new_pure)
     return nnx.merge(gdef, state), skipped
+
+
+def warm_start_partial(model, src_dir):
+    """Shape-tolerant warm start (P3a spec §8): restore every leaf of `src_dir`
+    (a `final/` written by StandardCheckpointer) whose path AND shape match
+    `model`'s state; for `decoder/e_inst` with fewer source rows copy the
+    leading rows; leave everything else at its fresh init. Returns the new
+    model and the list of leaves NOT fully restored. See
+    `merge_state_by_path` (which does the merge, and is shared with
+    `load_mvq_model`) for the path-normalisation details."""
+    return merge_state_by_path(model, restore_own_tree(src_dir))

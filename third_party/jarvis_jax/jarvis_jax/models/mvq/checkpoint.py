@@ -4,7 +4,8 @@
 carried their own copy of this restore logic (device-count-independent
 replicated sharding so a 4-GPU training run can be restored on 1 GPU or on
 CPU without Orbax's "Topology mismatch detected"). This module is the single
-place it lives now.
+place it lives now; the path/shape-tolerant merge itself is shared with
+`train/checkpoint.py::warm_start_partial` (see `merge_state_by_path`).
 """
 from __future__ import annotations
 
@@ -12,22 +13,27 @@ import json
 import os
 
 import jax
-import jax.numpy as jnp
 import orbax.checkpoint as ocp
 from flax import nnx
-from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 
 from jarvis_jax.models.mvq.model import MVQConfig, MVQModel
+from jarvis_jax.train.checkpoint import (merge_state_by_path, replicated_abstract_tree,
+                                         restore_own_tree)
+
+# Orbax needs an explicit handler per item to answer `item_metadata(step)`
+# (without one it warns "could not be restored" and returns None for every
+# item) -- see `load_mvq_model`'s `ckpt/` branch, which reads the
+# checkpoint's OWN tree shapes from that metadata.
+_CKPT_ITEM_HANDLERS = {"model": ocp.StandardCheckpointHandler(),
+                       "ema": ocp.StandardCheckpointHandler(),
+                       "ema_meta": ocp.JsonCheckpointHandler()}
 
 
-def _replicated_target(state):
-    """Abstract restore target: same pytree as `state`, REPLICATED over every
-    currently-visible device -- NOT the checkpoint's own stored sharding,
-    which raises "Topology mismatch detected" the moment the current
-    process's device count differs from the training run's (e.g. restoring
-    on 1 GPU, or on CPU, after a 4-GPU training job)."""
-    repl = NamedSharding(Mesh(jax.devices(), axis_names=("data",)), P())
-    return jax.tree_util.tree_map(lambda v: jax.ShapeDtypeStruct(v.shape, v.dtype, sharding=repl), state)
+def _report_unrestored(what, skipped):
+    if skipped:
+        print(f"[mvq] {what}: {len(skipped)} leaf/leaves NOT restored (kept at fresh init): "
+              f"{sorted(skipped)}", flush=True)
+    return skipped
 
 
 def load_mvq_model(run_dir_or_final, *, step=None, attn_impl=None):
@@ -64,6 +70,20 @@ def load_mvq_model(run_dir_or_final, *, step=None, attn_impl=None):
     `attn_impl`: override the config's own `attn_impl` after loading (e.g. a
     "cudnn" GPU training run evaluated on a CPU host, which has no cuDNN
     flash-attention kernel -- pass `attn_impl="xla"`).
+
+    TOLERANT restore (both branches, 2026-09-04): the restore target is built
+    from the CHECKPOINT's own stored tree and merged onto a freshly built
+    model by path and shape (`train/checkpoint.py::merge_state_by_path`, the
+    same helper `warm_start_partial` uses, including its `e_inst`
+    leading-rows rule). Building the target from the fresh model instead --
+    the previous behaviour -- raised on every pre-P3a checkpoint: the real
+    30k-step run `mvq_t1_b16_local8_20260904` has 606 leaves and 3 instance
+    slots, today's model has 608 (the sex head) and 4, so a strict restore
+    could not even open it and no figure/benchmark script could measure the
+    baseline it is the baseline FOR. Leaves that could not be restored keep
+    their fresh init, are printed, and are returned in
+    `meta["_unrestored_leaves"]` so a caller can refuse to report a metric
+    that depends on an unrestored head (e.g. `mvq_overlay.py`'s `sex_prob`).
     """
     final_dir = run_dir_or_final if step is None else os.path.join(run_dir_or_final, "final")
     if step is None:
@@ -76,32 +96,39 @@ def load_mvq_model(run_dir_or_final, *, step=None, attn_impl=None):
     if attn_impl is not None:
         cfg_kwargs["attn_impl"] = attn_impl
     cfg = MVQConfig(**cfg_kwargs)
-    abstract_model = nnx.eval_shape(lambda: MVQModel(cfg, rngs=nnx.Rngs(0)))
-    gdef, state = nnx.split(abstract_model)
+    # A REAL (not eval_shape) init: `merge_state_by_path` keeps this model's own
+    # values for any leaf the checkpoint does not carry, so they have to exist.
+    model = MVQModel(cfg, rngs=nnx.Rngs(0))
 
     if step is None:
-        target = _replicated_target(state)
-        restored = ocp.StandardCheckpointer().restore(final_dir, target=target)
-        model = nnx.merge(gdef, restored)
+        model, skipped = merge_state_by_path(model, restore_own_tree(final_dir))
+        meta["_unrestored_leaves"] = _report_unrestored(f"load {final_dir}", skipped)
         model.eval()
         return model, meta
 
     ckpt_dir = os.path.join(run_dir_or_final, "ckpt")
-    ema_abstract = jax.tree_util.tree_map(jnp.zeros_like, nnx.state(abstract_model, nnx.Param))
-    model_target, ema_target = _replicated_target(state), _replicated_target(ema_abstract)
     mngr = ocp.CheckpointManager(os.path.abspath(ckpt_dir),
                                  options=ocp.CheckpointManagerOptions(read_only=True),
-                                 item_names=("model", "opt", "ema", "ema_meta"))
+                                 item_names=("model", "opt", "ema", "ema_meta"),
+                                 item_handlers=_CKPT_ITEM_HANDLERS)
     use_step = mngr.latest_step() if step == "latest" else step
+    im = mngr.item_metadata(use_step)
+    tree_of = lambda x: getattr(x, "tree", x)
     r = mngr.restore(use_step, args=ocp.args.Composite(
-        model=ocp.args.StandardRestore(model_target),
-        ema=ocp.args.StandardRestore(ema_target),
+        model=ocp.args.StandardRestore(replicated_abstract_tree(tree_of(im["model"]))),
+        ema=ocp.args.StandardRestore(replicated_abstract_tree(tree_of(im["ema"]))),
         ema_meta=ocp.args.JsonRestore()))
-    model = nnx.merge(gdef, r["model"])
+    model, skipped = merge_state_by_path(model, r["model"])
     decay = meta.get("train", {}).get("ema", 0.999)
     t = int(r["ema_meta"]["ema_updates"])
     correction = 1.0 - decay ** t if t > 0 else 1.0
     ema_params = jax.tree_util.tree_map(lambda e: e / correction, r["ema"])
-    nnx.update(model, ema_params)
+    # The debiased EMA overwrites the params it carries; every other leaf
+    # (non-Param state, and anything the EMA predates) keeps what the `model`
+    # item just restored -- the tolerant generalisation of `nnx.update`.
+    model, skipped_ema = merge_state_by_path(model, ema_params)
+    meta["_unrestored_leaves"] = _report_unrestored(f"load {ckpt_dir}/{use_step} (model)", skipped)
+    _report_unrestored(f"load {ckpt_dir}/{use_step} (ema, non-Param leaves expected)",
+                       [s for s in skipped_ema if s not in skipped])
     model.eval()
     return model, meta
