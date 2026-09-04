@@ -97,7 +97,14 @@ def make_train_step(aug: MVAugParams, lr_swap, part_of_k, weights: LossWeights, 
     def step(model, optimizer, ema, key, batch, prompt_p):
         k_aug, k_p = jax.random.split(key)
         batch = augment_window(k_aug, batch, aug, swap)
-        has_mask = batch["prompt_mask"].reshape(batch["prompt_mask"].shape[0], -1).any(-1)
+        # A window only "has" a usable prompt if the (post-augmentation) mask
+        # has a labelled pixel in a view that is ALSO a valid camera -- camera
+        # dropout (augment_window, above) can invalidate the only camera the
+        # mask lived in, and _prompt (model.py) already gates its own mean by
+        # cam_valid, so scoring has_mask on the mask alone would turn prompt_on
+        # on for a window whose prompt token is actually an all-invalid,
+        # zeroed-out mean.
+        has_mask = (batch["prompt_mask"].any((3, 4)) & batch["cam_valid"]).any((1, 2))
         batch["prompt_on"] = jax.random.bernoulli(k_p, prompt_p, has_mask.shape) & has_mask
         (loss, metrics), grads = nnx.value_and_grad(loss_fn, has_aux=True)(model, batch)
         optimizer.update(model, grads)
@@ -156,7 +163,7 @@ def evaluate(model, ds, batch_size, *, cohorts: dict, part_of_k, weights, mesh, 
     seg_idx = [(ii(a), ii(c)) for a, c in seg_names]           # kept in lock-step with seg_names -- never re-filter one alone
     # per_sample[mode] rows: (mpjpe_units, n_joints_with_gt, n_exist_pred,
     # n_flies_true, seg_lengths_pred|None, seg_lengths_gt|None, ds_index,
-    # is_two_fly_window)
+    # is_two_fly_window, mpjpe_policy_units|nan, is_policy_miss)
     per_sample = {"prompted": [], "unprompted": []}
     # batch_stats[mode] rows: (reproj_px, uv2d_px, head_vs_reproj_px, valid_entry_count)
     batch_stats = {"prompted": [], "unprompted": []}
@@ -182,26 +189,51 @@ def evaluate(model, ds, batch_size, *, cohorts: dict, part_of_k, weights, mesh, 
             xyz = np.asarray(out["xyz"])                          # (B,I,T,K,3)
             batch_stats[mode].append((float(m["match_reproj_px"]), float(m["uv2d_px"]),
                                       float(m["head_vs_reproj_px"]), weight))
-            # per-sample numbers from the matched instance (fly 0 = host): redo the cheap host match
+            # per-sample numbers from the matched instance (fly 0 = host): redo the cheap host match.
+            # This is the ORACLE instance choice (nearest to GT, which a real deployment does not have
+            # access to) -- `mpjpe3d_units` below stays this oracle number; `mpjpe3d_policy_units`
+            # (below) uses the POLICY a real inference call would actually use to pick an instance.
             for bi in range(B0):        # only the REAL rows -- padding never enters a per-sample stat
                 i_ds = offset + bi
                 gt = b["kp3d_local"][bi, 0]; has = b["has3d"][bi, 0]
                 d = np.linalg.norm(xyz[bi] - gt[None], axis=-1)      # (I,T,K)
-                inst = int(np.argmin(np.where(has[None], d, 0).sum((1, 2)) / max(has.sum(), 1)))
-                e = d[inst][has]
-                L_pred = ([np.linalg.norm(xyz[bi, inst, 0, a] - xyz[bi, inst, 0, c]) for a, c in seg_idx]
-                         if has.sum() > 0 else None)
+                inst_oracle = int(np.argmin(np.where(has[None], d, 0).sum((1, 2)) / max(has.sum(), 1)))
+                e = d[inst_oracle][has]
+                L_pred = ([np.linalg.norm(xyz[bi, inst_oracle, 0, a] - xyz[bi, inst_oracle, 0, c])
+                          for a, c in seg_idx] if has.sum() > 0 else None)
                 # GT segment length per-segment gated on BOTH endpoints having GT (NaN otherwise,
                 # so a segment missing one endpoint doesn't silently pull rigid_len_ratio toward 0).
                 # gt/has are (T,K,.)/(T,K) -- index frame 0 explicitly (T==1 here), matching L_pred's
-                # own xyz[bi, inst, 0, a] indexing just above.
+                # own xyz[bi, inst_oracle, 0, a] indexing just above.
                 L_gt = ([np.linalg.norm(gt[0, a] - gt[0, c]) if has[0, a] and has[0, c] else np.nan
                         for a, c in seg_idx] if has.sum() > 0 else None)
-                exist = 1 / (1 + np.exp(-np.asarray(out["exist_logit"][bi]))) > 0.5
+                exist_probs = 1 / (1 + np.exp(-np.asarray(out["exist_logit"][bi])))    # (I,)
+                exist = exist_probs > 0.5
                 two_fly = ds.n_flies(i_ds) > 1
+                # POLICY instance choice -- what a real inference call (no GT to match against)
+                # would actually pick: prompted -> instance 0 (the prompt targets that query slot,
+                # see decoder.py/matching.py's pin_first); unprompted -> among instances the model
+                # itself claims exist, the one whose predicted centroid (mean xyz over T,K, ROI-local
+                # so the ROI origin is (0,0,0)) sits closest to the ROI centre -- the host fly is
+                # cropped to be near that centre by construction (v12_windows.py), so this is the
+                # cheapest correct proxy for "which instance is the host" without seeing GT. A window
+                # where NO instance clears the exist threshold is a MISS: excluded from the policy
+                # mean (nothing to score), counted in policy_miss_frac instead.
+                if prompted:
+                    inst_policy = 0
+                else:
+                    cand = np.where(exist)[0]
+                    inst_policy = (int(cand[np.argmin(np.linalg.norm(xyz[bi, cand].mean(axis=(1, 2)), axis=-1))])
+                                  if cand.size else None)
+                is_miss = inst_policy is None
+                if is_miss:
+                    mpjpe_policy = np.nan
+                else:
+                    e_pol = d[inst_policy][has]
+                    mpjpe_policy = float(e_pol.mean()) if e_pol.size else np.nan
                 per_sample[mode].append((float(e.mean()) if e.size else np.nan, int(e.size),
                                          int(exist.sum()), int(b["fly_valid"][bi].sum()),
-                                         L_pred, L_gt, i_ds, two_fly))
+                                         L_pred, L_gt, i_ds, two_fly, mpjpe_policy, is_miss))
         offset += B0
 
     def _finish(mode):
@@ -216,10 +248,21 @@ def evaluate(model, ds, batch_size, *, cohorts: dict, part_of_k, weights, mesh, 
             if col.size == 0:
                 return float("nan")
             return float(np.average(col, weights=w)) if w.sum() > 0 else float(np.mean(col))
+        # mpjpe3d_units/_mm are the ORACLE number (ground-truth-nearest instance, see the
+        # per-sample loop above) -- mpjpe3d_policy_units/_mm is what a real inference call
+        # (no GT to match against) would actually report, and policy_miss_frac is the
+        # fraction of windows the policy could not even name an instance for (unprompted
+        # mode only, when no instance clears the exist threshold).
         res = {"mpjpe3d_units": float(np.average(mp[ok], weights=n[ok])) if ok.any() else float("nan"),
                "reproj_px": _wmean(bstats[:, 0]), "uv2d_px": _wmean(bstats[:, 1]),
                "head_vs_reproj_px": _wmean(bstats[:, 2])}
         res["mpjpe3d_mm"] = res["mpjpe3d_units"] * MM_PER_UNIT
+        mp_policy = np.array([p[8] for p in samples]); ok_policy = np.isfinite(mp_policy)
+        miss = np.array([p[9] for p in samples], bool)
+        res["mpjpe3d_policy_units"] = (float(np.average(mp_policy[ok_policy], weights=n[ok_policy]))
+                                       if ok_policy.any() else float("nan"))
+        res["mpjpe3d_policy_mm"] = res["mpjpe3d_policy_units"] * MM_PER_UNIT
+        res["policy_miss_frac"] = float(miss.mean()) if len(samples) else 0.0
         # exist precision/recall (spec §7): two-fly windows only -- a single-fly
         # crop has nothing for a 2nd/3rd instance to correctly NOT exist against.
         two_fly = np.array([p[7] for p in samples])

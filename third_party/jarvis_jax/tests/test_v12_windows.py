@@ -50,6 +50,30 @@ def test_labels_are_consistent_with_geometry(tmp_path):
     # the host's visible keypoints lie inside the crop
     assert (gt[vis] >= 0).all() and (gt[vis] <= 447).all()
     assert 7.5 < float(s["px_scale"]) < 8.5
+    # crop_origin (C,2), full-frame px, per WINDOW (shared by every T frame):
+    # kp2d (crop-local) + crop_origin must reconstruct the fixture's own raw
+    # (full-frame) 2D labels for every visible keypoint.
+    assert s["crop_origin"].shape == (7, 2) and s["crop_origin"].dtype == np.int32
+    coco = json.load(open(os.path.join(root, "annotations", "instances_train.json")))
+    img_by_id = {im["id"]: im for im in coco["images"]}
+    ann_by_id = {a["id"]: a for a in coco["annotations"]}
+    fs0 = coco["framesets"][f"{REC}/Frame_0/fly0"]
+    cam_names = ds.camera_names(0)
+    full = np.zeros((7, K, 2), np.float32)
+    for img_id, ann_id in zip(fs0["frames"], fs0["ann_ids"]):
+        if ann_id is None:
+            continue
+        c = cam_names.index(img_by_id[img_id]["file_name"].split("/")[1])
+        full[c] = np.asarray(ann_by_id[ann_id]["keypoints"], np.float32).reshape(-1, 3)[:, :2]
+    recon = s["kp2d"][0, 0] + s["crop_origin"][:, None, :]
+    np.testing.assert_allclose(recon[vis], full[vis], atol=1e-3)
+    # assemble() must reconstruct the SAME full-frame coordinates from uv=kp2d.
+    from jarvis_jax.models.mvq.model import assemble
+    out = {"xyz": s["kp3d_local"][None, 0:1], "conf_logit": np.zeros((1, 1, 1, K), np.float32),
+          "exist_logit": np.array([[10.0]], np.float32), "uv": s["kp2d"][None, 0:1],
+          "vis_logit": np.zeros((1, 1, 1, 7, K), np.float32)}
+    _, _, kp2d_full = assemble(out, center3D=s["center3D"][None], crop_origin=s["crop_origin"][None])
+    np.testing.assert_allclose(kp2d_full[0, 0, 0][vis], full[vis], atol=1e-3)
 
 
 def test_jitter_only_in_train_mode_and_bounded(tmp_path):

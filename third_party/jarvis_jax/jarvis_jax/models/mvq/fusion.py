@@ -74,13 +74,24 @@ def masked_attention(q, k, v, key_valid, num_heads, q_chunk: int | None = 512, i
     return out.reshape(B, n_chunks * q_chunk, D)[:, :Nq]
 
 
+_UNSET = object()          # sentinel: "use the attribute baked in at construction", distinct from a real q_chunk=None
+
+
 class Attn(nnx.Module):
-    def __init__(self, D, heads, *, rngs):
+    def __init__(self, D, heads, *, rngs, q_chunk: int | None = 512, impl: str = "xla"):
         self.q, self.k, self.v, self.o = (nnx.Linear(D, D, rngs=rngs) for _ in range(4))
         self.heads = heads
+        # Construction-time defaults for callers (FusionStack) that don't override
+        # per call; decoder.py's CrossBlock always passes q_chunk/impl explicitly
+        # at call time instead, so its Attn's construction-time values (left at
+        # the class defaults above) are never actually used.
+        self.q_chunk = q_chunk
+        self.impl = impl
 
-    def __call__(self, x, ctx, ctx_valid, q_chunk: int | None = 512, impl: str = "xla"):
-        return self.o(masked_attention(self.q(x), self.k(ctx), self.v(ctx), ctx_valid, self.heads, q_chunk, impl))
+    def __call__(self, x, ctx, ctx_valid, q_chunk=_UNSET, impl=None):
+        qc = self.q_chunk if q_chunk is _UNSET else q_chunk
+        im = self.impl if impl is None else impl
+        return self.o(masked_attention(self.q(x), self.k(ctx), self.v(ctx), ctx_valid, self.heads, qc, im))
 
 
 class MLP(nnx.Module):
@@ -93,14 +104,15 @@ class MLP(nnx.Module):
 
 class SelfBlock(nnx.Module):
     """Pre-norm self-attention + MLP with LayerScale (init 0 => identity at step 0)."""
-    def __init__(self, D, heads, ratio, *, rngs, ls_init=0.0):
-        self.n1 = nnx.LayerNorm(D, rngs=rngs); self.attn = Attn(D, heads, rngs=rngs)
+    def __init__(self, D, heads, ratio, *, rngs, ls_init=0.0, q_chunk: int | None = 512, impl: str = "xla"):
+        self.n1 = nnx.LayerNorm(D, rngs=rngs)
+        self.attn = Attn(D, heads, rngs=rngs, q_chunk=q_chunk, impl=impl)
         self.n2 = nnx.LayerNorm(D, rngs=rngs); self.mlp = MLP(D, ratio, rngs=rngs)
         self.ls1 = nnx.Param(jnp.full((D,), ls_init)); self.ls2 = nnx.Param(jnp.full((D,), ls_init))
 
-    def __call__(self, x, valid, impl: str = "xla"):
+    def __call__(self, x, valid):
         h = self.n1(x)
-        x = x + self.ls1[...] * self.attn(h, h, valid, impl=impl)
+        x = x + self.ls1[...] * self.attn(h, h, valid)
         return x + self.ls2[...] * self.mlp(self.n2(x))
 
 
@@ -113,27 +125,28 @@ class FusionStack(nnx.Module):
         self.kinds = []
         for i in range(n):
             if i < cfg.n_local:
-                self.blocks.append(SelfBlock(D, H, cfg.mlp_ratio, rngs=rngs)); self.kinds.append("local")
+                self.blocks.append(SelfBlock(D, H, cfg.mlp_ratio, rngs=rngs, q_chunk=cfg.q_chunk,
+                                             impl=cfg.attn_impl)); self.kinds.append("local")
             if i < cfg.n_global:
-                self.blocks.append(SelfBlock(D, H, cfg.mlp_ratio, rngs=rngs)); self.kinds.append("global")
+                self.blocks.append(SelfBlock(D, H, cfg.mlp_ratio, rngs=rngs, q_chunk=cfg.q_chunk,
+                                             impl=cfg.attn_impl)); self.kinds.append("global")
 
     def __call__(self, tokens, valid):
         """tokens (B,V,N,D) with V = T*C views, valid (B,V)."""
         B, V, N, D = tokens.shape
         g = int(round(N ** 0.5)); p = self.cfg.global_pool
-        impl = self.cfg.attn_impl
         for kind, blk in zip(self.kinds, self.blocks):
             if kind == "local":
                 x = tokens.reshape(B * V, N, D)
                 ok = jnp.broadcast_to(valid.reshape(B * V, 1), (B * V, N))
-                tokens = blk(x, ok, impl).reshape(B, V, N, D)
+                tokens = blk(x, ok).reshape(B, V, N, D)
             else:
                 grid = tokens.reshape(B, V, g, g, D)
                 pooled = grid.reshape(B, V, g // p, p, g // p, p, D).mean(axis=(3, 5))     # (B,V,g/p,g/p,D)
                 q = (g // p) ** 2
                 flat = pooled.reshape(B, V * q, D)
                 ok = jnp.repeat(valid, q, axis=1)
-                upd = blk(flat, ok, impl) - flat                                            # (B,V*q,D)
+                upd = blk(flat, ok) - flat                                                   # (B,V*q,D)
                 upd = upd.reshape(B, V, g // p, 1, g // p, 1, D)
                 upd = jnp.broadcast_to(upd, (B, V, g // p, p, g // p, p, D)).reshape(B, V, N, D)
                 tokens = tokens + upd

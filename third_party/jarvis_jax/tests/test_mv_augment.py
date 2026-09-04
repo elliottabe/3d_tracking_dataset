@@ -86,6 +86,42 @@ def test_per_view_affine_moves_pixels_with_labels(tmp_path):
         assert img[c, y, x].max() > 128, f"cam {c}: label off the painted pixel"
 
 
+def test_per_view_affine_recomputes_px_scale(tmp_path):
+    """px_scale is a per-sample scalar summary of M (geometry.py::px_scale).
+    The per-view affine rewrites M (rotation+scale per camera), so a stale
+    px_scale carried over from the UN-augmented sample would mis-scale every
+    px_scale-weighted loss term (losses_mvq.py) relative to the geometry the
+    model actually trained on this step."""
+    from jarvis_jax.data.mv_augment import augment_window, MVAugParams
+    from jarvis_jax.data.augment import build_lr_swap
+    from jarvis_jax.models.mvq.geometry import px_scale
+    b, names = _batch(tmp_path)
+    p = MVAugParams(rot_deg=20, scale_min=1.4, scale_max=1.6, translate_frac=0.05, world_yaw=False,
+                    world_tilt_deg=0, mirror_p=0, cam_drop_p=0, brightness=0, contrast=0, gamma=0,
+                    blur_max=0, noise_scale=0, pc_color=0)
+    out = augment_window(jax.random.PRNGKey(5), b, p, build_lr_swap(names))
+    for i in range(b["crops"].shape[0]):
+        expected = float(px_scale(out["M"][i]))
+        assert abs(float(out["px_scale"][i]) - expected) < 1e-5
+        assert abs(float(out["px_scale"][i]) - float(b["px_scale"][i])) > 1e-3   # scale_min/max != 1 -> must differ
+
+
+def test_all_geometric_augs_composed_keep_labels_consistent(tmp_path):
+    """All geometric ops enabled at their MVAugParams DEFAULTS (photometric
+    zeroed) at once -- not one at a time, as test_each_geometric_aug_keeps_
+    labels_consistent checks -- must still keep GT 3D reprojecting onto GT 2D
+    exactly: per-view affine, world rotation, mirror and camera dropout all
+    rewrite the SAME M/t_local/kp2d/kp3d_local, in sequence, and a bug in how
+    any two compose (not just each alone) would show up here as reprojection
+    drift."""
+    from jarvis_jax.data.mv_augment import augment_window, MVAugParams
+    from jarvis_jax.data.augment import build_lr_swap
+    b, names = _batch(tmp_path)
+    p = MVAugParams(brightness=0, contrast=0, gamma=0, blur_max=0, noise_scale=0, pc_color=0)
+    out = augment_window(jax.random.PRNGKey(11), b, p, build_lr_swap(names))
+    assert _reproj_err(out) < 0.05
+
+
 def test_camera_dropout_never_below_three(tmp_path):
     from jarvis_jax.data.mv_augment import augment_window, MVAugParams
     from jarvis_jax.data.augment import build_lr_swap
@@ -97,3 +133,42 @@ def test_camera_dropout_never_below_three(tmp_path):
     cv = np.asarray(out["cam_valid"])
     assert (cv.sum(-1) >= 3).all() and (cv.sum(-1) < 7).any()
     assert not np.asarray(out["vis2d"])[..., ~cv[0, 0], :][0].any()
+
+
+def test_camera_dropout_keys_off_every_frame_valid(tmp_path):
+    """Frame 1 has camera index 2 unresolved (None slot, like
+    test_none_slot_marks_camera_invalid). Before this fix, both the "invalid
+    sorts last" penalty and the n_valid-3 floor were keyed on frame 0's
+    cam_valid alone (`cam_valid[:, 0]`) -- camera 2, invalid ONLY in frame 1,
+    would look like a perfectly good (frame-0-valid) drop candidate there,
+    risking frame 1 (cam_valid ANDed with the drop mask, same drop mask
+    every frame) ending with fewer than 3 valid cameras once its own
+    already-invalid camera stacks with the drop. Keying on
+    `cam_valid.all(axis=1)` (valid in EVERY frame) instead fixes both: every
+    frame keeps >= 3 valid cameras after aggressive dropout, and camera 2
+    (invalid in frame 1) is never among the cameras THIS augmentation drops
+    in any frame."""
+    import json, os
+    from mvq_fixtures import REC
+    from jarvis_jax.data.v12_windows import V12WindowDataset
+    from jarvis_jax.data.mv_augment import augment_window, MVAugParams
+    from jarvis_jax.data.augment import build_lr_swap
+    root = make_v12_root(tmp_path, n_frames=3)
+    p = os.path.join(root, "annotations", "instances_train.json")
+    coco = json.load(open(p))
+    fs = coco["framesets"][f"{REC}/Frame_1/fly0"]
+    fs["ann_ids"][2] = None                          # third listed camera unresolved, frame 1 only
+    json.dump(coco, open(p, "w"))
+    ds = V12WindowDataset(root, "train", T=2, train=False)
+    s = ds[ds.windows.index((REC, 0, 0))]
+    b = {k: jnp.asarray(v)[None] for k, v in s.items()}
+    before = np.asarray(b["cam_valid"][0])                       # (T,C) before augmentation
+    assert not before[1, 2] and before[0, 2]        # fixture sanity: only frame 1's cam 2 is invalid
+    params = MVAugParams(cam_drop_p=1.0, cam_drop_max=6, rot_deg=0, scale_min=1, scale_max=1,
+                         translate_frac=0, world_yaw=False, world_tilt_deg=0, mirror_p=0,
+                         brightness=0, contrast=0, gamma=0, blur_max=0, noise_scale=0, pc_color=0)
+    out = augment_window(jax.random.PRNGKey(2), b, params, build_lr_swap(ds.keypoint_names))
+    cv = np.asarray(out["cam_valid"][0])                          # (T,C) after augmentation
+    assert (cv.sum(-1) >= 3).all()
+    dropped = before & ~cv                                        # (T,C) True where THIS aug turned a valid cam off
+    assert not dropped[:, 2].any()                                # never drops the already-sometimes-invalid camera

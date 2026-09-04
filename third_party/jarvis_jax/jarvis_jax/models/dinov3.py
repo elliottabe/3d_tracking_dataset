@@ -37,7 +37,10 @@ class DINOv3Config:
     in_ch: int = 3
     rope_dtype: str = "bfloat16"
     # "xla" (default; the explicit fp32-softmax path below) or "cudnn" (the
-    # flash-attention path in mvq/attention.py -- no mask, all tokens valid).
+    # flash-attention path in mvq/attention.py -- no `key_valid` mask, since
+    # no camera ever invalidates a backbone patch token; the only "invalid"
+    # position is attention.py's own even-length pad, which it excludes
+    # exactly via `key_value_seq_lengths`, not by leaving it unmasked).
     attn_impl: str = "xla"
 
     def __post_init__(self):

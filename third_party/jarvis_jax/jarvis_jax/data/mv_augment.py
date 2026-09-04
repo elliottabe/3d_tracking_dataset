@@ -74,8 +74,14 @@ def _per_view_affine(key, b, p):
     tl = jnp.einsum("bcij,btcj->btci", A, b["t_local"]) + bb[:, None, :, :]
     kp = jnp.einsum("bcij,bftckj->bftcki", A, b["kp2d"]) + bb[:, None, None, :, None, :]
     inb = ((kp >= 0) & (kp <= CROP - 1)).all(-1)
+    # px_scale is a per-sample summary of M (geometry.py::px_scale: mean over
+    # cameras of sqrt(sum(M_c^2)/2)) -- the per-view rotation/scale above
+    # changes M, so a stale px_scale from before this aug would silently
+    # mis-scale every px_scale-weighted loss term (losses_mvq.py's l3d/rep
+    # terms) relative to the crop this batch actually trained on.
+    px_scale = jnp.mean(jnp.sqrt(jnp.sum(M ** 2, axis=(2, 3)) / 2.0), axis=1)   # (B,C) -> (B,)
     return {**b, "crops": crops, "prompt_mask": pm, "M": M, "t_local": tl, "kp2d": kp,
-            "vis2d": b["vis2d"] & inb}
+            "vis2d": b["vis2d"] & inb, "px_scale": px_scale}
 
 
 def _rot_mats(key, B, p):
@@ -121,10 +127,19 @@ def _camera_dropout(key, b, p):
     k1, k2, k3 = jax.random.split(key, 3)
     do = jax.random.bernoulli(k1, p.cam_drop_p, (B,))
     n_drop = jax.random.randint(k2, (B,), 1, p.cam_drop_max + 1)
-    score = jax.random.uniform(k3, (B, C)) + (~b["cam_valid"][:, 0]).astype(jnp.float32)   # invalid sort last
+    # A camera dropped here is dropped in EVERY frame of the window (below),
+    # so "already invalid" and "how many are left to drop down to" must both
+    # be judged against a camera valid in EVERY frame (`ref`), not just frame
+    # 0 -- keying on frame 0 alone could pick a camera invalid in frame 1 as
+    # a "valid" drop candidate (never actually removing a real camera there)
+    # or undercount n_valid by cameras frame 0 happens to miss but every
+    # other frame has, needlessly dropping BELOW 3 truly-valid cameras once
+    # cam_valid is ANDed across all frames elsewhere.
+    ref = b["cam_valid"].all(axis=1)                                       # (B,C) valid in EVERY frame
+    score = jax.random.uniform(k3, (B, C)) + (~ref).astype(jnp.float32)    # invalid sort last
     order = jnp.argsort(score, axis=1)
     rank = jnp.argsort(order, axis=1)                                     # rank of each cam
-    n_valid = b["cam_valid"][:, 0].sum(1)
+    n_valid = ref.sum(1)
     n_drop = jnp.minimum(n_drop, jnp.maximum(n_valid - 3, 0))
     drop = (rank < n_drop[:, None]) & do[:, None]                          # (B,C)
     cv = b["cam_valid"] & ~drop[:, None, :]

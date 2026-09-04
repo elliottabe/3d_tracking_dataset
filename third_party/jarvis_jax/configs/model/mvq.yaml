@@ -19,6 +19,11 @@ patch_rgb: 9
 fourier_bands: 8
 roi_scale: 24.0
 camera_slot_embed: true
+# dinov3_b16/dinov3_l16 are REAL presets (MVQConfig.__post_init__): the
+# preset's own embed_dim/depth/num_heads are authoritative for the backbone,
+# and embed_dim above must equal the preset's (l16 needs embed_dim: 1024).
+# backbone_depth/backbone_heads below are pinned to b16's own values here
+# (12/12) -- null lets a preset's own depth/heads apply instead.
 backbone: dinov3_b16
 backbone_depth: 12
 backbone_heads: 12

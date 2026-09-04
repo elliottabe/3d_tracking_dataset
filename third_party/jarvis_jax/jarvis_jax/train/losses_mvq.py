@@ -17,6 +17,10 @@ class LossWeights:
     l3d: float = 0.5
     uv2d: float = 0.5
     vis: float = 0.1
+    # NOT an outer weight on term 5 -- it is lambda INSIDE that term's own
+    # formula (c*err - lambda*log(c), see mvq_loss's term-5 comment below):
+    # the confidence-calibration term always contributes at weight 1, this
+    # just trades off how hard `c` is penalised for saturating toward 0.
     conf: float = 0.2
     exist: float = 1.0
     rep: float = 0.5

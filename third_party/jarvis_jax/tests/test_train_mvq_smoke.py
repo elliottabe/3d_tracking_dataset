@@ -16,7 +16,7 @@ def test_two_steps_cpu_and_eval(tmp_path):
     root = make_v12_root(tmp_path)
     mcfg = MVQConfig(crop=448, patch=16, embed_dim=32, num_keypoints=50, num_cameras=7, n_instances=2,
                      n_local=1, n_global=1, dec_layers_3d=2, dec_layers_2d=1, dec_heads=4, mlp_ratio=2.0,
-                     refine_passes=1, patch_rgb=3, fourier_bands=2, backbone_depth=1, backbone_heads=4, remat=False)
+                     refine_passes=1, patch_rgb=3, fourier_bands=2, backbone="tiny", backbone_depth=1, backbone_heads=4, remat=False)
     tcfg = MVQTrainConfig(total_steps=2, batch_size=2, warmup_steps=1, eval_every=2, save_every=2,
                           log_every=1, num_workers=1, pretrained=False, window_lengths=(1, 2), smoke=True)
     res = run_training(root, out_dir=str(tmp_path / "final"), ckpt_dir=str(tmp_path / "ckpt"),
@@ -24,9 +24,49 @@ def test_two_steps_cpu_and_eval(tmp_path):
                        weights=LossWeights())
     assert np.isfinite(res["final_loss"])
     assert {"prompted", "unprompted"} <= set(res["val"])
-    v = res["val"]["prompted"]
-    assert {"mpjpe3d_units", "mpjpe3d_mm", "reproj_px", "cohort_female", "cohort_two_fly", "cohort_group_A"} <= set(v)
+    for mode in ("prompted", "unprompted"):
+        v = res["val"][mode]
+        assert {"mpjpe3d_units", "mpjpe3d_mm", "reproj_px", "cohort_female", "cohort_two_fly", "cohort_group_A",
+                "mpjpe3d_policy_units", "mpjpe3d_policy_mm", "policy_miss_frac"} <= set(v)
+        assert 0.0 <= v["policy_miss_frac"] <= 1.0
     assert os.path.isdir(tmp_path / "final") and os.path.isdir(tmp_path / "ckpt")
+
+
+def test_load_mvq_model_ckpt_matches_final(tmp_path):
+    """load_mvq_model must agree on the same run's two restore paths: `final/`
+    (the EMA `run_training` already debiased before saving) and `ckpt/<last
+    step>` (the raw EMA sum, debiased HERE by load_mvq_model using ema_meta's
+    ema_updates and the run's own train.ema decay) -- same math, same
+    numbers, so a figure/benchmark script reading from a mid-training
+    checkpoint (no `final/` yet) gets the identical answer a completed run's
+    `final/` would."""
+    from jarvis_jax.models.mvq import MVQConfig
+    from jarvis_jax.models.mvq.checkpoint import load_mvq_model
+    from jarvis_jax.train.train_mvq import run_training, MVQTrainConfig
+    from jarvis_jax.train.losses_mvq import LossWeights
+    from jarvis_jax.data.mv_augment import MVAugParams
+    root = make_v12_root(tmp_path)
+    mcfg = MVQConfig(crop=448, patch=16, embed_dim=32, num_keypoints=50, num_cameras=7, n_instances=2,
+                     n_local=1, n_global=1, dec_layers_3d=2, dec_layers_2d=1, dec_heads=4, mlp_ratio=2.0,
+                     refine_passes=1, patch_rgb=3, fourier_bands=2, backbone="tiny", backbone_depth=1,
+                     backbone_heads=4, remat=False)
+    tcfg = MVQTrainConfig(total_steps=2, batch_size=2, warmup_steps=1, eval_every=2, save_every=2,
+                          log_every=1, num_workers=1, pretrained=False, window_lengths=(1,), smoke=True)
+    run_training(root, out_dir=str(tmp_path / "final"), ckpt_dir=str(tmp_path / "ckpt"),
+                mcfg=mcfg, tcfg=tcfg, aug=MVAugParams(enabled=False), weights=LossWeights())
+    m_final, meta_final = load_mvq_model(str(tmp_path / "final"))
+    m_ckpt, meta_ckpt = load_mvq_model(str(tmp_path), step=2)
+    assert meta_final["model"] == meta_ckpt["model"]
+    pf = jax.tree_util.tree_leaves(nnx.state(m_final, nnx.Param))
+    pc = jax.tree_util.tree_leaves(nnx.state(m_ckpt, nnx.Param))
+    assert len(pf) == len(pc) and len(pf) > 0
+    for a, c in zip(pf, pc):
+        np.testing.assert_allclose(np.asarray(a), np.asarray(c), atol=1e-5)
+    # "latest" resolves the same as the explicit last step
+    m_latest, _ = load_mvq_model(str(tmp_path), step="latest")
+    pl = jax.tree_util.tree_leaves(nnx.state(m_latest, nnx.Param))
+    for a, l in zip(pf, pl):
+        np.testing.assert_allclose(np.asarray(a), np.asarray(l), atol=1e-5)
 
 
 def test_empty_cohort_raises(tmp_path):
@@ -36,7 +76,7 @@ def test_empty_cohort_raises(tmp_path):
     from jarvis_jax.data.mv_augment import MVAugParams
     root = make_v12_root(tmp_path, two_fly_frame=99)        # no two-fly frame anywhere
     mcfg = MVQConfig(embed_dim=32, n_instances=2, n_local=1, n_global=0, dec_layers_3d=2, dec_layers_2d=1,
-                     dec_heads=4, backbone_depth=1, backbone_heads=4, remat=False, fourier_bands=2, patch_rgb=3)
+                     dec_heads=4, backbone="tiny", backbone_depth=1, backbone_heads=4, remat=False, fourier_bands=2, patch_rgb=3)
     tcfg = MVQTrainConfig(total_steps=1, batch_size=2, pretrained=False, num_workers=1, smoke=True)
     with pytest.raises(ValueError, match="two_fly"):
         run_training(root, out_dir=str(tmp_path / "f"), ckpt_dir=None, mcfg=mcfg, tcfg=tcfg,
@@ -54,7 +94,7 @@ def test_with_ema_does_not_mutate_live_model():
     from jarvis_jax.train.train_mvq import _with_ema
     mcfg = MVQConfig(crop=32, patch=16, embed_dim=16, num_keypoints=4, num_cameras=2, max_frames=2,
                      n_instances=1, n_local=1, n_global=0, dec_layers_3d=1, dec_layers_2d=1, dec_heads=2,
-                     mlp_ratio=2.0, refine_passes=0, patch_rgb=3, fourier_bands=1, backbone_depth=1,
+                     mlp_ratio=2.0, refine_passes=0, patch_rgb=3, fourier_bands=1, backbone="tiny", backbone_depth=1,
                      backbone_heads=2, remat=False)
     model = MVQModel(mcfg, rngs=nnx.Rngs(0))
     before = [np.array(x) for x in jax.tree_util.tree_leaves(nnx.state(model, nnx.Param))]
@@ -83,7 +123,7 @@ def test_resume_from_checkpoint(tmp_path):
     root = make_v12_root(tmp_path)
     mcfg = MVQConfig(crop=448, patch=16, embed_dim=32, num_keypoints=50, num_cameras=7, n_instances=2,
                      n_local=1, n_global=1, dec_layers_3d=2, dec_layers_2d=1, dec_heads=4, mlp_ratio=2.0,
-                     refine_passes=1, patch_rgb=3, fourier_bands=2, backbone_depth=1, backbone_heads=4, remat=False)
+                     refine_passes=1, patch_rgb=3, fourier_bands=2, backbone="tiny", backbone_depth=1, backbone_heads=4, remat=False)
     ckpt_dir = str(tmp_path / "ckpt")
     common = dict(batch_size=2, warmup_steps=1, eval_every=100, save_every=1, log_every=1,
                  num_workers=1, pretrained=False, window_lengths=(1,), smoke=True)
@@ -113,7 +153,7 @@ def test_resume_refuses_checkpoint_without_ema_meta(tmp_path):
     from jarvis_jax.train.train_mvq import _restore_latest, make_optimizer, MVQTrainConfig
     mcfg = MVQConfig(crop=32, patch=16, embed_dim=16, num_keypoints=4, num_cameras=2, max_frames=2,
                      n_instances=1, n_local=1, n_global=0, dec_layers_3d=1, dec_layers_2d=1, dec_heads=2,
-                     mlp_ratio=2.0, refine_passes=0, patch_rgb=3, fourier_bands=1, backbone_depth=1,
+                     mlp_ratio=2.0, refine_passes=0, patch_rgb=3, fourier_bands=1, backbone="tiny", backbone_depth=1,
                      backbone_heads=2, remat=False)
     model = MVQModel(mcfg, rngs=nnx.Rngs(0))
     opt = make_optimizer(model, MVQTrainConfig())
@@ -153,7 +193,7 @@ def test_ema_debias_matches_constant_params():
     from jarvis_jax.train.train_mvq import _with_ema
     mcfg = MVQConfig(crop=32, patch=16, embed_dim=16, num_keypoints=4, num_cameras=2, max_frames=2,
                      n_instances=1, n_local=1, n_global=0, dec_layers_3d=1, dec_layers_2d=1, dec_heads=2,
-                     mlp_ratio=2.0, refine_passes=0, patch_rgb=3, fourier_bands=1, backbone_depth=1,
+                     mlp_ratio=2.0, refine_passes=0, patch_rgb=3, fourier_bands=1, backbone="tiny", backbone_depth=1,
                      backbone_heads=2, remat=False)
     model = MVQModel(mcfg, rngs=nnx.Rngs(0))
     p = jax.tree_util.tree_map(lambda x: jnp.full_like(x, 3.7), nnx.state(model, nnx.Param))
@@ -188,7 +228,7 @@ def test_evaluate_ragged_batch_matches_full_batch(tmp_path):
     assert len(ds) == 4
     mcfg = MVQConfig(crop=448, patch=16, embed_dim=32, num_keypoints=50, num_cameras=7, n_instances=2,
                      n_local=1, n_global=1, dec_layers_3d=2, dec_layers_2d=1, dec_heads=4, mlp_ratio=2.0,
-                     refine_passes=1, patch_rgb=3, fourier_bands=2, backbone_depth=1, backbone_heads=4, remat=False)
+                     refine_passes=1, patch_rgb=3, fourier_bands=2, backbone="tiny", backbone_depth=1, backbone_heads=4, remat=False)
     model = MVQModel(mcfg, rngs=nnx.Rngs(0))
     part_of_k, _ = build_part_index(ds.keypoint_names)
     mesh = data_parallel_mesh()

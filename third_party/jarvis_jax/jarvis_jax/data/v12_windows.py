@@ -27,7 +27,7 @@ from jarvis_jax.geometry.reprojection_tool import ReprojectionTool
 
 CROP = 448
 WINDOW_KEYS = ("crops", "cam_valid", "M", "t_local", "center3D", "kp3d_local", "has3d",
-               "kp2d", "vis2d", "fly_valid", "px_scale", "is_female", "prompt_mask")
+               "kp2d", "vis2d", "fly_valid", "px_scale", "is_female", "prompt_mask", "crop_origin")
 
 
 def _parse_key(key):
@@ -228,6 +228,7 @@ class V12WindowDataset:
             "has3d": has3d, "kp2d": kp2d.astype(np.float32), "vis2d": vis2d,
             "fly_valid": fly_valid, "px_scale": np.float32(px_scale),
             "is_female": np.bool_(self.is_female(i)), "prompt_mask": prompt,
+            "crop_origin": origin,
         }
 
 

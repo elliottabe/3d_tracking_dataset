@@ -12,6 +12,11 @@ from jarvis_jax.models.mvq.decoder import QueryDecoder, fourier, gather_refine_c
 from jarvis_jax.models.mvq.fusion import FusionStack
 from jarvis_jax.models.mvq.geometry import ray_from_pixel, token_pixel_centres
 
+# Real DINOv3 backbone presets, keyed by MVQConfig.backbone. When `backbone`
+# names one of these, the preset's embed_dim/depth/num_heads are authoritative
+# for the BACKBONE -- see MVQConfig.__post_init__ and MVQModel.__init__.
+_BACKBONE_PRESETS = {"dinov3_b16": DINOv3Config.vitb16(), "dinov3_l16": DINOv3Config.vitl16()}
+
 
 @dataclasses.dataclass(frozen=True)
 class MVQConfig:
@@ -34,22 +39,38 @@ class MVQConfig:
     fourier_bands: int = 8
     roi_scale: float = 24.0
     camera_slot_embed: bool = True
+    # A key of _BACKBONE_PRESETS ("dinov3_b16", "dinov3_l16") makes the preset's
+    # embed_dim/depth/num_heads authoritative for the backbone -- embed_dim
+    # must equal the preset's (raised in __post_init__ otherwise) and
+    # backbone_depth/backbone_heads (below) are only checked, not applied,
+    # when explicitly set to something that conflicts with it. "tiny" is a
+    # test-only escape hatch that keeps the old override-everything behaviour
+    # (embed_dim/backbone_depth/backbone_heads apply verbatim, no preset, no
+    # pretrained weights) -- see tests' TINY configs.
     backbone: str = "dinov3_b16"
-    backbone_depth: int = 12
-    backbone_heads: int = 12
+    # None = use the preset's own depth/heads (for a _BACKBONE_PRESETS name)
+    # or vitb16's (12/12) otherwise. Set explicitly only to shrink the
+    # backbone for a test (with backbone="tiny") or to pin/confirm a preset's
+    # own value; a value that conflicts with a chosen preset raises.
+    backbone_depth: int | None = None
+    backbone_heads: int | None = None
     remat: bool = True
-    # Query-chunk size for the 2D cross-attention path's masked_attention call
-    # (None = unchunked). Profiled 2026-09-04: chunking (q_chunk=512, the shipped
-    # default before this field existed) cost +13% step time to save 2.2GB --
-    # a bad trade once the attention-chunk remat fix (fusion.py) made the
-    # unchunked path fit comfortably at the 4-8 samples/GPU this model trains
-    # at. Kept configurable (not deleted) because a future larger n_instances/
-    # num_cameras config could make Nq large enough that chunking is worth its
-    # cost again -- see tests/test_mvq_model.py's chunked==unchunked tests,
-    # which exercise q_chunk=8 explicitly regardless of this default. Applies
-    # ONLY to attn_impl="xla" -- the cudnn path (below) never materialises
-    # logits/softmax to chunk in the first place (see fusion.py's docstring
-    # for what it materialises instead when key_valid is an arbitrary mask).
+    # Query-chunk size for masked_attention's chunked path (None = unchunked).
+    # Threaded into every decoder CrossBlock call (both the 3D and 2D passes,
+    # decoder.py) AND into FusionStack's SelfBlock/Attn at construction time
+    # (fusion.py) -- every masked_attention call in the model honours it, not
+    # just the 2D path. Profiled 2026-09-04: chunking (q_chunk=512, the
+    # shipped default before this field existed) cost +13% step time to save
+    # 2.2GB -- a bad trade once the attention-chunk remat fix (fusion.py) made
+    # the unchunked path fit comfortably at the 4-8 samples/GPU this model
+    # trains at. Kept configurable (not deleted) because a future larger
+    # n_instances/num_cameras config could make Nq large enough that chunking
+    # is worth its cost again -- see tests/test_mvq_model.py's
+    # chunked==unchunked tests, which exercise q_chunk=8 explicitly regardless
+    # of this default. Applies ONLY to attn_impl="xla" -- the cudnn path
+    # (below) never materialises logits/softmax to chunk in the first place
+    # (see fusion.py's docstring for what it materialises instead when
+    # key_valid is an arbitrary mask).
     q_chunk: int | None = None
     # "xla" (default; CPU-safe explicit-softmax path, unchanged behaviour) or
     # "cudnn" (mvq/attention.py's flash-attention path -- GPU only). Threaded
@@ -61,6 +82,23 @@ class MVQConfig:
     def __post_init__(self):
         if self.attn_impl not in ("xla", "cudnn"):
             raise ValueError(f"attn_impl must be 'xla' or 'cudnn', got {self.attn_impl!r}")
+        preset = _BACKBONE_PRESETS.get(self.backbone)
+        if preset is not None:
+            if self.embed_dim != preset.embed_dim:
+                raise ValueError(
+                    f"backbone={self.backbone!r} is embed_dim={preset.embed_dim}, but "
+                    f"MVQConfig.embed_dim={self.embed_dim} -- pass embed_dim={preset.embed_dim} "
+                    f"(or backbone='tiny' for a from-scratch, test-only backbone shape).")
+            if self.backbone_depth is not None and self.backbone_depth != preset.depth:
+                raise ValueError(
+                    f"backbone={self.backbone!r} is depth={preset.depth}, but "
+                    f"backbone_depth={self.backbone_depth} conflicts with it -- leave "
+                    f"backbone_depth unset (None) to use the preset's own depth.")
+            if self.backbone_heads is not None and self.backbone_heads != preset.num_heads:
+                raise ValueError(
+                    f"backbone={self.backbone!r} is num_heads={preset.num_heads}, but "
+                    f"backbone_heads={self.backbone_heads} conflicts with it -- leave "
+                    f"backbone_heads unset (None) to use the preset's own num_heads.")
 
     @property
     def grid(self):
@@ -71,10 +109,16 @@ class MVQModel(nnx.Module):
     def __init__(self, cfg: MVQConfig, *, rngs: nnx.Rngs):
         self.cfg = cfg
         D = cfg.embed_dim
-        base = DINOv3Config.vitl16() if cfg.backbone == "dinov3_l16" else DINOv3Config.vitb16()
-        self.backbone = DINOv3(dataclasses.replace(base, embed_dim=D, depth=cfg.backbone_depth,
-                                                   num_heads=cfg.backbone_heads,
-                                                   attn_impl=cfg.attn_impl), rngs=rngs)
+        preset = _BACKBONE_PRESETS.get(cfg.backbone)
+        if preset is not None:
+            depth = preset.depth if cfg.backbone_depth is None else cfg.backbone_depth
+            heads = preset.num_heads if cfg.backbone_heads is None else cfg.backbone_heads
+        else:
+            default = DINOv3Config.vitb16()
+            depth = default.depth if cfg.backbone_depth is None else cfg.backbone_depth
+            heads = default.num_heads if cfg.backbone_heads is None else cfg.backbone_heads
+        self.backbone = DINOv3(DINOv3Config(embed_dim=D, depth=depth, num_heads=heads,
+                                            attn_impl=cfg.attn_impl), rngs=rngs)
         nf = 2 * cfg.fourier_bands + 1
         self.geom = nnx.Linear(6 * nf, D, rngs=rngs)
         self.e_frame = nnx.Param(jax.random.normal(rngs.params(), (cfg.max_frames, D)) * 0.02)
@@ -139,6 +183,12 @@ def assemble(out, center3D, crop_origin, exist_thresh=0.5, cam_valid=None):
     is no observation to have triangulated a keypoint from. Per-keypoint
     visibility gating (a keypoint occluded in every view but the frame
     otherwise fine) is deferred to the P4 lifter, not this assembly step.
+
+    `crop_origin` is `(B,C,2)`, not `(B,T,C,2)`: `v12_windows.py` crops every
+    frame of a window at the SAME per-camera origin (the projection of the
+    window's single center3D, computed once from frame 0), so there is only
+    one origin per (sample, camera), shared across all T frames -- broadcast
+    below, not indexed by T.
     """
     xyz, conf = np.asarray(out["xyz"]), 1 / (1 + np.exp(-np.asarray(out["conf_logit"])))
     exist = 1 / (1 + np.exp(-np.asarray(out["exist_logit"]))) >= exist_thresh                 # (B,I)

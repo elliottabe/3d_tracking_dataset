@@ -6,7 +6,7 @@ from flax import nnx
 TINY = dict(crop=64, patch=16, embed_dim=32, num_keypoints=5, num_cameras=3, max_frames=4,
             n_instances=2, n_local=1, n_global=1, global_pool=2, dec_layers_3d=4, dec_layers_2d=1,
             dec_heads=4, mlp_ratio=2.0, refine_passes=1, patch_rgb=3, fourier_bands=4,
-            roi_scale=24.0, backbone_depth=1, backbone_heads=4, remat=False)
+            roi_scale=24.0, backbone="tiny", backbone_depth=1, backbone_heads=4, remat=False)
 
 
 def _inputs(B=2, T=2, C=3, H=64, seed=0):
@@ -94,6 +94,27 @@ def test_fusion_layerscale_zero_init_is_identity():
     np.testing.assert_allclose(np.asarray(fs(x, valid)), np.asarray(x), atol=1e-6)
 
 
+def test_fusion_threads_q_chunk_and_attn_impl_at_construction():
+    """FusionStack must bake cfg.q_chunk/cfg.attn_impl into each SelfBlock's
+    Attn at CONSTRUCTION time (not rely on a call-time default) -- before this
+    fix every local/global block silently used Attn's own hardcoded default
+    (q_chunk=512), ignoring cfg.q_chunk entirely. TINY's q_chunk defaults to
+    MVQConfig's own None, so every Attn built here must carry q_chunk=None."""
+    from jarvis_jax.models.mvq import MVQConfig
+    from jarvis_jax.models.mvq.fusion import FusionStack
+    cfg = MVQConfig(**TINY)
+    assert cfg.q_chunk is None
+    fs = FusionStack(cfg, rngs=nnx.Rngs(0))
+    assert len(fs.blocks) > 0
+    for blk in fs.blocks:
+        assert blk.attn.q_chunk is None
+        assert blk.attn.impl == cfg.attn_impl
+    # identity-at-init still holds with the threaded construction
+    x = jnp.asarray(np.random.default_rng(0).normal(size=(2, 6, 16, 32)).astype(np.float32))
+    valid = jnp.ones((2, 6), bool)
+    np.testing.assert_allclose(np.asarray(fs(x, valid)), np.asarray(x), atol=1e-6)
+
+
 def test_assemble_nan_policy():
     from jarvis_jax.models.mvq.model import assemble
     B, I, T, K, C = 1, 2, 1, 3, 2
@@ -119,6 +140,29 @@ def test_assemble_nan_policy():
                                  crop_origin=np.zeros((B, C, 2)), exist_thresh=0.5, cam_valid=cam_valid)
     assert np.isnan(kp3d2[0, :, 0]).all() and (conf3d2[0, :, 0] == 0).all()
     assert np.isfinite(kp3d2[0, :, 1]).all() and (conf3d2[0, :, 1] > 0).all()
+
+
+def test_backbone_preset_dinov3_l16_is_real():
+    """backbone='dinov3_l16' must build a backbone shaped like the REAL
+    dinov3_l16 preset (depth 24, heads 16) even though backbone_depth/
+    backbone_heads are left at their own defaults (None) -- before this fix
+    the preset name was cosmetic: backbone_depth/backbone_heads always
+    overrode it, silently, regardless of which preset was named."""
+    from jarvis_jax.models.mvq import MVQConfig, MVQModel
+    cfg = MVQConfig(**{**TINY, "backbone": "dinov3_l16", "embed_dim": 1024,
+                       "backbone_depth": None, "backbone_heads": None})
+    m = MVQModel(cfg, rngs=nnx.Rngs(0))
+    assert m.backbone.cfg.depth == 24 and m.backbone.cfg.num_heads == 16
+
+
+def test_backbone_preset_conflicting_embed_dim_raises():
+    """MVQConfig(backbone='dinov3_l16') with the default embed_dim (768,
+    dinov3_b16's own shape) must raise -- l16 is embed_dim=1024, and building
+    silently at the wrong width would produce a backbone that doesn't match
+    its own name."""
+    from jarvis_jax.models.mvq import MVQConfig
+    with pytest.raises(ValueError, match="embed_dim"):
+        MVQConfig(**{**TINY, "backbone": "dinov3_l16"})
 
 
 def test_attn_impl_rejects_unknown_value():
