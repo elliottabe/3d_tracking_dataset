@@ -48,7 +48,8 @@ of a later tracking step.
 ## 2. Decisions (user, 2026-09-04)
 
 - P3 is two specs. **P3a** (this one): identity, existence, copy-paste,
-  eval plumbing, one fresh T=1 run. **P3b** (later): 30k evaluation on bout
+  eval plumbing, one T=1 fine-tune warm-started from the 30k run (§8; fresh
+  run only as the fallback). **P3b** (later): 30k evaluation on bout
   28 and the frozen benchmark, refinement/fusion ablations, T=2.
 - The P3a run is queued on `ckpt-g2` (requeue) as soon as the code is
   ready; the running 30k job is not touched.
