@@ -46,7 +46,10 @@ class MVQConfig:
     # at. Kept configurable (not deleted) because a future larger n_instances/
     # num_cameras config could make Nq large enough that chunking is worth its
     # cost again -- see tests/test_mvq_model.py's chunked==unchunked tests,
-    # which exercise q_chunk=8 explicitly regardless of this default.
+    # which exercise q_chunk=8 explicitly regardless of this default. Applies
+    # ONLY to attn_impl="xla" -- the cudnn path (below) never materialises
+    # logits/softmax to chunk in the first place (see fusion.py's docstring
+    # for what it materialises instead when key_valid is an arbitrary mask).
     q_chunk: int | None = None
     # "xla" (default; CPU-safe explicit-softmax path, unchanged behaviour) or
     # "cudnn" (mvq/attention.py's flash-attention path -- GPU only). Threaded
@@ -54,6 +57,10 @@ class MVQConfig:
     # CrossBlock call the same way q_chunk is threaded. configs/model/mvq.yaml
     # ships "cudnn"; unit tests keep "xla" so they run on CPU.
     attn_impl: str = "xla"
+
+    def __post_init__(self):
+        if self.attn_impl not in ("xla", "cudnn"):
+            raise ValueError(f"attn_impl must be 'xla' or 'cudnn', got {self.attn_impl!r}")
 
     @property
     def grid(self):

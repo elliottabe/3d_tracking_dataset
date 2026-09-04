@@ -105,6 +105,12 @@ def test_registered_backbone_slices_to_rgb():
     assert toks.shape == (1, 16, 32)
 
 
+def test_attn_impl_rejects_unknown_value():
+    from jarvis_jax.models.dinov3 import DINOv3Config
+    with pytest.raises(ValueError, match="attn_impl"):
+        DINOv3Config(**TINY, attn_impl="torch")
+
+
 def test_attn_impl_cudnn_raises_clear_error_on_cpu():
     """attn_impl='cudnn' on a host with no compatible GPU (this CPU test)
     must fail with a RuntimeError naming attn_impl, not a bare JAX
@@ -119,30 +125,34 @@ def test_attn_impl_cudnn_raises_clear_error_on_cpu():
 
 @pytest.mark.gpu
 def test_attn_impl_cudnn_matches_xla_backbone():
-    """Same weights, same input, attn_impl='cudnn' vs 'xla' must agree to
-    bf16-output-scale tolerance (2e-2), and gradients w.r.t. the input must
-    be finite with cosine similarity > 0.99 to the xla path's gradient.
+    """Same weights, same input, attn_impl='cudnn' vs 'xla' must agree
+    closely, and gradients w.r.t. the input must be finite with cosine
+    similarity > 0.99 to the xla path's gradient.
 
-    Input is 48x48 (1 cls + 4 registers + 3*3=9 patch tokens = 14, an EVEN
-    total), deliberately NOT the odd-N case: the backbone's cudnn call
-    passes no mask (attention.py's documented caveat), so an odd N's one
-    padded key is a real, non-negligible perturbation at small N (measured
-    ~0.09 max abs diff at N=17 here -- a real fix-round-1 finding, not
-    flakiness) even though it is negligible at the real backbone's N~789.
-    That odd-N/no-mask behaviour is covered by design, not by this test --
-    see attention.py's docstring and test_mvq_attention.py's masked (all
-    keys valid) odd-count case, which pins the correct comparison."""
+    Input is 64x48 (1 cls + 4 registers + 4*3=12 patch tokens = 17, ODD --
+    the shipped backbone's real N is also odd, ~789, so this is the shipped
+    case, not an easy even-N shortcut). Fix-round-1 (empirical job, see
+    docs/benchmark/2026-09-mvq/ notes): the backbone's cudnn call now
+    excludes its even-length pad key EXACTLY via cuDNN's native
+    `key_value_seq_lengths` padding mask (no bias tensor, no approximation)
+    instead of the earlier version's unmasked pad key -- so the ONLY
+    remaining xla-vs-cudnn difference here is bf16 rounding, not a masking
+    approximation. REL_TOL=2e-3 is tight enough to catch a 0.5% (5e-3)
+    regression in either the exclusion logic or a future dtype change,
+    while still comfortably passing on measured bf16 noise (empirically
+    <1e-3 relative at this shape)."""
     from jarvis_jax.models.dinov3 import DINOv3, DINOv3Config
     cfg_xla = DINOv3Config(**TINY, attn_impl="xla")
     cfg_cudnn = DINOv3Config(**TINY, attn_impl="cudnn")
     m_xla = DINOv3(cfg_xla, rngs=nnx.Rngs(0))
     m_cudnn = DINOv3(cfg_cudnn, rngs=nnx.Rngs(0))          # same seed -> same weights
-    x = jnp.asarray(np.random.default_rng(0).normal(size=(2, 48, 48, 3)).astype(np.float32))
+    x = jnp.asarray(np.random.default_rng(0).normal(size=(2, 64, 48, 3)).astype(np.float32))
 
     out_xla = m_xla(x)
     out_cudnn = m_cudnn(x)
     scale = float(jnp.abs(out_xla).max())
-    assert float(jnp.abs(out_cudnn - out_xla).max()) < 2e-2 * max(scale, 1.0)
+    rel_diff = float(jnp.abs(out_cudnn - out_xla).max()) / max(scale, 1.0)
+    assert rel_diff < 2e-3, rel_diff
 
     g_xla = jax.grad(lambda x: jnp.sum(m_xla(x) ** 2))(x)
     g_cudnn = jax.grad(lambda x: jnp.sum(m_cudnn(x) ** 2))(x)

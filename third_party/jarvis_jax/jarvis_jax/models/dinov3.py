@@ -40,6 +40,10 @@ class DINOv3Config:
     # flash-attention path in mvq/attention.py -- no mask, all tokens valid).
     attn_impl: str = "xla"
 
+    def __post_init__(self):
+        if self.attn_impl not in ("xla", "cudnn"):
+            raise ValueError(f"attn_impl must be 'xla' or 'cudnn', got {self.attn_impl!r}")
+
     @classmethod
     def vitb16(cls):
         return cls(embed_dim=768, depth=12, num_heads=12)

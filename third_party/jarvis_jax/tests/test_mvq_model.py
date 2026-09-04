@@ -121,6 +121,12 @@ def test_assemble_nan_policy():
     assert np.isfinite(kp3d2[0, :, 1]).all() and (conf3d2[0, :, 1] > 0).all()
 
 
+def test_attn_impl_rejects_unknown_value():
+    from jarvis_jax.models.mvq import MVQConfig
+    with pytest.raises(ValueError, match="attn_impl"):
+        MVQConfig(**{**TINY, "attn_impl": "torch"})
+
+
 def test_attn_impl_cudnn_raises_clear_error_on_cpu():
     """attn_impl='cudnn' on a host with no compatible GPU (this CPU test)
     must fail with a RuntimeError naming attn_impl -- the backbone and the

@@ -22,8 +22,23 @@ def masked_attention(q, k, v, key_valid, num_heads, q_chunk: int | None = 512, i
     query self-attention, where there is no such thing as an invalid query.
 
     `impl="cudnn"` instead routes to `mvq.attention.flash_attention`, which
-    never materialises logits at all (chunking is irrelevant there; `q_chunk`
-    is ignored in that branch).
+    never materialises attention LOGITS/softmax at all regardless of
+    `key_valid` (`q_chunk` is ignored in that branch -- chunking exists only
+    to bound logits memory, which cudnn never has). But when `key_valid` is
+    an explicit, arbitrary bool array (this decoder's real per-camera
+    validity -- invalid cameras are scattered through the sequence, not a
+    prefix/suffix, so they CANNOT be expressed as a single valid-length per
+    row), cuDNN turns that mask into a real bf16 additive bias tensor
+    (shape (B,1,Nq_pad,Nk_pad), broadcast over heads) plus a `dbias`
+    gradient of the same shape -- at the shipped 2D-path shape (2100 x
+    10976) that is ~46MB/sample each way. This is smaller than the never-
+    chunked logits tensor it replaces (~1.1GB/sample/layer, see above) and
+    is still exact, but it is not "nothing": only the backbone's `key_valid
+    =None` case (`dinov3.py`) reaches `attention.py`'s cheaper, bias-free
+    `key_value_seq_lengths` exclusion, because that mechanism only supports
+    a prefix-valid/suffix-invalid split per row (exactly what the
+    backbone's own even-length pad is, and exactly what this decoder's
+    scattered camera validity is not).
     """
     B, Nq, D = q.shape; Nk = k.shape[1]; hd = D // num_heads
     if impl == "cudnn":

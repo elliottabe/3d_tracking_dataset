@@ -34,11 +34,17 @@ def test_matches_masked_attention_with_nontrivial_key_mask():
     np.testing.assert_allclose(np.asarray(out), np.asarray(ref), atol=1e-5)
 
 
-def test_odd_token_count_backbone_shape_with_mask():
-    """13 tokens (odd, like a small backbone N) self-attention, all keys
-    valid: padding the token axis to 14 and masking the pad key out must
-    reproduce the same result as the unpadded computation (masked_attention
-    with an all-True key_valid) to 1e-5."""
+def test_odd_token_count_backbone_shape_no_mask_is_exact():
+    """13 tokens (odd, like a small backbone N), key_valid=None -- the REAL
+    backbone call signature (no camera ever invalidates a patch token).
+    Fix-round-1: this used to be an approximation (the pad key was left
+    unmasked); it is now exact, excluded via cuDNN's native
+    `key_value_seq_lengths` padding-mask (no bias tensor at all, see
+    attention.py's module docstring), so it must match
+    `masked_attention`'s all-True-mask reference to 1e-5 -- not a loose
+    bound -- and must agree with the explicit-key_valid path too (both are
+    mathematically the same computation via two different exclusion
+    mechanisms)."""
     from jarvis_jax.models.mvq.attention import flash_attention
     from jarvis_jax.models.mvq.fusion import masked_attention
     rng = np.random.default_rng(1)
@@ -51,10 +57,12 @@ def test_odd_token_count_backbone_shape_with_mask():
 
     ref = masked_attention(q, k, v, key_valid, H, q_chunk=None)
     qh, kh, vh = (t.reshape(B, T, H, hd) for t in (q, k, v))
-    out = flash_attention(qh, kh, vh, key_valid, _impl="xla").reshape(B, T, D)
-    np.testing.assert_allclose(np.asarray(out), np.asarray(ref), atol=1e-5)
+    out_none = flash_attention(qh, kh, vh, None, _impl="xla").reshape(B, T, D)
+    out_mask = flash_attention(qh, kh, vh, key_valid, _impl="xla").reshape(B, T, D)
+    np.testing.assert_allclose(np.asarray(out_none), np.asarray(ref), atol=1e-5)
+    np.testing.assert_allclose(np.asarray(out_mask), np.asarray(ref), atol=1e-5)
     # and the output shape has the padding sliced back off
-    assert out.shape == (B, T, D)
+    assert out_none.shape == (B, T, D)
 
 
 def test_pads_odd_axes_to_even_internally():
