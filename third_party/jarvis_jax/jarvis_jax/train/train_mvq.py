@@ -21,7 +21,7 @@ from jarvis_jax.data.transforms import IMAGENET_MEAN, IMAGENET_STD
 from jarvis_jax.data.v12_windows import V12WindowDataset, window_batches, WINDOW_KEYS
 from jarvis_jax.models.dinov3 import HF_REPOS, dinov3_snapshot, load_dinov3_safetensors
 from jarvis_jax.models.mvq import MVQConfig, MVQModel
-from jarvis_jax.sharding import data_parallel_mesh, replicate
+from jarvis_jax.sharding import data_parallel_mesh, replicate, shard_batch
 from jarvis_jax.train.losses_mvq import LossWeights, mvq_loss
 
 MM_PER_UNIT = 0.1
@@ -112,14 +112,26 @@ def _fwd(model, crops, cam_valid, M, t_local, prompt_mask, prompt_on):
     return model(crops, cam_valid, M, t_local, prompt_mask, prompt_on=prompt_on)
 
 
-def evaluate(model, ds, batch_size, *, cohorts: dict, part_of_k, weights, num_workers=8):
+def evaluate(model, ds, batch_size, *, cohorts: dict, part_of_k, weights, mesh, num_workers=8):
     """One pass over `ds` (JPEGs decoded ONCE per window via `window_batches`,
     not once per prompted/unprompted mode) running BOTH the prompted and the
     unprompted forward on every decoded batch. `cohorts`: name -> bool array
     over ds indices (by dataset index, recovered from `window_batches`'
     shuffle=False, drop_last=False order: batches are yielded in dataset-index
     order, so the sample seen at running position `offset+bi` IS ds index
-    `offset+bi`). Returns {"prompted": {...}, "unprompted": {...}}."""
+    `offset+bi`). Returns {"prompted": {...}, "unprompted": {...}}.
+
+    Batches are sharded across `mesh` (`shard_batch`, same as the training
+    step) rather than left as plain `jnp.asarray` -- unsharded eval arrays
+    place the whole batch on device 0 only, which fragments its BFC pool and
+    OOMs the *next* training step's ~19GB arena (measured 2026-09-03: eval
+    succeeds, the very next step's allocation then fails and the other ranks
+    hang on the NCCL clique rendezvous). The ragged last batch is padded (by
+    repeating its final row) up to `batch_size` so every batch shards evenly
+    across the mesh; the per-sample loop below still only reads the first
+    `B0` (real) rows, so padding never contaminates a per-sample statistic --
+    only the batch-level `uv2d_px`/`head_vs_reproj_px` prints average in a
+    duplicated real row for that one batch, a rounding-level effect."""
     names = ds.keypoint_names
     ii = lambda n: names.index(n)
     seg_names = [(a, c) for a, c in
@@ -132,8 +144,12 @@ def evaluate(model, ds, batch_size, *, cohorts: dict, part_of_k, weights, num_wo
     per_sample = {"prompted": [], "unprompted": []}
     offset = 0
     for b in window_batches(ds, batch_size, shuffle=False, drop_last=False, num_workers=num_workers):
-        B = b["crops"].shape[0]
-        jb = {k: jnp.asarray(v) for k, v in b.items()}
+        B0 = b["crops"].shape[0]
+        if B0 < batch_size:
+            pad = batch_size - B0
+            b = {k: np.concatenate([v, np.repeat(v[-1:], pad, axis=0)], axis=0) for k, v in b.items()}
+        B = batch_size
+        jb = {k: shard_batch(jnp.asarray(v), mesh) for k, v in b.items()}
         has_mask = jb["prompt_mask"].reshape(B, -1).any(-1)
         for mode, prompted in (("prompted", True), ("unprompted", False)):
             on = jnp.full((B,), prompted) & has_mask
@@ -144,7 +160,7 @@ def evaluate(model, ds, batch_size, *, cohorts: dict, part_of_k, weights, num_wo
             xyz = np.asarray(out["xyz"])                          # (B,I,T,K,3)
             uv2d_px, head_vs_reproj_px = float(m["uv2d_px"]), float(m["head_vs_reproj_px"])
             # per-sample numbers from the matched instance (fly 0 = host): redo the cheap host match
-            for bi in range(B):
+            for bi in range(B0):        # only the REAL rows -- padding never enters a per-sample stat
                 i_ds = offset + bi
                 gt = b["kp3d_local"][bi, 0]; has = b["has3d"][bi, 0]
                 d = np.linalg.norm(xyz[bi] - gt[None], axis=-1)      # (I,T,K)
@@ -157,7 +173,7 @@ def evaluate(model, ds, batch_size, *, cohorts: dict, part_of_k, weights, num_wo
                 per_sample[mode].append((float(e.mean()) if e.size else np.nan, int(e.size),
                                          float(m["match_reproj_px"]), uv2d_px, head_vs_reproj_px,
                                          int(exist.sum()), int(b["fly_valid"][bi].sum()), L, i_ds, two_fly))
-        offset += B
+        offset += B0
 
     def _finish(mode):
         samples = per_sample[mode]
@@ -303,17 +319,25 @@ def run_training(root, *, out_dir, ckpt_dir, mcfg: MVQConfig, tcfg: MVQTrainConf
             print(f"step {i+1}/{tcfg.total_steps} T={T} loss {loss:.4f} {ms} ({time.time()-t0:.0f}s)", flush=True)
         if (i + 1) % tcfg.eval_every == 0 or i + 1 == tcfg.total_steps:
             em = _with_ema(model, ema)
-            val = evaluate(em, val_ds, min(tcfg.batch_size, 8), cohorts=cohorts, part_of_k=part_of_k,
-                           weights=weights, num_workers=tcfg.num_workers)
+            val = evaluate(em, val_ds, tcfg.batch_size, cohorts=cohorts, part_of_k=part_of_k,
+                           weights=weights, mesh=mesh, num_workers=tcfg.num_workers)
             for mode, r in val.items():
                 print(f"  val[{mode}] " + " ".join(f"{k}={v:.4f}" for k, v in r.items()), flush=True)
+            # eval's own _fwd executable + its Python-held device arrays otherwise
+            # linger past this point; on a 4-GPU node that fragmented GPU0's BFC
+            # pool enough that the VERY NEXT training step (its ~19GB arena) OOM'd
+            # and the other 3 ranks hung on the NCCL clique rendezvous (measured
+            # 2026-09-03). Drop the eval module and clear the compilation cache
+            # before returning to training.
+            del em
+            jax.clear_caches()
         if mngr is not None and (i + 1) % tcfg.save_every == 0:
             _save_step(mngr, i + 1, model, opt, ema)
     if mngr is not None:
         _save_step(mngr, tcfg.total_steps, model, opt, ema); mngr.wait_until_finished()
     em = _with_ema(model, ema)
-    val = evaluate(em, val_ds, min(tcfg.batch_size, 8), cohorts=cohorts, part_of_k=part_of_k,
-                   weights=weights, num_workers=tcfg.num_workers)
+    val = evaluate(em, val_ds, tcfg.batch_size, cohorts=cohorts, part_of_k=part_of_k,
+                   weights=weights, mesh=mesh, num_workers=tcfg.num_workers)
     os.makedirs(out_dir, exist_ok=True)
     ckptr = ocp.StandardCheckpointer(); ckptr.save(out_dir, nnx.split(em)[1], force=True); ckptr.wait_until_finished()
     with open(os.path.join(out_dir, "mvq_run.json"), "w") as f:
