@@ -91,12 +91,18 @@ def main():
         sel = sel[: a.n]
         if not sel:
             print(f"[{case}] no samples"); continue
-        C = sel[0]["sample"]["crops"].shape[1]
+        # Grid width is the MAX camera count across selected rows (a row with fewer
+        # cameras than another blanks its extra columns below) -- rows are not assumed
+        # to all share one sample's camera count.
+        C = max(r["sample"]["crops"].shape[1] for r in sel)
         fig, axes = plt.subplots(len(sel), C, figsize=(2.2 * C, 2.2 * len(sel)), squeeze=False)
         for r_i, r in enumerate(sel):
-            s = r["sample"]; cam_names = r["cam_names"]
+            s = r["sample"]; cam_names = r["cam_names"]; Cr = s["crops"].shape[1]
             for c in range(C):
-                ax = axes[r_i, c]; ax.imshow(s["crops"][0, c]); ax.set_xticks([]); ax.set_yticks([])
+                ax = axes[r_i, c]
+                if c >= Cr:
+                    ax.axis("off"); continue
+                ax.imshow(s["crops"][0, c]); ax.set_xticks([]); ax.set_yticks([])
                 cam = cam_names[c]
                 if not s["cam_valid"][0, c]:
                     ax.set_title(f"{cam} absent", fontsize=7); continue

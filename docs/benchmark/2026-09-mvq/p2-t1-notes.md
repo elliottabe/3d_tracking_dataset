@@ -126,6 +126,18 @@ not IO-bound.
 
 ## Fix round 1 (2026-09-04): EMA debiasing was silently shrinking every joint
 
+**UPDATE (fix round 2)**: the debiasing divisor `1/(1-decay**t)` was being
+applied unconditionally on resume, inferring `t` from the step count -- but
+a checkpoint saved by PRE-fix code has its EMA seeded from live params, not
+zero, and applying the same divisor to that non-zero-seeded EMA would
+silently rescale it incorrectly (it does not need debiasing at all). Fixed:
+`t` is now an explicit `ema_updates` counter persisted in a new mandatory
+Orbax item, `ema_meta` (`{"ema_updates": int, "ema_zero_seeded": True}`);
+`_restore_latest` raises `ValueError` on any checkpoint missing this item or
+whose `ema_zero_seeded` is not True, naming the checkpoint dir, rather than
+guessing. See "30k job" below: the currently-running local 30k run predates
+this fix (and fix round 1 entirely) and will need restarting.
+
 **Controller-diagnosed defect, now fixed** (`train_mvq.py`, commit in this
 round): the EMA was seeded from the step-0 (near-random) params and never
 debiased. At step 2000, `decay**t = 0.999**2000 = 0.135` of that near-zero
@@ -215,7 +227,7 @@ see below) adding the mvq-comparison arms:
 | female | 0.723 / 0.072 | 1.000 | 4.040 / 0.404 | 4.040 / 0.404 |
 | two_fly | 1.701 / 0.170 | 1.000 | 4.293 / 0.429 | 4.293 / 0.429 |
 | group_A | 1.170 / 0.117 | 1.000 | 3.497 / 0.350 | 3.497 / 0.350 |
-| group_C | 0.674 / 0.067 | 1.000 | 4.801 / 0.480 | 4.801 / 0.480 |
+| group_C | 0.674 / 0.067 | 1.000 | 4.801 / 0.480 | 4.802 / 0.480 |
 
 **Fairness finding**: `coverage` (fraction of GT joints the baseline's DLT
 could triangulate, `sum(n_valid)/sum(n_has)`) is **1.000 in every cohort** --
@@ -416,10 +428,26 @@ python -m jarvis_jax.scripts.train_mvq model=mvq train=mvq paths=hyak \
   "paths.runs_root=\${paths.mvq_runs_root}"
 ```
 GPUs 0-7 were confirmed idle before launch and are fully occupied by this
-run for the duration of this fix round (all fix-round-1 work below used
-`JAX_PLATFORMS=cpu`, never touching 0-7). Not yet past its own step-2000
-eval boundary at the time of writing this update — the "worth a quick log
-check" item from the superseded queue-job entry below still applies to this
+run for the duration of this fix round (all fix-round-1/2 work below used
+`JAX_PLATFORMS=cpu`, never touching 0-7).
+
+**This run PREDATES fix rounds 1 and 2 and will need to be restarted.** It
+was launched with the code as of commit `d49c9da` -- before the attention-
+chunk remat fix (`e11cb59`), the eval-sharding fix (`7aa34ff`), and every
+fix-round-1/2 item (EMA debiasing + the persisted `ema_meta` counter,
+`q_chunk=None`, batch-independent eval metrics, `rigid_len_ratio`). Its
+`final/` checkpoint, if let run to completion, would carry the SAME
+step-0-seeded, undebiased EMA bias documented above for gate-1, and its
+`ckpt/` checkpoints predate the mandatory `ema_meta` item -- fix round 2's
+`_restore_latest` will REFUSE to resume this run's own checkpoints with a
+`ValueError` once it hits its next `save_every` boundary and this code is
+used to resume it (working as intended: it must not be silently treated as
+zero-seeded when it is not). Plan to `scancel`/kill this run and relaunch
+fresh once the code state here is what should be trained on; not done in
+this round since GPUs 0-7 were off-limits throughout. Not yet past its own
+step-2000 eval boundary at the time of writing this update — the "worth a
+quick log check" item from the superseded queue-job entry below still
+applies to this
 run instead.
 
 <details><summary>Superseded queue-job entry (job 39557158, cancelled)</summary>
@@ -484,6 +512,34 @@ Original commit (Task 8):
   `test_ema_debias_matches_constant_params`,
   `test_evaluate_ragged_batch_matches_full_batch`.
 - This file.
+
+**Fix round 2** (2026-09-04, this update):
+- `third_party/jarvis_jax/jarvis_jax/train/train_mvq.py` — persisted
+  `ema_meta` Orbax item (`ema_updates`, `ema_zero_seeded`); `_restore_latest`
+  refuses (ValueError) a checkpoint missing it or with `ema_zero_seeded`
+  not True; `run_training` tracks `ema_updates` explicitly (not inferred
+  from the step count) and returns it; `evaluate`'s per-batch weight for
+  `reproj_px`/`uv2d_px`/`head_vs_reproj_px` now counts only the real
+  (`:B0`) rows, not the padded ones; `_finish` returns NaN instead of
+  raising `IndexError` when a mode has zero batches.
+- `third_party/jarvis_jax/tests/test_train_mvq_smoke.py` — resume test
+  asserts `ema_updates` round-trips; new
+  `test_resume_refuses_checkpoint_without_ema_meta`; ragged-batch test
+  extended to the three px keys (1e-4 tolerance -- genuine float
+  non-associativity between batch shapes, not a grouping-dependence bug).
+- `third_party/jarvis_jax/jarvis_jax/models/mvq/model.py`,
+  `third_party/jarvis_jax/configs/model/mvq.yaml` — corrected a comment
+  (the previous implicit `q_chunk` default was 512, not 8).
+- `scripts/benchmark/mvq_val_baselines.py` — `zero_mask_channel` read from
+  config and actually applied (zeros the 4th channel only when True;
+  otherwise feeds `prompt_mask` as the 4th channel); `detector_zero_mask_channel`
+  recorded in the JSON; a length-only `kp_names` mismatch now raises
+  `ValueError` (was `TypeError` from indexing with `first=None`).
+- `scripts/viz/mvq_overlay.py` — grid width is the max camera count across
+  selected rows, with each row taking its OWN camera count (`Cr`) rather
+  than assuming every row shares the first row's.
+- This file (EMA-resume-hazard correction, group_C table cell, 30k-run
+  provenance note).
 
 `figures/2026-09-mvq/mvq_t1_b16_gate1/{unprompted,prompted}/gate1_{female,two_fly,worst}.png`
 + `summary.json` per mode, and `vitpose_dlt_baseline.json`, all under the

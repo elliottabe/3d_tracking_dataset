@@ -175,7 +175,14 @@ def run(args):
     det = load_detector_cfg()
     ds = V12WindowDataset(args.root, args.split, T=1, train=False)
     if det["kp_names"] != ds.keypoint_names:
-        first = next((i for i, (a, b) in enumerate(zip(det["kp_names"], ds.keypoint_names)) if a != b), None)
+        if len(det["kp_names"]) != len(ds.keypoint_names):
+            raise ValueError(
+                f"detector kp_names (configs/detector/vitpose_v3.yaml) has "
+                f"{len(det['kp_names'])} entries but dataset keypoint_names "
+                f"({args.root}/annotations/keypoint_names.json) has {len(ds.keypoint_names)} -- "
+                f"cannot compare position-for-position. Fix the config or the dataset before "
+                f"running this.")
+        first = next(i for i, (a, b) in enumerate(zip(det["kp_names"], ds.keypoint_names)) if a != b)
         raise ValueError(
             f"detector kp_names (configs/detector/vitpose_v3.yaml) != dataset keypoint_names "
             f"({args.root}/annotations/keypoint_names.json) -- first mismatch at index {first}: "
@@ -195,7 +202,18 @@ def run(args):
         s = ds[i]
         crops = s["crops"][0]                                    # (C,448,448,3) u8
         cam_valid = s["cam_valid"][0]                            # (C,)
-        crops4 = np.concatenate([crops, np.zeros(crops.shape[:-1] + (1,), np.uint8)], axis=-1)
+        # 4th (mask) channel: zeroed only when the config says the checkpoint was
+        # trained with it zeroed (v5vf_maskoff's own train.mask_ablation=true --
+        # EXACT for that checkpoint per the module docstring, since its channel-3
+        # kernel weights are all identically 0.0); otherwise a normally-trained
+        # checkpoint expects the REAL mask, so feed V12WindowDataset's own
+        # prompt_mask (literal 0/1, matching normalize_image's un-scaled 4th
+        # channel convention -- see data/device.py's docstring), not zeros.
+        if det["zero_mask_channel"]:
+            mask_ch = np.zeros(crops.shape[:-1] + (1,), np.uint8)
+        else:
+            mask_ch = s["prompt_mask"][0].astype(np.uint8)[..., None]           # (C,448,448,1)
+        crops4 = np.concatenate([crops, mask_ch], axis=-1)
         hm = vit(normalize_image(jnp.asarray(crops4)), use_running_average=True)
         kp_crop, conf = peaks_and_conf(hm, decode_sharpen=det["decode_sharpen"])   # (C,K,2),(C,K)
         kp_crop = np.asarray(kp_crop, np.float32)
@@ -258,6 +276,7 @@ def run(args):
         "ckpt": det["ckpt"], "root": args.root, "split": args.split,
         "decode_sharpen": det["decode_sharpen"], "conf_thresh": det["conf_thresh"],
         "view_conf_thresh": det["view_conf_thresh"], "reproj_resid_px": det["reproj_resid_px"],
+        "detector_zero_mask_channel": bool(det["zero_mask_channel"]),
         "train_exposure_caveat": _train_exposure_note(),
     }
     for name, mask in cohorts.items():
