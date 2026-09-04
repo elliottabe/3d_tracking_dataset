@@ -48,11 +48,12 @@ def _affine_np(cam_mats):
 
 class V12WindowDataset:
     def __init__(self, root, split, T=1, *, max_flies=2, jitter_units=3.0, seed=0,
-                 train=True, recordings=None):
+                 train=True, recordings=None, copy_paste=None):
         self.root, self.split, self.T = root, split, int(T)
         self.max_flies, self.jitter, self.train = int(max_flies), float(jitter_units), bool(train)
         self.seed = int(seed)
         self.epoch = 0
+        self.copy_paste = copy_paste
         coco = json.load(open(os.path.join(root, "annotations", f"instances_{split}.json")))
         self.manifest = json.load(open(os.path.join(root, "manifest.json")))["recordings"]
         self.keypoint_names = list(coco["keypoint_names"])
@@ -80,6 +81,10 @@ class V12WindowDataset:
         for (rec, frame, fly), fsv in self._fs.items():
             self._sex[(rec, fly)] = _resolve_sex(_frameset_own_sex(fsv, self._ann), fly,
                                                  self.manifest.get(rec, {}))
+        self._donors = {}
+        if self.copy_paste is not None and self.T == 1:
+            for i, (rec, fly, _) in enumerate(self.windows):
+                self._donors.setdefault((self.manifest[rec]["calib_group"], self.fly_sex_code(rec, fly)), []).append(i)
 
     def __len__(self):
         return len(self.windows)
@@ -180,7 +185,7 @@ class V12WindowDataset:
             return np.asarray(im.convert("RGB"), np.uint8)
 
     # ------------------------------------------------------------------ sample
-    def __getitem__(self, i):
+    def _build(self, i):
         rec, host, f0 = self.windows[i]
         rt = self._rt(rec); C = rt.num_cameras; T, K, F = self.T, self.K, self.max_flies
         cams = list(rt.cameras.keys())
@@ -276,6 +281,39 @@ class V12WindowDataset:
                                  for fi in range(F)], np.int8),
             "unlabelled_sex": np.int8(self.unlabelled_sex(i)),
         }
+
+    def paste_window(self, i, rng):
+        """Copy-paste per spec §6; None when no donor fits after max_tries."""
+        from jarvis_jax.data.mv_copy_paste import body_plane_axes, composite, sample_offset
+        p = self.copy_paste
+        rec, host, _ = self.windows[i]
+        grp = self.manifest[rec]["calib_group"]; host_sex = self.fly_sex_code(rec, host)
+        tgt = self._build(i)
+        axes = body_plane_axes(tgt["kp3d_local"][0, 0], tgt["has3d"][0, 0])
+        for _ in range(p.max_tries):
+            want = (1 - host_sex) if (host_sex in (0, 1) and rng.uniform() < p.opposite_sex_p) else host_sex
+            pool = self._donors.get((grp, want)) or self._donors.get((grp, host_sex)) or []
+            pool = [j for j in pool if j != i]
+            if not pool:
+                return None
+            j = int(pool[rng.integers(len(pool))])
+            D = sample_offset(rng, axes, p)
+            out = composite(tgt, self._build(j), D, p)
+            if out is not None:
+                sep = float(np.linalg.norm(D))
+                return out, {"donor": j, "D": D, "sep": sep, "contact": sep <= p.contact_sep[1]}
+        return None
+
+    def __getitem__(self, i):
+        p = self.copy_paste
+        if (p is not None and self.train and self.T == 1 and self.n_flies(i) == 1
+                and self.unlabelled_sex(i) == SEX_UNKNOWN):
+            rng = np.random.default_rng(np.random.SeedSequence([self.seed, int(i), int(self.epoch), 7]))
+            if rng.uniform() < p.p:
+                r = self.paste_window(i, rng)
+                if r is not None:
+                    return r[0]
+        return self._build(i)
 
 
 def window_batches(ds, batch_size, *, shuffle=True, seed=0, weights=None, num_workers=8,

@@ -189,3 +189,29 @@ def test_fixture_masks_are_written_and_match_host_blob(tmp_path):
     for c in range(7):
         assert s["prompt_mask"][0, c].any()
         assert s["crops"][0, c][s["prompt_mask"][0, c]].min() > 200
+
+
+def test_copy_paste_hook_is_deterministic_and_skips_unlabelled_present(tmp_path):
+    from jarvis_jax.data.v12_windows import V12WindowDataset
+    from jarvis_jax.data.mv_copy_paste import CopyPasteParams
+    root = make_v12_root(tmp_path, n_frames=3, two_fly_frame=1)
+    # manifest says 2 flies; frames 0 and 2 have only fly0 labelled -> unlabelled_sex = male -> never pasted
+    ds = V12WindowDataset(root, "train", T=1, train=True, copy_paste=CopyPasteParams(p=1.0))
+    i = ds.windows.index((REC, 0, 0))
+    assert ds[i]["fly_valid"].tolist() == [True, False]
+    # rewrite the manifest to n_flies=1 so those windows become fully labelled donors/targets
+    import json, os
+    man = json.load(open(os.path.join(root, "manifest.json"))); man["recordings"][REC]["n_flies"] = 1
+    man["recordings"][REC]["fly_sex"] = {"fly0": "female"}
+    json.dump(man, open(os.path.join(root, "manifest.json"), "w"))
+    ds = V12WindowDataset(root, "train", T=1, train=True, copy_paste=CopyPasteParams(p=1.0, max_tries=20))
+    s1 = ds[i]; s2 = ds[i]
+    assert s1["fly_valid"].tolist() == [True, True]
+    np.testing.assert_array_equal(s1["crops"], s2["crops"])            # same (seed, i, epoch) -> same paste
+    ds.epoch = 1
+    s3 = ds[i]
+    assert not np.array_equal(s1["kp2d"][1], s3["kp2d"][1])           # a new epoch draws a new paste
+    r = ds.paste_window(i, np.random.default_rng(0))
+    assert r is not None and set(r[1]) == {"donor", "D", "sep", "contact"}
+    val = V12WindowDataset(root, "val", T=1, train=False, copy_paste=CopyPasteParams(p=1.0))
+    assert val[i]["fly_valid"].tolist() == [True, False]               # never in eval mode
