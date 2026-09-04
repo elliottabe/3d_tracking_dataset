@@ -138,3 +138,38 @@ converts competing-mode misses into clean hits on some tips and suppresses
 the true tip entirely on others; the argmax-on-other-fly fraction drops only
 10.9 -> 9.4%. So the gain is real but the mechanism is blunt; the weights
 (256/0.5/1.0) are unswept and hardneg_weight is the first thing to sweep.
+
+## Six arms (2026-09-03 16:00; the two corrected arms finished 15:55)
+
+| arm | plain | gray-fill | gf two-fly | gf single | gf tips | gf body | gf p99 |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| maskoff (baseline) | 15.19 | 13.05 | 12.53 | 13.57 | 22.06 | 7.46 | 146 |
+| maskon | 13.49 | 13.30 | 11.97 | 14.61 | 22.05 | 7.12 | 139 |
+| arm A (buggy fill) | 14.78 | 12.83 | 11.82 | 13.82 | 20.42 | 7.34 | 130 |
+| arm B (buggy fill) | 14.27 | 12.04 | 11.21 | 12.86 | 18.56 | 7.07 | 127 |
+| arm B v2 (fixed fill) | 14.41 | **12.06** | 10.65 | 13.46 | 19.07 | **6.91** | **121** |
+| maskon + distr + copy-paste | **12.83** | 12.82 | **10.93** | 14.69 | 20.08 | 7.18 | 129 |
+
+Readout on the baseline's 699 bad tips: arm B v2 GT/max median 0.17, GT-is-peak
+11.7%; maskon+distr+cp median 0.21, GT-is-peak 19.6% (baseline 0.31 / 5.4%).
+
+What the six say together:
+* The fill bug cost arm B nothing measurable overall (12.04 -> 12.06 under
+  the deployed fill; v2 is better on two-fly 10.65 vs 11.21 and worse on the
+  headless female 8.42 vs 8.10). The ~3% erased draws were noise, not damage.
+* The combined mask-on arm is the best PLAIN model (12.83, two-fly 10.9,
+  courtship 12_11_50 9.3 px = best of any arm there) but gains nothing from
+  the inference fill (12.82) and is the WORST arm on single-fly frames
+  (14.69) and on the headless male 15_21_14 (19.4 vs 16.5 for arm B). The
+  mask channel and the distractor supervision are additive on two-fly frames
+  and not on single-fly ones: every mask-on arm loses single-fly accuracy.
+* Under the deployed fill the mask-off arm B v2 and the combined arm tie
+  overall (12.06 vs 12.82 favours B v2); B v2 has the shortest tail and the
+  best body points. On the female it is 9.78 vs 9.68.
+
+Recommendation: promote arm B v2 (`v12_bal_maskoff_distr_cp_v2`, mask-off,
+`zero_mask_channel: true` beside the ckpt as before) as the pipeline detector:
+best deployed number, no dependence on mask quality at inference, best tail.
+Keep the combined mask-on arm as the two-fly specialist candidate; the open
+question for it is why the mask channel costs single-fly accuracy (14.7 vs
+13.5), which a sweep of hardneg_weight and a mask-dropout arm would answer.
