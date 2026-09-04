@@ -68,6 +68,7 @@ from jarvis_jax.convert.build_checkpoint import load_vitpose
 from jarvis_jax.data.device import normalize_image
 from jarvis_jax.data.v12_windows import V12WindowDataset
 from jarvis_jax.models.mvq.checkpoint import load_mvq_model
+from jarvis_jax.models.mvq.policy import policy_instance
 from jarvis_jax.tracking.predict_2d import peaks_and_conf
 from jarvis_jax.tracking.triangulate import triangulate_keypoints
 from jarvis_jax.train.train_mvq import MM_PER_UNIT, normalize_crops
@@ -159,20 +160,6 @@ def _oracle_instance(xyz, gt, has):
     return int(np.argmin((d * has).sum(1)))
 
 
-def _policy_instance(xyz, exist_logit):
-    """The policy a real (unprompted) inference call would actually use to
-    pick an instance -- exactly train_mvq.evaluate's unprompted policy:
-    among instances the model itself claims exist (sigmoid(exist_logit) >=
-    0.5), the one whose predicted centroid (mean xyz over T,K, ROI-local so
-    the ROI origin is (0,0,0)) sits closest to the ROI centre. None (a miss)
-    if no instance clears the threshold."""
-    exist = 1 / (1 + np.exp(-exist_logit)) > 0.5
-    cand = np.where(exist)[0]
-    if cand.size == 0:
-        return None
-    return int(cand[np.argmin(np.linalg.norm(xyz[cand].mean(axis=(1, 2)), axis=-1))])
-
-
 def run(args):
     det = load_detector_cfg()
     ds = V12WindowDataset(args.root, args.split, T=1, train=False)
@@ -204,7 +191,7 @@ def run(args):
     # the mvq_* oracle columns (7,8) mirror mvq_val_baselines' own fairness
     # restriction (see FAIRNESS docstring); mvq_*_policy (9,10) apply the SAME
     # restriction to the POLICY instance (what a real unprompted inference call
-    # would actually pick, see _policy_instance) instead of the GT-nearest one.
+    # would actually pick, see models/mvq/policy.policy_instance) instead of the GT-nearest one.
     rows = []
     t0 = time.time()
     for i in range(n):
@@ -251,7 +238,11 @@ def run(args):
             if same.any():
                 mvq_same_units = float(np.linalg.norm(mvq_xyz[inst_o, 0][same] - gt[same], axis=-1).mean())
                 mvq_n_same = int(same.sum())
-            inst_p = _policy_instance(mvq_xyz, mvq_exist)
+            # the ONE shared unprompted policy (models/mvq/policy.py) -- the same
+            # function train_mvq.evaluate and scripts/viz/mvq_overlay.py call, so this
+            # table cannot quietly grade a different instance choice than the figure
+            inst_p = policy_instance(1 / (1 + np.exp(-mvq_exist)), mvq_xyz,
+                                     prompted=False, has_mask=False)
             mvq_policy_miss = inst_p is None
             if inst_p is not None and same.any():
                 mvq_same_units_policy = float(np.linalg.norm(mvq_xyz[inst_p, 0][same] - gt[same], axis=-1).mean())
