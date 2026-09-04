@@ -1,4 +1,6 @@
 # tests/test_train_mvq_smoke.py
+import dataclasses
+import json
 import os
 import jax
 import jax.numpy as jnp
@@ -253,3 +255,49 @@ def test_evaluate_ragged_batch_matches_full_batch(tmp_path):
                 continue
             tol = 1e-6 if k in tight else 1e-4
             assert abs(a - b) < tol, (mode, k, a, b)
+
+
+def test_run_dir_json_written_at_start_and_loader_prefers_it(tmp_path):
+    from jarvis_jax.models.mvq import MVQConfig
+    from jarvis_jax.models.mvq.checkpoint import load_mvq_model
+    from jarvis_jax.train.train_mvq import run_training, MVQTrainConfig
+    from jarvis_jax.train.losses_mvq import LossWeights
+    from jarvis_jax.data.mv_augment import MVAugParams
+    root = make_v12_root(tmp_path)
+    mcfg = MVQConfig(crop=448, patch=16, embed_dim=32, num_keypoints=50, num_cameras=7, n_instances=4,
+                     n_local=1, n_global=1, dec_layers_3d=2, dec_layers_2d=1, dec_heads=4, mlp_ratio=2.0,
+                     refine_passes=1, patch_rgb=3, fourier_bands=2, backbone="tiny", backbone_depth=1,
+                     backbone_heads=4, remat=False)
+    tcfg = MVQTrainConfig(total_steps=1, batch_size=2, warmup_steps=1, eval_every=1, save_every=1,
+                          log_every=1, num_workers=1, pretrained=False, window_lengths=(1,), smoke=True)
+    run = tmp_path / "run"
+    run_training(root, out_dir=str(run / "final"), ckpt_dir=str(run / "ckpt"), mcfg=mcfg, tcfg=tcfg,
+                 aug=MVAugParams(enabled=False), weights=LossWeights())
+    meta = json.load(open(run / "mvq_run.json"))
+    assert meta["val"] is None and meta["model"]["n_instances"] == 4 and len(meta["keypoint_names"]) == 50
+    # a mid-run checkpoint loads with NO final/ present
+    import shutil; shutil.rmtree(run / "final")
+    m, meta2 = load_mvq_model(str(run), step="latest")
+    assert meta2["model"] == meta["model"]
+
+
+def test_warm_start_config_seeds_step0_from_another_run(tmp_path):
+    from jarvis_jax.models.mvq import MVQConfig
+    from jarvis_jax.train.train_mvq import run_training, MVQTrainConfig
+    from jarvis_jax.train.losses_mvq import LossWeights
+    from jarvis_jax.data.mv_augment import MVAugParams
+    root = make_v12_root(tmp_path)
+    mcfg = MVQConfig(crop=448, patch=16, embed_dim=32, num_keypoints=50, num_cameras=7, n_instances=4,
+                     n_local=1, n_global=1, dec_layers_3d=2, dec_layers_2d=1, dec_heads=4, mlp_ratio=2.0,
+                     refine_passes=1, patch_rgb=3, fourier_bands=2, backbone="tiny", backbone_depth=1,
+                     backbone_heads=4, remat=False)
+    base = MVQTrainConfig(total_steps=1, batch_size=2, warmup_steps=1, eval_every=1, save_every=1,
+                          log_every=1, num_workers=1, pretrained=False, window_lengths=(1,), smoke=True)
+    a = tmp_path / "a"
+    run_training(root, out_dir=str(a / "final"), ckpt_dir=str(a / "ckpt"), mcfg=mcfg, tcfg=base,
+                 aug=MVAugParams(enabled=False), weights=LossWeights())
+    b = tmp_path / "b"
+    res = run_training(root, out_dir=str(b / "final"), ckpt_dir=str(b / "ckpt"), mcfg=mcfg,
+                       tcfg=dataclasses.replace(base, warm_start=str(a / "final")),
+                       aug=MVAugParams(enabled=False), weights=LossWeights())
+    assert res["resumed_from"] == 0 and np.isfinite(res["final_loss"])

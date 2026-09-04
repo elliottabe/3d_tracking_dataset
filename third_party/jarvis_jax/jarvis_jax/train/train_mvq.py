@@ -16,12 +16,14 @@ from flax import nnx
 from jarvis_jax.data.augment import build_lr_swap
 from jarvis_jax.data.distractor import build_part_index
 from jarvis_jax.data.mv_augment import MVAugParams, augment_window
+from jarvis_jax.data.mv_copy_paste import CopyPasteParams
 from jarvis_jax.data.prefetch import prefetch
 from jarvis_jax.data.transforms import IMAGENET_MEAN, IMAGENET_STD
 from jarvis_jax.data.v12_windows import V12WindowDataset, window_batches, WINDOW_KEYS
 from jarvis_jax.models.dinov3 import HF_REPOS, dinov3_snapshot, load_dinov3_safetensors
 from jarvis_jax.models.mvq import MVQConfig, MVQModel
 from jarvis_jax.sharding import data_parallel_mesh, replicate, shard_batch
+from jarvis_jax.train.checkpoint import warm_start_partial
 from jarvis_jax.train.losses_mvq import LossWeights, mvq_loss
 
 MM_PER_UNIT = 0.1
@@ -51,6 +53,10 @@ class MVQTrainConfig:
     pretrained: bool = True
     smoke: bool = False
     val_cohorts: tuple = ("female", "two_fly")
+    copy_paste_p: float = 0.0
+    copy_paste_opposite_sex_p: float = 0.7
+    copy_paste_contact_p: float = 0.3
+    warm_start: str | None = None
 
 
 _MEAN = jnp.asarray(IMAGENET_MEAN); _STD = jnp.asarray(IMAGENET_STD)
@@ -406,7 +412,10 @@ def run_training(root, *, out_dir, ckpt_dir, mcfg: MVQConfig, tcfg: MVQTrainConf
     # Dataset load + cohort validation BEFORE any GPU-heavy work (model build,
     # pretrained-weight download, device replication): a misconfigured/empty
     # val cohort should fail fast, not after minutes of backbone init.
-    train_sets = {T: V12WindowDataset(root, "train", T=T, train=True, seed=tcfg.seed) for T in tcfg.window_lengths}
+    copy_paste = (CopyPasteParams(p=tcfg.copy_paste_p, opposite_sex_p=tcfg.copy_paste_opposite_sex_p,
+                                  contact_p=tcfg.copy_paste_contact_p) if tcfg.copy_paste_p > 0 else None)
+    train_sets = {T: V12WindowDataset(root, "train", T=T, train=True, seed=tcfg.seed, copy_paste=copy_paste)
+                 for T in tcfg.window_lengths}
     val_ds = V12WindowDataset(root, "val", T=1, train=False)
     names = train_sets[tcfg.window_lengths[0]].keypoint_names
     lr_swap = build_lr_swap(names); part_of_k, _ = build_part_index(names)
@@ -415,10 +424,25 @@ def run_training(root, *, out_dir, ckpt_dir, mcfg: MVQConfig, tcfg: MVQTrainConf
         if not cohorts.get(c, np.zeros(1, bool)).any():
             raise ValueError(f"val cohort '{c}' is empty on {root}")
 
+    # Written BEFORE the model build (below) so a failed model build (bad
+    # backbone name, OOM, etc.) still leaves a usable config on disk -- see
+    # `models/mvq/checkpoint.py::load_mvq_model`, which now reads this run-dir
+    # copy first and falls back to `final/mvq_run.json` for older layouts.
+    # `val` is None here (not yet computed) and overwritten with the real
+    # numbers by the final write at the end of this function.
+    run_dir = os.path.dirname(os.path.abspath(out_dir))
+    os.makedirs(run_dir, exist_ok=True)
+    with open(os.path.join(run_dir, "mvq_run.json"), "w") as f:
+        json.dump({"model": dataclasses.asdict(mcfg), "train": dataclasses.asdict(tcfg), "val": None,
+                  "keypoint_names": names}, f, indent=1)
+
     model = MVQModel(mcfg, rngs=nnx.Rngs(tcfg.seed))
     if tcfg.pretrained:
         model.backbone = load_dinov3_safetensors(model.backbone, dinov3_snapshot(HF_REPOS[mcfg.backbone]))
         print(f"[mvq] loaded {HF_REPOS[mcfg.backbone]}")
+    if tcfg.warm_start:
+        model, skipped = warm_start_partial(model, tcfg.warm_start)
+        print(f"[mvq] warm start from {tcfg.warm_start}; not restored: {skipped}", flush=True)
     opt = make_optimizer(model, tcfg)
     # EMA seeded at ZERO (not the step-0 params): a running sum, debiased by
     # `_with_ema`'s `/(1-decay**t)` divisor at read time (t = the number of

@@ -46,21 +46,32 @@ def load_mvq_model(run_dir_or_final, *, step=None, attn_impl=None):
     `model`/`opt`/`ema`/`ema_meta`, see `train_mvq._make_manager`/
     `_save_step`), then debiases the EMA by `1 - decay**ema_updates` exactly
     as `train_mvq._with_ema` does during training. `decay` is read from
-    `<run_dir>/final/mvq_run.json`'s `train.ema` when that file and key exist
-    (a run that has not reached its final save yet has no `final/`, and an
-    older run's json might predate this field); it defaults to 0.999
+    the run's `mvq_run.json`'s `train.ema` when that file and key exist
+    (an older run's json might predate this field); it defaults to 0.999
     (`MVQTrainConfig`'s own default) otherwise.
 
-    `mvq_run.json` (under `<run_dir>/final/`) is REQUIRED either way for the
-    model architecture (`MVQConfig`) -- a bare `ckpt/<step>` has no config of
-    its own (`_save_step` never writes one).
+    `mvq_run.json` is REQUIRED either way for the model architecture
+    (`MVQConfig`) -- a bare `ckpt/<step>` has no config of its own
+    (`_save_step` never writes one). `train_mvq.run_training` writes it
+    directly under `<run_dir>/mvq_run.json` BEFORE step 0 (so a mid-run
+    checkpoint has one even with no `final/` yet) and again at the very
+    end under `<run_dir>/final/mvq_run.json` (this time with the real
+    `val` numbers) once the run completes -- when `step` is given, this
+    loader looks in `<run_dir>/mvq_run.json` FIRST and falls back to
+    `<run_dir>/final/mvq_run.json` for an older run directory that only
+    ever wrote the `final/` copy.
 
     `attn_impl`: override the config's own `attn_impl` after loading (e.g. a
     "cudnn" GPU training run evaluated on a CPU host, which has no cuDNN
     flash-attention kernel -- pass `attn_impl="xla"`).
     """
     final_dir = run_dir_or_final if step is None else os.path.join(run_dir_or_final, "final")
-    meta = json.load(open(os.path.join(final_dir, "mvq_run.json")))
+    if step is None:
+        meta_path = os.path.join(final_dir, "mvq_run.json")
+    else:
+        run_dir_meta = os.path.join(run_dir_or_final, "mvq_run.json")
+        meta_path = run_dir_meta if os.path.exists(run_dir_meta) else os.path.join(final_dir, "mvq_run.json")
+    meta = json.load(open(meta_path))
     cfg_kwargs = dict(meta["model"])
     if attn_impl is not None:
         cfg_kwargs["attn_impl"] = attn_impl
