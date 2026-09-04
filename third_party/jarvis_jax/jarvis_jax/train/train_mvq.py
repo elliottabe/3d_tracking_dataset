@@ -22,6 +22,7 @@ from jarvis_jax.data.transforms import IMAGENET_MEAN, IMAGENET_STD
 from jarvis_jax.data.v12_windows import V12WindowDataset, window_batches, WINDOW_KEYS
 from jarvis_jax.models.dinov3 import HF_REPOS, dinov3_snapshot, load_dinov3_safetensors
 from jarvis_jax.models.mvq import MVQConfig, MVQModel
+from jarvis_jax.models.mvq.geometry import project_local
 from jarvis_jax.sharding import data_parallel_mesh, replicate, shard_batch
 from jarvis_jax.train.checkpoint import warm_start_partial
 from jarvis_jax.train.losses_mvq import LossWeights, mvq_loss
@@ -169,10 +170,15 @@ def evaluate(model, ds, batch_size, *, cohorts: dict, part_of_k, weights, mesh, 
     seg_idx = [(ii(a), ii(c)) for a, c in seg_names]           # kept in lock-step with seg_names -- never re-filter one alone
     # per_sample[mode] rows: (mpjpe_units, n_joints_with_gt, n_exist_pred,
     # n_flies_true, seg_lengths_pred|None, seg_lengths_gt|None, ds_index,
-    # is_two_fly_window, mpjpe_policy_units|nan, is_policy_miss)
+    # is_two_fly_window, mpjpe_policy_units|nan, is_policy_miss,
+    # mask_containment_frac|nan -- the policy instance's reprojection inside the host mask)
     per_sample = {"prompted": [], "unprompted": []}
     # batch_stats[mode] rows: (reproj_px, uv2d_px, head_vs_reproj_px, valid_entry_count)
     batch_stats = {"prompted": [], "unprompted": []}
+    # slot_counts[mode]: (I,3) int TP/FP/FN of per-slot existence, over non-ignored
+    # slots (spec §7); lazily sized to I on the first batch/mode that runs.
+    slot_counts = {}
+    sex_hits = {"prompted": [], "unprompted": []}
     offset = 0
     for b in window_batches(ds, batch_size, shuffle=False, drop_last=False, num_workers=num_workers):
         B0 = b["crops"].shape[0]
@@ -193,6 +199,20 @@ def evaluate(model, ds, batch_size, *, cohorts: dict, part_of_k, weights, mesh, 
             jb_m = dict(jb); jb_m["prompt_on"] = on
             _, m = mvq_loss(out, jb_m, weights, part_of_k)      # reuses the matching
             xyz = np.asarray(out["xyz"])                          # (B,I,T,K,3)
+            I = xyz.shape[1]
+            if mode not in slot_counts:
+                slot_counts[mode] = np.zeros((I, 3), int)
+            # label-driven typed-slot targets (P3a §3-4): a slot's existence/sex target is a
+            # deterministic function of the labels + this mode's prompt flag, never of the
+            # prediction -- computed on the host from the SAME `on` this mode's forward used.
+            from jarvis_jax.train.matching import assign_slots, slot_ignore, SLOT_OTHER
+            has_f = b["has3d"].astype(np.float32)
+            cen = (b["kp3d_local"] * has_f[..., None]).sum((2, 3)) / np.maximum(has_f.sum((2, 3)), 1.0)[..., None]
+            dist = np.linalg.norm(cen, axis=-1)
+            assign, slot_t = assign_slots(jnp.asarray(b["fly_sex"]), jnp.asarray(b["fly_valid"]), on, jnp.asarray(dist), I)
+            assign, slot_t = np.asarray(assign), np.asarray(slot_t)
+            ignore = np.asarray(slot_ignore(jnp.asarray(b["unlabelled_sex"]), I))
+            sex_logit = np.asarray(out["sex_logit"])
             batch_stats[mode].append((float(m["match_reproj_px"]), float(m["uv2d_px"]),
                                       float(m["head_vs_reproj_px"]), weight))
             # per-sample numbers from the matched instance (fly 0 = host): redo the cheap host match.
@@ -214,21 +234,20 @@ def evaluate(model, ds, batch_size, *, cohorts: dict, part_of_k, weights, mesh, 
                 L_gt = ([np.linalg.norm(gt[0, a] - gt[0, c]) if has[0, a] and has[0, c] else np.nan
                         for a, c in seg_idx] if has.sum() > 0 else None)
                 exist_probs = 1 / (1 + np.exp(-np.asarray(out["exist_logit"][bi])))    # (I,)
-                exist = exist_probs > 0.5
+                exist = exist_probs >= 0.5
                 two_fly = ds.n_flies(i_ds) > 1
-                # POLICY instance choice -- what a real inference call (no GT to match against)
-                # would actually pick: prompted -> instance 0 (the prompt targets that query slot,
-                # see decoder.py/matching.py's pin_first); unprompted -> among instances the model
-                # itself claims exist, the one whose predicted centroid (mean xyz over T,K, ROI-local
-                # so the ROI origin is (0,0,0)) sits closest to the ROI centre -- the host fly is
-                # cropped to be near that centre by construction (v12_windows.py), so this is the
-                # cheapest correct proxy for "which instance is the host" without seeing GT. A window
-                # where NO instance clears the exist threshold is a MISS: excluded from the policy
-                # mean (nothing to score), counted in policy_miss_frac instead.
-                if prompted:
+                # POLICY (P3a §7): prompted -> slot 0 when this window has a usable mask, else the
+                # unprompted rule; unprompted -> among TYPED slots 1..3 that exist, nearest centroid to
+                # the ROI origin (mean xyz over T,K, ROI-local so the ROI origin is (0,0,0)) -- the
+                # host fly is cropped to be near that centre by construction (v12_windows.py), so this
+                # is the cheapest correct proxy for "which instance is the host" without seeing GT. A
+                # window where NO typed slot clears the exist threshold is a MISS: excluded from the
+                # policy mean (nothing to score), counted in policy_miss_frac instead.
+                use_prompt = prompted and bool(np.asarray(has_mask)[bi])
+                if use_prompt:
                     inst_policy = 0
                 else:
-                    cand = np.where(exist)[0]
+                    cand = np.array([s for s in range(1, I) if exist[s]])
                     inst_policy = (int(cand[np.argmin(np.linalg.norm(xyz[bi, cand].mean(axis=(1, 2)), axis=-1))])
                                   if cand.size else None)
                 is_miss = inst_policy is None
@@ -237,9 +256,33 @@ def evaluate(model, ds, batch_size, *, cohorts: dict, part_of_k, weights, mesh, 
                 else:
                     e_pol = d[inst_policy][has]
                     mpjpe_policy = float(e_pol.mean()) if e_pol.size else np.nan
+                # per-slot existence bookkeeping (non-ignored slots), sex accuracy on assigned known-sex slots
+                for s in range(I):
+                    if ignore[bi, s]:
+                        continue
+                    slot_counts[mode][s] += np.array([exist[s] and slot_t[bi, s], exist[s] and not slot_t[bi, s],
+                                                      (not exist[s]) and slot_t[bi, s]], int)     # TP, FP, FN
+                for f in range(b["fly_valid"].shape[1]):
+                    if b["fly_valid"][bi, f] and b["fly_sex"][bi, f] >= 0 and assign[bi, f] >= 0:
+                        sex_hits[mode].append(int((sex_logit[bi, assign[bi, f]] > 0) == (b["fly_sex"][bi, f] == 0)))
+                # mask containment of the policy instance's reprojection inside the HOST mask
+                contain = np.nan
+                if inst_policy is not None:
+                    uv = np.asarray(project_local(jnp.asarray(xyz[bi, inst_policy, 0]), jnp.asarray(b["M"][bi]),
+                                                  jnp.asarray(b["t_local"][bi, 0])))  # (K,C,2)
+                    pm = b["prompt_mask"][bi, 0]; hits = []
+                    for c in range(pm.shape[0]):
+                        if not b["cam_valid"][bi, 0, c] or not pm[c].any():
+                            continue
+                        vis = b["vis2d"][bi, 0, 0, c]
+                        p = np.round(uv[vis, c]).astype(int)
+                        okp = (p[:, 0] >= 0) & (p[:, 0] < pm.shape[2]) & (p[:, 1] >= 0) & (p[:, 1] < pm.shape[1])
+                        inside = np.zeros(len(p), bool); inside[okp] = pm[c][p[okp, 1], p[okp, 0]]
+                        hits.extend(inside.tolist())
+                    contain = float(np.mean(hits)) if hits else np.nan
                 per_sample[mode].append((float(e.mean()) if e.size else np.nan, int(e.size),
                                          int(exist.sum()), int(b["fly_valid"][bi].sum()),
-                                         L_pred, L_gt, i_ds, two_fly, mpjpe_policy, is_miss))
+                                         L_pred, L_gt, i_ds, two_fly, mpjpe_policy, is_miss, contain))
         offset += B0
 
     def _finish(mode):
@@ -257,8 +300,9 @@ def evaluate(model, ds, batch_size, *, cohorts: dict, part_of_k, weights, mesh, 
         # mpjpe3d_units/_mm are the ORACLE number (ground-truth-nearest instance, see the
         # per-sample loop above) -- mpjpe3d_policy_units/_mm is what a real inference call
         # (no GT to match against) would actually report, and policy_miss_frac is the
-        # fraction of windows the policy could not even name an instance for (unprompted
-        # mode only, when no instance clears the exist threshold).
+        # fraction of windows the policy could not even name an instance for: unprompted
+        # windows (or prompted windows that fell back to the unprompted rule because this
+        # window had no usable mask) where no TYPED slot (1-3) clears the 0.5 threshold.
         res = {"mpjpe3d_units": float(np.average(mp[ok], weights=n[ok])) if ok.any() else float("nan"),
                "reproj_px": _wmean(bstats[:, 0]), "uv2d_px": _wmean(bstats[:, 1]),
                "head_vs_reproj_px": _wmean(bstats[:, 2])}
@@ -269,16 +313,24 @@ def evaluate(model, ds, batch_size, *, cohorts: dict, part_of_k, weights, mesh, 
                                        if ok_policy.any() else float("nan"))
         res["mpjpe3d_policy_mm"] = res["mpjpe3d_policy_units"] * MM_PER_UNIT
         res["policy_miss_frac"] = float(miss.mean()) if len(samples) else 0.0
-        # exist precision/recall (spec §7): two-fly windows only -- a single-fly
-        # crop has nothing for a 2nd/3rd instance to correctly NOT exist against.
-        two_fly = np.array([p[7] for p in samples])
-        if two_fly.any():
-            pred = np.array([p[2] for p in samples])[two_fly]
-            true = np.array([p[3] for p in samples])[two_fly]
-            res["exist_prec"] = float(np.sum(np.minimum(pred, true)) / max(np.sum(pred), 1))
-            res["exist_rec"] = float(np.sum(np.minimum(pred, true)) / max(np.sum(true), 1))
-        else:
-            res["exist_prec"] = float("nan"); res["exist_rec"] = float("nan")
+        # per-slot existence precision/recall (spec §7), from the label-driven TP/FP/FN
+        # counted in the per-sample loop above (non-ignored slots only -- an unlabelled
+        # fly legitimately present gets no existence loss/credit for its would-be slot).
+        sc = slot_counts.get(mode, np.zeros((0, 3), int))
+        for s in range(sc.shape[0]):
+            tp, fp, fn = (int(x) for x in sc[s])
+            res[f"exist_prec_slot{s}"] = float(tp) / max(tp + fp, 1)
+            res[f"exist_rec_slot{s}"] = (float(tp) / (tp + fn)) if (tp + fn) > 0 else float("nan")
+        # legacy exist_prec/exist_rec keys (logged historically): same per-slot TP/FP/FN,
+        # summed over the TYPED slots (1..3) only -- slot 0 (prompted) has no existence
+        # target of its own to score (the prompt always targets it directly).
+        tp = int(sc[1:, 0].sum()); fp = int(sc[1:, 1].sum()); fn = int(sc[1:, 2].sum())
+        res["exist_prec"] = float(tp) / max(tp + fp, 1)
+        res["exist_rec"] = float(tp) / max(tp + fn, 1)
+        hits = sex_hits.get(mode, [])
+        res["sex_acc"] = float(np.mean(hits)) if hits else float("nan")
+        contain = np.array([p[10] for p in samples], float) if samples else np.zeros(0)
+        res["mask_containment"] = float(np.nanmean(contain)) if np.isfinite(contain).any() else float("nan")
         Ls = [p[4] for p in samples if p[4] is not None]        # skip samples with no 3D-labelled joint
         Ls_gt = [p[5] for p in samples if p[5] is not None]     # same gate as Ls -- see the shared `has.sum()>0` above
         if Ls:
@@ -307,6 +359,13 @@ def _cohorts(ds):
          "two_fly": np.array([ds.n_flies(i) > 1 for i in range(n)])}
     for g in sorted({ds.calib_group(i) for i in range(n)}):
         c[f"group_{g}"] = np.array([ds.calib_group(i) == g for i in range(n)])
+
+    def _contact(i):
+        if ds.n_flies(i) < 2:
+            return False
+        c = ds.fly_centroids(i)
+        return bool(np.isfinite(c).all() and np.linalg.norm(c[0] - c[1]) < 15.0)
+    c["contact_pair"] = np.array([_contact(i) for i in range(n)])
     return c
 
 
@@ -442,7 +501,9 @@ def run_training(root, *, out_dir, ckpt_dir, mcfg: MVQConfig, tcfg: MVQTrainConf
         print(f"[mvq] loaded {HF_REPOS[mcfg.backbone]}")
     if tcfg.warm_start:
         model, skipped = warm_start_partial(model, tcfg.warm_start)
-        print(f"[mvq] warm start from {tcfg.warm_start}; not restored: {skipped}", flush=True)
+        total = len(jax.tree_util.tree_leaves(nnx.state(model)))
+        print(f"[mvq] warm start from {tcfg.warm_start}: restored {total - len(skipped)}/{total} leaves; "
+             f"not restored: {skipped}", flush=True)
     opt = make_optimizer(model, tcfg)
     # EMA seeded at ZERO (not the step-0 params): a running sum, debiased by
     # `_with_ema`'s `/(1-decay**t)` divisor at read time (t = the number of

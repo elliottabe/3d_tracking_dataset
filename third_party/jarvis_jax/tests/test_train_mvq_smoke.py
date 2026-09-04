@@ -29,8 +29,11 @@ def test_two_steps_cpu_and_eval(tmp_path):
     for mode in ("prompted", "unprompted"):
         v = res["val"][mode]
         assert {"mpjpe3d_units", "mpjpe3d_mm", "reproj_px", "cohort_female", "cohort_two_fly", "cohort_group_A",
-                "mpjpe3d_policy_units", "mpjpe3d_policy_mm", "policy_miss_frac"} <= set(v)
+                "mpjpe3d_policy_units", "mpjpe3d_policy_mm", "policy_miss_frac", "cohort_contact_pair"} <= set(v)
         assert 0.0 <= v["policy_miss_frac"] <= 1.0
+        assert {"sex_acc", "mask_containment", "cohort_contact_pair"} <= set(v)
+        assert {f"exist_prec_slot{i}" for i in range(4)} | {f"exist_rec_slot{i}" for i in range(4)} <= set(v)
+        assert np.isnan(v["mask_containment"]) or 0.0 <= v["mask_containment"] <= 1.0
     assert os.path.isdir(tmp_path / "final") and os.path.isdir(tmp_path / "ckpt")
 
 
