@@ -10,18 +10,23 @@ reverse, its `fly_sex` convention is wrong and the export must be fixed
 before training.
 
 Each panel title carries BOTH sexes per fly: `ds=<per-window resolved sex>`
-(what `V12WindowDataset` actually ships in `fly_sex` / `is_female`, from that
-frameset's own annotation) and `man=<manifest fly_sex>`. Where the two
-disagree, believe the picture over the manifest and read `ds` as the value
-training consumes. 2025_10_20_13_20_04 is sampled from BOTH of its annotation
-subsets: 677 framesets of `courtship_20_04_male` (fly0 annotated MALE, frames
-84143-439478) and 15 of `20_04_female_climbing` (fly0 FEMALE, frames >=
-446642), while its manifest says fly0 = female for all 692. So its
-`courtship_20_04_male` rows must show a MALE host (smaller, dark abdomen tip)
-and its `20_04_female_climbing` rows a FEMALE host -- the specific
-disagreement this gate exists to settle. In that recording only one fly is
-labelled: the unlabelled fly in the crop must be the OPPOSITE sex of the
-labelled one.
+(what `V12WindowDataset` actually ships in `fly_sex` / `is_female`) and
+`man=<manifest fly_sex>`, plus the window's annotation SUBSET, and a
+`[ds!=man]` flag when they differ. Believe the picture; `ds` is the value
+training consumes.
+
+2025_10_20_13_20_04 is sampled from BOTH of its annotation subsets: 677
+framesets of `courtship_20_04_male` (annotation `sex` = male, frames
+84143-439478) and 15 of `20_04_female_climbing` (female, frames >= 446642),
+while its manifest says fly0 = female for all 692. The user read this figure
+on 2026-09-04 and judged EVERY 20_04 window to show a female, so resolution
+is MANIFEST-FIRST and both blocks now report `ds=female`: the expectation for
+this recording is that both blocks' labelled host looks like the SAME fly and
+that fly reads female (larger, pointed striped abdomen), with its smaller,
+darker unlabelled companion the male. A block whose host instead looks
+smaller and dark-tipped would mean the manifest is wrong for it after all.
+In that recording only one fly is labelled: `ds says <sex>` in the fly1 line
+is the unlabelled animal's sex from the manifest's fly ids.
 
     JAX_PLATFORMS=cpu OMP_NUM_THREADS=4 PYTHONPATH=third_party/jarvis_jax:. \\
         python scripts/viz/mvq_sex_label_check.py \\
