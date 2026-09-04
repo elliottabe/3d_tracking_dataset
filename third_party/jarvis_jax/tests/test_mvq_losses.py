@@ -68,6 +68,10 @@ def test_loss_near_zero_at_ground_truth_and_metrics():
     assert float(m["reproj"]) < 1e-3 and float(m["l3d"]) < 1e-3 and float(m["uv2d"]) < 1e-3
     assert float(m["rep"]) == 0.0 and float(m["exist_acc"]) == 1.0
     assert float(m["match_reproj_px"]) < 1e-2 and float(m["mpjpe3d_units"]) < 1e-3
+    # vis must equal the per-entry BCE of a logit of 6.0 against target 1, independent of K
+    # (a broadcast-mask bug previously made this K-times too large)
+    expected_vis = float(jnp.log1p(jnp.exp(-6.0)))
+    assert abs(float(m["vis"]) - expected_vis) < 1e-5
     # only the -log c and BCE floors remain
     assert float(total) < 0.05
 
@@ -118,3 +122,49 @@ def test_loss_is_differentiable_and_jittable():
     f = jax.jit(lambda xyz: mvq_loss({**out, "xyz": xyz}, batch, LossWeights(), pk)[0])
     g = jax.grad(f)(out["xyz"])
     assert g.shape == out["xyz"].shape and bool(jnp.isfinite(g).all())
+
+
+def test_px_scale_broadcasts_by_batch_not_fly_axis():
+    # B=3 != F=2 (the fixture always has 2 flies): the matching cost's 3D term must scale
+    # each batch element by ITS OWN px_scale, not by whichever fly index the batch axis
+    # happened to alias onto. Per-sample-varying scale (6, 8, 10) with a batch size that
+    # differs from the fly count used to raise (or silently mis-scale at B==F).
+    from jarvis_jax.train.losses_mvq import mvq_loss, LossWeights
+    out, batch = _perfect_batch(B=3)
+    batch["px_scale"] = jnp.array([6.0, 8.0, 10.0], jnp.float32)
+    total, m = mvq_loss(out, batch, LossWeights(), np.arange(5, dtype=np.int32))
+    assert bool(jnp.isfinite(total))
+    assert float(m["reproj"]) < 1e-3
+    assert float(m["l3d"]) < 1e-3
+
+
+def test_single_valid_fly_zero_repulsion_and_correct_exist_acc():
+    from jarvis_jax.train.losses_mvq import mvq_loss, LossWeights
+    out, batch = _perfect_batch()
+    B, I = out["xyz"].shape[0], out["xyz"].shape[1]
+    batch["fly_valid"] = jnp.asarray([[True, False]] * B)
+    total, m = mvq_loss(out, batch, LossWeights(), np.arange(5, dtype=np.int32))
+    assert float(m["rep"]) == 0.0
+    assert bool(jnp.isfinite(total))
+    # with fly 1 invalid, only instance 0 (matched to fly 0) should be "matched" ground truth
+    expected_matched = jnp.asarray([[True, False, False]] * B)
+    expected_acc = ((out["exist_logit"] > 0) == expected_matched).astype(jnp.float32).mean()
+    assert float(m["exist_acc"]) == float(expected_acc)
+
+
+def test_aux_layers_deep_supervision_raises_total_and_stays_jittable():
+    from jarvis_jax.train.losses_mvq import mvq_loss, LossWeights
+    out, batch = _perfect_batch()
+    pk = np.arange(5, dtype=np.int32)
+    total0, _ = mvq_loss(out, batch, LossWeights(), pk)
+    out2 = dict(out)
+    out2["aux_layers"] = [{"xyz": out["xyz"] + 2.0, "conf_logit": out["conf_logit"], "exist_logit": out["exist_logit"]}]
+    total1, _ = mvq_loss(out2, batch, LossWeights(), pk)
+    assert float(total1) > float(total0)
+
+    def f(xyz):
+        o = {**out2, "aux_layers": [{**out2["aux_layers"][0], "xyz": xyz}]}
+        return mvq_loss(o, batch, LossWeights(), pk)[0]
+
+    g = jax.grad(jax.jit(f))(out2["aux_layers"][0]["xyz"])
+    assert bool(jnp.isfinite(g).all())

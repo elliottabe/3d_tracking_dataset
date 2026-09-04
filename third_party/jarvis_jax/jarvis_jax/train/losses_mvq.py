@@ -33,7 +33,7 @@ def _huber(d, delta):
 
 
 def _mmean(x, m):
-    m = m.astype(x.dtype)
+    m = jnp.broadcast_to(m.astype(x.dtype), x.shape)
     return (x * m).sum() / jnp.maximum(m.sum(), 1.0)
 
 
@@ -73,7 +73,7 @@ def mvq_loss(out, batch, w: LossWeights, part_of_k):
     e2 = _huber(uv_all[:, :, None] - batch["kp2d"][:, None], w.huber_px).mean(-1)   # (B,I,F,T,C,K)
     m2 = batch["vis2d"][:, None]
     c2 = (e2 * m2).sum((3, 4, 5)) / jnp.maximum(m2.sum((3, 4, 5)), 1.0)
-    e3 = batch["px_scale"][:, None, None] * jnp.abs(xyz_sg[:, :, None] - batch["kp3d_local"][:, None]).mean(-1)
+    e3 = batch["px_scale"][:, None, None, None, None] * jnp.abs(xyz_sg[:, :, None] - batch["kp3d_local"][:, None]).mean(-1)
     m3 = batch["has3d"][:, None]
     c3 = (e3 * m3).sum((3, 4)) / jnp.maximum(m3.sum((3, 4)), 1.0)
     cost = jnp.where(fv[:, None, :], c2 + c3, 1e6)
@@ -86,9 +86,10 @@ def mvq_loss(out, batch, w: LossWeights, part_of_k):
     vis_t = batch["vis2d"].astype(jnp.float32)
     bce_v = jnp.maximum(pf["vis_logit"], 0) - pf["vis_logit"] * vis_t + jnp.log1p(jnp.exp(-jnp.abs(pf["vis_logit"])))
     vis = _mmean(bce_v, batch["cam_valid"][:, None, :, :, None] & fv[:, :, None, None, None])
-    # term 5 confidence (D4RT): c*err - lambda*log c
-    c = jnp.clip(jax.nn.sigmoid(pf["conf_logit"]), 1e-4, 1 - 1e-4)
-    conf = _mmean(c * per_kp - w.conf * jnp.log(c), per_kp_m & fv[:, :, None, None])
+    # term 5 confidence (D4RT): c*err - lambda*log c (log_sigmoid keeps the gradient on a saturated head)
+    log_c = jax.nn.log_sigmoid(pf["conf_logit"])
+    c = jnp.exp(log_c)
+    conf = _mmean(c * per_kp - w.conf * log_c, per_kp_m & fv[:, :, None, None])
     # term 6 existence
     tgt = inst_matched.astype(jnp.float32)
     bce_e = jnp.maximum(out["exist_logit"], 0) - out["exist_logit"] * tgt + jnp.log1p(jnp.exp(-jnp.abs(out["exist_logit"])))
@@ -97,6 +98,7 @@ def mvq_loss(out, batch, w: LossWeights, part_of_k):
     # term 7 repulsion against OTHER flies' same-part labels
     pok = jnp.asarray(np.asarray(part_of_k))
     same_part = (pok[:, None] == pok[None, :]).astype(jnp.float32)              # (K,K')
+    same_part = same_part / jnp.maximum(same_part.sum(1, keepdims=True), 1.0)     # per-row average, not sum, over a part's members
     rep = jnp.zeros(())
     if F > 1:
         for f in range(F):
