@@ -28,11 +28,14 @@ number; `mvq_all_joints_units` (copied straight from `final/mvq_run.json`,
 no recomputation) is kept alongside it as the "official" mvq number, on the
 harder full joint set.
 
-No 4th (SAM-mask) channel is available at this granularity, so it is passed
-as an all-zero channel -- EXACT for v5vf_maskoff, whose patch_embed kernel
-weights for that channel are all identically 0.0 (verified in
-tracking/predict_2d.py's `zero_mask_channel` docstring), so this is not an
-approximation for this checkpoint.
+The 4th (SAM-mask) channel is zeroed ONLY when the resolved detector config
+says the checkpoint was trained with it zeroed (`det["zero_mask_channel"]`,
+e.g. v5vf_maskoff's own `train.mask_ablation=true`) -- EXACT in that case,
+since that checkpoint's patch_embed kernel weights for the channel are all
+identically 0.0 (verified in tracking/predict_2d.py's `zero_mask_channel`
+docstring), so an all-zero channel is not an approximation for it. A
+checkpoint trained WITHOUT that ablation instead gets `V12WindowDataset`'s
+own `prompt_mask` fed as the real 4th channel -- see `run()` below.
 
 Geometry: V12WindowDataset's M/t_local are CROP-LOCAL (uv_crop = M@X_local +
 t_local, X_local = world - center3D), so both the ViTPose 2D and the
@@ -64,6 +67,7 @@ from jarvis_jax.config import ViTPoseConfig
 from jarvis_jax.convert.build_checkpoint import load_vitpose
 from jarvis_jax.data.device import normalize_image
 from jarvis_jax.data.v12_windows import V12WindowDataset
+from jarvis_jax.models.mvq.checkpoint import load_mvq_model
 from jarvis_jax.tracking.predict_2d import peaks_and_conf
 from jarvis_jax.tracking.triangulate import triangulate_keypoints
 from jarvis_jax.train.train_mvq import MM_PER_UNIT, normalize_crops
@@ -138,37 +142,35 @@ def cam_mats_local(M, t_local):
     return cm
 
 
-def _load_mvq_model(final_dir):
-    """Minimal mvq restore, mirroring scripts/viz/mvq_overlay.py::load_model
-    (kept local/duplicated rather than imported from a sibling script, which
-    Python does not treat as a normal importable module here)."""
-    import orbax.checkpoint as ocp
-    from flax import nnx
-    from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
-    from jarvis_jax.models.mvq import MVQConfig, MVQModel
-    meta = json.load(open(os.path.join(final_dir, "mvq_run.json")))
-    cfg = MVQConfig(**meta["model"])
-    model = nnx.eval_shape(lambda: MVQModel(cfg, rngs=nnx.Rngs(0)))
-    gdef, state = nnx.split(model)
-    repl = NamedSharding(Mesh(jax.devices(), axis_names=("data",)), P())
-    target = jax.tree_util.tree_map(
-        lambda v: jax.ShapeDtypeStruct(v.shape, v.dtype, sharding=repl), state)
-    restored = ocp.StandardCheckpointer().restore(final_dir, target=target)
-    model = nnx.merge(gdef, restored); model.eval()
-    return model, meta
-
-
-def _mvq_predict_xyz(model, s):
-    """One val sample (from V12WindowDataset) -> (xyz_local (K,3), has3d (K,)
-    bool) for the host-matched instance, unprompted. Mirrors
-    scripts/viz/mvq_overlay.py's per-sample nearest-instance-to-GT match."""
+def _mvq_forward(model, s):
+    """One val sample (from V12WindowDataset), unprompted -> (xyz (I,T,K,3),
+    exist_logit (I,), gt (K,3), has3d (K,) bool)."""
     b = {k: jnp.asarray(v)[None] for k, v in s.items()}
     on = jnp.array([False])
     out = model(normalize_crops(b["crops"]), b["cam_valid"], b["M"], b["t_local"], b["prompt_mask"], prompt_on=on)
     xyz = np.asarray(out["xyz"][0]); gt = s["kp3d_local"][0, 0]; has = s["has3d"][0, 0]
+    return xyz, np.asarray(out["exist_logit"][0]), gt, has
+
+
+def _oracle_instance(xyz, gt, has):
+    """Nearest-to-GT instance -- not available at real inference time,
+    diagnostic only (mirrors scripts/viz/mvq_overlay.py's own oracle match)."""
     d = np.linalg.norm(xyz[:, 0] - gt[None], axis=-1)
-    inst = int(np.argmin((d * has).sum(1)))
-    return xyz[inst, 0], has
+    return int(np.argmin((d * has).sum(1)))
+
+
+def _policy_instance(xyz, exist_logit):
+    """The policy a real (unprompted) inference call would actually use to
+    pick an instance -- exactly train_mvq.evaluate's unprompted policy:
+    among instances the model itself claims exist (sigmoid(exist_logit) >=
+    0.5), the one whose predicted centroid (mean xyz over T,K, ROI-local so
+    the ROI origin is (0,0,0)) sits closest to the ROI centre. None (a miss)
+    if no instance clears the threshold."""
+    exist = 1 / (1 + np.exp(-exist_logit)) > 0.5
+    cand = np.where(exist)[0]
+    if cand.size == 0:
+        return None
+    return int(cand[np.argmin(np.linalg.norm(xyz[cand].mean(axis=(1, 2)), axis=-1))])
 
 
 def run(args):
@@ -193,10 +195,17 @@ def run(args):
     vit = load_vitpose(det["ckpt"], ViTPoseConfig(num_keypoints=det["num_keypoints"]))
     mvq_model = mvq_meta = None
     if args.mvq_run:
-        mvq_model, mvq_meta = _load_mvq_model(args.mvq_run)
+        mvq_step = int(args.mvq_step) if (args.mvq_step is not None and args.mvq_step != "latest") else args.mvq_step
+        mvq_model, mvq_meta = load_mvq_model(args.mvq_run, step=mvq_step, attn_impl=args.mvq_attn_impl)
 
     n_empty_framesets = 0
-    rows = []  # (mpjpe_units, n_valid, n_has, female, two_fly, group, mvq_same_units, mvq_n_same)
+    # rows: (mpjpe_units, n_valid, n_has, female, two_fly, group, mvq_same_units,
+    # mvq_n_same, mvq_same_units_policy, mvq_n_same_policy, mvq_policy_miss) --
+    # the mvq_* oracle columns (7,8) mirror mvq_val_baselines' own fairness
+    # restriction (see FAIRNESS docstring); mvq_*_policy (9,10) apply the SAME
+    # restriction to the POLICY instance (what a real unprompted inference call
+    # would actually pick, see _policy_instance) instead of the GT-nearest one.
+    rows = []
     t0 = time.time()
     for i in range(n):
         s = ds[i]
@@ -234,15 +243,23 @@ def run(args):
         mpjpe_i = float(err[valid].mean()) if valid.any() else float("nan")
 
         mvq_same_units, mvq_n_same = float("nan"), 0
+        mvq_same_units_policy, mvq_n_same_policy, mvq_policy_miss = float("nan"), 0, False
         if mvq_model is not None:
-            mvq_xyz, mvq_has = _mvq_predict_xyz(mvq_model, s)
+            mvq_xyz, mvq_exist, mvq_gt, mvq_has = _mvq_forward(mvq_model, s)
+            inst_o = _oracle_instance(mvq_xyz, mvq_gt, mvq_has)
             same = valid & mvq_has                                 # baseline-finite AND mvq has GT
             if same.any():
-                mvq_same_units = float(np.linalg.norm(mvq_xyz[same] - gt[same], axis=-1).mean())
+                mvq_same_units = float(np.linalg.norm(mvq_xyz[inst_o, 0][same] - gt[same], axis=-1).mean())
                 mvq_n_same = int(same.sum())
+            inst_p = _policy_instance(mvq_xyz, mvq_exist)
+            mvq_policy_miss = inst_p is None
+            if inst_p is not None and same.any():
+                mvq_same_units_policy = float(np.linalg.norm(mvq_xyz[inst_p, 0][same] - gt[same], axis=-1).mean())
+                mvq_n_same_policy = int(same.sum())
 
         rows.append((mpjpe_i, int(valid.sum()), int(has.sum()), bool(ds.is_female(i)), ds.n_flies(i) > 1,
-                    ds.calib_group(i), mvq_same_units, mvq_n_same))
+                    ds.calib_group(i), mvq_same_units, mvq_n_same,
+                    mvq_same_units_policy, mvq_n_same_policy, mvq_policy_miss))
         if (i + 1) % 20 == 0 or i + 1 == n:
             print(f"[{i+1}/{n}] ({time.time()-t0:.0f}s)", flush=True)
 
@@ -250,6 +267,9 @@ def run(args):
     ok = np.isfinite(mp) & (nv > 0)
     mvq_same = np.array([r[6] for r in rows]); mvq_n = np.array([r[7] for r in rows])
     mvq_ok = np.isfinite(mvq_same) & (mvq_n > 0)
+    mvq_same_policy = np.array([r[8] for r in rows]); mvq_n_policy = np.array([r[9] for r in rows])
+    mvq_ok_policy = np.isfinite(mvq_same_policy) & (mvq_n_policy > 0)
+    mvq_policy_miss = np.array([r[10] for r in rows], bool)
 
     def cohort_mpjpe(mask):
         sel = mask & ok
@@ -264,6 +284,10 @@ def run(args):
     def cohort_mvq_same(mask):
         sel = mask & mvq_ok
         return float(np.average(mvq_same[sel], weights=mvq_n[sel])) if sel.any() else float("nan")
+
+    def cohort_mvq_same_policy(mask):
+        sel = mask & mvq_ok_policy
+        return float(np.average(mvq_same_policy[sel], weights=mvq_n_policy[sel])) if sel.any() else float("nan")
 
     female = np.array([r[3] for r in rows]); two_fly = np.array([r[4] for r in rows])
     groups = sorted({r[5] for r in rows})
@@ -287,9 +311,15 @@ def run(args):
         result[f"{name}_n_framesets_finite"] = n_finite
     if args.mvq_run:
         result["mvq_run"] = args.mvq_run
-        result["mvq_meta_val"] = mvq_meta["val"]     # (c) mvq on ALL joints -- copied, not recomputed
+        # (c) mvq on ALL joints -- copied, not recomputed. mvq_meta_val's own mpjpe3d_units/_mm
+        # are the ORACLE number (GT-nearest instance); mpjpe3d_policy_units/_mm alongside them
+        # is what a real (unprompted) inference call would actually report -- see
+        # train_mvq.evaluate's docstring for the oracle-vs-policy distinction.
+        result["mvq_meta_val"] = mvq_meta["val"]
+        result["mvq_policy_miss_frac"] = float(mvq_policy_miss.mean()) if len(rows) else float("nan")
         for name, mask in cohorts.items():
-            result[f"mvq_same_joints_{name}_units"] = cohort_mvq_same(mask)   # (b)
+            result[f"mvq_same_joints_{name}_units"] = cohort_mvq_same(mask)          # (b) oracle instance
+            result[f"mvq_same_joints_{name}_units_policy"] = cohort_mvq_same_policy(mask)   # (b) policy instance
     for k in list(result):
         if k.endswith("_units"):
             v = result[k]
@@ -309,10 +339,13 @@ def main():
     ap.add_argument("--split", default="val")
     ap.add_argument("--n", type=int, default=None, help="limit to first N val framesets")
     ap.add_argument("--mvq_run", default=None,
-                    help="path to a gate-1-style final/ dir; when given, also reports "
+                    help="path to a gate-1-style final/ dir (default), or (with --mvq_step) "
+                         "the RUN dir (parent of final/ and ckpt/); when given, also reports "
                          "mvq's own MPJPE restricted to the SAME (sample,joint) pairs the "
                          "baseline could triangulate (items b/c) -- adds one CPU/GPU mvq "
                          "forward pass per frameset, so this is slow without a GPU.")
+    ap.add_argument("--mvq_step", default=None, help="load ckpt/<step> (or 'latest') instead of final/")
+    ap.add_argument("--mvq_attn_impl", default=None, help="override the mvq run's own attn_impl (e.g. 'xla' on CPU)")
     ap.add_argument("--out", default=None)
     run(ap.parse_args())
 

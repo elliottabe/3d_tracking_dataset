@@ -16,72 +16,78 @@ import numpy as np
 import jax, jax.numpy as jnp
 import matplotlib; matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-import orbax.checkpoint as ocp
-from flax import nnx
-from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.join(ROOT, "third_party", "jarvis_jax")); sys.path.insert(0, ROOT)
-from jarvis_jax.models.mvq import MVQConfig, MVQModel, assemble
+from jarvis_jax.models.mvq.checkpoint import load_mvq_model
 from jarvis_jax.models.mvq.geometry import project_local
 from jarvis_jax.data.v12_windows import V12WindowDataset, WINDOW_KEYS
 from jarvis_jax.train.train_mvq import normalize_crops, MM_PER_UNIT
 
 
-def load_model(final_dir):
-    """Restore mvq_run.json + the Orbax EMA state into a fresh MVQModel.
-
-    The checkpoint was saved data-parallel-replicated across however many
-    GPUs the training job used (commonly 4); its stored array metadata
-    records that device count. A bare jax.ShapeDtypeStruct target (no
-    sharding) makes Orbax try to honor the CHECKPOINT's own sharding, which
-    raises "Topology mismatch detected" the moment the current process's
-    visible device count differs from the training run's -- e.g. restoring
-    on a single GPU for a quick figure. Pin the target to an explicit
-    REPLICATED sharding over whatever devices are visible now instead (same
-    pattern as convert/build_checkpoint.py::load_vitpose), which restores
-    correctly on 1, 4, or any other device count.
-    """
-    meta = json.load(open(os.path.join(final_dir, "mvq_run.json")))
-    cfg = MVQConfig(**meta["model"])
-    model = nnx.eval_shape(lambda: MVQModel(cfg, rngs=nnx.Rngs(0)))
-    gdef, state = nnx.split(model)
-    repl = NamedSharding(Mesh(jax.devices(), axis_names=("data",)), P())
-    target = jax.tree_util.tree_map(
-        lambda v: jax.ShapeDtypeStruct(v.shape, v.dtype, sharding=repl), state)
-    restored = ocp.StandardCheckpointer().restore(final_dir, target=target)
-    model = nnx.merge(gdef, restored); model.eval()
-    return model, meta
+def _policy_instance(xyz, exist_logit, prompted: bool):
+    """Same policy train_mvq.evaluate uses: prompted -> instance 0 (the
+    prompt targets that query slot); unprompted -> among instances the model
+    itself claims exist (sigmoid(exist_logit) >= 0.5), the one whose
+    predicted centroid (mean xyz over T,K, ROI-local so the ROI origin is
+    (0,0,0)) sits closest to the ROI centre. None (a miss) if unprompted and
+    no instance clears the threshold."""
+    if prompted:
+        return 0
+    exist = 1 / (1 + np.exp(-np.asarray(exist_logit))) > 0.5
+    cand = np.where(exist)[0]
+    if cand.size == 0:
+        return None
+    return int(cand[np.argmin(np.linalg.norm(xyz[cand].mean(axis=(1, 2)), axis=-1))])
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--run", required=True); ap.add_argument("--root", default=None)
+    ap.add_argument("--run", required=True,
+                    help="a final/ dir (default), or (with --step) the RUN dir (parent of final/ and ckpt/)")
+    ap.add_argument("--step", default=None, help="load ckpt/<step> (or 'latest') instead of final/")
+    ap.add_argument("--attn_impl", default=None, help="override the run's own attn_impl (e.g. 'xla' on CPU)")
+    ap.add_argument("--root", default=None)
     ap.add_argument("--split", default="val"); ap.add_argument("--n", type=int, default=6)
     ap.add_argument("--cases", default="female,two_fly,worst"); ap.add_argument("--out", required=True)
     ap.add_argument("--prompted", action="store_true")
     a = ap.parse_args()
     root = a.root or "/gscratch/portia/eabe/data/Johnson_lab/red_data/red_data_3d_v12_export0902"
-    model, meta = load_model(a.run)
+    step = int(a.step) if (a.step is not None and a.step != "latest") else a.step
+    model, meta = load_mvq_model(a.run, step=step, attn_impl=a.attn_impl)
     ds = V12WindowDataset(root, a.split, T=1, train=False)
     names = ds.keypoint_names
     os.makedirs(a.out, exist_ok=True)
     rows = []
     for i in range(len(ds)):
         s = ds[i]; b = {k: jnp.asarray(v)[None] for k, v in s.items()}
-        on = jnp.array([a.prompted and bool(s["prompt_mask"].any())])
+        prompted = a.prompted and bool(s["prompt_mask"].any())
+        on = jnp.array([prompted])
         out = model(normalize_crops(b["crops"]), b["cam_valid"], b["M"], b["t_local"], b["prompt_mask"], prompt_on=on)
         xyz = np.asarray(out["xyz"][0]); gt = s["kp3d_local"][0, 0]; has = s["has3d"][0, 0]
+        # ORACLE instance (nearest GT -- not available at real inference time, diagnostic only)
         d = np.linalg.norm(xyz[:, 0] - gt[None], axis=-1); inst = int(np.argmin((d * has).sum(1)))
+        # POLICY instance (what a real inference call would actually pick, see _policy_instance)
+        inst_policy = _policy_instance(xyz, out["exist_logit"][0], prompted)
+        mpjpe_policy = (float(d[inst_policy][has].mean()) if inst_policy is not None and has.any()
+                       else np.nan)
         uv3 = np.asarray(project_local(jnp.asarray(xyz[inst, 0]), b["M"][0], b["t_local"][0, 0]))   # (K,C,2)
         uv2 = np.asarray(out["uv"][0, inst, 0])                                                     # (C,K,2)
         vis = s["vis2d"][0, 0]                                                                     # (C,K)
         re = np.linalg.norm(uv3.transpose(1, 0, 2) - s["kp2d"][0, 0], axis=-1)
         rows.append(dict(i=i, mpjpe_units=float(d[inst][has].mean()) if has.any() else np.nan,
+                         mpjpe_policy_units=mpjpe_policy, policy_miss=inst_policy is None,
                          reproj_px=float(re[vis].mean()) if vis.any() else np.nan,
                          exist=[float(x) for x in 1 / (1 + np.exp(-np.asarray(out["exist_logit"][0])))],
                          female=bool(ds.is_female(i)), two_fly=ds.n_flies(i) > 1, group=ds.calib_group(i),
                          cam_names=ds.camera_names(i), sample=s, uv3=uv3, uv2=uv2, inst=inst))
+    finite = lambda vals: [v for v in vals if np.isfinite(v)]
+    oracle_mean = float(np.mean(finite([r["mpjpe_units"] for r in rows]))) if rows else float("nan")
+    policy_vals = finite([r["mpjpe_policy_units"] for r in rows])
+    policy_mean = float(np.mean(policy_vals)) if policy_vals else float("nan")
+    miss_frac = float(np.mean([r["policy_miss"] for r in rows])) if rows else float("nan")
+    print(f"mpjpe3d oracle={oracle_mean:.3f} policy={policy_mean:.3f} units "
+         f"(policy_miss_frac={miss_frac:.3f}, prompted={a.prompted})")
     json.dump([{k: v for k, v in r.items() if k not in ("sample", "uv3", "uv2")} for r in rows],
               open(os.path.join(a.out, "summary.json"), "w"), indent=1)
     for case in a.cases.split(","):
