@@ -154,7 +154,10 @@ mode.
 
 ### 4.6 Decoder
 
-**Instance queries.** `n_instances` learned embeddings: 3 for courtship
+**Instance queries.** SUPERSEDED 2026-09-04 by
+`docs/specs/2026-09-04-mvq-p3a-identity-existence-design.md` §3: four slots
+with fixed meaning (prompted / female / male / other). P0-P2 text follows.
+`n_instances` learned embeddings: 3 for courtship
 (num_animals + 1 slack), 2 for single-fly. The prompt token is added to
 instance 0 when present. Existence head: mean of an instance's 3D query
 features -> linear -> logit.
@@ -199,7 +202,9 @@ All errors are in pixels so weights are comparable; 3D errors are converted
 with the recording's mean projection scale `s = mean ||M||_F / sqrt(2)`
 (about 8 px/unit). Masked means over valid entries; mean over the batch.
 
-**Matching.** A prompted instance is assigned to the prompted fly. Otherwise
+**Matching.** SUPERSEDED 2026-09-04 by the P3a spec §3-4: label-driven
+slot assignment, existence ignore for unlabelled present flies, sex term 8.
+P0-P2 text follows. A prompted instance is assigned to the prompted fly. Otherwise
 instances are matched to labelled flies per window by minimum cost over all
 injective assignments, enumerated in JAX (at most 6 for N=3, two flies).
 Cost = mean reprojection error + 3D L1 where 3D exists. Unmatched instances
@@ -277,7 +282,8 @@ Geometric, all exact under affine cameras:
 Robustness: photometric per view from `augment.py` defaults, camera
 dropout (`cam_drop_p: 0.3`, 1-2 views).
 
-**NOT implemented in P2** (P3 candidates, per §8's ruling that mvq trains
+**Copy-paste is specified in the P3a spec §6 (2026-09-04); gray-fill is
+dropped there.** Original P2 note: **NOT implemented in P2** (P3 candidates, per §8's ruling that mvq trains
 as a set predictor with the other fly visible rather than gray-filled):
 distractor gray-fill with `fill_p` (15/60 dilation rule from
 `data/distractor.py`); multi-view copy-paste of a donor frameset at a 3D
