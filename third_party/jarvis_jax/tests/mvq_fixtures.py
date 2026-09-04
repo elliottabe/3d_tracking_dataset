@@ -66,12 +66,18 @@ def make_v12_root(tmp_path, *, n_frames=3, two_fly_frame=1, img_w=1936, img_h=44
             img_id += 1
             images.append({"id": img_id, "width": img_w, "height": img_h,
                            "recording": REC, "file_name": fn})
+            mask_ids, mask_arrs = [], []
             for fly in flies:
                 X = np.concatenate([pts[fly], np.ones((K, 1))], 1)
                 uv = (X @ P.T)[:, :2]
                 kps = np.stack([uv[:, 0], uv[:, 1], np.ones(K)], 1)
                 cx, cy = int(uv[:, 0].mean()), int(uv[:, 1].mean())
-                img[max(cy - 12, 0):cy + 12, max(cx - 12, 0):cx + 12] = 255
+                y0, y1 = max(cy - 12, 0), cy + 12
+                x0, x1 = max(cx - 12, 0), cx + 12
+                img[y0:y1, x0:x1] = 255
+                m = np.zeros((img_h, img_w), np.uint8)
+                m[y0:y1, x0:x1] = 1
+                mask_ids.append(ann_id); mask_arrs.append(m)
                 anns.append({"id": ann_id, "image_id": img_id,
                              "bbox": [float(uv[:, 0].min()), float(uv[:, 1].min()),
                                       float(np.ptp(uv[:, 0])), float(np.ptp(uv[:, 1]))],
@@ -82,6 +88,13 @@ def make_v12_root(tmp_path, *, n_frames=3, two_fly_frame=1, img_w=1936, img_h=44
                 ann_id += 1
             os.makedirs(root / "images" / REC / c, exist_ok=True)
             Image.fromarray(img).save(root / "images" / REC / c / f"Frame_{f}.jpg", quality=90)
+            # mask npz, same layout _load_mask reads: masks/<rec>/<cam>/Frame_<f>.npz
+            # with ann_ids/matched/masks keyed by each annotation's own `id` (== src_ann_id here)
+            os.makedirs(root / "masks" / REC / c, exist_ok=True)
+            np.savez(root / "masks" / REC / c / f"Frame_{f}.npz",
+                     ann_ids=np.array(mask_ids, np.int64),
+                     matched=np.ones(len(mask_ids), bool),
+                     masks=np.stack(mask_arrs).astype(np.uint8))
         for fly in flies:
             framesets[f"{REC}/Frame_{f}/fly{fly}"] = {"recording": REC, "fly_id": fly,
                                                      "subset": "synthetic", **per_fly[fly]}

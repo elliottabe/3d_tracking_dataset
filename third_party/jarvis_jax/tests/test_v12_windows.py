@@ -174,3 +174,18 @@ def test_fly_centroids_match_sample_labels(tmp_path):
         has = s["has3d"][f, 0]
         ref = (s["kp3d_local"][f, 0][has]).mean(0) + s["center3D"]
         np.testing.assert_allclose(c[f], ref, atol=1e-3)
+
+
+def test_fixture_masks_are_written_and_match_host_blob(tmp_path):
+    """The synthetic fixture now writes a mask npz per image (masks/<rec>/<cam>/
+    Frame_<f>.npz) so `prompt_mask` is non-empty: for the host fly in the
+    two-fly frame, the mask must be non-empty in every camera and lie
+    entirely within the host's own bright 24x24 blob (mask == blob)."""
+    from jarvis_jax.data.v12_windows import V12WindowDataset
+    root = make_v12_root(tmp_path, n_frames=3, two_fly_frame=1)
+    ds = V12WindowDataset(root, "train", T=1, train=False)
+    i = ds.windows.index((REC, 0, 1))          # host fly0, two-fly frame
+    s = ds[i]
+    for c in range(7):
+        assert s["prompt_mask"][0, c].any()
+        assert s["crops"][0, c][s["prompt_mask"][0, c]].min() > 200
