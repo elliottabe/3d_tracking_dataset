@@ -25,7 +25,7 @@ sys.path.insert(0, os.path.join(ROOT, "third_party", "jarvis_jax")); sys.path.in
 from jarvis_jax.models.mvq import MVQConfig, MVQModel, assemble
 from jarvis_jax.models.mvq.geometry import project_local
 from jarvis_jax.data.v12_windows import V12WindowDataset, WINDOW_KEYS
-from jarvis_jax.train.train_mvq import normalize_crops
+from jarvis_jax.train.train_mvq import normalize_crops, MM_PER_UNIT
 
 
 def load_model(final_dir):
@@ -81,7 +81,7 @@ def main():
                          reproj_px=float(re[vis].mean()) if vis.any() else np.nan,
                          exist=[float(x) for x in 1 / (1 + np.exp(-np.asarray(out["exist_logit"][0])))],
                          female=bool(ds.is_female(i)), two_fly=ds.n_flies(i) > 1, group=ds.calib_group(i),
-                         sample=s, uv3=uv3, uv2=uv2, inst=inst))
+                         cam_names=ds.camera_names(i), sample=s, uv3=uv3, uv2=uv2, inst=inst))
     json.dump([{k: v for k, v in r.items() if k not in ("sample", "uv3", "uv2")} for r in rows],
               open(os.path.join(a.out, "summary.json"), "w"), indent=1)
     for case in a.cases.split(","):
@@ -91,24 +91,27 @@ def main():
         sel = sel[: a.n]
         if not sel:
             print(f"[{case}] no samples"); continue
-        C = 7; fig, axes = plt.subplots(len(sel), C, figsize=(2.2 * C, 2.2 * len(sel)), squeeze=False)
+        C = sel[0]["sample"]["crops"].shape[1]
+        fig, axes = plt.subplots(len(sel), C, figsize=(2.2 * C, 2.2 * len(sel)), squeeze=False)
         for r_i, r in enumerate(sel):
-            s = r["sample"]
+            s = r["sample"]; cam_names = r["cam_names"]
             for c in range(C):
                 ax = axes[r_i, c]; ax.imshow(s["crops"][0, c]); ax.set_xticks([]); ax.set_yticks([])
+                cam = cam_names[c]
                 if not s["cam_valid"][0, c]:
-                    ax.set_title(f"cam{c+1} absent", fontsize=7); continue
+                    ax.set_title(f"{cam} absent", fontsize=7); continue
                 vis = s["vis2d"][0, 0, c]; g2 = s["kp2d"][0, 0, c]
                 ax.scatter(g2[vis, 0], g2[vis, 1], s=6, c="white", label="human 2D")
                 ax.scatter(r["uv2"][c, :, 0], r["uv2"][c, :, 1], s=6, c="cyan", label="model 2D head")
                 ax.scatter(r["uv3"][:, c, 0], r["uv3"][:, c, 1], s=6, c="lime", label="model 3D reprojected")
                 e = np.linalg.norm(r["uv3"][:, c] - g2, axis=-1)[vis]
-                ax.set_title(f"cam{c+1} {e.mean():.1f}px" if e.size else f"cam{c+1}", fontsize=7)
+                ax.set_title(f"{cam} {e.mean():.1f}px" if e.size else cam, fontsize=7)
             axes[r_i, 0].set_ylabel(f"#{r['i']} {'F' if r['female'] else 'M'} grp{r['group']}\n"
-                                    f"{r['mpjpe_units']*0.1:.2f}mm", fontsize=7)
-        axes[0, 0].legend(fontsize=6, loc="lower left")
+                                    f"{r['mpjpe_units']*MM_PER_UNIT:.2f}mm", fontsize=7)
+        fig.legend(*axes[0, 0].get_legend_handles_labels(), fontsize=6, loc="upper left",
+                  bbox_to_anchor=(0.0, 1.0), bbox_transform=fig.transFigure)
         fig.suptitle(f"mvq {os.path.basename(os.path.dirname(a.run.rstrip('/')))} — {case} — white=human, cyan=2D head, green=reprojected 3D")
-        fig.tight_layout(); fig.savefig(os.path.join(a.out, f"gate1_{case}.png"), dpi=130); plt.close(fig)
+        fig.tight_layout(rect=(0, 0, 1, 0.96)); fig.savefig(os.path.join(a.out, f"gate1_{case}.png"), dpi=130); plt.close(fig)
         print("wrote", os.path.join(a.out, f"gate1_{case}.png"))
 
 

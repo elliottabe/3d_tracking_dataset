@@ -116,23 +116,137 @@ Wall time for the full 2000-step run: ~103 minutes (6181s reported at the
 final step, plus ~130s of one-time backbone-load/compile overhead before the
 timer starts).
 
+**The data loader is not the bottleneck** (profiled): 0.24 s/batch at
+`num_workers=16`, 0.11 s/batch at `num_workers=32`, against 2.78 s/step of
+GPU compute for one GPU's share of a step. Even the slower (16-worker)
+loader number is under a tenth of the per-step compute time, so the spec
+§6.2 strip-cache mitigation (deferred pending evidence the loader is the
+bottleneck) is **not triggered** — the measured ~3.02 s/step is compute-bound,
+not IO-bound.
+
+## Fix round 1 (2026-09-04): EMA debiasing was silently shrinking every joint
+
+**Controller-diagnosed defect, now fixed** (`train_mvq.py`, commit in this
+round): the EMA was seeded from the step-0 (near-random) params and never
+debiased. At step 2000, `decay**t = 0.999**2000 = 0.135` of that near-zero
+init still weighted the average that `final/` actually saved and evaluated
+-- a uniform SHRINK of every predicted joint toward the crop centre (xyz=0
+in local coordinates), worse for joints far from centre. Measured on the
+gate-1 checkpoint (predicted/GT radial distance from the crop centre, i.e.
+exactly the ratio this bug would suppress):
+
+| region | radial dist/GT ratio |
+|---|---|
+| head / thorax / abdomen / wing-base (proximal, near centre) | 0.86-0.93 |
+| distal legs (tarsi, furthest from centre) | 0.68-0.83 |
+
+This is a plausible SECOND contributor (alongside the 2D-precision gap
+already discussed above) to the "green stops short of the tarsal tips"
+pattern seen in every figure in this gate -- a uniform radial shrink reads
+visually almost identically to "legs under-extended," and the two are hard
+to tell apart from a static overlay alone. Fix: EMA now seeds at zero and
+`_with_ema` divides by `(1 - decay**t)` (`t` = the current absolute step
+count, always exactly the EMA's own update count -- no separate counter
+needs to be saved/restored, since the checkpoint step number already IS
+that count). `tests/test_train_mvq_smoke.py::test_ema_debias_matches_constant_params`
+pins the identity: a zero-seeded EMA of a CONSTANT p, debiased, equals p to
+1e-6 for n in {1, 10, 1000}. **This changes the numbers everywhere above and
+in `mvq_run.json`** -- the gate-1 `final/` checkpoint predates this fix, so
+every mm/units number in this document (val mpjpe, rigid_spread, baseline
+comparison) reflects the BIASED (shrunk) EMA, not the debiased one. Re-running
+gate 1 against a checkpoint trained with the fix is the natural next step;
+not done in this round (the 8-GPU local 30k run owns GPUs 0-7 for its
+duration -- see "30k job" below).
+
+**New: `rigid_len_ratio/<seg>`** (mean predicted segment length / mean GT
+segment length, alongside the existing `rigid_spread_mm`) makes exactly this
+kind of collapse visible numerically, which spread alone cannot (a
+collapsed-but-STEADY pair is smoother, not noisier -- CLAUDE.md's "check a
+rigid invariant" history). Computed against the (pre-fix, biased-EMA) gate-1
+checkpoint, unprompted, val set (CPU, `evaluate(model, val_ds, 8, ...)`):
+
+| segment | rigid_len_ratio (prompted) | rigid_len_ratio (unprompted) |
+|---|---|---|
+| EyeL-EyeR | 0.426 | 0.541 |
+| T1L_Tro-T1L_FeTi | 0.567 | 0.578 |
+| T1R_Tro-T1R_FeTi | 0.540 | 0.630 |
+| T2L_Tro-T2L_FeTi | 0.620 | 0.653 |
+| T2R_Tro-T2R_FeTi | 0.569 | 0.708 |
+| T3L_Tro-T3L_FeTi | 0.665 | 0.720 |
+| T3R_Tro-T3R_FeTi | 0.637 | 0.754 |
+
+Every segment ratio is well below 1.0 (predicted consistently SHORTER than
+GT) -- direct, independent confirmation that the model under-predicts
+segment length, in the same direction the EMA-debias bug predicts. Not
+uniform across segments (0.43-0.75), so this is not a single global
+position-domain scale factor (which would make every ratio identical); it
+varies by which two joints and which part of the query/head pipeline they
+pass through, same qualitative shape as the controller's radial-ratio table
+above (non-uniform, worse for some categories) without the two metrics
+being expected to match numerically (radial dist/GT is a per-JOINT position
+ratio; this is a per-SEGMENT length ratio). Notably `EyeL-EyeR` -- a short,
+bilateral (left/right) segment -- is the MOST collapsed here despite both
+its endpoints being individually close to the crop centre in the
+controller's proximal-joint bucket; a plausible read is that the bug
+collapses left/right separation specifically (both eyes pulled toward the
+body midline) rather than being explained by radial distance from centre
+alone. All numbers computed on the pre-fix (biased-EMA) gate-1 checkpoint --
+`evaluate(model, val_ds, 8, ...)` re-run on CPU against `final/`, val set,
+153 framesets.
+
 ## Val baseline (ViTPose v5vf_maskoff 2D -> robust DLT), full 153 val framesets
 
-`scripts/benchmark/mvq_val_baselines.py`, default args (`conf_thresh=0.3
-view_conf_thresh=0.6 reproj_resid_px=10.0 decode_sharpen=3.0`, matching
-`configs/detector/vitpose_v3.yaml`), run on GPU 4 alone:
+`scripts/benchmark/mvq_val_baselines.py`. **Fix round 1** (2026-09-04):
+gate thresholds, checkpoint path, `zero_mask_channel`, and `num_keypoints`
+are now read from `configs/detector/vitpose_v3.yaml` via OmegaConf (resolved
+against `configs/paths/hyak.yaml` for `${paths.vit_runs_root}`), not
+hardcoded -- a config change now actually changes what this script runs. The
+script asserts the detector's `kp_names` list equals the dataset's
+`keypoint_names` element-wise BY NAME before comparing anything (raises
+otherwise) -- checked and PASSES on this root (both 50-name lists are
+identical, position-for-position; this is a belt-and-suspenders check, not a
+fix for a mismatch that existed here). Re-run on GPU 4, then a second full
+CPU pass (`JAX_PLATFORMS=cpu`, GPUs 0-7 owned by the 8-GPU local 30k run --
+see below) adding the mvq-comparison arms:
 
-| cohort | mpjpe (units / mm) |
-|---|---|
-| overall | 1.070 / 0.107 |
-| female | 0.723 / 0.072 |
-| two_fly | 1.701 / 0.170 |
-| group_A | 1.170 / 0.117 |
-| group_C | 0.674 / 0.067 |
+| cohort | baseline mpjpe (units/mm) | coverage | mvq SAME joints, unprompted (units/mm) | mvq ALL joints, unprompted (units/mm) [=official] |
+|---|---|---|---|---|
+| overall | 1.070 / 0.107 | 1.000 | 3.760 / 0.376 | 3.760 / 0.376 |
+| female | 0.723 / 0.072 | 1.000 | 4.040 / 0.404 | 4.040 / 0.404 |
+| two_fly | 1.701 / 0.170 | 1.000 | 4.293 / 0.429 | 4.293 / 0.429 |
+| group_A | 1.170 / 0.117 | 1.000 | 3.497 / 0.350 | 3.497 / 0.350 |
+| group_C | 0.674 / 0.067 | 1.000 | 4.801 / 0.480 | 4.801 / 0.480 |
 
-Runtime: 79s for all 153 framesets (a single OOM-and-recover warning mid-run
-at `XLA_PYTHON_CLIENT_MEM_FRACTION=0.5`, harmless — the allocator fell back to
-a smaller buffer and every fresset still triangulated).
+**Fairness finding**: `coverage` (fraction of GT joints the baseline's DLT
+could triangulate, `sum(n_valid)/sum(n_has)`) is **1.000 in every cohort** --
+the baseline never failed to triangulate a labelled joint anywhere in this
+153-frameset val set, so "mvq restricted to the baseline's finite joints"
+and "mvq on ALL joints" are numerically identical here (compare columns 4
+and 5 above -- the earlier concern that the baseline could be scored on an
+easier self-selected joint subset than mvq does not materialize on THIS val
+set, though the code now checks it on every run rather than assuming it).
+`n_empty_framesets` (a frameset where DLT triangulated zero GT joints) is 0.
+Runtime: 79s on GPU, ~22 min on CPU with the mvq comparison added (one extra
+mvq forward pass per frameset).
+
+**Train-set-exposure caveat (item 3, could not be fully resolved)**: the
+detector was trained on `red_data_3d_v5_valfix` (`.hydra/overrides.yaml`),
+NOT v12's root, and that root no longer exists on disk (2026-09-02 cleanup)
+-- this script cannot check directly whether any of v12's val recordings
+(`2026_01_29_14_09_33`, `2026_04_02_12_11_50`, `2026_04_02_15_25_51`,
+`2026_06_09_15_21_14`, `2026_06_09_15_46_55`) sat in the detector's own
+TRAIN split. `docs/benchmark/2026-09-02-dataset-dedup/notes.md` documents
+exactly this dataset lineage's known failure mode: byte-identical
+recordings re-ingested under different session names landing on opposite
+sides of a name-keyed split, including a confirmed `courtship_11_50_female`/
+`courtship_11_50_male` alias pair. v12's own `2026_04_02_12_11_50` carries
+that same `courtship_11_50` subset label -- suggestive, but NOT confirmed
+(the alias pair's dates, 2026_05_27, don't match), since the source root is
+gone. **This baseline's numbers are therefore PROVISIONAL**: the gap between
+mvq and this baseline should be read as an upper bound on how far mvq
+currently trails, not a precise, guaranteed-held-out figure. (Full text:
+`train_exposure_caveat` field in
+`docs/benchmark/2026-09-mvq/vitpose_dlt_baseline_gate1.json`.)
 
 **A4 c2f arm reference (0.56 units)**: `docs/benchmark/2026-08-30-arm-results/notes.md`
 — a **DIFFERENT, NOT like-for-like** val split (`red_data_3d_v5`, 216
@@ -169,13 +283,16 @@ with `exist_prec`/`exist_rec` (prompted 1.000/0.597 vs unprompted
 0.848/0.855 on two_fly-type existence), the mask-prompted path is currently
 UNDER-predicting existence (high precision, low recall: it only claims a
 second instance exists when very sure) while unprompted over-predicts
-existence more evenly. `prompt_p` anneals from 1.0 to 0.5 over exactly
-`prompt_anneal_steps=2000` steps, so at step 2000 the model has only just
-started seeing genuinely unprompted batches during training — the prompted
-path is the one that dominated training so far, and its cohort numbers being
-slightly worse is therefore a step-2000-specific artifact of the anneal
-schedule, not evidence prompting itself hurts; re-check once the 30k run is
-well past its own anneal window.
+existence more evenly. **This reversal is UNEXPLAINED, not an anneal-schedule
+artifact** — an earlier draft of this note attributed it to `prompt_p`
+annealing from 1.0 to 0.5 over `prompt_anneal_steps=2000` coinciding with
+gate-1's own step count, reasoning the model had "only just started seeing
+genuinely unprompted batches"; that reasoning does not hold up (the anneal
+schedule affects how OFTEN each mode is trained on, not which mode should
+score better at eval time, and by step 2000 `prompt_p` has already reached
+its floor of 0.5, i.e. half of training batches were unprompted throughout
+the back half of the run) and is retracted. Re-check at 30k with no
+supporting theory yet for why prompted underperforms here.
 
 ## Figure gate 1 — per-figure observations
 
@@ -201,19 +318,26 @@ PYTHONPATH=third_party/jarvis_jax:. python scripts/viz/mvq_overlay.py \
 
 ### `unprompted/gate1_female.png` (6 female windows, calib group A, all cam1-cam7)
 
-**Saw**: white (human) points radiate cleanly out along each leg to the
-tarsal tips in every camera, as expected — the labels themselves are fine.
-Cyan (model 2D head) and green (model reprojected 3D) sit in a diffuse
-cluster covering the fly's central body mass (thorax/head/wing-base region)
-in every one of the 42 panels (6 samples x 7 cams), but do **not** reach out
-along the leg chains to the tarsal tips the way white does. Per-panel
-reprojection 16.7-22.6px. Critically: this diffuse cluster tracks the SAME
-fly, in the SAME rough pose, consistently across all 7 cameras for a given
-sample — no camera shows the cloud rotated, mirrored, or shifted relative to
-the others, and no camera shows it jumping to the background or off the
-animal. **Meets the loosened female-cohort bar** (stays on her body); does
-**not** meet the strict few-px bar, which the docstring explicitly reserves
-for "easy male frames" — these are hard, wall-adjacent female frames.
+**Saw (corrected after a closer re-read -- an earlier draft of this note
+mischaracterized this figure as a "diffuse cluster" that does not follow the
+legs at all; that description is WRONG for this figure and is retracted
+here)**: white (human) points radiate cleanly out along each leg to the
+tarsal tips in every camera, as expected -- the labels themselves are fine.
+Cyan (model 2D head) and green (model reprojected 3D) DO follow the same
+leg-chain directions as white, visibly paralleling each leg outward from the
+body in most of the 42 panels (6 samples x 7 cams) -- they are not a
+body-centered blob. What they get wrong is reach: green/cyan consistently
+fall short of white's tarsal tips, stopping partway along each leg (most
+visible on cam2-cam5, where full legs are in frame). Per-panel reprojection
+16.7-22.6px. Critically: this shortened-leg pattern tracks the SAME fly, in
+the SAME rough pose, consistently across all 7 cameras for a given sample --
+no camera shows it rotated, mirrored, or shifted relative to the others, and
+no camera shows it jumping to the background or off the animal. **Meets the
+loosened female-cohort bar** (stays on her body, legs recognizably in the
+right directions); does **not** meet the strict few-px bar, which the
+docstring explicitly reserves for "easy male frames" -- these are hard,
+wall-adjacent female frames. (The genuinely body-centered, leg-chain-blind
+collapse described below is a `gate1_worst` phenomenon, not this one.)
 
 ### `unprompted/gate1_two_fly.png` (6 two-fly windows, calib group C, mixed M/F)
 
@@ -233,11 +357,22 @@ pairs calib group A + 4 wall/occlusion female group C, sorted worst-first)
 mating pair, second fly plainly visible below the host in every camera) and
 #10/#30/#24/#28 (wall-adjacent females), green/cyan collapse toward the
 body-center/thorax and systematically fail to extend to the leg tips that
-white correctly reaches — the point cloud is consistently "too short," not
-consistently offset or rotated. Per-panel error 36.3-59.8px. Same
-cross-fly check as above: even with a second animal filling a third of the
-frame (#67, #65), the model's points stay exclusively on the host fly — no
-sample in this "worst" set shows attachment to the wrong animal.
+white correctly reaches — here the cloud genuinely does NOT trace the leg
+chains (unlike the milder female-cohort shortening above): it is a compact
+blob near the thorax regardless of the legs' actual splayed directions.
+Per-panel error 36.3-59.8px. Same cross-fly check as above: even with a
+second animal filling a third of the frame (#67, #65), the model's points
+stay exclusively on the HOST fly, never the other animal — no sample in this
+"worst" set shows cross-fly attachment.
+
+**One partial exception, re-read and confirmed**: sample #67 (top row), cam6
+specifically -- the green/cyan cloud sits at/just below the wall-edge line
+near the BOTTOM of that panel, not clearly on the visible fly's body (which
+sits more toward upper-left in that view). This is not cross-fly bleed (the
+second animal is not there either); it looks like the point cloud landing on
+the floor/wall boundary rather than on any fly. One panel out of 42 (6
+samples x 7 cams) in this set -- not systemic, but a real miss worth naming
+rather than folding into "stays on the host fly."
 
 ### `prompted/gate1_{female,two_fly,worst}.png` — same 3 cases, `--prompted`
 
@@ -255,17 +390,39 @@ The three failure signatures the gate is built to catch — (a) a constant
 per-camera offset vector (crop-origin/center3D bookkeeping bug), (b) points
 correct in some cameras and rotated/mirrored in others (camera-order-by-name
 or geometry-token bug), (c) cross-fly attachment on two-fly windows — are
-**absent** in all 12 PNGs (both prompted and unprompted x female/two_fly/worst).
-Cyan and green move together (not "cyan fine, green broken"), ruling out an
-independently-broken 3D path. The real, visible problem — points cluster near
-body-center instead of extending to the tarsal tips, worst on the hardest
-(wall/occlusion/courtship-pair) frames — is a precision/undertraining
-signature consistent with the numeric val/baseline gap above (2k of 30k
-steps, `uv2d_px` still ~7-8x the mature detector's own precision), not a
-geometry defect. **Proceed to the 30k run**; re-run this same gate at 30k to
-confirm the tarsal-tip gap closes as `uv2d_px` converges.
+**absent** in all 12 PNGs (both prompted and unprompted x female/two_fly/worst),
+with one single-panel exception (`gate1_worst`, sample #67 cam6, unprompted:
+the point cloud sits on the floor/wall boundary rather than the fly -- not
+cross-fly bleed, since neither animal is under it, but a genuine miss, 1 of
+42 panels in that set). Cyan and green move together (not "cyan fine, green
+broken"), ruling out an independently-broken 3D path. The real, visible
+problem — legs recognizably followed but under-extended in the female
+cohort, collapsing further into a body-centered blob on the hardest
+(wall/occlusion/courtship-pair) `gate1_worst` frames — is a
+precision/undertraining signature consistent with the numeric val/baseline
+gap above (2k of 30k steps, `uv2d_px` still ~7-8x the mature detector's own
+precision), not a geometry defect. **Proceed to the 30k run**; re-run this
+same gate at 30k to confirm the tarsal-tip gap closes as `uv2d_px` converges.
 
 ## 30k job
+
+**UPDATE (fix round 1, 2026-09-04): superseded.** Queue job **39557158** was
+`scancel`led; the 30k run is now LOCAL on this node's all 8 GPUs,
+`run_id=mvq_t1_b16_local8_20260904` (PID 642747):
+```
+python -m jarvis_jax.scripts.train_mvq model=mvq train=mvq paths=hyak \
+  run_id=mvq_t1_b16_local8_20260904 train.total_steps=30000 train.eval_every=2000 \
+  train.save_every=1000 train.batch_size=32 train.num_workers=24 \
+  "paths.runs_root=\${paths.mvq_runs_root}"
+```
+GPUs 0-7 were confirmed idle before launch and are fully occupied by this
+run for the duration of this fix round (all fix-round-1 work below used
+`JAX_PLATFORMS=cpu`, never touching 0-7). Not yet past its own step-2000
+eval boundary at the time of writing this update — the "worth a quick log
+check" item from the superseded queue-job entry below still applies to this
+run instead.
+
+<details><summary>Superseded queue-job entry (job 39557158, cancelled)</summary>
 
 Job id **39557158** (queue `ckpt-all`), submitted from the worktree root with
 the eval fix already committed, `train.save_every=250` (checkpoint every
@@ -279,34 +436,59 @@ cd <worktree>
 scripts/slurm/submit_task.sh --gpus 4 --cpus 32 --mem 200 --time 36:00:00 mvq_t1_b16 \
   'module load cuda; unset JAX_PLATFORMS; export HF_HOME=/gscratch/portia/eabe/data/Johnson_lab/sam3; export XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 && export TF_GPU_ALLOCATOR=cuda_malloc_async && cd third_party/jarvis_jax && python -m jarvis_jax.scripts.train_mvq model=mvq train=mvq paths=hyak run_id=mvq_t1_b16_20260903 train.save_every=250 "paths.runs_root=\${paths.mvq_runs_root}"'
 ```
-Observed at hand-off: past its first TWO periodic checkpoint saves (step 250,
-step 500) with no OOM, then preempted (routine `ckpt-all` `CANCELLED ...
-DUE TO PREEMPTION`, not a bug — this partition is checkpoint/preemptible and
-was preempted 3 times total across this session's attempts at this job,
-always auto-requeuing via `--requeue`). Do not wait on it; its own
-`eval_every` default (2000) means it will exercise the eval-sharding fix at
-its own step 2000 for the first time under real 30k-scale conditions —
-worth a quick log check the next time this job is revisited, specifically
-that step 2000-2001 shows no `bfc_allocator`/`rendezvous` messages.
+Observed before cancellation: past its first TWO periodic checkpoint saves
+(step 250, step 500) with no OOM, then preempted (routine `ckpt-all`
+`CANCELLED ... DUE TO PREEMPTION`, not a bug — this partition is
+checkpoint/preemptible and was preempted 3 times total across this session's
+attempts at this job, always auto-requeuing via `--requeue`) three times
+before being superseded by the local run above.
+
+</details>
 
 ## Files changed
 
-- `scripts/viz/mvq_overlay.py` (new) — figure-gate overlay script (Step 1 of
-  the brief, as written, plus a `load_model` fix: the checkpoint carries
-  4-device sharding metadata, so restoring it requires 4 GPUs visible, same
-  as `load_vitpose`'s existing pattern in this repo — restoring on 1 GPU
-  raised `ValueError: Topology mismatch detected`).
-- `scripts/benchmark/mvq_val_baselines.py` (new) — ViTPose+DLT baseline
-  script (Step 4).
+Original commit (Task 8):
+- `scripts/viz/mvq_overlay.py` (new) — figure-gate overlay script.
+- `scripts/benchmark/mvq_val_baselines.py` (new) — ViTPose+DLT baseline script.
 - `third_party/jarvis_jax/jarvis_jax/models/mvq/fusion.py`,
   `third_party/jarvis_jax/tests/test_mvq_model.py` — the attention-chunk
   remat fix (commit `e11cb59`).
 - `third_party/jarvis_jax/jarvis_jax/train/train_mvq.py` — the eval-sharding
   fix (commit `7aa34ff`).
+
+**Fix round 1** (2026-09-04, this update):
+- `scripts/viz/mvq_overlay.py` — camera names by NAME (not `cam{c+1}`) via
+  the new `V12WindowDataset.camera_names`; legend moved outside the image
+  axes; `C` from `s["crops"].shape[1]` not hardcoded 7; `MM_PER_UNIT` instead
+  of a literal `0.1`.
+- `scripts/benchmark/mvq_val_baselines.py` — OmegaConf-resolved detector
+  config (path/thresholds no longer hardcoded); `kp_names`-by-name assertion
+  (raises on mismatch); mvq-vs-baseline same-joint-set fairness comparison
+  (`--mvq_run`); per-cohort coverage/`n_framesets`/`n_framesets_finite`;
+  empty-frameset warning; train-set-exposure caveat.
+- `third_party/jarvis_jax/jarvis_jax/data/v12_windows.py` — new
+  `camera_names(i)`.
+- `third_party/jarvis_jax/jarvis_jax/train/train_mvq.py` — EMA debiasing
+  (seed at zero, divide by `1-decay**t` in `_with_ema`); batch-weighted
+  `reproj_px`/`uv2d_px`/`head_vs_reproj_px`; new `rigid_len_ratio/<seg>`;
+  corrected `del em` comment (relief is `jax.clear_caches()`, not the `del`).
+- `third_party/jarvis_jax/jarvis_jax/models/mvq/model.py`,
+  `third_party/jarvis_jax/jarvis_jax/models/mvq/decoder.py`,
+  `third_party/jarvis_jax/configs/model/mvq.yaml` — `MVQConfig.q_chunk`
+  (default `None`, was an implicit 512), threaded to both `CrossBlock`
+  call sites.
+- `third_party/jarvis_jax/tests/test_mvq_model.py` — chunked-grad test now
+  also checks `k`/`v` gradients (was `q` only).
+- `third_party/jarvis_jax/tests/test_train_mvq_smoke.py` — updated
+  `_with_ema` call site (new required `decay, t` args); new
+  `test_ema_debias_matches_constant_params`,
+  `test_evaluate_ragged_batch_matches_full_batch`.
 - This file.
 
 `figures/2026-09-mvq/mvq_t1_b16_gate1/{unprompted,prompted}/gate1_{female,two_fly,worst}.png`
 + `summary.json` per mode, and `vitpose_dlt_baseline.json`, all under the
 gitignored `figures/` tree — regenerate with the commands above (overlay) and
-`PYTHONPATH=third_party/jarvis_jax:. python scripts/benchmark/mvq_val_baselines.py --out <path>`
-(baseline).
+`PYTHONPATH=third_party/jarvis_jax:. python scripts/benchmark/mvq_val_baselines.py --out <path> [--mvq_run <final_dir>]`
+(baseline). `docs/benchmark/2026-09-mvq/vitpose_dlt_baseline_gate1.json` is
+the same baseline run (with the mvq comparison) committed as a small text
+artifact per CLAUDE.md's evidence-for-a-decision convention.
