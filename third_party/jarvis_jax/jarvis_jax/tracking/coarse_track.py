@@ -156,16 +156,27 @@ class FloorPlane(NamedTuple):
     `fit_floor`): the sign is not a convention anyone can read off the
     calibration, and getting it backwards would silently invert every
     height-based gate.
+
+    `orientation` records WHICH mechanism picked that sign -- `"hint"` when
+    `fit_floor`'s `up_hint` decided it directly, `"skew"` when the
+    bottom-heaviness heuristic did (see `fit_floor`'s DEVIATION note, and its
+    round-2 addendum on where that heuristic stops being trustworthy).
+    `skew` is the heuristic's own statistic, recorded even when `up_hint`
+    made the actual decision, so the two can be cross-checked in the meta
+    json.
     """
     normal: np.ndarray
     offset: float
+    orientation: str = "skew"
+    skew: float = float("nan")
 
     def height(self, points):
         """(...,3) world points -> (...,) height above the plane, units."""
         return np.asarray(points, np.float64) @ np.asarray(self.normal, np.float64) + self.offset
 
     def as_dict(self):
-        return {"normal": [float(v) for v in self.normal], "offset": float(self.offset)}
+        return {"normal": [float(v) for v in self.normal], "offset": float(self.offset),
+                "orientation": str(self.orientation), "skew": float(self.skew)}
 
 
 def _svd_normal(pts):
@@ -175,7 +186,11 @@ def _svd_normal(pts):
     return vh[-1] / np.linalg.norm(vh[-1])
 
 
-def fit_floor(centroids, *, exist=None, n_fit=FLOOR_FIT_N, floor_pct=3.0):
+FLOOR_SKEW_MARGINAL = 0.1   # see fit_floor's `skew_marginal` docs for how this was picked
+
+
+def fit_floor(centroids, *, exist=None, n_fit=FLOOR_FIT_N, floor_pct=3.0, up_hint=None,
+             skew_marginal=FLOOR_SKEW_MARGINAL):
     """Least-squares floor plane from the FIRST `n_fit` finite, TRACKABLE
     coarse centroids.
 
@@ -200,11 +215,36 @@ def fit_floor(centroids, *, exist=None, n_fit=FLOOR_FIT_N, floor_pct=3.0):
             placed at (low single digits = just under the lowest observed
             centroids; not 0/1, which is one outlier away from the true
             floor on a real, noisy cloud).
+        up_hint: optional (3,) world-unit vector giving an ALREADY-KNOWN up
+            direction (e.g. hand-picked from a floor-majority stretch of the
+            same recording, or carried in the recording config from a prior
+            run's diagnosis). When given, the fitted normal is oriented by
+            `dot(normal, up_hint) > 0` and the skew heuristic below is
+            SKIPPED entirely -- `FloorPlane.orientation == "hint"`. Use this
+            whenever the recording is expected to be wall-heavy (see
+            `skew_marginal`).
+        skew_marginal: only used when `up_hint` is None. The sign is then
+            chosen by the bottom-heaviness skew heuristic below, which
+            ASSUMES floor points are the majority of the trackable sample and
+            flips ~180 deg once wall points take over -- reproduced
+            empirically at wall_frac 0.63-0.70 across 5+ seeds (round-2
+            review finding). The heuristic's own statistic, `skew = (mean(s)
+            - median(s)) / std(s)`, tracks this: measured `|skew|` stays
+            above ~0.2 for wall_frac <= 0.5 and collapses under ~0.1 right in
+            the 0.6-0.7 flip zone (both the sign AND the confidence come from
+            the SAME quantity failing together, which is why "check a
+            residual" does not catch this -- CLAUDE.md). `|skew| <
+            skew_marginal` (default 0.1) is used as a proxy for "the
+            heuristic is close to a coin flip here" and emits a
+            `RuntimeWarning` recommending `up_hint` instead of trusting the
+            sign silently.
 
     Returns:
         FloorPlane with a unit `normal` pointing UP and an `offset` that puts
         the plane at the BOTTOM of the fly cloud, so heights are ~0 for a fly
-        walking on the glass and positive for one up a wall.
+        walking on the glass and positive for one up a wall. `orientation`
+        and `skew` record which mechanism picked the sign and the heuristic's
+        own statistic (see `FloorPlane`).
 
     DEVIATION from the design note's literal wording ("least squares ... with
     the sign chosen so the median fly height is positive"), because that rule
@@ -223,15 +263,25 @@ def fit_floor(centroids, *, exist=None, n_fit=FLOOR_FIT_N, floor_pct=3.0):
     What is kept: the least-squares fit over the first `n_fit` finite,
     trackable centroids, and positive fly heights. What is fixed: "up" is the
     direction the cloud is bottom-heavy in (mean along the normal above the
-    median -- flies climb up, not down); a SECOND SVD pass refits the normal
-    on only the bottom half (by the first pass's height) of those points,
-    because a total-least-squares fit over floor+wall points together tilts
-    the normal toward the wall in proportion to the wall's point fraction --
-    every point gets equal SVD weight regardless of whether it is "the floor"
-    -- and the wall points are, almost by construction, the ones farthest
-    from co-planar with the true floor; the offset sits at the `floor_pct`
-    percentile of the REFIT normal's heights rather than at the mean, so a
-    handful of below-floor outliers cannot single-handedly set it.
+    median -- flies climb up, not down) UNLESS `up_hint` says otherwise; a
+    SECOND SVD pass refits the normal on only the bottom half (by the first
+    pass's height) of those points, because a total-least-squares fit over
+    floor+wall points together tilts the normal toward the wall in
+    proportion to the wall's point fraction -- every point gets equal SVD
+    weight regardless of whether it is "the floor" -- and the wall points
+    are, almost by construction, the ones farthest from co-planar with the
+    true floor; the offset sits at the `floor_pct` percentile of the REFIT
+    normal's heights rather than at the mean, so a handful of below-floor
+    outliers cannot single-handedly set it.
+
+    ROUND-2 DEVIATION: the bottom-heaviness heuristic above is itself only a
+    MAJORITY-RULE proxy for "up" -- it silently flips when wall points are
+    the majority of the sample, which no per-run smoothness/residual metric
+    would catch (both "correct" and "confidently backwards" look identical to
+    everything except the sign). Orientation must not rest on that statistic
+    alone: `up_hint` (an independent, externally-supplied up direction) is
+    now the PREFERRED path, and the heuristic path now warns when its own
+    confidence is marginal instead of picking a silent coin flip.
 
     Raises:
         ValueError: fewer than 3 finite, trackable points -- a plane through
@@ -259,17 +309,24 @@ def fit_floor(centroids, *, exist=None, n_fit=FLOOR_FIT_N, floor_pct=3.0):
                          f"coarse centroids, got {pts.shape[0]}")
     pts = pts[:int(n_fit)]
 
-    def _oriented_up(normal, s):
-        """Flip `normal` (and its scores `s`) so the cloud is bottom-heavy
-        the "up" way: flies rest on the floor and occasionally climb, never
-        the reverse, so a correctly-oriented up-normal has mean(s) > median(s)."""
-        if s.mean() < np.median(s):
-            return -normal, -s
-        return normal, s
+    hint = None if up_hint is None else np.asarray(up_hint, np.float64)
+
+    def _orient(normal, s):
+        """Flip `normal` (and its scores `s`) to point UP.
+
+        With `up_hint`, "up" is simply `dot(normal, hint) > 0` -- no
+        heuristic, no majority assumption. Without it, "up" is the direction
+        the cloud is bottom-heavy in: flies rest on the floor and
+        occasionally climb, never the reverse, so a correctly-oriented
+        up-normal has mean(s) > median(s) -- see the ROUND-2 DEVIATION note
+        on why this alone is not trusted blindly any more."""
+        if hint is not None:
+            return (normal, s) if np.dot(normal, hint) >= 0 else (-normal, -s)
+        return (normal, s) if s.mean() >= np.median(s) else (-normal, -s)
 
     normal = _svd_normal(pts)
     s = pts @ normal
-    normal, s = _oriented_up(normal, s)
+    normal, s = _orient(normal, s)
 
     # Refit the normal on the BOTTOM half only (by this first pass's height),
     # which is dominated by the true floor regardless of the wall fraction --
@@ -281,10 +338,24 @@ def fit_floor(centroids, *, exist=None, n_fit=FLOOR_FIT_N, floor_pct=3.0):
             normal2 = -normal2
         normal = normal2
         s = pts @ normal
-        normal, s = _oriented_up(normal, s)
+        normal, s = _orient(normal, s)
+
+    skew = float((s.mean() - np.median(s)) / (np.std(s) + 1e-9))
+    if hint is not None:
+        orientation = "hint"
+    else:
+        orientation = "skew"
+        if abs(skew) < float(skew_marginal):
+            warnings.warn(
+                f"fit_floor: orientation skew={skew:.4f} is below the marginal threshold "
+                f"{skew_marginal} -- the bottom-heaviness heuristic is close to a coin flip "
+                f"here (this happens once wall points approach a MAJORITY of the trackable "
+                f"sample); the normal's sign is UNCERTAIN. Pass up_hint=<a known up direction, "
+                f"e.g. hand-picked from a floor-majority stretch of the recording> to resolve "
+                f"it directly instead of trusting this heuristic.", RuntimeWarning, stacklevel=2)
 
     offset = -float(np.percentile(s, float(floor_pct)))
-    return FloorPlane(normal.astype(np.float64), offset)
+    return FloorPlane(normal.astype(np.float64), offset, orientation, skew)
 
 
 def _angle_deg(a, b):

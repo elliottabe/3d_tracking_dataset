@@ -85,6 +85,18 @@ def default_cameras(path=DEFAULT_CAMERAS_YAML):
     raise ValueError(f"no `cameras:` list in {path}")
 
 
+def parse_up_hint(s):
+    """`--up-hint`'s `'x,y,z'` string -> a `(3,)` float array, or `None` if
+    `s` is `None`/empty. Passed straight through to `fit_floor`'s `up_hint`
+    (world units; only the DIRECTION matters, not the magnitude)."""
+    if not s:
+        return None
+    parts = [p.strip() for p in str(s).split(",") if p.strip()]
+    if len(parts) != 3:
+        raise ValueError(f"--up-hint must be 'x,y,z' (3 comma-separated numbers), got {s!r}")
+    return np.array([float(p) for p in parts], np.float64)
+
+
 def video_size(session_dir, camera):
     import cv2
     cap = cv2.VideoCapture(os.path.join(str(session_dir), f"{camera}.mp4"))
@@ -251,6 +263,11 @@ def main():
     ap.add_argument("--min-views", type=int, default=3)
     ap.add_argument("--max-resid-px", type=float, default=25.0)
     ap.add_argument("--merge-dist-units", type=float, default=30.0)
+    ap.add_argument("--up-hint", default=None,
+                    help="'x,y,z' world-unit up direction for fit_floor, e.g. hand-picked from "
+                         "a floor-majority stretch of this recording; skips the bottom-heaviness "
+                         "skew heuristic entirely (see fit_floor's round-2 addendum) -- use this "
+                         "when the notes' floor-block check says the skew was marginal")
     ap.add_argument("--partial-every", type=int, default=2000,
                     help="coarse frames per chunk / partial write")
     ap.add_argument("--progress-every", type=int, default=500, help="coarse frames per log line")
@@ -362,8 +379,9 @@ def _write(path, chunks, cameras, runner, args, W, H, t_load, t_pass, *, calib_d
                                                   write_coarse_tracks)
     tr = concat_tracks(chunks)
     tr["W"], tr["H"] = tr.get("W") or W, tr.get("H") or H
+    up_hint = parse_up_hint(args.up_hint)
     try:
-        floor = fit_floor(tr["centroid"], exist=tr["exist"])
+        floor = fit_floor(tr["centroid"], exist=tr["exist"], up_hint=up_hint)
     except ValueError as e:                 # no finite, trackable centroid yet (early partial)
         print(f"[coarse] floor not fit ({e}); heights are NaN in this write", flush=True)
         floor = None
@@ -371,7 +389,8 @@ def _write(path, chunks, cameras, runner, args, W, H, t_load, t_pass, *, calib_d
     if floor is None:
         from jarvis_jax.tracking.coarse_track import FloorPlane
         feats = coarse_features(tr, tr["kp_names"],
-                                floor=FloorPlane(np.array([np.nan] * 3), float("nan")))
+                                floor=FloorPlane(np.array([np.nan] * 3), float("nan"),
+                                                orientation="none", skew=float("nan")))
     else:
         feats = coarse_features(tr, tr["kp_names"], floor=floor)
     extra = {"checkpoint": runner.checkpoint, "mvq_step": runner.step_label,

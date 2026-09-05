@@ -236,12 +236,16 @@ def _synthetic_tracks(kp_names, *, n=4):
             "kp_names": list(kp_names), "W": 1936, "H": 448}
 
 
-def _arena_cloud(n_true, *, n=2000, seed=0):
-    """A realistic arena cloud: 90 % of the centroids within 3 units of the
-    glass, 10 % up a wall at 10-40 units. Bottom-heavy along the TRUE up
-    normal, which is the only thing that tells `fit_floor` which way is up."""
+def _arena_cloud(n_true, *, n=2000, seed=0, wall_frac=0.1):
+    """A realistic arena cloud: `1 - wall_frac` of the centroids within 3
+    units of the glass, `wall_frac` up a wall at 10-40 units. Bottom-heavy
+    along the TRUE up normal (for `wall_frac < 0.5`; see round-2's
+    `test_fit_floor_*_up_hint_*` for the wall-MAJORITY case, where that stops
+    being true), which is otherwise the only thing that tells `fit_floor`
+    which way is up."""
     rng = np.random.default_rng(seed)
-    height = np.where(rng.random(n) < 0.9, rng.uniform(0.0, 3.0, n), rng.uniform(10.0, 40.0, n))
+    height = np.where(rng.random(n) < (1.0 - wall_frac), rng.uniform(0.0, 3.0, n),
+                     rng.uniform(10.0, 40.0, n))
     xy = rng.uniform(-200, 200, size=(n, 2))
     on_plane = np.stack([xy[:, 0], xy[:, 1],
                          -(n_true[0] * xy[:, 0] + n_true[1] * xy[:, 1]) / n_true[2]], 1)
@@ -313,6 +317,44 @@ def test_fit_floor_recovers_a_known_tilted_plane_with_positive_heights():
     floor2 = fit_floor(pts2[None])
     assert np.dot(floor2.normal, -nrm) > 0.999
     assert np.abs((pts2 @ floor2.normal + floor2.offset) - height2).max() < 3.0
+
+
+def test_fit_floor_up_hint_recovers_a_wall_majority_cloud():
+    """Round-2 regression: at wall_frac 0.7 (wall points a clear MAJORITY of
+    the trackable sample), the bottom-heaviness skew heuristic flips the
+    normal ~180 deg (measured across 5+ seeds in the review). `up_hint`
+    bypasses that heuristic entirely -- given the TRUE up direction (as if
+    hand-picked from a floor-majority stretch of the same recording), the fit
+    must recover the normal within 2 deg and the true floor within 1 unit of
+    height 0, and must report `orientation == "hint"`."""
+    from jarvis_jax.tracking.coarse_track import fit_floor
+    nrm = np.array([0.1, -0.2, 1.0]); nrm /= np.linalg.norm(nrm)
+    pts, height = _arena_cloud(nrm, wall_frac=0.7, seed=3)
+    floor = fit_floor(pts[None], up_hint=nrm)
+    ang = np.degrees(np.arccos(np.clip(np.dot(floor.normal, nrm), -1.0, 1.0)))
+    assert ang < 2.0, f"normal off by {ang:.2f} deg despite an explicit up_hint"
+    assert floor.orientation == "hint"
+    # per point, the reconstructed height must match the TRUE height (as in
+    # test_fit_floor_recovers_a_known_tilted_plane_with_positive_heights) --
+    # a MEDIAN comparison is the wrong check here: the offset is anchored at
+    # the low `floor_pct` percentile of the WHOLE population (floor+wall), not
+    # at the floor's own median height.
+    got = pts @ floor.normal + floor.offset
+    assert np.abs(got - height).max() < 1.0
+
+
+def test_fit_floor_without_up_hint_warns_on_a_wall_majority_cloud():
+    """The SAME wall-majority cloud, with NO hint: the heuristic is left to
+    guess (and may guess wrong -- its sign is not asserted here, only that it
+    KNOWS it is guessing). `fit_floor` must warn that the orientation is
+    uncertain and recommend `up_hint`, and report `orientation == "skew"`."""
+    from jarvis_jax.tracking.coarse_track import fit_floor
+    nrm = np.array([0.1, -0.2, 1.0]); nrm /= np.linalg.norm(nrm)
+    pts, _height = _arena_cloud(nrm, wall_frac=0.7, seed=3)
+    with pytest.warns(RuntimeWarning, match="up_hint"):
+        floor = fit_floor(pts[None])
+    assert floor.orientation == "skew"
+    assert np.isfinite(floor.skew)
 
 
 def test_coarse_features_known_angles_distance_and_height(tiny):

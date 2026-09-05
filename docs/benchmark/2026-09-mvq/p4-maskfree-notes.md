@@ -228,6 +228,16 @@ from its `float16` on-disk storage, so `wing_angle_deg` (and anything else
 derived from `kp3d`) on a resumed chunk is recomputed from that f16-quantised
 value, an inherent ~0.05 mm rounding difference from a true single-shot run.
 
+**Before trusting the real 20_04 run's heights/gates, check the `.meta.json`
+floor block** (`floor.orientation`, `floor.skew`): a correct fit reads median
+trackable height in roughly 0 to +10 units with wall-climbing frames
+positive; if `orientation == "skew"` and `|skew|` is anywhere near the
+marginal threshold (`fit_floor`'s `skew_marginal`, default 0.1 -- see its
+round-2 addendum), do not trust the sign silently -- rerun with `--up-hint
+x,y,z` taken from a visually-confirmed floor-majority stretch of the SAME
+recording, and once confirmed, carry that hint into the recording config so
+the fine pass (§4.4+) does not have to re-derive it.
+
 ### Deviation: the floor-plane sign rule (figure-gated)
 
 The plan's wording was "least-squares plane on the first 2000 finite coarse
@@ -279,6 +289,31 @@ below-floor outlier. Guarded by
 `test_fit_floor_ignores_low_exist_points_and_refits_normal_on_lowest_quantile`
 (30 % wall points plus a handful of `exist=0.1` sub-floor outliers; normal
 recovered within 2 deg, offset within 1 unit of the true floor).
+
+**Fix round 2: the bottom-heaviness heuristic itself assumes a floor
+majority.** Round-2 review found the regression this round-1 fix could not
+see: `_orient`'s skew-based sign (mean(s) vs median(s)) silently flips ~180
+deg once wall points become the MAJORITY of the trackable sample --
+reproduced at wall_frac 0.63-0.70 across 5+ seeds, true floor reading back at
+~38 units instead of ~0. Orientation must not rest on a skew statistic
+alone. Fixed: `fit_floor(..., up_hint=None)` -- when `up_hint` (a known up
+direction, e.g. hand-picked from a floor-majority stretch of the same
+recording) is given, the normal is oriented by `dot(normal, up_hint) > 0` and
+the skew heuristic is skipped entirely; without a hint the heuristic is kept
+but now computes a confidence (`skew = (mean(s)-median(s))/std(s)`, which
+empirically stays above ~0.2 for wall_frac <= 0.5 and collapses under ~0.1 in
+the 0.6-0.7 flip zone -- the same statistic failing both the sign and the
+confidence check together is exactly why a residual/smoothness check cannot
+catch this) and `warnings.warn`s when `|skew|` is below the marginal
+threshold (`FLOOR_SKEW_MARGINAL = 0.1`) instead of trusting a coin flip.
+`FloorPlane` now carries `orientation` ("hint"/"skew"/"none") and `skew`,
+recorded in the `.meta.json` floor block either way. `scripts/coarse_pass_mvq.py`
+gained `--up-hint x,y,z`, threaded straight into `fit_floor`. Guarded by
+`test_fit_floor_up_hint_recovers_a_wall_majority_cloud` (wall_frac 0.7, WITH
+`up_hint`: normal within 2 deg, offset within 1 unit) and
+`test_fit_floor_without_up_hint_warns_on_a_wall_majority_cloud` (the SAME
+cloud, no hint: `pytest.warns`, sign deliberately not asserted). The existing
+30 %-wall test (round 1) is unchanged and still green.
 
 ### Signals that change meaning in an mvq file, before §5 (bout detection)
 
