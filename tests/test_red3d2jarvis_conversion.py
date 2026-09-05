@@ -38,37 +38,70 @@ def _write_raw(path: Path, ndim: int, rows: dict[int, np.ndarray]) -> None:
             f.write(",".join(parts) + "\n")
 
 
-def _dlt(path: Path) -> None:
-    # affine DLT: u = 80*X + 1, v = -80*Y + 400  (row 2 = [0,0,0,1])
-    path.write_text("\n".join(["80", "0", "0", "1", "0", "-80", "0", "400",
-                               "0", "0", "0"]) + "\n")
+# affine DLTs (row 2 = [0,0,0,1]) projecting mm into TOP-origin pixels.
+# Cam1 looks down (u = 80X+1, v = -80Y+400); Cam2 from the side
+# (u = 80X+1, v = -80Z+400) so the pair can triangulate.
+DLT = {"Cam1": [80, 0, 0, 1, 0, -80, 0, 400, 0, 0, 0],
+       "Cam2": [80, 0, 0, 1, 0, 0, -80, 400, 0, 0, 0]}
+
+
+def _P(cam: str) -> np.ndarray:
+    return np.append(np.array(DLT[cam], float), 1.0).reshape(3, 4)
+
+
+def _project_raw(cam: str, X: np.ndarray) -> np.ndarray:
+    """mm -> raw CSV (u, v) with v BOTTOM-origin, as red writes it."""
+    p = (_P(cam) @ np.c_[X, np.ones(len(X))].T).T
+    uv = p[:, :2] / p[:, 2:3]
+    uv[:, 1] = H - uv[:, 1]
+    return uv
+
+
+def _dlt(path: Path, cam: str = "Cam1") -> None:
+    path.write_text("\n".join(str(v) for v in DLT[cam]) + "\n")
 
 
 def _yaml(path: Path) -> None:
     path.write_text(f"%YAML:1.0\n---\nimage_width: {W}\nimage_height: {H}\n")
 
 
+def _yaml_full(path: Path, P: np.ndarray, scale: int) -> None:
+    """A complete JARVIS calibration yaml (what general_model ships)."""
+    vals = ", ".join(repr(float(v)) for v in P.ravel())
+    path.write_text(f"%YAML:1.0\n---\nimage_width: {W}\nimage_height: {H}\n"
+                    "projectionMatrix: !!opencv-matrix\n   rows: 3\n   cols: 4\n"
+                    f"   dt: d\n   data: [ {vals} ]\nscale: {scale}\n")
+
+
 @pytest.fixture
 def recording(tmp_path: Path) -> Path:
+    """One frame, two cameras; the 2D IS the projection of the 3D through the
+    shipped DLT (the real export is consistent to 0.003 px), Scutellum
+    unlabelled everywhere."""
     names, _ = load_fly50()
     rec = tmp_path / "2099_01_01_00_00_00_male"
     (rec / "calibration").mkdir(parents=True)
     rng = np.random.default_rng(0)
-    uv = rng.uniform(50, 400, size=(len(names), 2))
-    uv[:, 0] += 500
-    uv[3] = [1e7, 1e7]                       # Scutellum not labelled
+    X = rng.uniform(0.2, 2.8, size=(len(names), 3))
     for cam in ("Cam1", "Cam2"):
+        uv = _project_raw(cam, X)
+        uv[3] = [1e7, 1e7]                   # Scutellum not labelled
         _write_raw(rec / f"{cam}.csv", 2, {7: uv})
-        _dlt(rec / "calibration" / f"{cam}_dlt.csv")
+        _dlt(rec / "calibration" / f"{cam}_dlt.csv", cam)
         _yaml(rec / "calibration" / f"{cam}.yaml")
-    _write_raw(rec / "keypoints3d.csv", 3,
-               {7: rng.uniform(0, 3, size=(len(names), 3))})
+    X3 = X.copy()
+    X3[3] = 1e7
+    _write_raw(rec / "keypoints3d.csv", 3, {7: X3})
     return rec
 
 
-def _run(rec: Path, out: Path):
-    convert(rec, out, "sub", "REC", "male", "test", None,
-            scale_10x=True, link_from=[], video_dir=None)
+def _run_stats(rec: Path, out: Path, **kw):
+    return convert(rec, out, "sub", "REC", "male", "test", None,
+                   scale_10x=True, link_from=[], video_dir=None, **kw)
+
+
+def _run(rec: Path, out: Path, **kw):
+    _run_stats(rec, out, **kw)
     return json.load(open(out / "annotations" / "instances_train.json"))
 
 
@@ -163,6 +196,92 @@ def test_a_foreign_skeleton_is_refused(recording, tmp_path):
     p.write_text(p.read_text().replace("fly50.json", "fly31.json"))
     with pytest.raises(SystemExit, match="fly50.json"):
         _run(recording, tmp_path / "out")
+
+
+def test_num_keypoints_is_the_visible_count(recording, tmp_path):
+    """The original wrote 50 unconditionally; 283 v12 annotations claimed 50
+    with fewer visible."""
+    blob = _run(recording, tmp_path / "out")
+    for a in blob["annotations"]:
+        kp = np.array(a["keypoints"]).reshape(-1, 3)
+        assert a["num_keypoints"] == int((kp[:, 2] > 0).sum()) == 49
+
+
+def test_shipped_calibration_is_proven_against_the_labels(recording, tmp_path):
+    stats = _run_stats(recording, tmp_path / "out")
+    chk = stats["calibration_check"]
+    assert chk["source"].endswith("calibration")
+    assert chk["median_px"] < 1e-6 and chk["n_frames"] == 1
+    assert stats["frames_3d_inconsistent"] == []
+
+
+def test_a_calibration_that_did_not_make_the_labels_is_refused(recording, tmp_path):
+    """The 2026-09-02 export: 15_25_51 / 17_28_34 shipped the 12_11_50
+    calibration. A 12 px shift in one camera must be fatal, not a warning."""
+    p = recording / "calibration" / "Cam1_dlt.csv"
+    coefs = [float(x) for x in p.read_text().split()]
+    coefs[3] += 12.0
+    p.write_text("\n".join(str(v) for v in coefs) + "\n")
+    with pytest.raises(SystemExit, match="does NOT reproduce"):
+        _run(recording, tmp_path / "out")
+
+
+def test_calib_from_ships_the_override_after_proving_it(recording, tmp_path):
+    # break the raw DLT for Cam1 ...
+    p = recording / "calibration" / "Cam1_dlt.csv"
+    coefs = [float(x) for x in p.read_text().split()]
+    coefs[3] += 12.0
+    p.write_text("\n".join(str(v) for v in coefs) + "\n")
+    # ... and provide the right calibration in general_model's yaml form
+    good = tmp_path / "gm_calib"
+    good.mkdir()
+    for cam in ("Cam1", "Cam2"):
+        P = _P(cam)
+        P[0:2, 0:3] *= 0.1
+        _yaml_full(good / f"{cam}.yaml", P, 10)
+    out = tmp_path / "out"
+    stats = _run_stats(recording, out, calib_from=good)
+    assert stats["calibration_check"]["source"] == str(good)
+    assert stats["calibration_check"]["median_px"] < 1e-6
+    for cam in ("Cam1", "Cam2"):
+        assert ((out / "calib_params" / "REC" / f"{cam}.yaml").read_bytes()
+                == (good / f"{cam}.yaml").read_bytes())
+    # a wrong override is refused just the same
+    bad = tmp_path / "bad_calib"
+    bad.mkdir()
+    for cam in ("Cam1", "Cam2"):
+        P = _P(cam)
+        P[0, 3] += 12.0
+        P[0:2, 0:3] *= 0.1
+        _yaml_full(bad / f"{cam}.yaml", P, 10)
+    with pytest.raises(SystemExit, match="does NOT reproduce"):
+        _run(recording, tmp_path / "out2", calib_from=bad)
+
+
+def test_a_10x_3d_frame_is_reported_and_its_2d_kept(recording, tmp_path):
+    """Five frames of the real export carry 3D exactly 10x their own 2D's
+    triangulation. Their 2D is right, so they ship; the defect is named."""
+    names, _ = load_fly50()
+    _, k3 = read_raw_csv(recording / "keypoints3d.csv", 3)
+    X = k3[7]
+    rng = np.random.default_rng(1)
+    X8 = rng.uniform(0.2, 2.8, size=(len(names), 3))
+    X9 = rng.uniform(0.2, 2.8, size=(len(names), 3))
+    # three frames, ONE broken: the verdict is the median over frames, so a
+    # minority of broken frames must not read as a wrong calibration
+    for cam in ("Cam1", "Cam2"):
+        _write_raw(recording / f"{cam}.csv", 2,
+                   {7: _project_raw(cam, X), 8: _project_raw(cam, X8),
+                    9: _project_raw(cam, X9)})
+    _write_raw(recording / "keypoints3d.csv", 3, {7: X, 8: X8 * 10.0, 9: X9})
+    out = tmp_path / "out"
+    stats = _run_stats(recording, out)
+    bad = stats["frames_3d_inconsistent"]
+    assert [b["frame"] for b in bad] == [8]
+    assert abs(bad[0]["scale_ratio"] - 10.0) < 0.05
+    blob = json.load(open(out / "annotations" / "instances_train.json"))
+    assert "REC/Frame_8" in blob["framesets"]
+    assert sum(1 for im in blob["images"] if im["file_name"].endswith("Frame_8.jpg")) == 2
 
 
 def test_duplicate_frame_rows_are_refused(recording, tmp_path):

@@ -185,6 +185,84 @@ def triangulate_window(cent, valid, repro_tool):
     return X.reshape(A, T, 3)
 
 
+def setup_recording(session_dir, *, stride, chunk_len, chunk_overlap, num_animals,
+                     start_frame, end_frame, project, jarvis_root):
+    """Everything every mode ('full'/'window'/'collect') needs before touching
+    SAM3: project/camera geometry + the (SAM3-independent, purely arithmetic)
+    window grid. None of this needs the GPU -- 'collect' never builds a
+    tracker at all, so it can run CPU-only."""
+    tag = session_tag_for(session_dir)
+    repro_tool = load_project(project, session_dir, jarvis_root)
+    cameras = list(repro_tool.cameras)
+    video_paths = video_paths_for(session_dir, cameras)
+    n_full, W, H = video_frame_count_and_size(video_paths[0])
+    if end_frame is None:
+        end_frame = n_full
+    plan = ensure_sync_plan(session_dir)
+
+    n_coarse = (end_frame - start_frame) // stride
+    coarse0 = start_frame // stride
+    starts = window_starts(n_coarse, chunk_len, chunk_overlap)
+    return dict(tag=tag, repro_tool=repro_tool, cameras=cameras, video_paths=video_paths,
+                n_full=n_full, W=W, H=H, plan=plan, n_coarse=n_coarse, coarse0=coarse0,
+                starts=starts)
+
+
+def build_tracker(*, gpu_id, sam3_text, sam3_version, sam3_compile, sam3_checkpoint,
+                   chunk_len, chunk_overlap, lowmem):
+    from jarvis.prediction.sam3_video_tracker import SAM3VideoTracker  # noqa
+    tracker = SAM3VideoTracker(
+        gpu_id=gpu_id, text_prompt=sam3_text, sam3_version=sam3_version,
+        compile=sam3_compile, checkpoint_path=sam3_checkpoint,
+        chunk_len=chunk_len, chunk_overlap=chunk_overlap)
+    if lowmem:
+        from jarvis_jax.predict.sam3_driver import _enable_sam3_lowmem
+        _enable_sam3_lowmem(tracker.predictor)
+    return tracker
+
+
+def check_parts_complete(parts_dir, n_windows):
+    """Refuse to collect unless EVERY window_NNNN.npz in [0, n_windows) exists.
+
+    A window that found no flies still writes a part file (empty=True), so
+    this only catches a window that never ran/finished -- exactly the case
+    that would otherwise silently produce a plausible-looking but WRONG bout
+    summary (task brief: "the worst outcome here")."""
+    missing = [i for i in range(n_windows)
+               if not os.path.isfile(os.path.join(parts_dir, f"window_{i:04d}.npz"))]
+    if missing:
+        raise SystemExit(
+            f"[coarse_pass] COLLECT REFUSED: {len(missing)}/{n_windows} window part "
+            f"file(s) missing under {parts_dir}: {missing}. Submit/resume the array "
+            f"task(s) for these window index/indices, then re-run --mode collect.")
+
+
+def process_one_window(tracker, video_paths, repro_tool, cameras, coarse0, stride, plan,
+                        num_animals, W, H, parts_dir, wi, gs, ge, n_coarse):
+    """Compute window `wi` (grid offsets [gs, ge) in coarse-index space,
+    clamped to n_coarse) and write ONLY its part file. Shared by 'full'
+    (looped over every window) and 'window' (one SLURM array task, one
+    index) modes -- this is the one piece of real work either mode does."""
+    ge = min(ge, n_coarse)
+    part_path = os.path.join(parts_dir, f"window_{wi:04d}.npz")
+    t0 = time.time()
+    coarse_indices = [coarse0 + c for c in range(gs, ge)]
+    res = process_window(tracker, video_paths, repro_tool, cameras,
+                          coarse_indices, stride, plan, num_animals, W, H)
+    if res is None:
+        print(f"[coarse_pass] window {wi} [{gs}:{ge}): no flies found -- skipping")
+        np.savez_compressed(part_path, empty=np.array(True), gs=gs, ge=ge)
+        return
+    np.savez_compressed(
+        part_path, gs=gs, ge=ge,
+        area=res["area"], cent=res["cent"], valid=res["valid"],
+        border=res["border"], in_frame=res["in_frame"], X3d=res["X3d"],
+        sex_status=np.array(res["sex_status"]),
+        sex_info=np.array(json.dumps(res["sex_info"])))
+    print(f"[coarse_pass] window {wi} [{gs}:{ge}) sex={res['sex_status']} "
+          f"({res['sex_info']}) {time.time()-t0:.1f}s -> {part_path}")
+
+
 def process_window(tracker, video_paths, repro_tool, cameras, coarse_indices,
                     stride, plan, num_animals, W, H):
     """Run one chunk_len-sized window through the existing per-bout pipeline
@@ -219,62 +297,79 @@ def process_window(tracker, video_paths, repro_tool, cameras, coarse_indices,
 def run(session_dir, out_path, *, stride=16, chunk_len=1000, chunk_overlap=120,
         num_animals=2, start_frame=0, end_frame=None, project="unified_V3_masked",
         jarvis_root=None, gpu_id=0, sam3_version="sam3.1", sam3_text="insect",
-        sam3_compile=False, sam3_checkpoint=None, lowmem=True, resume=True):
-    tag = session_tag_for(session_dir)
-    repro_tool = load_project(project, session_dir, jarvis_root)
-    cameras = list(repro_tool.cameras)
-    video_paths = video_paths_for(session_dir, cameras)
-    n_full, W, H = video_frame_count_and_size(video_paths[0])
-    if end_frame is None:
-        end_frame = n_full
-    plan = ensure_sync_plan(session_dir)
-
-    n_coarse = (end_frame - start_frame) // stride
-    coarse0 = start_frame // stride
-    starts = window_starts(n_coarse, chunk_len, chunk_overlap)
+        sam3_compile=False, sam3_checkpoint=None, lowmem=True, resume=True,
+        mode="full", window_index=None):
+    """mode='full' (default): today's exact behaviour, unchanged -- every
+    window computed in-process, sequentially, then merged. mode='window':
+    compute ONE window (`window_index`) and write only its part file --
+    what one SLURM array task runs (see scripts/slurm_coarse_pass_array.py);
+    never touches the GPU/SAM3 if that window's part already exists and
+    `resume` is set. mode='collect': CPU-only -- no tracker is built at all
+    -- verify every window's part file exists (loudly refusing otherwise,
+    see `check_parts_complete`) and merge them into the single tracks
+    artifact + meta.json, exactly as 'full' already did at the end of its
+    loop."""
+    ctx = setup_recording(session_dir, stride=stride, chunk_len=chunk_len,
+                           chunk_overlap=chunk_overlap, num_animals=num_animals,
+                           start_frame=start_frame, end_frame=end_frame,
+                           project=project, jarvis_root=jarvis_root)
+    tag, repro_tool = ctx["tag"], ctx["repro_tool"]
+    cameras, video_paths = ctx["cameras"], ctx["video_paths"]
+    n_full, W, H, plan = ctx["n_full"], ctx["W"], ctx["H"], ctx["plan"]
+    n_coarse, coarse0, starts = ctx["n_coarse"], ctx["coarse0"], ctx["starts"]
     print(f"[coarse_pass] {tag}: {n_full} full-rate frames, stride={stride} "
           f"-> {n_coarse} coarse frames, {len(starts)} windows "
-          f"(chunk_len={chunk_len}, chunk_overlap={chunk_overlap})")
+          f"(chunk_len={chunk_len}, chunk_overlap={chunk_overlap}) mode={mode}")
 
     parts_dir = out_path + ".parts"
     os.makedirs(parts_dir, exist_ok=True)
 
-    from jarvis.prediction.sam3_video_tracker import SAM3VideoTracker  # noqa
-    tracker = SAM3VideoTracker(
-        gpu_id=gpu_id, text_prompt=sam3_text, sam3_version=sam3_version,
-        compile=sam3_compile, checkpoint_path=sam3_checkpoint,
-        chunk_len=chunk_len, chunk_overlap=chunk_overlap)
-    if lowmem:
-        from jarvis_jax.predict.sam3_driver import _enable_sam3_lowmem
-        _enable_sam3_lowmem(tracker.predictor)
+    def _merge():
+        merge_parts(parts_dir, out_path, cameras=cameras, coarse0=coarse0, stride=stride,
+                    n_coarse=n_coarse, W=W, H=H, num_animals=num_animals,
+                    session_dir=session_dir, chunk_len=chunk_len,
+                    chunk_overlap=chunk_overlap, project=project)
 
+    if mode == "collect":
+        check_parts_complete(parts_dir, len(starts))
+        _merge()
+        print(f"[coarse_pass] collected {len(starts)} window part(s) -> {out_path}")
+        return
+
+    if mode == "window":
+        if window_index is None:
+            raise SystemExit("[coarse_pass] --mode window requires --window-index")
+        if not (0 <= window_index < len(starts)):
+            raise SystemExit(f"[coarse_pass] --window-index {window_index} out of range "
+                             f"[0, {len(starts)})")
+        gs = starts[window_index]
+        part_path = os.path.join(parts_dir, f"window_{window_index:04d}.npz")
+        if resume and os.path.isfile(part_path):
+            print(f"[coarse_pass] window {window_index} [{gs}:...) -- reusing {part_path}")
+            return
+        tracker = build_tracker(gpu_id=gpu_id, sam3_text=sam3_text, sam3_version=sam3_version,
+                                 sam3_compile=sam3_compile, sam3_checkpoint=sam3_checkpoint,
+                                 chunk_len=chunk_len, chunk_overlap=chunk_overlap, lowmem=lowmem)
+        process_one_window(tracker, video_paths, repro_tool, cameras, coarse0, stride, plan,
+                            num_animals, W, H, parts_dir, window_index, gs, gs + chunk_len,
+                            n_coarse)
+        return
+
+    assert mode == "full", f"unknown mode {mode!r}"
+    tracker = build_tracker(gpu_id=gpu_id, sam3_text=sam3_text, sam3_version=sam3_version,
+                             sam3_compile=sam3_compile, sam3_checkpoint=sam3_checkpoint,
+                             chunk_len=chunk_len, chunk_overlap=chunk_overlap, lowmem=lowmem)
     for wi, gs in enumerate(starts):
         ge = min(gs + chunk_len, n_coarse)
         part_path = os.path.join(parts_dir, f"window_{wi:04d}.npz")
         if resume and os.path.isfile(part_path):
             print(f"[coarse_pass] window {wi} [{gs}:{ge}) -- reusing {part_path}")
             continue
-        t0 = time.time()
-        coarse_indices = [coarse0 + c for c in range(gs, ge)]
-        res = process_window(tracker, video_paths, repro_tool, cameras,
-                             coarse_indices, stride, plan, num_animals, W, H)
-        if res is None:
-            print(f"[coarse_pass] window {wi} [{gs}:{ge}): no flies found -- skipping")
-            np.savez_compressed(part_path, empty=np.array(True), gs=gs, ge=ge)
-            continue
-        np.savez_compressed(
-            part_path, gs=gs, ge=ge,
-            area=res["area"], cent=res["cent"], valid=res["valid"],
-            border=res["border"], in_frame=res["in_frame"], X3d=res["X3d"],
-            sex_status=np.array(res["sex_status"]),
-            sex_info=np.array(json.dumps(res["sex_info"])))
-        print(f"[coarse_pass] window {wi} [{gs}:{ge}) sex={res['sex_status']} "
-              f"({res['sex_info']}) {time.time()-t0:.1f}s -> {part_path}")
+        process_one_window(tracker, video_paths, repro_tool, cameras, coarse0, stride, plan,
+                            num_animals, W, H, parts_dir, wi, gs, gs + chunk_len, n_coarse)
 
-    merge_parts(parts_dir, out_path, cameras=cameras, coarse0=coarse0, stride=stride,
-                n_coarse=n_coarse, W=W, H=H, num_animals=num_animals,
-                session_dir=session_dir, chunk_len=chunk_len,
-                chunk_overlap=chunk_overlap, project=project)
+    check_parts_complete(parts_dir, len(starts))
+    _merge()
     print(f"[coarse_pass] wrote {out_path}")
 
 
@@ -375,6 +470,16 @@ def main():
     ap.add_argument("--sam3-checkpoint", default=None)
     ap.add_argument("--no-lowmem", action="store_true")
     ap.add_argument("--no-resume", action="store_true")
+    ap.add_argument("--mode", choices=("full", "window", "collect"), default="full",
+                    help="full (default) = today's sequential sweep, unchanged: every "
+                         "window computed in-process then merged. window = compute ONE "
+                         "window (--window-index) and write only its parts/window_NNNN.npz "
+                         "-- what a SLURM array task runs, see "
+                         "scripts/slurm_coarse_pass_array.py. collect = CPU-only, no "
+                         "SAM3/GPU: merge existing parts/window_*.npz into the tracks "
+                         "artifact, refusing loudly if any window's part is missing.")
+    ap.add_argument("--window-index", type=int, default=None,
+                    help="0-based window index to compute; required for --mode window")
     args = ap.parse_args()
 
     run(args.session_dir, args.out, stride=args.stride, chunk_len=args.chunk_len,
@@ -383,7 +488,7 @@ def main():
         jarvis_root=args.jarvis_root, gpu_id=args.gpu, sam3_version=args.sam3_version,
         sam3_text=args.sam3_text, sam3_compile=args.sam3_compile,
         sam3_checkpoint=args.sam3_checkpoint, lowmem=not args.no_lowmem,
-        resume=not args.no_resume)
+        resume=not args.no_resume, mode=args.mode, window_index=args.window_index)
 
 
 if __name__ == "__main__":

@@ -105,9 +105,30 @@ target. The measurement in 1.1 stands; only 1.2's remedy is withdrawn.
 
 Two consequences for what follows. First, Phase 2's sigma change is reversed
 (see below) -- the retrain is still worth doing, but for the dataset, not the
-sigma. Second, one earlier test is downgraded rather than refuted: the
+sigma. Second, one earlier test was downgraded rather than refuted: the
 flip-augmentation A/B (72.9 vs 73.6 px) ran at sigma=2, where **both** arms
-were broken, so it was inconclusive about flip and was never rerun at sigma=7.
+were broken, so it was inconclusive about flip.
+
+**It has now been rerun at sigma=7 (2026-08-31), and flip augmentation HELPS
+-- decisively, and most of all for the female.** Identical recipe to
+`v5_s70_bal_augdef_full` except `aug.flip_p=0.0`, 30k steps:
+
+| | overall | female |
+|---|---|---|
+| flip ON (p=0.5) | 5.915 px | 14.239 px |
+| flip OFF (p=0.0) | 6.666 px | 25.883 px |
+| cost of removing flip | **+12.7%** | **+81.8%** |
+
+Not an early-stopping artifact: the flip-off arm's female metric plateaus around
+26 px across its last six evals and never approaches 14 px.
+
+So flip augmentation is NOT the cause of the mirror confusion -- the hypothesis
+that motivated the test. If anything it mitigates it. Two mechanisms fit the
+asymmetry between the 13% overall and 82% female costs: flip doubles the
+effective pose diversity of the SCARCE class (the female is 15.2% of
+annotations, already upweighted 2.46x by balanced sampling), and it forces
+left/right to be learned from image evidence rather than from a positional
+prior that fails whenever the animal's orientation varies. Keep `flip_p=0.5`.
 
 ### 1.3 The train/val split leaks, so no prior 3D number is trustworthy
 
