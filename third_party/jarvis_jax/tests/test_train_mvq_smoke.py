@@ -444,3 +444,100 @@ def test_train_dataset_receives_configured_jitter_units(tmp_path, monkeypatch):
     # the val split is unaffected: it is built with train=False and no jitter kwarg
     val_calls = [c for c in seen if c["train"] is False]
     assert val_calls and all(c["jitter_units"] is None for c in val_calls)
+
+
+def test_female_host_weight_balances_the_sampled_host_sexes():
+    """P3b `train.female_host_weight` on a FAKE manifest with the real export's
+    imbalance (202 female-host windows of 2661, two behaviours).
+
+    Expectation: 1.0 leaves `_balanced_weights` bit-identical to the P2 call
+    (no silent change to any earlier run), and the documented multiplier
+    `mass_male / mass_female` computed at 1.0 makes the two host sexes exactly
+    equally likely -- which is the property the launch value is chosen for.
+    """
+    import numpy as np
+    from jarvis_jax.train.train_mvq import _balanced_weights
+
+    N_F, N_M = 202, 2459
+
+    class FakeDS:
+        """The only surface `_balanced_weights` touches: len, windows, manifest, is_female."""
+        def __init__(self):
+            self.windows = [(f"rec{i % 2}", 0, i) for i in range(N_F + N_M)]
+            self.manifest = {"rec0": {"behavior": "courtship"}, "rec1": {"behavior": "walking"}}
+            self._f = np.zeros(N_F + N_M, bool); self._f[:N_F] = True
+        def __len__(self):
+            return len(self.windows)
+        def is_female(self, i):
+            return bool(self._f[i])
+
+    ds = FakeDS(); is_f = ds._f
+    w1 = _balanced_weights(ds, 0.5, 1.0)
+    np.testing.assert_allclose(_balanced_weights(ds, 0.5, 1.0, 1.0), w1, rtol=0, atol=0)
+    mult = w1[~is_f].sum() / w1[is_f].sum()
+    assert mult > 1.0, "the fake manifest must be female-scarce for this test to mean anything"
+
+    w = _balanced_weights(ds, 0.5, 1.0, mult)
+    assert abs(w.sum() - 1.0) < 1e-12
+    assert abs(w[is_f].sum() - 0.5) < 1e-9 and abs(w[~is_f].sum() - 0.5) < 1e-9
+    # and it is a pure multiplier on the female rows: their relative order is untouched
+    np.testing.assert_allclose(w[is_f] / w[is_f].sum(), w1[is_f] / w1[is_f].sum(), rtol=1e-12)
+    # a 2x weight moves the mass exactly 2x relative to male/other
+    w2 = _balanced_weights(ds, 0.5, 1.0, 2.0)
+    assert abs((w2[is_f].sum() / w2[~is_f].sum()) / (w1[is_f].sum() / w1[~is_f].sum()) - 2.0) < 1e-9
+
+
+def test_p3b_knobs_reach_the_dataset_and_the_copy_paste_params(tmp_path, monkeypatch):
+    """Config plumbing for the three P3b loader-side knobs: the contact-heavy
+    `copy_paste_contact_sep`, the `sex_label_overrides` map and (with them)
+    `copy_paste_p`/`copy_paste_contact_p` must reach the objects that consume
+    them, not just sit on `MVQTrainConfig`. Same wrapping trick as
+    `test_train_dataset_receives_configured_jitter_units`."""
+    import dataclasses
+    import jarvis_jax.train.train_mvq as train_mvq
+    from jarvis_jax.data.v12_windows import V12WindowDataset as RealV12WindowDataset
+    from jarvis_jax.models.mvq import MVQConfig
+    from jarvis_jax.train.train_mvq import run_training, MVQTrainConfig
+    from jarvis_jax.train.losses_mvq import LossWeights
+    from jarvis_jax.data.mv_augment import MVAugParams
+    from mvq_fixtures import REC
+
+    seen = []
+
+    class RecordingV12WindowDataset(RealV12WindowDataset):
+        def __init__(self, *a, **kw):
+            seen.append({"train": kw.get("train"), "copy_paste": kw.get("copy_paste"),
+                         "sex_overrides": kw.get("sex_overrides")})
+            super().__init__(*a, **kw)
+
+    monkeypatch.setattr(train_mvq, "V12WindowDataset", RecordingV12WindowDataset)
+
+    root = make_v12_root(tmp_path)
+    mcfg = MVQConfig(crop=448, patch=16, embed_dim=32, num_keypoints=50, num_cameras=7, n_instances=4,
+                     n_local=1, n_global=1, dec_layers_3d=2, dec_layers_2d=1, dec_heads=4, mlp_ratio=2.0,
+                     refine_passes=1, patch_rgb=3, fourier_bands=2, backbone="tiny", backbone_depth=1,
+                     backbone_heads=4, remat=False)
+    tcfg = MVQTrainConfig(total_steps=1, batch_size=2, warmup_steps=1, eval_every=1, save_every=1,
+                          log_every=1, num_workers=1, pretrained=False, window_lengths=(1,), smoke=True,
+                          copy_paste_p=0.8, copy_paste_contact_p=0.7, copy_paste_contact_sep=(4.0, 25.0),
+                          female_host_weight=4.27, sex_label_overrides={REC: {"fly1": "female"}})
+    run_training(root, out_dir=str(tmp_path / "final"), ckpt_dir=str(tmp_path / "ckpt"),
+                 mcfg=mcfg, tcfg=tcfg, aug=MVAugParams(enabled=False), weights=LossWeights())
+
+    train_calls = [c for c in seen if c["train"] is True]
+    assert train_calls
+    for c in train_calls:
+        cp = c["copy_paste"]
+        assert cp is not None and cp.p == 0.8 and cp.contact_p == 0.7
+        assert tuple(cp.contact_sep) == (4.0, 25.0), (
+            f"contact_sep={cp.contact_sep!r}; CopyPasteParams' own default is (8.0, 30.0), so "
+            f"run_training must pass tcfg.copy_paste_contact_sep explicitly")
+        assert c["sex_overrides"] == {REC: {"fly1": "female"}}
+    # the val split gets the overrides too (a val recording must resolve the same way)
+    assert all(c["sex_overrides"] == {REC: {"fly1": "female"}} for c in seen if c["train"] is False)
+    # copy_paste stays None when the rate is 0 (the P3a/P2 default path)
+    seen.clear()
+    run_training(root, out_dir=str(tmp_path / "f2"), ckpt_dir=str(tmp_path / "c2"), mcfg=mcfg,
+                 tcfg=dataclasses.replace(tcfg, copy_paste_p=0.0, sex_label_overrides={}),
+                 aug=MVAugParams(enabled=False), weights=LossWeights())
+    assert seen and all(c["copy_paste"] is None for c in seen)

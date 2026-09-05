@@ -324,3 +324,42 @@ def test_center_shift_moves_window_by_exact_amount(tmp_path):
     assert np.array_equal(ds5[i]["center3D"], b["center3D"])                    # deterministic
     dtr = V12WindowDataset(root, "val", T=1, train=True, center_shift_units=5.0, jitter_units=0.0)
     np.testing.assert_allclose(dtr[i]["center3D"], a["center3D"], atol=1e-6)    # train mode ignores it
+
+
+def test_sex_label_overrides_beat_the_annotation_and_manifest(tmp_path):
+    """P3b `train.sex_label_overrides`: an operator statement that the EXPORT is
+    wrong for a whole (recording, fly). It must sit ABOVE both steps of the
+    resolution chain -- the fixture's fly0 is `female` in the manifest AND
+    annotated `male` in frame 1, and the override must win in both frames --
+    and it must reach everything the resolved sex feeds: `is_female`,
+    `fly_sex_code`, the sample's `fly_sex`, and the donor index."""
+    from jarvis_jax.data.v12_windows import V12WindowDataset
+    from jarvis_jax.data.mv_copy_paste import CopyPasteParams
+    root = make_v12_root(tmp_path, n_frames=3, two_fly_frame=1, fly0_sex_by_frame={1: "male"})
+    base = V12WindowDataset(root, "train", T=1, train=False)
+    i_ann = base.windows.index((REC, 0, 1))       # annotation says male here
+    i_man = base.windows.index((REC, 0, 0))       # no annotation disagreement: manifest says female
+    assert not base.is_female(i_ann) and base.is_female(i_man)
+
+    ov = V12WindowDataset(root, "train", T=1, train=False,
+                          sex_overrides={REC: {"fly0": "female"}})
+    assert ov.is_female(i_ann) and ov.is_female(i_man)
+    assert ov.fly_sex_code(REC, 0, 1) == 0 and ov.fly_sex_code(REC, 0, 0) == 0
+    assert int(ov[i_ann]["fly_sex"][0]) == 0
+    # int and "0" keys are accepted too, and the donor index is built from the override
+    ov2 = V12WindowDataset(root, "train", T=1, train=True, copy_paste=CopyPasteParams(p=1.0),
+                           sex_overrides={REC: {0: "male"}})
+    assert not ov2.is_female(i_man)
+    assert all(k[1] != 0 for k in ov2._donors), "no window should still be indexed as female"
+
+    # default: no override, nothing changes
+    assert V12WindowDataset(root, "train", T=1, train=False).is_female(i_man)
+
+
+def test_sex_label_overrides_reject_a_typo(tmp_path):
+    """A bad sex string must fail at construction, not silently resolve to
+    "unknown" (which would suppress that fly's sex AND existence targets)."""
+    from jarvis_jax.data.v12_windows import V12WindowDataset
+    root = make_v12_root(tmp_path)
+    with pytest.raises(ValueError, match="expected 'female' or 'male'"):
+        V12WindowDataset(root, "train", T=1, train=False, sex_overrides={REC: {"fly0": "F"}})

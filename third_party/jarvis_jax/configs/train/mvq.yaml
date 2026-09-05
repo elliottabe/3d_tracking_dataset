@@ -24,6 +24,13 @@ val_cohorts: [female, two_fly]
 copy_paste_p: 0.0                # P3a §6: multi-view copy-paste augmentation rate (0 = off)
 copy_paste_opposite_sex_p: 0.7   # P3a §6: fraction of pastes drawing an opposite-sex donor
 copy_paste_contact_p: 0.3        # P3a §6: fraction of pastes placed in the stacked-pair (contact) regime
+copy_paste_contact_sep: [8.0, 30.0]  # P3b: (lo, hi) contact separation in world units (0.1 mm);
+                                     # (4, 25) is the contact-heavy setting -- see p3b-notes.md
+female_host_weight: 1.0          # P3b: multiplier on FEMALE-HOST windows AFTER the behaviour balance
+                                 # (1.0 = unchanged; 4.27 makes the two host sexes equally likely on
+                                 # red_data_3d_v12_export0902 train -- 202 of 2661 windows are female-host)
+sex_label_overrides: {}          # P3b: {recording: {fly_index: female|male}} forced above the
+                                 # annotation/manifest sex chain in the window loader. Empty by default.
 warm_start: null                 # P3a §8: path to another run's `final/` dir for shape-tolerant warm start
 jitter_units: 3.0                # train-time window-centre jitter, world units (0.1 mm); P4 §6 raises it to 10 for the mask-free route
 # loss weights (spec 2026-09-03 §5) -- starting points, swept in P3
@@ -36,6 +43,7 @@ loss:
   exist: 1.0
   sex: 0.5
   rep: 0.5
+  other_fly_repulsion: 0.0   # P3b cross-fly repulsion (0 = off, the P3a behaviour)
   pass1: 0.5
   aux: 0.3
   huber_px: 8.0

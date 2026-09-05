@@ -29,6 +29,7 @@ from jarvis_jax.train.losses_mvq import LossWeights, mvq_loss
 
 MM_PER_UNIT = 0.1
 CONTACT_UNITS = 30.0  # 3 mm; real mounting pairs have centroid gaps of ~24-30 units, see p3a-notes.md
+_RATIO_BATCHES = 200  # batches over which run_training reports the realised host-sex sampling ratio
 
 
 @dataclasses.dataclass
@@ -58,6 +59,21 @@ class MVQTrainConfig:
     copy_paste_p: float = 0.0
     copy_paste_opposite_sex_p: float = 0.7
     copy_paste_contact_p: float = 0.3
+    # P3b: the (lo, hi) centroid separation, in world units (0.1 mm), a CONTACT paste
+    # is drawn from. `CopyPasteParams.contact_sep`'s own default (8, 30) brackets the
+    # real 24-30-unit mounting pairs; P3b tightens it to (4, 25) to spend the pastes
+    # on heavier overlap, which is where the slots actually mix.
+    copy_paste_contact_sep: tuple = (8.0, 30.0)
+    # P3b: multiplier on FEMALE-HOST windows' sampling weight, applied AFTER
+    # `_balanced_weights`' behaviour-category normalisation (unlike `female_weight`,
+    # which is folded into that normalisation and whose effect on the realised ratio
+    # is therefore data-dependent and opaque). 1.0 = unchanged. `run_training` prints
+    # both the resulting weight mass and the realised host-sex ratio of the first
+    # `_RATIO_BATCHES` batches, so the number is verifiable in the run log.
+    female_host_weight: float = 1.0
+    # P3b: {recording: {fly_index: "female"|"male"}} forced onto the window loader's
+    # sex-resolution chain, above the annotation and the manifest. Empty by default.
+    sex_label_overrides: dict = dataclasses.field(default_factory=dict)
     warm_start: str | None = None
     jitter_units: float = 3.0  # train-time window-centre jitter, world units (0.1 mm); P4 §6 raises it to 10 for the mask-free route
 
@@ -173,13 +189,22 @@ def evaluate(model, ds, batch_size, *, cohorts: dict, part_of_k, weights, mesh, 
     # per_sample[mode] rows: (mpjpe_units, n_joints_with_gt, n_exist_pred,
     # n_flies_true, seg_lengths_pred|None, seg_lengths_gt|None, ds_index,
     # is_two_fly_window, mpjpe_policy_units|nan, is_policy_miss,
-    # mask_containment_frac|nan -- the policy instance's reprojection inside the host mask)
+    # mask_containment_frac|nan -- the policy instance's reprojection inside the host mask,
+    # cross_fly_frac|nan -- P3b: on a window with TWO labelled flies, the fraction of an
+    #   ASSIGNED slot's predicted 3D keypoints that sit nearer the OTHER fly's GT centroid
+    #   than their own, averaged over the labelled flies. This is the identity-mixing
+    #   failure measured directly: mask_containment says "inside the host mask" (generous
+    #   for a 50-keypoint skeleton and blind to the second fly), this says "on the wrong
+    #   animal". NaN on single-fly windows.
     per_sample = {"prompted": [], "unprompted": []}
     # batch_stats[mode] rows: (reproj_px, uv2d_px, head_vs_reproj_px, valid_entry_count)
     batch_stats = {"prompted": [], "unprompted": []}
     # slot_counts[mode]: (I,3) int TP/FP/FN of per-slot existence, over non-ignored
     # slots (spec §7); lazily sized to I on the first batch/mode that runs.
     slot_counts = {}
+    # cross_counts[mode]: (I,2) int [n_keypoints_on_the_other_fly, n_keypoints_scored]
+    # per SLOT, over two-labelled-fly windows -- the per-typed-slot view of cross_fly_frac.
+    cross_counts = {}
     sex_hits = {"prompted": [], "unprompted": []}
     offset = 0
     for b in window_batches(ds, batch_size, shuffle=False, drop_last=False, num_workers=num_workers):
@@ -204,6 +229,7 @@ def evaluate(model, ds, batch_size, *, cohorts: dict, part_of_k, weights, mesh, 
             I = xyz.shape[1]
             if mode not in slot_counts:
                 slot_counts[mode] = np.zeros((I, 3), int)
+                cross_counts[mode] = np.zeros((I, 2), int)
             # label-driven typed-slot targets (P3a §3-4): a slot's existence/sex target is a
             # deterministic function of the labels + this mode's prompt flag, never of the
             # prediction -- computed on the host from the SAME `on` this mode's forward used.
@@ -268,9 +294,29 @@ def evaluate(model, ds, batch_size, *, cohorts: dict, part_of_k, weights, mesh, 
                                             b["prompt_mask"][bi, 0], b["cam_valid"][bi, 0],
                                             b["vis2d"][bi, 0, 0])
                            if inst_policy is not None else np.nan)
+                # cross_fly_frac (P3b): is this slot's prediction on the right ANIMAL?
+                # `cen` (above) is each labelled fly's GT 3D centroid; a predicted keypoint
+                # nearer the OTHER fly's centroid than its own has crossed the two
+                # centroids' midplane. Only scored where BOTH flies are labelled, assigned
+                # to a slot, and have a 3D centroid at all.
+                fl = [f for f in range(b["fly_valid"].shape[1])
+                      if b["fly_valid"][bi, f] and assign[bi, f] >= 0 and has_f[bi, f].sum() > 0]
+                cross = np.nan
+                if len(fl) >= 2:
+                    vals = []
+                    for f in fl:
+                        sl = int(assign[bi, f])
+                        d_own = np.linalg.norm(xyz[bi, sl] - cen[bi, f], axis=-1)          # (T,K)
+                        d_oth = np.min([np.linalg.norm(xyz[bi, sl] - cen[bi, o], axis=-1)
+                                        for o in fl if o != f], axis=0)
+                        wrong = d_own > d_oth
+                        cross_counts[mode][sl] += np.array([int(wrong.sum()), int(wrong.size)], int)
+                        vals.append(float(wrong.mean()))
+                    cross = float(np.mean(vals))
                 per_sample[mode].append((float(e.mean()) if e.size else np.nan, int(e.size),
                                          int(exist.sum()), int(b["fly_valid"][bi].sum()),
-                                         L_pred, L_gt, i_ds, two_fly, mpjpe_policy, is_miss, contain))
+                                         L_pred, L_gt, i_ds, two_fly, mpjpe_policy, is_miss, contain,
+                                         cross))
         offset += B0
 
     def _finish(mode):
@@ -321,6 +367,11 @@ def evaluate(model, ds, batch_size, *, cohorts: dict, part_of_k, weights, mesh, 
         res["sex_acc"] = float(np.mean([h for _, h in hits])) if hits else float("nan")
         contain = np.array([p[10] for p in samples], float) if samples else np.zeros(0)
         res["mask_containment"] = float(np.nanmean(contain)) if np.isfinite(contain).any() else float("nan")
+        cross = np.array([p[11] for p in samples], float) if samples else np.zeros(0)
+        res["cross_fly_frac"] = float(np.nanmean(cross)) if np.isfinite(cross).any() else float("nan")
+        cc = cross_counts.get(mode, np.zeros((0, 2), int))
+        for s_ in range(cc.shape[0]):
+            res[f"cross_fly_frac_slot{s_}"] = (float(cc[s_, 0]) / cc[s_, 1]) if cc[s_, 1] else float("nan")
         miss_arr = np.array([p[9] for p in samples], bool) if samples else np.zeros(0, bool)
         Ls = [p[4] for p in samples if p[4] is not None]        # skip samples with no 3D-labelled joint
         Ls_gt = [p[5] for p in samples if p[5] is not None]     # same gate as Ls -- see the shared `has.sum()>0` above
@@ -346,6 +397,9 @@ def evaluate(model, ds, batch_size, *, cohorts: dict, part_of_k, weights, mesh, 
             ch = contain[in_cohort] if in_cohort.any() else np.zeros(0)
             res[f"mask_containment_{name}"] = (float(np.nanmean(ch))
                                                if ch.size and np.isfinite(ch).any() else float("nan"))
+            cx = cross[in_cohort] if in_cohort.any() else np.zeros(0)
+            res[f"cross_fly_frac_{name}"] = (float(np.nanmean(cx))
+                                             if cx.size and np.isfinite(cx).any() else float("nan"))
             res[f"policy_miss_frac_{name}"] = float(miss_arr[in_cohort].mean()) if in_cohort.any() else float("nan")
             ch_hits = [h for i_ds, h in hits if mask[i_ds]]
             res[f"sex_acc_{name}"] = float(np.mean(ch_hits)) if ch_hits else float("nan")
@@ -373,12 +427,26 @@ def _cohorts(ds):
     return c
 
 
-def _balanced_weights(ds, alpha, female_weight):
-    cats = [f"{ds.manifest[ds.windows[i][0]].get('behavior', 'unknown')}_{'female' if ds.is_female(i) else 'other'}"
+def _balanced_weights(ds, alpha, female_weight, female_host_weight=1.0):
+    """Per-window sampling weights, normalised to sum 1.
+
+    `female_weight` (P2) multiplies female-host windows INSIDE the
+    behaviour-category balance, so how much of the sampled mass it actually buys
+    depends on how the categories fall out. `female_host_weight` (P3b) multiplies
+    them again on the FINAL normalised weights, so the mass ratio it produces is
+    exactly `female_host_weight x (mass_F / mass_M)` and can be solved for a target
+    ratio: on `red_data_3d_v12_export0902` train the unweighted ratio is 0.234
+    (202 female-host windows of 2661), so 4.27 makes the two host sexes equally
+    likely. 1.0 leaves the P2 behaviour untouched.
+    """
+    is_f = np.array([ds.is_female(i) for i in range(len(ds))], bool)
+    cats = [f"{ds.manifest[ds.windows[i][0]].get('behavior', 'unknown')}_{'female' if is_f[i] else 'other'}"
             for i in range(len(ds))]
     counts = {c: cats.count(c) for c in set(cats)}
     w = np.array([(1.0 / counts[c]) ** alpha for c in cats])
-    w *= np.where([ds.is_female(i) for i in range(len(ds))], female_weight, 1.0)
+    w *= np.where(is_f, female_weight, 1.0)
+    w = w / w.sum()
+    w = w * np.where(is_f, float(female_host_weight), 1.0)
     return w / w.sum()
 
 
@@ -476,11 +544,13 @@ def run_training(root, *, out_dir, ckpt_dir, mcfg: MVQConfig, tcfg: MVQTrainConf
     # pretrained-weight download, device replication): a misconfigured/empty
     # val cohort should fail fast, not after minutes of backbone init.
     copy_paste = (CopyPasteParams(p=tcfg.copy_paste_p, opposite_sex_p=tcfg.copy_paste_opposite_sex_p,
-                                  contact_p=tcfg.copy_paste_contact_p) if tcfg.copy_paste_p > 0 else None)
+                                  contact_p=tcfg.copy_paste_contact_p,
+                                  contact_sep=tuple(tcfg.copy_paste_contact_sep)) if tcfg.copy_paste_p > 0 else None)
+    ov = dict(tcfg.sex_label_overrides or {})
     train_sets = {T: V12WindowDataset(root, "train", T=T, train=True, seed=tcfg.seed, copy_paste=copy_paste,
-                                      jitter_units=tcfg.jitter_units)
+                                      jitter_units=tcfg.jitter_units, sex_overrides=ov)
                  for T in tcfg.window_lengths}
-    val_ds = V12WindowDataset(root, "val", T=1, train=False)
+    val_ds = V12WindowDataset(root, "val", T=1, train=False, sex_overrides=ov)
     names = train_sets[tcfg.window_lengths[0]].keypoint_names
     lr_swap = build_lr_swap(names); part_of_k, _ = build_part_index(names)
     cohorts = _cohorts(val_ds)
@@ -548,7 +618,12 @@ def run_training(root, *, out_dir, ckpt_dir, mcfg: MVQConfig, tcfg: MVQTrainConf
     step_fns = {T: make_train_step(aug, lr_swap, part_of_k, weights, tcfg.ema) for T in tcfg.window_lengths}
     streams = {}
     for T, ds in train_sets.items():
-        w = _balanced_weights(ds, tcfg.balance_alpha, tcfg.female_weight)
+        w = _balanced_weights(ds, tcfg.balance_alpha, tcfg.female_weight, tcfg.female_host_weight)
+        is_f = np.array([ds.is_female(i) for i in range(len(ds))], bool)
+        mf, mm = float(w[is_f].sum()), float(w[~is_f].sum())
+        print(f"[mvq] T={T} sampler: {int(is_f.sum())}/{len(ds)} female-host windows, "
+              f"female_host_weight={tcfg.female_host_weight} -> weight mass female {mf:.4f} "
+              f"male/other {mm:.4f} (F/M {mf / max(mm, 1e-12):.3f})", flush=True)
         def epochs(ds=ds, w=w, T=T):
             e = 0
             while True:
@@ -559,9 +634,19 @@ def run_training(root, *, out_dir, ckpt_dir, mcfg: MVQConfig, tcfg: MVQTrainConf
     key = jax.random.PRNGKey(tcfg.seed)
     Ts = list(tcfg.window_lengths)
     loss = float("nan"); t0 = time.time()
+    # Realised host-sex ratio of what the sampler ACTUALLY draws, over the first
+    # `_RATIO_BATCHES` batches -- `female_host_weight` sets a weight mass, and this
+    # is the number that says whether the draws came out where they were aimed
+    # (`is_female` is the HOST's sex and survives copy-paste, which only adds a donor).
+    seen_f = seen_n = 0
     for i in range(start, tcfg.total_steps):
         T = Ts[i % len(Ts)]
         batch = dict(zip(WINDOW_KEYS, next(streams[T])))
+        if i - start < _RATIO_BATCHES:
+            seen_f += int(np.asarray(batch["is_female"]).sum()); seen_n += int(batch["is_female"].shape[0])
+            if i - start == _RATIO_BATCHES - 1:
+                print(f"[mvq] realised host-sex ratio over the first {_RATIO_BATCHES} batches: "
+                      f"female {seen_f}/{seen_n} = {seen_f / max(seen_n, 1):.3f}", flush=True)
         pp = tcfg.prompt_p_start + (tcfg.prompt_p_end - tcfg.prompt_p_start) * min(i / max(tcfg.prompt_anneal_steps, 1), 1.0)
         loss, metrics, ema = step_fns[T](model, opt, ema, jax.random.fold_in(key, i), batch, jnp.float32(pp))
         loss = float(loss); ema_updates += 1

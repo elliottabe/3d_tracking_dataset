@@ -21,6 +21,10 @@ def main(cfg):
     mcfg = build_dataclass(MVQConfig, cfg.model)
     tnode = OmegaConf.to_container(cfg.train, resolve=True)
     tnode["window_lengths"] = tuple(tnode["window_lengths"]); tnode["val_cohorts"] = tuple(tnode["val_cohorts"])
+    if "copy_paste_contact_sep" in tnode:                       # yaml list -> tuple (CopyPasteParams field)
+        tnode["copy_paste_contact_sep"] = tuple(float(v) for v in tnode["copy_paste_contact_sep"])
+    if "sex_label_overrides" in tnode:                          # OmegaConf DictConfig -> plain dict
+        tnode["sex_label_overrides"] = dict(tnode["sex_label_overrides"] or {})
     tcfg = MVQTrainConfig(**{k: v for k, v in tnode.items() if k in MVQTrainConfig.__dataclass_fields__})
     weights = LossWeights(**tnode["loss"]); aug = MVAugParams(**tnode["mv_aug"])
     run_dir = run_dir_for(cfg)

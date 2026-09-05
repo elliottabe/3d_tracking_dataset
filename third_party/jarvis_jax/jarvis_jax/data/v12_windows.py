@@ -14,6 +14,13 @@ annotations/keypoint_names.json.
 Sex is resolved PER WINDOW and ANNOTATION-FIRST (`_resolve_fs_sex`, which is
 `data/v5_3d._resolve_sex`'s chain applied to the window's OWN frameset):
 
+  0. `sex_overrides[rec][fly]`, when the caller supplied one (P3b
+     `train.sex_label_overrides`) -- an operator statement that the EXPORT is
+     wrong for a whole (recording, fly), overriding everything below. Empty by
+     default; it is deliberately per (recording, fly) and NOT per frameset, so
+     it cannot express a recording whose annotation subsets label different
+     animals under one fly id (`2025_10_20_13_20_04` -- see below), which is
+     exactly why that recording is NOT overridden today.
   1. that frameset's own annotation `sex`, when not "unknown"
   2. else `manifest[rec]["fly_sex"]["fly<id>"]`
   3. else `manifest[rec]["sex"]`
@@ -63,6 +70,25 @@ WINDOW_KEYS = ("crops", "cam_valid", "M", "t_local", "center3D", "kp3d_local", "
 _SEX_CODE = {"female": SEX_FEMALE, "male": SEX_MALE}
 
 
+def _parse_sex_overrides(overrides):
+    """{recording: {fly: "female"|"male"}} with the fly key accepted as an int,
+    "0" or "fly0", and the sex lower-cased. Raises on an unknown sex string so
+    a typo in a launch override fails at dataset construction rather than
+    silently falling through to "unknown" (which would suppress every sex/
+    existence target for that fly)."""
+    out = {}
+    for rec, m in (overrides or {}).items():
+        per = {}
+        for k, v in dict(m).items():
+            fly = int(str(k).lower().replace("fly", ""))
+            sex = str(v).lower()
+            if sex not in _SEX_CODE:
+                raise ValueError(f"sex_overrides[{rec!r}][{k!r}] = {v!r}: expected 'female' or 'male'")
+            per[fly] = sex
+        out[str(rec)] = per
+    return out
+
+
 def _parse_key(key):
     rec, frame, fly = key.split("/")
     return rec, int(frame.split("_")[1]), int(fly[3:])
@@ -77,11 +103,13 @@ def _affine_np(cam_mats):
 
 class V12WindowDataset:
     def __init__(self, root, split, T=1, *, max_flies=2, jitter_units=3.0, seed=0,
-                 train=True, recordings=None, copy_paste=None, center_shift_units=0.0):
+                 train=True, recordings=None, copy_paste=None, center_shift_units=0.0,
+                 sex_overrides=None):
         self.root, self.split, self.T = root, split, int(T)
         self.max_flies, self.jitter, self.train = int(max_flies), float(jitter_units), bool(train)
         self.seed = int(seed)
         self.center_shift = float(center_shift_units)
+        self.sex_overrides = _parse_sex_overrides(sex_overrides)
         self.epoch = 0
         self.copy_paste = copy_paste
         coco = json.load(open(os.path.join(root, "annotations", f"instances_{split}.json")))
@@ -111,6 +139,10 @@ class V12WindowDataset:
         # not one collapsed value per (rec, fly): see the module docstring.
         self._win_sex = [self._resolve_fs_sex(rec, f0, fly) for (rec, fly, f0) in self.windows]
         self._warn_sex_disagreements()
+        for rec, m in sorted(self.sex_overrides.items()):
+            n = sum(1 for (r, fly, _) in self.windows if r == rec and fly in m)
+            print(f"[v12_windows] sex_label_overrides {rec}: {dict(sorted(m.items()))} -- overriding the "
+                  f"annotation/manifest chain on {n} window(s) of split {self.split!r}", flush=True)
         self._donors = {}
         if self.copy_paste is not None and self.T == 1:
             for i, (rec, fly, _) in enumerate(self.windows):
@@ -170,6 +202,9 @@ class V12WindowDataset:
         A frame this fly has no frameset for (e.g. the other fly of a T=2
         window labelled only in the second frame) has no annotation of its
         own and falls through to the manifest by fly id."""
+        ov = self.sex_overrides.get(rec, {}).get(int(fly))
+        if ov is not None:
+            return ov
         fsv = self._fs.get((rec, frame, fly))
         own = _frameset_own_sex(fsv, self._ann) if fsv is not None else "unknown"
         return _resolve_sex(own, fly, self.manifest.get(rec, {}))

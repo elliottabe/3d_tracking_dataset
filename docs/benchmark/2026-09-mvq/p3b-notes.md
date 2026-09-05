@@ -1,0 +1,292 @@
+# P3b: the contact-heavy mvq fine-tune (`mvq_t1_b16_p3b_contact_20260905`)
+
+## Why
+
+Measured on `2025_10_20_13_20_04` (20_04) with the r2 relative-assignment lift
+(see the "Mask-identity assignment" section of `p3a-notes.md`): in CONTACT
+frames where the female slot is empty, the MALE instance absorbs her head, T1
+legs and wing base. 1.4 % of frames have >= 5 male keypoints jumping > 0.5 mm
+between neighbouring frames; 1.7 % have >= 5 male keypoints sitting on HER
+body. The sex head calls 20_04's female a MALE (her slot fires < 0.5; the
+female slot is read on only ~50 % of frames).
+
+Three training-side causes, and what this run does about each:
+
+| cause (measured) | knob | mechanism |
+|---|---|---|
+| (a) contact pairs are under-trained -- P3a val: `contact_pair` cohort 0.18 mm vs 0.09 mm overall, `mask_containment` 0.81 on contact pairs (lowest of any cohort) | `copy_paste_p` 0.5 -> **0.8**, `copy_paste_contact_p` 0.3 -> **0.7**, `copy_paste_contact_sep` (8, 30) -> **(4, 25)** units | ~56 % of every training window is now a synthetic touching/overlapping pair, at heavier overlap than the real 24-30-unit mounting pairs |
+| (b) female-host windows are scarce -- **202 of 2661** train windows (7.6 %), because 20_04's 677-frameset `courtship_20_04_male` block labels only the MALE as host and the present-but-unlabelled female gets existence-ignore and no sex supervision | `female_host_weight` 1.0 -> **4.27** | the two host sexes are drawn equally often (verified: weight mass female 0.5000 / male 0.5000) |
+| (c) nothing penalises a slot's keypoints landing on the OTHER fly | `loss.other_fly_repulsion` 0 -> **0.5** | hinge on (distance to own fly's GT centroid - distance to the other's), in units, on windows with two labelled flies |
+
+## Knobs (all new; every default leaves P3a behaviour bit-identical)
+
+| knob | default | this run | file |
+|---|---|---|---|
+| `train.copy_paste_contact_sep` | `[8.0, 30.0]` (`CopyPasteParams`' own default) | `[4.0, 25.0]` | `train/train_mvq.py`, `configs/train/mvq.yaml` |
+| `train.female_host_weight` | `1.0` (unchanged) | `4.27` | `train/train_mvq.py::_balanced_weights` |
+| `train.sex_label_overrides` | `{}` | `{}` -- **not used**, see below | `data/v12_windows.py` |
+| `train.loss.other_fly_repulsion` | `0.0` (off) | `0.5` | `train/losses_mvq.py::LossWeights` |
+
+### `female_host_weight` vs the existing `female_weight`
+
+`female_weight` (P2) multiplies female-host windows INSIDE `_balanced_weights`'
+behaviour-category normalisation, so how much sampled mass it actually buys is
+data-dependent and opaque -- which is how P2 sampled 677 male-host windows as
+"female" for a whole run without anyone noticing. `female_host_weight` is
+applied to the FINAL normalised weights instead, so the mass ratio it produces
+is exactly `female_host_weight x (mass_F / mass_M)` and can be solved for a
+target. On `red_data_3d_v12_export0902` train the unweighted ratio is 0.234
+(202 of 2661 windows), hence **4.27**. `female_weight` stays 1.0.
+
+Two prints make it verifiable rather than assumed -- the weight mass at sampler
+construction, and the ratio the sampler ACTUALLY drew over the first 200
+batches (`_RATIO_BATCHES`). From this run's log:
+
+```
+[mvq] T=1 sampler: 202/2661 female-host windows, female_host_weight=4.27
+      -> weight mass female 0.5000 male/other 0.5000 (F/M 1.000)
+```
+
+Risk, stated: 202 unique female-host windows now carry half the sampling mass,
+so each is drawn ~740 times over 10k steps of batch 35. Copy-paste (0.8),
+`mv_aug` and the 10-unit centre jitter are what stand between that and
+memorisation; if the `female` val cohort degrades while train loss falls, this
+knob is the first suspect.
+
+### `other_fly_repulsion` (term 7b, `losses_mvq.py`)
+
+Term 7 (`rep`) already pushes a predicted keypoint off the other fly's
+same-part LABEL, but only within `rep_px`/`rep_units` and only for keypoints
+that fly actually has labels for. Term 7b asks the coarser question the contact
+failure is about -- *is this point on the right ANIMAL at all?* -- using the GT
+3D centroids `cen` the slot assignment already computes:
+
+```
+other_rep = mean over (b, f, t, k) of relu(||xyz_pred[f] - cen[f]|| - ||xyz_pred[f] - cen[o]||)
+```
+
+so it is exactly zero as soon as a point sits on its own side of the two
+centroids' midplane, and grows linearly (in units, 0.1 mm) once it crosses.
+Scored only where BOTH flies are labelled AND assigned to a slot AND have a 3D
+centroid -- real two-fly windows and copy-paste composites alike. ~20 lines.
+Known false positive, accepted: during a real mounting pair (20-26 units apart,
+body half-length ~11 units) a genuinely extended leg tip can cross the midplane
+and be penalised. The hinge has no margin, so the penalty there is small.
+
+### `sex_label_overrides`: implemented, deliberately EMPTY
+
+`V12WindowDataset(..., sex_overrides={rec: {fly: "female"|"male"}})` now sits
+at step 0 of the resolution chain, above the annotation and the manifest, and
+raises on a bad sex string rather than silently resolving to "unknown".
+
+**20_04 is NOT overridden, and should not be.** The mapping question the brief
+asked to settle is already settled in the files, in the other direction: the
+loader's annotation-first resolution (P3a fix wave, `p3a-notes.md` "Fix wave
+2026-09-04: sex resolution") is CORRECT for this recording. Its fly0 spans two
+annotation subsets that label DIFFERENT animals -- `courtship_20_04_male` (677
+framesets, annotation `sex: male`) and `20_04_female_climbing` (15 framesets,
+`sex: female`) -- and the user's authoritative full-frame verdict confirmed
+both. A `recording -> {fly_index: sex}` map is per (recording, fly) and
+therefore structurally incapable of expressing that; setting it would either
+restate what the loader already does or actively corrupt 677 windows.
+
+The real gap is different from what an override can fix and is left as the
+**top P3c candidate**: in those 677 windows the female is PRESENT but
+UNLABELLED, so `slot_ignore` drops her slot's existence target entirely. Her
+existence is in fact known (`unlabelled_sex` resolves her as female), so those
+windows could supply 677 positive existence examples for the female slot --
+which is precisely the symptom being chased ("her slot fires < 0.5"). Not done
+here: it changes `slot_ignore` semantics shared by the loss AND `evaluate`, so
+it would move the P3a acceptance baseline mid-comparison. Items (a)-(c) above
+attack the same failure without that risk.
+
+## Eval: `cross_fly_frac` (new, the metric that shows the fix directly)
+
+`mask_containment` says "inside the host mask" -- generous for a 50-keypoint
+skeleton, and structurally blind to the second fly. `cross_fly_frac` says "on
+the wrong animal": for each labelled fly assigned to a slot, the fraction of
+that slot's predicted 3D keypoints nearer the OTHER fly's GT centroid than
+their own, averaged over the window's flies; NaN on single-fly windows.
+Reported as `cross_fly_frac`, `cross_fly_frac_<cohort>` for every P3a cohort
+(so `cross_fly_frac_contact_pair` is the headline number) and
+`cross_fly_frac_slot<s>` per typed slot. All P3a cohorts kept unchanged.
+
+### BEFORE number (jitter-10 final, the warm-start source, val 153 windows)
+
+Produced with `evaluate` on `mvq_t1_b16_p4_jitter10_20260904/final`
+(`figures/2026-09-mvq/p3b_gates/cross_fly_baseline_jitter10.json`, GPU 6,
+generator kept in the session scratchpad as `cross_fly_baseline.py`).
+
+Expectation stated before running: `cross_fly_frac` should be small overall
+(most val windows are single-fly or well-separated) and NOTICEABLY HIGHER on
+`contact_pair`; if it were not, the metric would not be measuring what it
+claims and the P3b acceptance test would need rethinking.
+
+| metric (val, 153 windows) | prompted | unprompted |
+|---|---|---|
+| **cross_fly_frac** | 0.1020 | **0.0482** |
+| **cross_fly_frac, contact_pair** (n=26) | 0.1469 | **0.0762** |
+| cross_fly_frac, two_fly (n=74) | 0.1020 | 0.0482 |
+| cross_fly_frac, female | 0.1036 | 0.0548 |
+| cross_fly_frac, group_A / group_C | 0.1039 / 0.0883 | 0.0518 / 0.0217 |
+| cross_fly_frac, slot1 (FEMALE) | 0.1536 | **0.0576** |
+| cross_fly_frac, slot2 (male) | 0.1024 | **0.0388** |
+| cross_fly_frac, single_fly | nan (by construction) | nan |
+| mask_containment | 0.8949 | 0.8853 |
+| mask_containment, contact_pair | 0.8009 | 0.8138 |
+
+**Met, and it points where the field failure does.** Contact pairs are
+**1.58x** the aggregate unprompted (0.0762 vs 0.0482) and 1.44x prompted, and
+the **FEMALE slot mixes 1.5x more than the male slot** (0.0576 vs 0.0388
+unprompted) -- the same asymmetry the 20_04 lift shows, reproduced on held-out
+val by a metric that never sees a mask. `slot3` is nan (no real same-sex pair
+in val) and `slot0` is nan unprompted (the prompt is off), both expected.
+These are the numbers P3b has to beat.
+
+## Gate figure: copy-paste at the contact-heavy setting
+
+```bash
+JAX_PLATFORMS=cpu OMP_NUM_THREADS=4 PYTHONPATH=third_party/jarvis_jax:. \
+    python scripts/viz/mvq_copy_paste_check.py --out figures/2026-09-mvq/p3b_gates \
+        --contact-sep 4 25 --contact-p 0.7 --n-contact 5 --n-far 3
+```
+
+(`--contact-sep`, `--contact-p`, `--n-contact`, `--n-far` are new on that
+script, so the gate can be run at the settings a given run actually trains
+with rather than only at the dataclass default.)
+
+`figures/2026-09-mvq/p3b_gates/copy_paste_check.{png,json}` (gitignored;
+regenerate with the command above). 8 rows x 7 cameras. Pool 1850 eligible
+targets, 43 draws, **0 rejected by `composite`**, 18 skipped by the check
+script's head filter (legibility only -- see `p3a-notes.md`).
+
+**Expectation stated before rendering:** the contact rows must show the pasted
+donor (orange) TOUCHING or OVERLAPPING the host (cyan) -- visibly heavier
+overlap than the 21.7-27.6 u the old (8, 30) render produced -- at the same
+place relative to the host in every camera, with each fly's labels on its own
+body and host keypoints under the donor drawn hollow.
+
+**Read back (Read tool, all 8 rows in three crops):** met.
+
+- **Contact rows, 5/5** at seps **8.5, 9.5, 21.7, 21.8, 23.6 u** -- the
+  tightening worked: two of five are now genuinely stacked bodies (8.5, 9.5 u)
+  where the old default's contact bucket bottomed out at 21.7 u. In every
+  camera the donor sits at a consistent position relative to the host (e.g.
+  #2026: orange above cyan in Cam2012630/2012855, and the same 3D relation
+  seen from the other side in Cam2012861), never floating or per-camera
+  offset. Hollow cyan circles appear exactly where the donor overlays the host
+  (#2387 Cam2012631/2012861/2012862, #2236 Cam2012853, #1533 Cam2012862).
+  On the two stacked rows the orange and cyan dots interleave spatially --
+  that is the physical situation at 8-9 units, not a labelling error.
+- **Far rows, 3/3** at 27.6, 38.8, 42.6 u -- bodies clearly separated, and at
+  38.8/42.6 u the donor is only a partial cluster at the crop edge in some
+  cameras and absent in others. That is `composite()`'s documented visibility
+  rule (a camera with no donor pixels gets no donor labels), already recorded
+  in `p3a-notes.md`, not new behaviour.
+- Row #1052's Cam2012630 panel is black and titled "absent" -- a
+  target-invalid camera, drawn correctly.
+
+**Limitation, stated so it is not over-read:** 7 of the 8 rows are male-host
+(the only female-host row is #1288, a *far* pair). That is the eligible donor
+pool's own imbalance -- 187 female of 1850 eligible targets -- and is exactly
+what `female_host_weight=4.27` corrects at training time; the figure was drawn
+from an UNWEIGHTED permutation of the pool, so it does not show the sampler's
+realised mix. The realised mix is instead reported numerically by the
+first-200-batch ratio print above.
+
+### Donors stayed within calibration group A -- measured, not assumed
+
+The brief allowed drawing donors from BOTH groups "if the donor pool allows".
+The pool numerically allows it (group B has 692 train windows; every eligible
+paste TARGET is group A), but the geometry does not. `mv_copy_paste` is
+affine-exact only because donor and target share `M`: the pasted 3D label is
+`X_src + D`, which under the target's cameras projects to `M_tgt X + M_tgt D +
+t_tgt`, while the pasted PIXELS are the donor's own crop translated, i.e.
+`M_src X + M_tgt D + t_tgt`. Measured on the real calibrations (same 7 camera
+names, same order in both groups):
+
+```
+A vs B: max|dM| 0.1822 px/unit  ->  up to 4.11 px label error at 15 units from the crop centre
+```
+
+P3a's own per-camera fit is 2.6-3.7 px, so cross-group donors would inject a
+label bias at the level of the signal into ~26 % of pastes. **Kept group A.**
+
+## Launch
+
+Batch math: `run_training` raises unless `batch_size % len(jax.devices()) == 0`.
+On **7** GPUs (0-5 and 7) that rules out 32; **35 = 5 per device** was chosen
+(the jitter-10 run was 4/device on 8 L40S, and `q_chunk: null`'s profiling note
+records the unchunked path fitting at 4-8 samples/GPU). Fallback on OOM was 28
+(4/device, the proven per-device batch) -- **not needed, 35 ran clean**: 41.7 GB of 46 GB per L40S at steady state, GPU 6 untouched at 0 MiB.
+
+```bash
+cd third_party/jarvis_jax
+module load cuda/12.9.1
+export LD_PRELOAD=$CONDA_PREFIX/lib/libstdc++.so.6
+unset LD_LIBRARY_PATH JAX_PLATFORMS
+export XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 TF_GPU_ALLOCATOR=cuda_malloc_async
+export HF_HOME=/gscratch/portia/eabe/data/Johnson_lab/sam3
+export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,7
+setsid nohup python -u -m jarvis_jax.scripts.train_mvq model=mvq train=mvq paths=hyak \
+  run_id=mvq_t1_b16_p3b_contact_20260905 \
+  train.total_steps=10000 train.warmup_steps=500 train.lr=1e-4 \
+  train.prompt_p_start=0.0 train.prompt_p_end=0.0 \
+  train.copy_paste_p=0.8 train.copy_paste_contact_p=0.7 'train.copy_paste_contact_sep=[4.0,25.0]' \
+  train.female_host_weight=4.27 train.loss.other_fly_repulsion=0.5 train.jitter_units=10 \
+  train.warm_start=/gscratch/portia/eabe/data/Johnson_lab/jax_mvq_runs/mvq_t1_b16_p4_jitter10_20260904/final \
+  train.eval_every=2000 train.save_every=1000 train.batch_size=35 train.num_workers=24 \
+  "paths.runs_root=\${paths.mvq_runs_root}" \
+  > slurm_logs/mvq_t1_b16_p3b_contact_20260905.out 2>&1 &
+```
+
+| | |
+|---|---|
+| PID | **1281418** (the `python` process; `setsid` wrapper 1281416 exits immediately) |
+| log | `third_party/jarvis_jax/slurm_logs/mvq_t1_b16_p3b_contact_20260905.out` |
+| run dir | `/gscratch/portia/eabe/data/Johnson_lab/jax_mvq_runs/mvq_t1_b16_p3b_contact_20260905/` |
+| GPUs | 0,1,2,3,4,5,7 (L40S, node g3102); GPU 6 left free |
+| started | 2026-09-05 15:18 |
+| step rate | **1.27 s/step** steady state (steps 150 -> 400 in 317 s), 41.7 GB/GPU |
+| expected end | ~**19:20 on 2026-09-05** (10000 x 1.27 s = 3 h 32 m of stepping + 5 evals) |
+
+First-200-batch check, from the log:
+
+```
+[mvq] realised host-sex ratio over the first 200 batches: female 3550/7000 = 0.507
+```
+
+so the sampler really did draw the two host sexes equally, not merely weight
+them that way. `other_rep` is live and non-degenerate in the log (0.26-0.50 at
+steps 50-400, contributing 0.13-0.25 of a ~28 total loss) -- large enough to
+have a gradient, far from dominating.
+
+Warm start reported `restored 608/608 leaves; not restored: []` -- the
+jitter-10 checkpoint is already 4-slot P3a-shaped, so unlike the P3a warm start
+nothing (not even the sex head) starts fresh.
+
+## What to look at when it finishes
+
+1. `cross_fly_frac_contact_pair` (unprompted) vs the BEFORE number above --
+   this is the acceptance number for the whole run.
+2. `mask_containment_contact_pair` and `cohort_contact_pair` MPJPE, against
+   P3a @10k's 0.815 / 0.179 mm.
+3. `sex_acc` and `exist_rec_slot1` (the female slot) -- (b) is meant to lift
+   these; the 20_04 female's slot firing < 0.5 is the field symptom.
+4. `cohort_female` MPJPE against P3a's 0.114 mm -- the overfitting check on
+   `female_host_weight`.
+5. Then re-lift 20_04 bouts 25/5/8 with `--identity mask` on the new
+   checkpoint and re-run the swap/NaN audit table in `p3a-notes.md`'s
+   "Re-smoke (round 2)" section; that is the end-to-end number the field
+   failure was measured in.
+
+## Files
+
+- `third_party/jarvis_jax/jarvis_jax/train/losses_mvq.py` -- `LossWeights.other_fly_repulsion`, term 7b, `other_rep` metric
+- `third_party/jarvis_jax/jarvis_jax/train/train_mvq.py` -- `copy_paste_contact_sep`/`female_host_weight`/`sex_label_overrides` config fields and their plumbing, `_balanced_weights` final-weight multiplier, the two sampler prints, `cross_fly_frac` in `evaluate`
+- `third_party/jarvis_jax/jarvis_jax/data/v12_windows.py` -- `sex_overrides` at step 0 of the sex chain, `_parse_sex_overrides`
+- `third_party/jarvis_jax/jarvis_jax/scripts/train_mvq.py` -- list->tuple / DictConfig->dict for the two new structured knobs
+- `third_party/jarvis_jax/configs/train/mvq.yaml` -- the four new keys, all at their no-op defaults
+- `scripts/viz/mvq_copy_paste_check.py` -- `--contact-sep`, `--contact-p`, `--n-contact`, `--n-far`
+- tests: `tests/test_mvq_losses.py` (+2), `tests/test_v12_windows.py` (+2), `tests/test_train_mvq_smoke.py` (+2)
+- `figures/2026-09-mvq/p3b_gates/copy_paste_check.{png,json}` (gitignored)

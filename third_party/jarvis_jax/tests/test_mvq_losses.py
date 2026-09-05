@@ -243,3 +243,54 @@ def test_dropped_valid_fly_is_masked_from_every_geometric_term():
     for k in ("reproj", "l3d", "uv2d", "vis", "conf", "rep", "match_reproj_px", "mpjpe3d_units"):
         assert abs(float(m1[k]) - float(m0[k])) < 1e-5, k
     assert float(m0["reproj"]) < 1e-3          # the host (slot 3) is still scored, and perfectly
+
+
+def test_other_fly_repulsion_is_off_by_default_and_fires_only_when_swapped():
+    """P3b cross-fly repulsion: zero when each slot's keypoints sit on their OWN
+    fly (whatever the weight), positive as soon as a slot's prediction is moved
+    onto the other labelled fly, and identically absent at the default weight 0
+    so every P3a run's loss is unchanged.
+
+    The fixture's two flies are ~40 units apart (`_perfect_batch` shifts fly 1),
+    so "on the other fly" is unambiguous: swapping the two slots' predictions
+    puts every predicted keypoint nearer the other fly's GT centroid than its own.
+    """
+    import dataclasses
+    from jarvis_jax.train.losses_mvq import mvq_loss, LossWeights
+    part_of_k = np.arange(5, dtype=np.int32)
+    w_off = LossWeights()
+    w_on = dataclasses.replace(LossWeights(), other_fly_repulsion=0.5)
+    assert w_off.other_fly_repulsion == 0.0
+
+    out, batch = _perfect_batch()
+    t_off, m_off = mvq_loss(out, batch, w_off, part_of_k)
+    t_on, m_on = mvq_loss(out, batch, w_on, part_of_k)
+    assert float(m_on["other_rep"]) == 0.0                 # keypoints are on their own fly
+    assert abs(float(t_on) - float(t_off)) < 1e-6
+
+    # swap: slot 1 (the female host's slot) predicts fly 1's points and vice versa
+    sw, batch_sw = _perfect_batch()
+    sw["xyz"] = sw["xyz"].at[:, 1].set(batch_sw["kp3d_local"][:, 1])
+    sw["xyz"] = sw["xyz"].at[:, 2].set(batch_sw["kp3d_local"][:, 0])
+    _, m_swap_off = mvq_loss(sw, batch_sw, w_off, part_of_k)
+    t_swap, m_swap = mvq_loss(sw, batch_sw, w_on, part_of_k)
+    assert float(m_swap["other_rep"]) > 1.0                # ~40 units of centroid separation
+    assert float(m_swap_off["other_rep"]) == 0.0           # not computed at weight 0
+    # and it really is in `total`
+    _, m_ref = mvq_loss(sw, batch_sw, w_off, part_of_k)
+    assert float(t_swap) > float(m_ref["total"])
+
+
+def test_other_fly_repulsion_needs_two_labelled_flies():
+    """Single-labelled-fly windows contribute nothing: there is no other fly's
+    centroid to be nearer to, so the term must stay exactly 0 there (it is the
+    windows with two labelled flies -- real pairs and copy-paste composites --
+    that the term exists for)."""
+    import dataclasses
+    from jarvis_jax.train.losses_mvq import mvq_loss, LossWeights
+    w_on = dataclasses.replace(LossWeights(), other_fly_repulsion=0.5)
+    out, batch = _perfect_batch()
+    out["xyz"] = out["xyz"].at[:, 1].set(batch["kp3d_local"][:, 1])   # host slot on the other fly
+    batch["fly_valid"] = batch["fly_valid"].at[:, 1].set(False)       # ... which is now unlabelled
+    _, m = mvq_loss(out, batch, w_on, np.arange(5, dtype=np.int32))
+    assert float(m["other_rep"]) == 0.0

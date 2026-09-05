@@ -42,7 +42,7 @@ from jarvis_jax.data.mv_copy_paste import CopyPasteParams
 from jarvis_jax.train.matching import SEX_UNKNOWN
 from viz.core.colors import PALETTE
 
-N_CONTACT, N_FAR = 3, 3
+N_CONTACT, N_FAR = 3, 3          # defaults; --n-contact/--n-far override them
 SEX_NAME = {0: "female", 1: "male", -1: "unknown"}
 FLY_RGB = {f: tuple(c / 255.0 for c in reversed(PALETTE[f])) for f in ("fly0", "fly1")}  # BGR->RGB
 # Antenna/eye landmarks -- a fly with NONE of these visible in ANY camera is
@@ -76,7 +76,7 @@ def _try_paste(ds, i, rng, head_idx):
     return row, "ok"
 
 
-def _collect(ds, ds_ref, seed=0, max_pool=800):
+def _collect(ds, ds_ref, seed=0, max_pool=800, n_contact=N_CONTACT, n_far=N_FAR):
     """Draw random single-fly windows and call `ds.paste_window` until 3
     contact (sep<=30u, `CopyPasteParams.contact_sep[1]`) and 3 far pastes are
     collected, at least one same-sex, both flies with a visible head
@@ -91,7 +91,7 @@ def _collect(ds, ds_ref, seed=0, max_pool=800):
     contact, far, counts = [], [], {"tried": 0, "rejected": 0, "headless": 0}
     idx_used = 0
     for i in order:
-        if len(contact) >= N_CONTACT and len(far) >= N_FAR:
+        if len(contact) >= n_contact and len(far) >= n_far:
             break
         idx_used += 1
         counts["tried"] += 1
@@ -117,7 +117,7 @@ def _collect(ds, ds_ref, seed=0, max_pool=800):
                     bucket[-1] = row
                 same_sex = True
                 break
-    rows = contact[:N_CONTACT] + far[:N_FAR]
+    rows = contact[:n_contact] + far[:n_far]
     return rows, dict(n_tried=counts["tried"], n_none=counts["rejected"], n_headless=counts["headless"],
                       n_pool=len(cand), same_sex_found=same_sex)
 
@@ -157,20 +157,32 @@ def main():
     ap.add_argument("--root", default="/gscratch/portia/eabe/data/Johnson_lab/red_data/red_data_3d_v12_export0902")
     ap.add_argument("--out", required=True)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--n-contact", type=int, default=N_CONTACT)
+    ap.add_argument("--n-far", type=int, default=N_FAR)
+    # The compositor's own contact regime, so this gate can be run against the
+    # settings a given training run actually uses (P3b tightens it to 4 25 --
+    # `train.copy_paste_contact_sep`) instead of only the dataclass default.
+    ap.add_argument("--contact-sep", type=float, nargs=2, default=list(CopyPasteParams().contact_sep),
+                    metavar=("LO", "HI"))
+    ap.add_argument("--contact-p", type=float, default=None,
+                    help="fraction of pastes drawn from the contact regime (default: keep the "
+                         "dataclass default; the figure buckets rows by the realised sep either way)")
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
 
-    ds = V12WindowDataset(a.root, "train", T=1, train=True,
-                         copy_paste=CopyPasteParams(p=1.0, max_tries=30))
+    cp = CopyPasteParams(p=1.0, max_tries=30, contact_sep=tuple(a.contact_sep),
+                         **({"contact_p": a.contact_p} if a.contact_p is not None else {}))
+    print(f"copy-paste params: contact_p={cp.contact_p} contact_sep={cp.contact_sep} far_sep={cp.far_sep}")
+    ds = V12WindowDataset(a.root, "train", T=1, train=True, copy_paste=cp)
     ds_ref = V12WindowDataset(a.root, "train", T=1, train=True)   # copy_paste=None twin, same jitter
-    rows, stats = _collect(ds, ds_ref, seed=a.seed)
+    rows, stats = _collect(ds, ds_ref, seed=a.seed, n_contact=a.n_contact, n_far=a.n_far)
     print(f"paste_window: pool={stats['n_pool']} tried={stats['n_tried']} "
          f"rejected(None)={stats['n_none']} headless_skipped={stats['n_headless']} "
          f"same_sex_found={stats['same_sex_found']} "
          f"collected contact={sum(r['info']['contact'] for r in rows)} "
          f"far={sum(not r['info']['contact'] for r in rows)}")
-    if len(rows) < N_CONTACT + N_FAR:
-        print(f"WARNING: only collected {len(rows)}/{N_CONTACT + N_FAR} pastes "
+    if len(rows) < a.n_contact + a.n_far:
+        print(f"WARNING: only collected {len(rows)}/{a.n_contact + a.n_far} pastes "
              f"(pool={stats['n_pool']}, tried={stats['n_tried']}, none={stats['n_none']})")
 
     C = max((r["sample"]["crops"].shape[1] for r in rows), default=7)

@@ -25,6 +25,12 @@ class LossWeights:
     exist: float = 1.0
     sex: float = 0.5
     rep: float = 0.5
+    # P3b: cross-fly repulsion. 0 = OFF (the P3a default, so every earlier run's
+    # loss is unchanged). Penalises a slot's predicted 3D keypoints for sitting
+    # nearer the OTHER labelled fly's GT centroid than their own -- the training
+    # -side answer to a slot absorbing the other animal's head/T1 legs/wing base
+    # on contact frames (docs/benchmark/2026-09-mvq/p3b-notes.md).
+    other_fly_repulsion: float = 0.0
     pass1: float = 0.5
     aux: float = 0.3
     huber_px: float = 8.0
@@ -130,8 +136,33 @@ def mvq_loss(out, batch, w: LossWeights, part_of_k):
                 h3 = batch["px_scale"][:, None, None, None] * jax.nn.relu(w.rep_units - d3) * same_part * batch["has3d"][:, o][..., None, :]
                 rep = rep + (h2.sum((1, 2, 3, 4)) * ok).sum() / jnp.maximum(ok.sum() * h2.shape[1] * h2.shape[2] * h2.shape[3], 1.0) \
                           + (h3.sum((1, 2, 3)) * ok).sum() / jnp.maximum(ok.sum() * h3.shape[1] * h3.shape[2], 1.0)
+    # term 7b cross-fly repulsion (P3b) -- a CENTROID-level version of term 7.
+    # Term 7 pushes a predicted keypoint off the other fly's same-part LABEL, so it
+    # can only see the keypoints that fly actually has labels for and only within
+    # rep_px/rep_units. This one asks the coarser question the contact failure is
+    # about: is this point on the right ANIMAL at all? `cen` (computed above for the
+    # slot assignment) is each labelled fly's GT 3D centroid, so
+    # relu(d_own - d_other) is exactly zero as soon as the point sits on its own
+    # side of the two centroids' midplane and grows linearly (in units, 0.1 mm)
+    # once it crosses. Only windows with TWO labelled flies contribute (real two-fly
+    # windows and copy-paste composites alike -- `fv_eff` covers both), and only
+    # flies that HAVE a 3D centroid to be measured against.
+    other_rep = jnp.zeros(())
+    if F > 1 and w.other_fly_repulsion > 0:
+        has_cen = has_f.sum((2, 3)) > 0                                          # (B,F)
+        n_pairs = 0
+        for f in range(F):
+            for o in range(F):
+                if o == f:
+                    continue
+                ok = (fv_eff[:, f] & fv_eff[:, o] & has_cen[:, f] & has_cen[:, o])[:, None, None]
+                d_own = jnp.linalg.norm(pf["xyz"][:, f] - cen[:, f][:, None, None, :], axis=-1)   # (B,T,K)
+                d_oth = jnp.linalg.norm(pf["xyz"][:, f] - cen[:, o][:, None, None, :], axis=-1)
+                other_rep = other_rep + _mmean(jax.nn.relu(d_own - d_oth), ok)
+                n_pairs += 1
+        other_rep = other_rep / max(n_pairs, 1)
     total = (w.reproj * reproj + w.l3d * l3d + w.uv2d * uv2d + w.vis * vis + conf
-             + w.exist * exist + w.sex * sex + w.rep * rep)
+             + w.exist * exist + w.sex * sex + w.rep * rep + w.other_fly_repulsion * other_rep)
     # deep supervision
     if out.get("aux_pass1") is not None:
         r1, l1, u1, _, _ = _geo_terms(g(out["aux_pass1"]), batch, w, fv_eff)
@@ -153,6 +184,7 @@ def mvq_loss(out, batch, w: LossWeights, part_of_k):
     uv2d_px = _mmean(jnp.linalg.norm(pf["uv"] - batch["kp2d"], axis=-1), m2_full)
     head_vs_reproj_px = _mmean(jnp.linalg.norm(pf["uv"] - pf_reproj, axis=-1), m2_full)
     metrics = {"total": total, "reproj": reproj, "l3d": l3d, "uv2d": uv2d, "vis": vis, "conf": conf,
-               "exist": exist, "rep": rep, "exist_acc": exist_acc, "sex": sex, "sex_acc": sex_acc,
+               "exist": exist, "rep": rep, "other_rep": other_rep, "exist_acc": exist_acc,
+               "sex": sex, "sex_acc": sex_acc,
                "match_reproj_px": px, "mpjpe3d_units": mp, "uv2d_px": uv2d_px, "head_vs_reproj_px": head_vs_reproj_px}
     return total, metrics
