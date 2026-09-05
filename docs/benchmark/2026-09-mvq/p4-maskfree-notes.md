@@ -177,6 +177,52 @@ the training jitter is +-10 units per axis (radial reach ~1.4 mm), so 2 mm is ou
 Re-run on the final checkpoint decides; if still over the rule at 1 mm, the follow-up is jitter 15-20 units or a
 tighter coarse placement (stride 8), not a redesign.
 
+### Jitter-10 retrain: final (2026-09-04, real-run wave)
+
+Precondition checked: `.../mvq_t1_b16_p4_jitter10_20260904/final/mvq_run.json`
+exists, no `run_id=mvq_t1_b16_p4_jitter10` process, all 8 GPUs idle (later:
+GPU 7 picked up ~27.7GB from another agent's smoke test partway through this
+wave -- GPU 1 was used for every GPU step below instead).
+
+Final val block (`grep 'val\[unprompted\]' slurm_logs/mvq_t1_b16_p4_jitter10_20260904.out`,
+main checkout, last occurrence): `mpjpe3d_mm=0.0893 mpjpe3d_policy_mm=0.0901
+policy_miss_frac=0.0000 sex_acc=1.0000 mask_containment=0.8854`.
+
+Centre-shift spike on the FINAL checkpoint (same command pattern as the P3a
+run, `--run .../mvq_t1_b16_p4_jitter10_20260904/final`, no `--step`; 153 val
+windows, unprompted policy; GPU 1, 3m34s wall clock incl. checkpoint
+restore). Output kept separate from the P3a curve:
+`figures/2026-09-mvq/p4_maskfree/centre_shift_jitter10_final.{png,json}`.
+
+| shift (mm) | P3a final: MPJPE mm / miss | jitter-10 @3000 (interim): MPJPE mm / miss | **jitter-10 FINAL: MPJPE mm / miss** |
+|---|---|---|---|
+| 0.0 | 0.093 / 0.0 % | 0.083 / 0.0 % | **0.089 / 0.0 %** |
+| 0.5 | 0.097 / 0.7 % | 0.094 / 0.0 % | **0.090 / 0.0 %** |
+| 1.0 | 0.108 / 0.7 % | 0.102 / 0.0 % | **0.090 / 0.0 %** |
+| 2.0 | 0.417 / 6.5 % | 0.362 / 0.7 % | **0.377 / 0.0 %** |
+| 3.0 | 0.872 / 22 % | 0.663 / 0.0 % | **0.630 / 0.0 %** |
+
+Decision line at 1mm: 1.1x unshifted = 0.0984mm.
+
+Figure reading (`centre_shift_jitter10_final.png`, read with the Read tool):
+left panel -- 0, 0.5 and 1.0mm sit together, visibly clear of the 1.1x dashed
+line, essentially flat (~0.089-0.090mm); the curve only turns upward between
+1 and 2mm (0.377mm), continuing to 0.630mm at 3mm -- the cliff is still
+there, but pushed a full mm further out than the P3a checkpoint's (which
+already broke the line at 1mm). Right panel -- miss fraction is flat at
+**0.0 across all five shifts, 0-3mm**, nowhere near the 0.02 line at any
+point -- a qualitative improvement over both P3a (22% miss at 3mm) and the
+step-3000 interim (0.7%/0% at 2/3mm).
+
+**§6 decision: PASS.** At 1mm, error 0.0899mm is +0.6% over the unshifted
+0.0894mm (inside the +10% allowance, 0.0984mm line) and miss fraction is
+0.0000 (< 2%). Both halves of the rule are met with large margin. The
+1mm-jitter retrain run to completion (10000 steps) gives the unprompted
+policy the headroom the mask-free coarse track (~0.6mm nominal centre error)
+needs -- unlike P3a (FAIL, +16.1% at 1mm) and unlike the step-3000 interim
+checkpoint (borderline, +23% at 1mm relative to its own centred value).
+Task 4 (real coarse pass) may proceed on this checkpoint.
+
 ## Coarse pass (task 4, spec §4.3) -- 2026-09-04
 
 `jarvis_jax/tracking/coarse_track.py` + `scripts/coarse_pass_mvq.py`: the
@@ -190,13 +236,41 @@ mask-free replacement for `scripts/coarse_pass.py`. Writes
 
 | stage | wall clock | notes |
 |---|---|---|
-| model load (mvq + CenterDetect) | PENDING | printed as `[coarse] models loaded in Xs` |
-| coarse pass, 20_04 @ stride 16 | PENDING | printed as `[coarse] done: N coarse frames in X min` |
+| model load (mvq + CenterDetect) | **10.9s** | `[coarse] models loaded in 10.9s (mvq step final, K=50, I=4)` |
+| coarse pass, 20_04 @ stride 16 | **STOPPED at 500/31125 frames** | `[coarse] 500/31125 coarse frames  0.39 frames/s  eta 1321.8 min` |
 
-**Real run status: NOT RUN.** The retrained checkpoint
-`mvq_t1_b16_p4_jitter10_20260904/final` did not exist at the end of this task
-(training was at step 4000 of its schedule and still held all 8 GPUs at
-~41 GB each), and the brief forbids waiting on it. Command to run, once the
+**Real run status (2026-09-04, real-run wave): STOPPED, plan budget blown.**
+Ran on GPU 1 (`CUDA_VISIBLE_DEVICES=1`; GPU 0/7 held memory from another
+agent's smoke test at various points -- never used). Command exactly as
+below (this section's own command, `--resume` included). `[coarse] frames
+0..497993 stride 16 -> 31125 coarse frames (1936x448)` and `models loaded in
+10.9s` printed promptly (23:09:35-23:09:48), then the first
+`--progress-every` (default 500) line took **13m28s** more to appear:
+`[coarse] 500/31125 coarse frames  0.39 frames/s  eta 1321.8 min` (~22 hours).
+This is ~11x over the brief's 2h stop threshold and ~47x slower than task
+2's window-cost extrapolation for this same stride/recording (~28 min, see
+"Window cost" above) -- so the process was killed (`kill -TERM`, confirmed
+gone, all 8 GPUs back to 0 MiB; no partial file was written -- the first
+`--partial-every` checkpoint is at 2000 coarse frames, never reached).
+
+Diagnosis (brief, no code changes made -- policy: report a slowdown, don't
+fix by editing code): `ps` showed the process at 470-475% CPU the entire
+13.5 minutes (vs. ~0% GPU utilization in spot checks), i.e. CPU-bound, not
+GPU-bound. `--batch` defaults to 32 (matches the batched-window measurement
+in task 2), so this is not an obvious batch-size regression reachable by a
+flag. The most likely explanation is the per-camera video frame IO/decode
+path (`cv2.VideoCapture` positional seeks across 7 open captures per coarse
+frame, called out as a possible cost in the script's own docstring) being
+far more expensive on this recording/node than the task-2 single-frame-set
+timing measured. **Steps 3 (gates) and 4 (figure gates 1-2) of this wave
+could not run on real 20_04 data as a result** -- both need a completed
+`coarse_tracks.npz`, which does not exist. Flagged for the coordinator:
+either accept coarse_pass_mvq.py as a long (multi-hour, `--resume`-able,
+queued) batch job rather than an interactive <1h step, or have someone
+familiar with the video-IO path profile `SlotReader`/`read_window` before
+the next real-run attempt.
+
+Command to run, once GPUs are free (only the timing differs from plan; the
 `final/` appears and the GPUs are free:
 
 ```
@@ -343,3 +417,28 @@ cloud, no hint: `pytest.warns`, sign deliberately not asserted). The existing
   axis a wing is held relative to. Both are documented in
   `coarse_features`; a heading whose zero meant "facing away" would be read
   backwards by every downstream gate.
+
+## Gates vs reviewed bouts (task 5, spec §5.1) -- 2026-09-04, real-run wave
+
+**BLOCKED, not run.** `scripts/coarse_pass_gates.py --tracks
+$OUT/coarse_tracks.npz --out-csv $OUT/bouts_mvq_gates.csv --ground-truth
+$REC/courtship_bouts_fly0_summary.csv` needs the real `coarse_tracks.npz`
+from the coarse pass above, which does not exist (that step was stopped at
+500/31125 coarse frames -- see "Coarse pass timing"). No recall/precision/
+boundary-offset numbers against the 30 reviewed bouts
+(`courtship_bouts_fly0_summary.csv`, confirmed 30 rows) are available this
+wave. Command verified runnable (`--help` read, `--session-tag` is
+required and was not in the brief's flag list -- would need e.g.
+`Session0/2025_10_20_13_20_04_fly0`) but not executed against real data.
+
+## Figure gates 1-2 (task 6, spec §8.1/§8.2) -- 2026-09-04, real-run wave
+
+**BLOCKED, not run.** Both `scripts/viz/coarse_centres_check.py` and
+`scripts/viz/coarse_tracks_check.py` need the same real `coarse_tracks.npz`
+(figure gate 2 also needs `bouts_mvq_gates.csv` from task 5, itself blocked).
+Task 6's own report already validated both scripts end-to-end on synthetic
+tracks (`figures/2026-09-mvq/p4_maskfree/synthetic_check/`, read and
+described there); that synthetic validation stands, but the real-20_04
+reading against the actual coarse pass output (are the centres within the
+fly bodies; do reviewed bouts coincide with close-distance/wing-extension
+episodes) is deferred until the coarse pass is re-run to completion.
