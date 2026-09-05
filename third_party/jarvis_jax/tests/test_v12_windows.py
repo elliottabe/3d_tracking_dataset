@@ -308,3 +308,19 @@ def test_paste_window_falls_back_to_other_sex_pool(tmp_path):
     assert r is not None and r[1]["donor"] == j
     ds._donors = {("A", 0): [i]}                    # no donor of either sex once i excludes itself
     assert ds.paste_window(i, np.random.default_rng(0)) is None
+
+
+def test_center_shift_moves_window_by_exact_amount(tmp_path):
+    from jarvis_jax.data.v12_windows import V12WindowDataset
+    root = make_v12_root(tmp_path)
+    ds0 = V12WindowDataset(root, "val", T=1, train=False)
+    ds5 = V12WindowDataset(root, "val", T=1, train=False, center_shift_units=5.0)
+    i = ds0.windows.index((REC, 0, 1))
+    a, b = ds0[i], ds5[i]
+    d = b["center3D"] - a["center3D"]
+    assert abs(np.linalg.norm(d) - 5.0) < 1e-4 and abs(d[2]) < 1e-6          # exact magnitude, in-plane
+    # the labels describe the same world points: local + centre is invariant
+    np.testing.assert_allclose(b["kp3d_local"][0, 0] + b["center3D"], a["kp3d_local"][0, 0] + a["center3D"], atol=1e-3)
+    assert np.array_equal(ds5[i]["center3D"], b["center3D"])                    # deterministic
+    dtr = V12WindowDataset(root, "val", T=1, train=True, center_shift_units=5.0, jitter_units=0.0)
+    np.testing.assert_allclose(dtr[i]["center3D"], a["center3D"], atol=1e-6)    # train mode ignores it

@@ -77,10 +77,11 @@ def _affine_np(cam_mats):
 
 class V12WindowDataset:
     def __init__(self, root, split, T=1, *, max_flies=2, jitter_units=3.0, seed=0,
-                 train=True, recordings=None, copy_paste=None):
+                 train=True, recordings=None, copy_paste=None, center_shift_units=0.0):
         self.root, self.split, self.T = root, split, int(T)
         self.max_flies, self.jitter, self.train = int(max_flies), float(jitter_units), bool(train)
         self.seed = int(seed)
+        self.center_shift = float(center_shift_units)
         self.epoch = 0
         self.copy_paste = copy_paste
         coco = json.load(open(os.path.join(root, "annotations", f"instances_{split}.json")))
@@ -330,6 +331,15 @@ class V12WindowDataset:
             # across epochs since window_batches sets ds.epoch = seed.
             rng = np.random.default_rng(np.random.SeedSequence([self.seed, int(i), int(self.epoch)]))
             center = center + rng.uniform(-self.jitter, self.jitter, size=3)
+        if not self.train and self.center_shift > 0:
+            # Eval-only, deterministic per (seed, i) regardless of epoch: a
+            # fixed random in-plane direction and an EXACT magnitude (unlike
+            # the train jitter's uniform box) so a centre-shift sweep moves
+            # every window by precisely `center_shift` and nothing else
+            # (spec doc 2026-09-04-mvq-maskfree-p4a-p4b task 1, §6 spike).
+            rng = np.random.default_rng(np.random.SeedSequence([self.seed, int(i), 99]))
+            ang = rng.uniform(0, 2 * np.pi)
+            center = center + self.center_shift * np.array([np.cos(ang), np.sin(ang), 0.0])
         center = center.astype(np.float32)
 
         # --- crops around the projection of center (same origin for all frames of the window)
