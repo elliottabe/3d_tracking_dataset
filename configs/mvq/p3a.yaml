@@ -23,6 +23,28 @@ step: null
 # decides WHICH FRAMES ARE NaN in kp3d.npz.
 exist_thresh: 0.5
 
+# WHO each written fly is.
+#
+#   mask  fly0 is SAM3 mask fly 0 and fly1 is mask fly 1 -- the HUMAN id
+#         review the canonicalized masks carry, which is the top of this
+#         pipeline's identity precedence (sexing.canonicalize_bout: human >
+#         mvq > wing-song CV). Per frame the mvq instance nearest each mask's
+#         triangulated centre is written as that fly; the model's sex head is
+#         recorded but does not decide.
+#   sex   fly0 is the model's FEMALE typed slot and fly1 its MALE one, each
+#         from whichever window reads it most confidently. The original P3a
+#         behaviour.
+#
+# `mask` because the sex head is measurably wrong on 2025_10_20_13_20_04: it
+# types that female as a male, which NaN'd fly0 on 40% of the recording's
+# frames (97.7% of bout 25) and let the male track jump onto her body on 2.5%
+# of them (21% in bout 25). See
+# `.superpowers/sdd/2026-09-04-mvq-maskfree-p4a-p4b/female-miss-diagnosis.md`
+# and `docs/benchmark/2026-09-mvq/p3a-notes.md`. Enrolled in the gate
+# signature: the two modes write DIFFERENT keypoints, so a run switched
+# between them must not reuse the other's bouts.
+identity: mask
+
 # Windows per forward. The 448-crop x 7-camera DINOv3-B forward is the cost
 # here; 8 fits comfortably on a 48 GB card at XLA_PYTHON_CLIENT_MEM_FRACTION
 # 0.9 alongside the mask store. NOT part of the gate signature (batching

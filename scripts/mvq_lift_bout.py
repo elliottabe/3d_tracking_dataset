@@ -17,13 +17,24 @@ skipped (their artifacts exist), the Stage-B gate signature is the mvq
 checkpoint's rather than the DLT gates', and the keypoint filter -> body-scale
 precompute -> STAC IK -> polish -> viz chain runs unchanged.
 
-WHAT THE MASKS ARE AND ARE NOT USED FOR. The masks place the CROP (their
-per-camera centroids, triangulated). They do NOT assign identity: fly0 is the
-model's FEMALE typed slot and fly1 its MALE one, per frame, from the network's
-own sex head -- which is why this writes a `sex.json` with `method =
-"mvq_sex_head"` that `sexing.canonicalize_bout` then treats as authoritative
-instead of re-deciding the bout from a wing-song CV. A mask/manifest identity
-that disagrees is LOGGED in mvq_meta.json, never acted on.
+WHAT THE MASKS ARE USED FOR (`--identity`, default `mask`). The masks always
+place the CROP (their per-camera centroids, triangulated). With
+`--identity mask` they also ASSIGN IDENTITY: fly0 is mask fly 0 and fly1 is
+mask fly 1 -- the human id review the canonicalized masks carry, which is the
+top of this pipeline's identity precedence -- and per frame the mvq instance
+whose keypoint centroid is nearest that mask's centre (within
+`--mask-assign-units`) is written as that fly. `sex.json` then says
+`method = "mask_human_id_review"`.
+
+With `--identity sex` the masks do NOT assign identity: fly0 is the model's
+FEMALE typed slot and fly1 its MALE one, per frame, from the network's own sex
+head, and `sex.json` says `method = "mvq_sex_head"`. That was the original P3a
+behaviour, and it is why the default changed: on 2025_10_20_13_20_04 the sex
+head types the female as a male, which NaN'd fly0 on 40% of the recording and
+let the male track jump onto her body on 2.5% of frames (see
+`.superpowers/sdd/2026-09-04-mvq-maskfree-p4a-p4b/female-miss-diagnosis.md`).
+Either way `sexing.canonicalize_bout` treats the written sex.json as
+authoritative instead of re-deciding the bout from a wing-song CV.
 
 ORDER DISCIPLINE (CLAUDE.md). The written keypoint axis is
 `cfg.model.KP_NAMES` (`--anatomy`), permuted from the model's own detector
@@ -109,6 +120,19 @@ def build_parser():
     p.add_argument("--merge-dist-units", type=float, default=30.0,
                    help="two flies closer than this (world units, 30 == 3 mm) share "
                         "one crop -- the model's own two-instance case")
+    p.add_argument("--identity", choices=("mask", "sex"), default="mask",
+                   help="who each written fly is. 'mask' (default): fly{f} IS SAM3 "
+                        "mask fly f, per the HUMAN id review the masks carry -- the "
+                        "model only says which instance sits on which mask. 'sex': "
+                        "fly0/fly1 are the model's female/male typed slots. Part of "
+                        "the gate string. A bout whose masks carry no human review "
+                        "falls back to 'sex' with a warning")
+    p.add_argument("--mask-assign-units", "--mask_assign_units", dest="mask_assign_units",
+                   type=float, default=10.0,
+                   help="--identity mask only: how far (world units, 10 == 1 mm) an "
+                        "instance's keypoint centroid may sit from a mask's "
+                        "triangulated centre and still be that mask's fly; outside "
+                        "it the fly is NaN rather than 'the nearest thing in the crop'")
     p.add_argument("--attn-impl", default=None,
                    help="override the run's attn_impl ('xla' to run cudnn weights on CPU)")
     p.add_argument("--cameras", default=None,
@@ -161,10 +185,11 @@ def main(argv=None):
     # would dominate the runtime of a --all pass.
     runner = MVQRunner(args.run, step=args.step, attn_impl=args.attn_impl,
                        calib_dir=calib_dir, cameras=cameras, batch=int(args.batch),
-                       exist_thresh=float(args.exist_thresh))
+                       exist_thresh=float(args.exist_thresh), identity=args.identity)
     gates_string = runner.gates_string()
     print(f"[mvq-lift] checkpoint {runner.checkpoint} step {runner.step_label}; "
-          f"K={runner.K} slots={runner.I} exist_thresh={runner.exist_thresh}; "
+          f"K={runner.K} slots={runner.I} exist_thresh={runner.exist_thresh} "
+          f"identity={runner.identity}; "
           f"unrestored={runner.meta.get('_unrestored_leaves', [])}", flush=True)
     print(f"[mvq-lift] gates {gates_string}", flush=True)
     print(f"[mvq-lift] {len(bouts)} bout(s): {bouts}", flush=True)
@@ -201,7 +226,9 @@ def main(argv=None):
         res = lift_masked_bout(
             runner, read_window(args.session_dir, cameras, plan, abs_start, n),
             centres, ok, out_dir=out_dir, model_names=model_names,
-            merge_dist_units=float(args.merge_dist_units), force=args.force,
+            merge_dist_units=float(args.merge_dist_units),
+            identity=args.identity,
+            mask_assign_units=float(args.mask_assign_units), force=args.force,
             progress_every=int(args.progress_every),
             mask_sex_meta=read_sex_meta(mask_npz), review_male_fly=review_male,
             meta_extra={"bout": int(bout), "session_dir": str(args.session_dir),

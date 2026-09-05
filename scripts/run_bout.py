@@ -444,15 +444,19 @@ def stage_b_gate_signature(cfg):
     # With the mvq lifter (spec 2026-09-04-mvq-maskfree-frontend-design §4.5)
     # Stages A and B are REPLACED by `jarvis_jax.tracking.lift_mvq`, so none of
     # the DLT gates below ran on that kp3d.npz and none of them describes it.
-    # What determines its contents is which checkpoint produced it and the
-    # existence threshold that decided which frames are NaN, so that is what
-    # the signature names -- same contract (stored inside kp3d.npz, a mismatch
-    # refuses the bout), and an mvq bout passes without `allow_stale_kp3d`.
+    # What determines its contents is which checkpoint produced it, the
+    # existence threshold that decided which frames are NaN, and which
+    # IDENTITY rule named the two written flies (`mvq.identity`: the masks'
+    # human review or the model's sex head -- they disagree on 40% of one
+    # recording's frames), so that is what the signature names -- same
+    # contract (stored inside kp3d.npz, a mismatch refuses the bout), and an
+    # mvq bout passes without `allow_stale_kp3d`.
     if str((cfg.get("pipeline") or {}).get("lifter", "dlt")) == "mvq":
         from jarvis_jax.tracking.lift_mvq import mvq_gate_string
         _mv = cfg.get("mvq") or {}
         return mvq_gate_string(_mv.get("checkpoint"), step=_mv.get("step"),
-                               exist_thresh=_mv.get("exist_thresh"))
+                               exist_thresh=_mv.get("exist_thresh"),
+                               identity=_mv.get("identity"))
 
     _wc = cfg.get("wing_collapse") or {}
     _rr = cfg.get("rigid_repair") or {}

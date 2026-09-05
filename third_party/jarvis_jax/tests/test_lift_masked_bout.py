@@ -90,10 +90,14 @@ class FakeRunner:
     del _R
 
     def __init__(self, checkpoint, *, kp_names, cameras=CAMS, batch=4,
-                 exist_thresh=0.5, exist_fn=None, sex_prob=(0.5, 0.9, 0.1, 0.5)):
+                 exist_thresh=0.5, exist_fn=None, sex_prob=(0.5, 0.9, 0.1, 0.5),
+                 identity="mask"):
         self.checkpoint = os.path.abspath(checkpoint)
         self.step = None
         self.step_label = "final"
+        # the real MVQRunner carries the identity mode so its gates string
+        # names it; a runner built for one mode may not be lifted with another
+        self.identity = identity
         self.kp_names = list(kp_names)
         self.K = len(self.kp_names)
         self.I = 4
@@ -709,3 +713,378 @@ def test_canonicalize_bout_moves_an_mvq_bout_to_a_different_male_slot(tmp_path):
     again = canonicalize_bout(str(bout), _model_names(), male_slot=0, verbose=False)
     assert again["applied_swap"] is False
     assert (bout / "fly0" / "who.txt").read_text() == "male"
+
+
+# ============================================================ mask identity
+# The sex head is not a reliable identity source on every recording. On
+# 2025_10_20_13_20_04 it calls the female a MALE: in her own mask window the
+# male slot fires 0.87-1.00 on her body while the female slot reads 0.01-0.46,
+# so `identity="sex"` NaN'd fly0 on 98% of bout 25 and let the male track jump
+# onto her body on 21% of frames (diagnosis:
+# .superpowers/sdd/2026-09-04-mvq-maskfree-p4a-p4b/female-miss-diagnosis.md).
+# `identity="mask"` takes identity from the HUMAN id review the SAM3 masks
+# carry -- authoritative in this pipeline's own precedence (human > mvq) --
+# and asks the model only "which instance is ON this mask?".
+
+
+class PlacedFake(FakeRunner):
+    """A `FakeRunner` whose every instance sits at a CHOSEN world point.
+
+    The base fake spreads keypoint `k` to `y = k`, which puts any instance's
+    centroid 24.5 units off its window centre -- further than the 10-unit
+    mask-assignment radius, so no mask-identity geometry could be expressed
+    with it. Here keypoint `k` of slot `s` in the window centred at `cx` sits
+    at `place(cx, s) + (0, 0.02 * (k - (K-1)/2), 0)`: the instance's centroid
+    is EXACTLY `place(cx, s)`, and EyeL-EyeR is still a non-zero rigid
+    distance (0.02 * |iL - iR|) so the by-name permutation check has something
+    to measure.
+    """
+
+    def __init__(self, *a, place=None, **kw):
+        super().__init__(*a, **kw)
+        # default: every slot sits on its own window's centre
+        self._place = place or (lambda cx, s: (float(cx), 0.0, 0.0))
+
+    def infer(self, w, *, prompt_on=None):
+        out = FakeRunner.infer(self, w, prompt_on=prompt_on)
+        centres = np.asarray(w["centres"], np.float64)
+        k = np.arange(self.K, dtype=np.float64) - (self.K - 1) / 2.0
+        for b in range(centres.shape[0]):
+            for s in range(self.I):
+                out["kp3d"][b, s] = np.asarray(self._place(centres[b, 0], s), np.float32)
+                out["kp3d"][b, s, :, 1] += (0.02 * k).astype(np.float32)
+        return out
+
+
+HUMAN_MASKS = {"method": "human_id_review", "male_slot": 1,
+               "review_file": "id_review_reviewed_20260829.json"}
+
+
+def _two_mask_windows():
+    """(A=2,T=1,3) centres 200 units apart: the female mask at x=0, the male
+    mask at x=200 -- two separate crops, one per mask fly."""
+    c = np.zeros((2, 1, 3), np.float32)
+    c[1, :, 0] = 200.0
+    return c, np.ones((2, 1), bool)
+
+
+def _female_window_reads_male():
+    """The 20_04 failure, in an exist table: in the FEMALE mask's window the
+    male slot fires hard (0.95) on her body and the female slot is dead (0.2);
+    in the male mask's window the male slot fires a little less (0.90)."""
+    return lambda c: (np.array([0.0, 0.2, 0.95, 0.0], np.float32) if c[0] < 100
+                      else np.array([0.0, 0.0, 0.90, 0.0], np.float32))
+
+
+def test_mask_identity_writes_the_instance_on_the_female_mask(tmp_path):
+    """Case (1). The female's own mask window holds exactly one instance above
+    threshold and it is the MALE slot (the sex head mistypes her). Under
+    `identity="mask"` fly0 must still be written -- from slot 2, out of HER
+    window -- with the disagreement recorded, rather than NaN'd because the
+    female-typed slot went quiet."""
+    from jarvis_jax.tracking.lift_mvq import lift_masked_bout
+    centres, ok = _two_mask_windows()
+    r = PlacedFake(_fake_checkpoint(tmp_path), kp_names=_mvq_names(),
+                   exist_fn=_female_window_reads_male())
+    out = tmp_path / "bout"
+    res = lift_masked_bout(r, _frames(1), centres, ok, out_dir=str(out),
+                           model_names=_model_names(), identity="mask",
+                           mask_sex_meta=HUMAN_MASKS)
+    assert res["identity"] == "mask" and res["identity_source"][0] == "mask"
+    # fly0 comes from slot 2 (the male-typed slot) read in the FEMALE window
+    assert res["slot"][0, 0] == 2
+    assert res["window"][0, 0] == 0
+    np.testing.assert_allclose(res["kp3d_mvq"][0, 0, :, 0], 0.0, atol=1e-4)
+    assert res["sex_head_agrees"][0, 0] == 0                  # False, and recorded
+    # fly1 keeps his own window's male slot -- no swap onto her body
+    assert res["slot"][1, 0] == 2 and res["sex_head_agrees"][1, 0] == 1
+    np.testing.assert_allclose(res["kp3d_mvq"][1, 0, :, 0], 200.0, atol=1e-4)
+
+    meta = json.load(open(out / "mvq_meta.json"))
+    assert meta["identity"] == "mask" and meta["identity_resolved"] == "mask"
+    assert meta["per_frame"]["identity_source"] == ["mask"]
+    assert meta["per_frame"]["slot_used"] == [[2], [2]]
+    assert meta["per_frame"]["sex_head_agrees"] == [[0], [1]]
+    assert meta["sex_head_disagree_frac"] == {"fly0": 1.0, "fly1": 0.0}
+    assert meta["n_missing"] == {"fly0": 0, "fly1": 0}
+    sx = json.load(open(out / "sex.json"))
+    assert sx["male_fly"] == 1 and sx["method"] == "mask_human_id_review"
+
+
+def test_mask_identity_matches_sex_identity_when_both_typed_slots_are_right(tmp_path):
+    """Case (2). When the sex head is right -- each mask window's own typed
+    slot is the one that fires -- the two modes must produce the SAME bout.
+    A fix that changed the good recordings too would be a different change."""
+    from jarvis_jax.tracking.lift_mvq import lift_masked_bout
+    centres, ok = _two_mask_windows()
+    exist_fn = lambda c: (np.array([0.0, 0.9, 0.1, 0.0], np.float32) if c[0] < 100
+                          else np.array([0.0, 0.1, 0.9, 0.0], np.float32))
+    res = {}
+    for mode in ("sex", "mask"):
+        r = PlacedFake(_fake_checkpoint(tmp_path), kp_names=_mvq_names(),
+                       exist_fn=exist_fn, identity=mode)
+        res[mode] = lift_masked_bout(r, _frames(1), centres, ok,
+                                     out_dir=str(tmp_path / mode),
+                                     model_names=_model_names(), identity=mode,
+                                     mask_sex_meta=HUMAN_MASKS)
+    for key in ("kp3d_mvq", "kp2d_mvq", "vis", "conf_raw", "exist", "slot", "window"):
+        np.testing.assert_array_equal(np.nan_to_num(res["sex"][key], nan=-999),
+                                      np.nan_to_num(res["mask"][key], nan=-999),
+                                      err_msg=f"{key} differs between identity modes")
+    assert res["mask"]["slot"][0, 0] == 1 and res["mask"]["slot"][1, 0] == 2
+    for fly in (0, 1):
+        a = np.load(tmp_path / "sex" / f"fly{fly}" / "kp3d.npz")["kp3d"]
+        b = np.load(tmp_path / "mask" / f"fly{fly}" / "kp3d.npz")["kp3d"]
+        np.testing.assert_array_equal(np.nan_to_num(a, nan=-999), np.nan_to_num(b, nan=-999))
+
+
+def test_mask_identity_keeps_the_male_off_the_female_body(tmp_path):
+    """Case (3). Same fixture as case (1), read from the male's side: the male
+    slot is MORE confident in the female's window (0.95) than in his own
+    (0.90). `identity="sex"` takes the highest-existence male slot anywhere and
+    therefore writes fly1 on the FEMALE's body -- the 2.5%-of-20_04 swap the
+    diagnosis measured. `identity="mask"` must not.
+
+    The old behaviour is pinned here on purpose, so the difference between the
+    two modes is explicit rather than assumed.
+    """
+    from jarvis_jax.tracking.lift_mvq import lift_masked_bout
+    centres, ok = _two_mask_windows()
+    exist_fn = _female_window_reads_male()
+
+    r = PlacedFake(_fake_checkpoint(tmp_path), kp_names=_mvq_names(), exist_fn=exist_fn,
+                   identity="sex")
+    old = lift_masked_bout(r, _frames(1), centres, ok, out_dir=str(tmp_path / "sex"),
+                           model_names=_model_names(), identity="sex",
+                           mask_sex_meta=HUMAN_MASKS)
+    # OLD: fly1 (the male) is read out of the FEMALE mask's window -> x = 0,
+    # which is her body; fly0 is NaN because her typed slot never cleared 0.5.
+    assert old["window"][1, 0] == 0
+    np.testing.assert_allclose(old["kp3d_mvq"][1, 0, :, 0], 0.0, atol=1e-4)
+    assert old["slot"][0, 0] == -1 and np.isnan(old["kp3d_mvq"][0]).all()
+
+    r = PlacedFake(_fake_checkpoint(tmp_path), kp_names=_mvq_names(), exist_fn=exist_fn)
+    new = lift_masked_bout(r, _frames(1), centres, ok, out_dir=str(tmp_path / "mask"),
+                           model_names=_model_names(), identity="mask",
+                           mask_sex_meta=HUMAN_MASKS)
+    # NEW: the male comes from the MALE mask's window (x = 200) and the female
+    # is written at all.
+    assert new["window"][1, 0] == 1
+    np.testing.assert_allclose(new["kp3d_mvq"][1, 0, :, 0], 200.0, atol=1e-4)
+    np.testing.assert_allclose(new["kp3d_mvq"][0, 0, :, 0], 0.0, atol=1e-4)
+
+
+def test_mask_identity_nans_a_fly_with_no_instance_on_its_mask(tmp_path):
+    """Case (4). An instance that exists but sits 50 units (5 mm) from the mask
+    it would be assigned to is not that fly -- it is the model localising
+    something else in the crop. Outside `mask_assign_units` the fly must be
+    NaN, never "the nearest thing in the window"."""
+    from jarvis_jax.tracking.lift_mvq import lift_masked_bout
+    centres, ok = _two_mask_windows()
+    # slot 1 sits 50 units off its window centre; slot 2 sits on it
+    place = lambda cx, s: (float(cx) + (50.0 if s == 1 else 0.0), 0.0, 0.0)
+    exist_fn = lambda c: (np.array([0.0, 0.9, 0.0, 0.0], np.float32) if c[0] < 100
+                          else np.array([0.0, 0.0, 0.9, 0.0], np.float32))
+
+    r = PlacedFake(_fake_checkpoint(tmp_path), kp_names=_mvq_names(),
+                   exist_fn=exist_fn, place=place)
+    res = lift_masked_bout(r, _frames(1), centres, ok, out_dir=str(tmp_path / "mask"),
+                           model_names=_model_names(), identity="mask",
+                           mask_sex_meta=HUMAN_MASKS)
+    assert res["slot"][0, 0] == -1 and np.isnan(res["kp3d_mvq"][0]).all()
+    assert res["slot"][1, 0] == 2 and np.isfinite(res["kp3d_mvq"][1]).all()
+    assert res["n_missing"]["fly0"] == 1
+    assert json.load(open(tmp_path / "mask" / "mvq_meta.json"))["mask_assign_units"] == 10.0
+
+    # ... and it really is the RADIUS that dropped her: identity="sex" happily
+    # writes that same far-away instance as the female.
+    r = PlacedFake(_fake_checkpoint(tmp_path), kp_names=_mvq_names(),
+                   exist_fn=exist_fn, place=place, identity="sex")
+    old = lift_masked_bout(r, _frames(1), centres, ok, out_dir=str(tmp_path / "sex"),
+                           model_names=_model_names(), identity="sex",
+                           mask_sex_meta=HUMAN_MASKS)
+    assert old["slot"][0, 0] == 1 and np.isfinite(old["kp3d_mvq"][0]).all()
+
+
+def test_mask_identity_collapse_guard_keeps_the_fly_nearer_its_own_mask(tmp_path):
+    """Merged window (the flies are 10 units apart, so ONE crop holds both):
+    both masks resolve to the SAME instance because only one slot is above
+    threshold. Writing it twice would ship a duplicated fly that every jitter,
+    confidence and residual metric rates as excellent, so the guard must keep
+    the mask it is nearer -- here the male's, 2 units away vs the female's 8 --
+    and NaN the other."""
+    from jarvis_jax.tracking.lift_mvq import lift_masked_bout
+    centres = np.zeros((2, 1, 3), np.float32)
+    centres[1, :, 0] = 10.0                          # 10 units -> one merged window
+    # the merged window's centre is the midpoint x=5; the one live instance
+    # sits at x=8 -> 8 units from the female mask (x=0), 2 from the male (x=10)
+    r = PlacedFake(_fake_checkpoint(tmp_path), kp_names=_mvq_names(),
+                   exist_fn=lambda c: np.array([0.0, 0.0, 0.9, 0.0], np.float32),
+                   place=lambda cx, s: (8.0, 0.0, 0.0))
+    res = lift_masked_bout(r, _frames(1), centres, np.ones((2, 1), bool),
+                           out_dir=str(tmp_path / "bout"), model_names=_model_names(),
+                           identity="mask", mask_sex_meta=HUMAN_MASKS)
+    assert list(res["n_windows"]) == [1]
+    assert res["collapsed"][0]
+    assert res["n_collapsed"] == {"fly0": 1, "fly1": 0}      # she was the further one
+    assert res["slot"][0, 0] == -1 and res["slot"][1, 0] == 2
+
+
+def test_mask_identity_falls_back_to_the_sex_head_without_a_human_review(tmp_path):
+    """Masks with no human id review carry no identity to honour: the mode
+    must fall back to the sex head AND say so (a silent fallback would make an
+    `identity=mask` run mean two different things across recordings)."""
+    from jarvis_jax.tracking.lift_mvq import lift_masked_bout
+    centres, ok = _two_mask_windows()
+    r = PlacedFake(_fake_checkpoint(tmp_path), kp_names=_mvq_names(),
+                   exist_fn=_female_window_reads_male())
+    out = tmp_path / "bout"
+    with pytest.warns(RuntimeWarning, match="human_id_review"):
+        res = lift_masked_bout(r, _frames(1), centres, ok, out_dir=str(out),
+                               model_names=_model_names(), identity="mask",
+                               mask_sex_meta={"method": "mask_area_vote", "male_slot": 1})
+    assert res["identity"] == "mask" and res["identity_resolved"] == "sex"
+    assert res["slot"][0, 0] == -1                        # the sex-head behaviour
+    assert res["window"][1, 0] == 0
+    meta = json.load(open(out / "mvq_meta.json"))
+    assert meta["per_frame"]["identity_source"] == ["sex"]
+    # the sex.json method names what actually decided identity
+    assert json.load(open(out / "sex.json"))["method"] == "mvq_sex_head"
+
+
+def test_mask_identity_refuses_masks_whose_male_is_not_slot_1(tmp_path):
+    """`fly{f}` IS mask fly `f` on this route, so "male = mask slot 1" is the
+    premise of writing `male_fly: 1`. A mask npz the review resolved the other
+    way must raise rather than write a sex.json that names the wrong fly."""
+    from jarvis_jax.tracking.lift_mvq import lift_masked_bout
+    centres, ok = _two_mask_windows()
+    r = PlacedFake(_fake_checkpoint(tmp_path), kp_names=_mvq_names())
+    with pytest.raises(ValueError, match="male = mask slot 0"):
+        lift_masked_bout(r, _frames(1), centres, ok, out_dir=str(tmp_path / "bout"),
+                         model_names=_model_names(), identity="mask",
+                         mask_sex_meta={"method": "human_id_review", "male_slot": 0})
+
+
+def test_gate_string_distinguishes_the_identity_modes(tmp_path):
+    """Case (5). The two modes can write DIFFERENT keypoints from the same
+    weights, so the Stage-B gate string has to name which one ran -- otherwise
+    a run switched to `identity=mask` silently reuses the sex-head bouts it was
+    meant to replace."""
+    from jarvis_jax.tracking.lift_mvq import (bout_lift_is_current, lift_masked_bout,
+                                              mvq_gate_string)
+    ckpt = _fake_checkpoint(tmp_path)
+    g_mask = mvq_gate_string(ckpt, step=None, exist_thresh=0.5, identity="mask")
+    g_sex = mvq_gate_string(ckpt, step=None, exist_thresh=0.5, identity="sex")
+    assert g_mask != g_sex
+    assert json.loads(g_mask)["identity"] == "mask"
+    assert json.loads(g_sex)["identity"] == "sex"
+    with pytest.raises(ValueError, match="identity"):
+        mvq_gate_string(ckpt, step=None, exist_thresh=0.5, identity="whatever")
+
+    centres, ok = _two_mask_windows()
+    r = PlacedFake(ckpt, kp_names=_mvq_names())
+    out = tmp_path / "bout"
+    lift_masked_bout(r, _frames(1), centres, ok, out_dir=str(out),
+                     model_names=_model_names(), identity="mask",
+                     mask_sex_meta=HUMAN_MASKS)
+    with np.load(out / "fly0" / "kp3d.npz") as z:
+        assert str(z["gates"]) == g_mask
+    assert bout_lift_is_current(str(out), g_mask)
+    assert not bout_lift_is_current(str(out), g_sex)       # the other mode is NOT current
+
+
+def test_gate_string_with_identity_is_what_run_bout_stage_b_expects(tmp_path):
+    """The same contract as `test_gates_string_is_what_run_bout_stage_b_expects`,
+    now with `mvq.identity` in the config: run_bout's OWN
+    `stage_b_gate_signature` must reproduce the string a mask-identity lift
+    stamps, or every mask-identity bout is refused at Stage B."""
+    from jarvis_jax.tracking.lift_mvq import lift_masked_bout
+    ckpt = _fake_checkpoint(tmp_path)
+    centres, ok = _two_mask_windows()
+    r = PlacedFake(ckpt, kp_names=_mvq_names(), exist_thresh=0.55)
+    out = tmp_path / "bout"
+    lift_masked_bout(r, _frames(1), centres, ok, out_dir=str(out),
+                     model_names=_model_names(), identity="mask",
+                     mask_sex_meta=HUMAN_MASKS)
+
+    fn = next(n for n in ast.parse(RUN_BOUT.read_text()).body
+              if isinstance(n, ast.FunctionDef) and n.name == "stage_b_gate_signature")
+    g = {"json": json}
+    exec(compile(ast.Module(body=[fn], type_ignores=[]), "<rb>", "exec"), g)
+    cfg = OmegaConf.create({"detector": {"conf_thresh": 0.3},
+                            "pipeline": {"lifter": "mvq"},
+                            "mvq": {"checkpoint": ckpt, "step": None,
+                                    "exist_thresh": 0.55, "identity": "mask"}})
+    with np.load(out / "fly0" / "kp3d.npz") as z:
+        assert str(z["gates"]) == g["stage_b_gate_signature"](cfg)
+    # and the shipped config carries the mode this campaign runs
+    assert str(OmegaConf.load(REPO / "configs" / "mvq" / "p3a.yaml").identity) == "mask"
+
+
+def test_canonicalize_bout_treats_mask_human_id_review_as_authoritative(tmp_path):
+    """Case (6). A bout typed from the HUMAN id review carried by the masks is
+    the strongest identity this pipeline has. `canonicalize_bout` must not
+    re-decide it from the wing-song CV -- exactly as it already does not for
+    `mvq_sex_head`."""
+    from jarvis_jax.tracking.sexing import MASK_ID_SEX_METHOD, canonicalize_bout
+    assert MASK_ID_SEX_METHOD == "mask_human_id_review"
+    bout = tmp_path / "bout_00025"
+    (bout / "fly0").mkdir(parents=True)
+    (bout / "fly1").mkdir(parents=True)
+    names = _model_names()
+    rng = np.random.default_rng(0)
+    for fly, jitter in ((0, 1.0), (1, 0.0)):            # CV would prefer fly0 as male
+        T, K = 60, len(names)
+        kp = np.zeros((T, K, 3), np.float32)
+        idx = {n: i for i, n in enumerate(names)}
+        kp[:, idx["Scutellum"]] = [0, 0, 0]
+        kp[:, idx["Abd_tip"]] = [0, -1, 0]
+        for s in "LR":
+            kp[:, idx[f"Wing{s}_base"]] = [0, 0, 0]
+            ang = rng.normal(size=T) * jitter
+            kp[:, idx[f"Wing{s}_V13"]] = np.stack(
+                [np.sin(ang), np.cos(ang), np.zeros(T)], axis=1)
+        np.savez(bout / f"fly{fly}" / "kp3d.npz", kp3d=kp,
+                 conf3d=np.ones((T, K), np.float32))
+    payload = {"male_fly": 1, "original_male_fly": 1, "applied_swap": False,
+               "confidence": "high", "method": MASK_ID_SEX_METHOD,
+               "authority": MASK_ID_SEX_METHOD, "note": "mask human id review"}
+    (bout / "sex.json").write_text(json.dumps(payload))
+    before = (bout / "sex.json").read_text()
+
+    res = canonicalize_bout(str(bout), names, verbose=False)
+    assert res["applied_swap"] is False
+    assert res["method"] == MASK_ID_SEX_METHOD and res["authority"] == MASK_ID_SEX_METHOD
+    assert res["male_fly"] == 1
+    assert (bout / "sex.json").read_text() == before          # untouched
+    # `mvq_sex_head` keeps working exactly as before -- this is an addition
+    (bout / "sex.json").write_text(json.dumps(dict(payload, method="mvq_sex_head",
+                                                   authority="mvq_sex_head")))
+    res = canonicalize_bout(str(bout), names, verbose=False)
+    assert res["method"] == "mvq_sex_head" and res["applied_swap"] is False
+
+
+def test_mvq_lift_cli_exposes_the_identity_mode():
+    """The campaign runs this from the CLI and from the slurm array text; both
+    have to be able to name the mode, and `mask` is the default."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "mvq_lift_bout_wt", REPO / "scripts" / "mvq_lift_bout.py")
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    a = m.build_parser().parse_args(
+        ["--session-dir", "/s", "--out", "/o", "--run", "/r", "--bout", "1"])
+    assert a.identity == "mask" and a.mask_assign_units == 10.0
+    a = m.build_parser().parse_args(
+        ["--session-dir", "/s", "--out", "/o", "--run", "/r", "--bout", "1",
+         "--identity", "sex", "--mask-assign-units", "6"])
+    assert a.identity == "sex" and a.mask_assign_units == 6.0
+
+    s = _slurm_mod().build_mvq_lift_array_script(
+        job_name="mvq", partition="ckpt-all", account="portia", cpus=8, mem=48,
+        gpus=1, time_limit="12:00:00", requeue=True, conda_env="3d_tracking",
+        idxs=[25], session_dir="/s", predictions_dir="/p", run_dir="/r",
+        checkpoint="/ckpt/final", step=None, exist_thresh=0.5, batch=8,
+        identity="mask", anatomy_cfg="configs/anatomy/v1.yaml",
+        recording_cfg="configs/recording/session0.yaml")
+    assert "--identity mask" in s

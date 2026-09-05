@@ -122,6 +122,20 @@ _REVIEWED_STATUS = ("confirmed", "swapped")
 # review, which outranks everything).
 MVQ_SEX_METHOD = "mvq_sex_head"
 
+# `sex.json.method` written by the SAME lifter running `identity="mask"`: the
+# flies were assigned from the HUMAN id review the SAM3 masks carry (fly{f} IS
+# mask fly f, and the model only said which instance sits on which mask). That
+# is the same human decision `review_from_mask_meta` promotes to 'user'
+# authority, already applied -- so re-deciding the bout from the wing-song CV
+# would replace a human label with a heuristic. It joins MVQ_SEX_METHOD in the
+# authoritative, no-swap set below.
+MASK_ID_SEX_METHOD = "mask_human_id_review"
+
+# The `sex.json.method` values the mvq bout lifter writes; a bout carrying one
+# of them has already had its identity decided by something at least as good
+# as the wing-song CV.
+LIFTER_SEX_METHODS = (MVQ_SEX_METHOD, MASK_ID_SEX_METHOD)
+
 
 def _binary(x):
     """x if it is exactly 0 or 1 (and not a bool), else None."""
@@ -199,10 +213,12 @@ def review_from_manifest_entry(entry):
 def read_mvq_sex_json(bout_dir):
     """The mvq lifter's own decision for this bout, or None.
 
-    Only a `sex.json` whose `method` is `MVQ_SEX_METHOD` and whose `male_fly`
-    is a usable 0/1 int counts; anything else (a heuristic sex.json this
-    module wrote on an earlier run, a hand-edited file, a missing key) returns
-    None so the normal authority chain runs unchanged.
+    Only a `sex.json` whose `method` is one of `LIFTER_SEX_METHODS`
+    (`mvq_sex_head` -- the model's typed slots; `mask_human_id_review` -- the
+    human review carried by the masks) and whose `male_fly` is a usable 0/1
+    int counts; anything else (a heuristic sex.json this module wrote on an
+    earlier run, a hand-edited file, a missing key) returns None so the normal
+    authority chain runs unchanged.
     """
     path = os.path.join(str(bout_dir), "sex.json")
     if not os.path.exists(path):
@@ -212,7 +228,7 @@ def read_mvq_sex_json(bout_dir):
             doc = json.load(f)
     except (OSError, ValueError):
         return None
-    if not isinstance(doc, dict) or str(doc.get("method")) != MVQ_SEX_METHOD:
+    if not isinstance(doc, dict) or str(doc.get("method")) not in LIFTER_SEX_METHODS:
         return None
     if _binary(doc.get("male_fly")) is None:
         return None
@@ -283,9 +299,12 @@ def canonicalize_bout(bout_dir, kp_names, *, mask_sex_meta=None,
       2. `review_entry`, an id_review manifest entry -- only meaningful when
          `bout_dir` is the tree the reviewer watched (see the note above
          review_from_mask_meta);
-      3. an existing `sex.json` written by the mvq bout lifter
-         (`method == MVQ_SEX_METHOD`): its fly dirs ARE the model's typed
-         female/male slots, so there is nothing left to decide. That bout
+      3. an existing `sex.json` written by the mvq bout lifter (`method` in
+         `LIFTER_SEX_METHODS`): its fly dirs ARE the model's typed
+         female/male slots (`mvq_sex_head`) or the masks' human-reviewed
+         identities (`mask_human_id_review`), so there is nothing left to
+         decide -- in the second case the decision is the very human review
+         authority 1 would have applied, already resolved per frame. That bout
          short-circuits -- no wing-song CV, no swap when the male is already
          at `male_slot`, and the file is left exactly as written (it carries
          per-fly `sex_prob`/`exist` this function does not know how to
@@ -306,7 +325,7 @@ def canonicalize_bout(bout_dir, kp_names, *, mask_sex_meta=None,
     _mvq = None if _human is not None else read_mvq_sex_json(bout_dir)
     if _mvq is not None:
         out = dict(_mvq)
-        out.setdefault("authority", MVQ_SEX_METHOD)
+        out.setdefault("authority", str(out.get("method")))
         male = _binary(out.get("male_fly"))
         swap = male != male_slot
         # `applied_swap` is what THIS call did, exactly as on the heuristic
@@ -326,7 +345,8 @@ def canonicalize_bout(bout_dir, kp_names, *, mask_sex_meta=None,
             print(f"[sexing] {os.path.basename(os.path.normpath(str(bout_dir)))}: "
                   f"authority={out['authority']} method={out.get('method')} "
                   f"male=fly{out.get('male_fly')} swap={out['applied_swap']} "
-                  f"(mvq typed slots -- wing-song CV not run)")
+                  f"(mvq lifter identity={out.get('identity', 'sex')} -- "
+                  f"wing-song CV not run)")
         return out
 
     kp_index = _kp_index(kp_names)

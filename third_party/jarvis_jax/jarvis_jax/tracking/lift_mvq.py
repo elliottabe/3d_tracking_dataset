@@ -72,6 +72,37 @@ from jarvis_jax.train.train_mvq import _fwd, normalize_crops
 # tree metadata one level down, under `model/`.
 _DIGEST_FILES = ("_CHECKPOINT_METADATA", "_METADATA", os.path.join("model", "_METADATA"))
 
+# How the masked-bout lifter decides WHICH written fly an instance is:
+#
+#   "sex"   the model's own typed slots -- fly0 is the FEMALE slot, fly1 the
+#           MALE slot, each taken from whichever window reads it most
+#           confidently. The original P3a behaviour.
+#   "mask"  the HUMAN id review carried by the SAM3 masks -- fly0 is mask fly
+#           0 and fly1 is mask fly 1, and the model is only asked "which
+#           instance is ON this mask?".
+#
+# `mask` is the default because it is the pipeline's own precedence (human >
+# mvq, `sexing.canonicalize_bout`) and because the sex head is measurably
+# unreliable on at least one recording: on 2025_10_20_13_20_04 it types the
+# female as a male, which NaN'd fly0 on 40% of that recording's frames and let
+# the male track jump onto her body on 2.5% of them (up to 23% in a bout). See
+# `.superpowers/sdd/2026-09-04-mvq-maskfree-p4a-p4b/female-miss-diagnosis.md`.
+IDENTITY_MODES = ("mask", "sex")
+DEFAULT_IDENTITY = "mask"
+
+# Mask `sex_meta.method` that carries a human identity decision (==
+# `sexing.HUMAN_REVIEW_METHOD`; a plain string here so this module still needs
+# no import of sexing).
+HUMAN_REVIEW_METHOD = "human_id_review"
+
+# World units (10 == 1 mm): how far an instance's keypoint centroid may sit
+# from a mask's triangulated centre and still be judged to BE that mask's fly.
+# A fly is ~25 units long and the two flies' mask centres are typically >30
+# apart, so 10 accepts the same animal seen slightly off-centre and refuses the
+# other animal in the crop. Measured on the 20_04 bout-25 diagnosis frames the
+# correct instance sat 3.8-4.5 units from its mask centre.
+MASK_ASSIGN_UNITS = 10.0
+
 
 def _sigmoid(x):
     return 1.0 / (1.0 + np.exp(-np.asarray(x, np.float64)))
@@ -155,17 +186,42 @@ def concat_windows(ws):
     return {k: np.concatenate([w[k] for w in ws], axis=0) for k in keys}
 
 
-def mvq_gate_signature(checkpoint, *, step=None, exist_thresh=None):
+def resolved_identity(identity):
+    """`identity` as one of `IDENTITY_MODES` (None -> `DEFAULT_IDENTITY`).
+
+    Refuses anything else by name rather than falling back to a default: a
+    typo'd mode that silently became "sex" would produce a gate string saying
+    one thing while the lifter did another, and nothing downstream re-derives
+    which rule assigned the flies.
+    """
+    if identity is None:
+        return DEFAULT_IDENTITY
+    identity = str(identity)
+    if identity not in IDENTITY_MODES:
+        raise ValueError(f"mvq identity must be one of {list(IDENTITY_MODES)}, got "
+                         f"{identity!r}")
+    return identity
+
+
+def mvq_gate_signature(checkpoint, *, step=None, exist_thresh=None, identity=None):
     """The Stage-B `gates` payload for an mvq-lifted kp3d.npz.
 
     With `pipeline.lifter: mvq` the DLT gates (view-conf, mask-agreement,
     wing-collapse, rigid-repair) never run -- Stages A and B are replaced by
     the lifter -- so what determines the file's contents is WHICH CHECKPOINT
-    produced it and the existence threshold that decided which frames are
-    NaN. `scripts/run_bout.py::stage_b_gate_signature` returns
+    produced it, the existence threshold that decided which frames are NaN,
+    and WHICH RULE decided which written fly each instance is (`identity`;
+    the two modes disagree on ~40% of one recording's frames, so a run
+    switched between them must not reuse the other's bouts).
+    `scripts/run_bout.py::stage_b_gate_signature` returns
     `json.dumps(this, sort_keys=True)` for such a run, so a bout produced by
     one checkpoint is refused after the config points at another, exactly as
     a changed DLT gate is.
+
+    `identity` is the REQUESTED mode, not the one a particular bout resolved
+    to: a bout whose masks carry no human review falls back to "sex" for
+    itself alone, which run_bout (which never opens the mask npz) cannot
+    know. `mvq_meta.json` records the resolved mode per bout and per frame.
     """
     if not checkpoint:
         raise ValueError("pipeline.lifter=mvq needs mvq.checkpoint set -- the Stage-B gate "
@@ -175,13 +231,34 @@ def mvq_gate_signature(checkpoint, *, step=None, exist_thresh=None):
             "checkpoint": os.path.abspath(str(checkpoint)),
             "step": "final" if step is None else step,
             "sha256": checkpoint_sha256(checkpoint, step),
-            "exist_thresh": float(EXIST_THRESH if exist_thresh is None else exist_thresh)}
+            "exist_thresh": float(EXIST_THRESH if exist_thresh is None else exist_thresh),
+            "identity": resolved_identity(identity)}
 
 
-def mvq_gate_string(checkpoint, *, step=None, exist_thresh=None):
+def mvq_gate_string(checkpoint, *, step=None, exist_thresh=None, identity=None):
     """`mvq_gate_signature` as the stable string stored inside kp3d.npz."""
-    return json.dumps(mvq_gate_signature(checkpoint, step=step, exist_thresh=exist_thresh),
+    return json.dumps(mvq_gate_signature(checkpoint, step=step, exist_thresh=exist_thresh,
+                                         identity=identity),
                       sort_keys=True)
+
+
+def slot_read(out, bi, slot):
+    """One instance slot of one window of an `infer` output, as a plain dict.
+
+    The single place the per-slot arrays are named, so `MVQRunner.read_typed`
+    (which picks a slot from the model's TYPING) and `pick_mask_pair` (which
+    picks one from the mask GEOMETRY) hand their callers byte-identical
+    payloads -- a second, hand-written copy of this dict is exactly where a
+    `vis`/`conf_raw` mix-up would hide.
+    """
+    slot = int(slot)
+    return {"slot": slot,
+            "kp3d": out["kp3d"][bi, slot],
+            "kp2d": out["kp2d"][bi, slot],
+            "vis": out["vis"][bi, slot],
+            "conf_raw": out["conf_raw"][bi, slot],
+            "exist": float(out["exist"][bi, slot]),
+            "sex_prob": float(out["sex_prob"][bi, slot])}
 
 
 class MVQRunner:
@@ -200,8 +277,14 @@ class MVQRunner:
     """
 
     def __init__(self, run_dir_or_final, *, step=None, attn_impl=None, calib_dir, cameras,
-                 batch=32, exist_thresh=EXIST_THRESH):
+                 batch=32, exist_thresh=EXIST_THRESH, identity=None):
         self.checkpoint = os.path.abspath(str(run_dir_or_final))
+        # Which rule the caller will use to name the written flies. The runner
+        # does not apply it (that is `lift_masked_bout`'s job); it is carried
+        # here so `gates_string()` -- the string stamped into kp3d.npz -- names
+        # the mode, and so a runner cannot be shared between two callers that
+        # disagree about it.
+        self.identity = resolved_identity(identity)
         if step == "latest":
             import orbax.checkpoint as ocp
             mgr = ocp.CheckpointManager(os.path.abspath(os.path.join(self.checkpoint, "ckpt")),
@@ -386,14 +469,7 @@ class MVQRunner:
             slot = SLOT_FEMALE if want == SEX_FEMALE else SLOT_MALE
             if float(out["exist"][bi, slot]) < self.exist_thresh:
                 return None
-        exist = float(out["exist"][bi, slot])
-        return {"slot": int(slot),
-                "kp3d": out["kp3d"][bi, slot],
-                "kp2d": out["kp2d"][bi, slot],
-                "vis": out["vis"][bi, slot],
-                "conf_raw": out["conf_raw"][bi, slot],
-                "exist": exist,
-                "sex_prob": float(out["sex_prob"][bi, slot])}
+        return slot_read(out, bi, slot)
 
     # ------------------------------------------------------------------ pipeline format
     def to_pipeline(self, kp3d, kp2d, vis, conf_raw, model_names):
@@ -442,7 +518,8 @@ class MVQRunner:
         """
         if self._gates is None:
             self._gates = mvq_gate_signature(self.checkpoint, step=self.step,
-                                             exist_thresh=self.exist_thresh)
+                                             exist_thresh=self.exist_thresh,
+                                             identity=self.identity)
         return dict(self._gates)
 
     def gates_string(self):
@@ -461,16 +538,30 @@ class MVQRunner:
 # permutation -- is the SAME code the coarse pass uses, so the two passes
 # cannot drift apart.
 #
-# IDENTITY. The mask slots are NOT the identity here. `fly0` is the model's
-# FEMALE typed slot and `fly1` its MALE typed slot, per frame, from the sex
-# head; the masks only place the crop. That is why the lifter can write a
-# `sex.json` with `method = "mvq_sex_head"` and why `canonicalize_bout` must
-# not then re-decide the bout from the wing-song CV.
+# IDENTITY (`identity=`, see IDENTITY_MODES at the top of this module).
+#
+#   identity="sex"   the mask slots are NOT the identity: `fly0` is the model's
+#                    FEMALE typed slot and `fly1` its MALE typed slot, per
+#                    frame, from the sex head; the masks only place the crop.
+#                    Writes `sex.json` with `method = "mvq_sex_head"`.
+#   identity="mask"  (default) the masks' HUMAN id review IS the identity:
+#                    `fly0` is mask fly 0 and `fly1` is mask fly 1, and the
+#                    model is asked only WHICH INSTANCE IS ON THIS MASK.
+#                    Writes `sex.json` with `method = "mask_human_id_review"`.
+#
+# Either way `canonicalize_bout` must not then re-decide the bout from the
+# wing-song CV -- both methods are in its authoritative, no-swap set.
+#
+# Why "mask" is the default: the human id review outranks the model in this
+# pipeline's own precedence, and the sex head is measurably wrong on at least
+# one recording (20_04 -- see the module header constants and
+# `.superpowers/sdd/2026-09-04-mvq-maskfree-p4a-p4b/female-miss-diagnosis.md`).
 
 MVQ_SEX_METHOD = "mvq_sex_head"      # == sexing.MVQ_SEX_METHOD (kept as a plain
                                      # string here so this module needs no
                                      # import of sexing, which imports nothing
                                      # from jax and should stay that way)
+MASK_ID_SEX_METHOD = "mask_human_id_review"    # == sexing.MASK_ID_SEX_METHOD
 
 # Median per-keypoint 3D distance below which the two typed slots are judged to
 # be the SAME physical fly (world units; 3.0 == 0.3 mm). Two real flies -- even
@@ -538,6 +629,111 @@ def pick_typed_pair(out, off, nb, runner, collapse_dist_units=COLLAPSE_DIST_UNIT
             dropped_fi = 1 if picks[1][0]["exist"] <= picks[0][0]["exist"] else 0
             picks.pop(dropped_fi)
     return picks, collapsed, dropped_fi
+
+
+def instance_centroid(kp3d):
+    """(3,) mean of an instance's FINITE keypoints, or None if it has none.
+
+    The same statistic `scripts/.../identity_check.py` compares against the
+    mask centres, so "which instance is on this mask?" is answered here with
+    the quantity the audit re-measures afterwards.
+    """
+    kp = np.asarray(kp3d, np.float64)
+    m = np.isfinite(kp).all(axis=-1)
+    return kp[m].mean(axis=0) if m.any() else None
+
+
+def pick_mask_pair(out, off, nb, runner, mask_centres, assign, *,
+                   mask_assign_units=MASK_ASSIGN_UNITS,
+                   collapse_dist_units=COLLAPSE_DIST_UNITS):
+    """`identity="mask"`: assign each MASK fly the instance that is ON it.
+
+    The masks carry a human id review of which animal is the female (mask fly
+    0) and which the male (mask fly 1). That decision is authoritative in this
+    pipeline (`sexing`: human > mvq), so it -- not the model's sex head --
+    says which written fly is which, and the model is asked only the question
+    it is good at: which of the four instances in this crop is the animal
+    under this mask?
+
+    Per mask fly `f`, in the window `assign[f]` its own mask centre placed:
+    among the slots whose existence clears `runner.exist_thresh`, keep those
+    whose keypoint centroid is within `mask_assign_units` of that mask centre,
+    and take the nearest -- except that the TYPED slot for that fly's sex
+    wins whenever it also qualifies (ties on distance broken by existence).
+    The typed preference matters when both flies are in ONE merged window and
+    two instances are plausibly near both mask centres; the nearest-instance
+    rule is what rescues the female on 20_04, where her typed slot is dead and
+    the male-typed slot is the one localising her body.
+
+    Nothing within the radius means NaN for that fly: an instance 5 mm from
+    the mask is not that animal, and "the nearest thing in the crop" is how a
+    lifter ends up confidently tracking the other fly.
+
+    COLLAPSE GUARD. Both masks can still resolve to the SAME instance (one
+    merged window, one live slot). Two real flies are never within
+    `collapse_dist_units` over most of their 50 keypoints; the same instance
+    read twice is 0. Such a frame keeps the fly whose own mask the instance is
+    NEARER and NaNs the other, rather than shipping a duplicated fly that
+    every jitter, confidence and residual metric rates as excellent. Ties keep
+    fly0 (the female -- the fly this pipeline loses frames on).
+
+    Args:
+        out: an `MVQRunner.infer` output.
+        off, nb: this frame's window rows, `[off, off + nb)`.
+        runner: for `I`, `exist_thresh`.
+        mask_centres: (2,3) each mask fly's triangulated centre, world units.
+        assign: (2,) window index per mask fly within this frame (-1 = none),
+            from `frame_windows`.
+
+    Returns:
+        picks: {fi: (slot_read result, absolute window index)}.
+        dists: {fi: distance (world units) from the chosen instance's
+            centroid to fly fi's own mask centre} -- recorded in mvq_meta.
+        collapsed: bool, whether the guard fired.
+        dropped_fi: the fi it NaN'd, or None.
+    """
+    typed = (SLOT_FEMALE, SLOT_MALE)
+    mask_centres = np.asarray(mask_centres, np.float64)
+    picks, dists = {}, {}
+    for fi in (0, 1):
+        w = int(assign[fi])
+        if w < 0 or w >= int(nb):
+            continue                                  # this fly has no window
+        centre = mask_centres[fi]
+        if not np.isfinite(centre).all():
+            continue
+        b = int(off) + w
+        cands = []
+        for s in range(int(runner.I)):
+            e = float(out["exist"][b, s])
+            if e < float(runner.exist_thresh):
+                continue
+            c = instance_centroid(out["kp3d"][b, s])
+            if c is None:
+                continue
+            d = float(np.linalg.norm(c - centre))
+            if d > float(mask_assign_units):
+                continue
+            # sort key: the typed slot first, then nearest, then most confident
+            cands.append((s != typed[fi], d, -e, s))
+        if not cands:
+            continue
+        _typed_miss, d, _ne, s = min(cands)
+        picks[fi] = (slot_read(out, b, s), b)
+        dists[fi] = d
+
+    collapsed, dropped_fi = False, None
+    if len(picks) == 2:
+        a3 = np.asarray(picks[0][0]["kp3d"], np.float64)
+        b3 = np.asarray(picks[1][0]["kp3d"], np.float64)
+        dd = np.linalg.norm(a3 - b3, axis=-1)
+        dd = dd[np.isfinite(dd)]
+        if dd.size and float(np.median(dd)) < float(collapse_dist_units):
+            collapsed = True
+            dropped_fi = 1 if dists[1] >= dists[0] else 0     # keep the nearer own-mask
+            picks.pop(dropped_fi)
+            dists.pop(dropped_fi)
+    return picks, dists, collapsed, dropped_fi
 
 
 def frame_windows(centres, ok=None, *, merge_dist_units=30.0):
@@ -680,12 +876,15 @@ def resolve_bout_frames(session_dir, bout_idx, bouts_csv=None):
 
 def bout_lift_is_current(out_dir, gates_string, n_flies=2):
     """True when every `<out_dir>/fly*/kp3d.npz` exists and carries `gates_string`
-    AND `<out_dir>/sex.json` exists with `method == MVQ_SEX_METHOD`.
+    AND `<out_dir>/sex.json` exists with a `method` this lifter writes
+    (`MVQ_SEX_METHOD` or `MASK_ID_SEX_METHOD` -- which one depends on the
+    identity mode, and the gates string already pins THAT).
 
-    The gates string names the checkpoint and the existence threshold, so this
-    is the same staleness contract `run_bout.py`'s Stage B enforces: a bout
-    lifted by different weights is NOT current and gets re-run, while a
-    re-submitted array skips the work it already did.
+    The gates string names the checkpoint, the existence threshold and the
+    identity mode, so this is the same staleness contract `run_bout.py`'s
+    Stage B enforces: a bout lifted by different weights -- or by the other
+    identity rule -- is NOT current and gets re-run, while a re-submitted
+    array skips the work it already did.
 
     `sex.json` is REQUIRED too, not just the per-fly npz files:
     `lift_masked_bout` writes every fly's `kp3d.npz` BEFORE `sex.json` (it
@@ -714,7 +913,7 @@ def bout_lift_is_current(out_dir, gates_string, n_flies=2):
             sex = json.load(f)
     except (OSError, ValueError):
         return False
-    if sex.get("method") != MVQ_SEX_METHOD:
+    if sex.get("method") not in (MVQ_SEX_METHOD, MASK_ID_SEX_METHOD):
         return False
     return True
 
@@ -727,6 +926,7 @@ def _mean_or_none(a):
 
 def lift_masked_bout(runner, frames_iter, centres, ok, *, out_dir, model_names,
                      merge_dist_units=30.0, collapse_dist_units=COLLAPSE_DIST_UNITS,
+                     identity=None, mask_assign_units=MASK_ASSIGN_UNITS,
                      force=False, progress_every=0,
                      meta_extra=None, mask_sex_meta=None, review_male_fly=None,
                      verbose=True):
@@ -743,31 +943,57 @@ def lift_masked_bout(runner, frames_iter, centres, ok, *, out_dir, model_names,
         ok: (A,T) bool, which of those centres are usable.
         out_dir: the BOUT directory, `<run>/bouts/bout_<idx:05d>`.
         model_names: `cfg.model.KP_NAMES` -- the pipeline's keypoint order.
-        collapse_dist_units: a frame whose two typed slots agree to within this
-            median per-keypoint 3D distance is judged to be the SAME fly read
-            twice; the less confident slot is NaN'd and the frame flagged (see
+        collapse_dist_units: a frame whose two written flies agree to within
+            this median per-keypoint 3D distance is judged to be the SAME fly
+            read twice; one of them is NaN'd and the frame flagged (see
             `COLLAPSE_DIST_UNITS`).
+        identity: `"mask"` (default -- see IDENTITY_MODES) or `"sex"`; None
+            takes the runner's own. `"mask"` needs the masks to carry a human
+            id review (`mask_sex_meta["method"] == "human_id_review"`); a bout
+            whose masks do not falls back to `"sex"` with a warning, and says
+            so in `mvq_meta.json`. The REQUESTED mode (not the fallback) is
+            what the gates string names -- run_bout never opens the mask npz.
+        mask_assign_units: `identity="mask"` only -- how far an instance's
+            keypoint centroid may sit from a mask's triangulated centre and
+            still be that mask's fly (`MASK_ASSIGN_UNITS`). Recorded in
+            `mvq_meta.json` rather than enrolled in the gate signature, for
+            the same reason as `collapse_dist_units`.
         force: re-run a bout whose kp3d.npz already carries this gates string.
         mask_sex_meta / review_male_fly: what the SAM3 masks / the id-review
-            manifest believe about identity. NOT used to decide anything (the
-            typed slots are the decision); recorded, and any disagreement
-            logged, in `mvq_meta.json`.
+            manifest believe about identity. Under `identity="mask"` the
+            masks' human review IS the decision (and a mask npz whose
+            `male_slot` is not 1 is refused, since `fly{f}` IS mask fly `f`
+            here); under `identity="sex"` both are recorded only, and any
+            disagreement logged, in `mvq_meta.json`.
 
-    Writes, per fly (0 = FEMALE typed slot, 1 = MALE typed slot -- the
-    canonical identity `canonicalize_bout` would enforce):
+    Writes, per fly (0 = the FEMALE, 1 = the MALE -- the canonical identity
+    `canonicalize_bout` would enforce, from the mask review or the typed
+    slots depending on the mode):
         kp2d.npz  kp2d (T,C,K,2) full-frame px, conf (T,C,K) per-view
                   visibility, cameras (C,), kp_names (K,)
         kp3d.npz  kp3d (T,K,3) world units, conf3d (T,K) = mean visibility
                   over cameras, conf3d_mvq_raw (T,K), kp_names (K,), gates
-    and, per bout, `sex.json` (male_fly 1, method "mvq_sex_head") and
-    `mvq_meta.json` (which carries the per-frame `collapsed` flag, the per-fly
-    `n_collapsed` counts and `collapsed_frac`).
+    and, per bout, `sex.json` (male_fly 1; method "mask_human_id_review" or
+    "mvq_sex_head") and `mvq_meta.json` (which carries the per-frame
+    `collapsed` flag, `identity_source`, `slot_used` and `sex_head_agrees`,
+    the per-fly `n_collapsed` counts, `collapsed_frac` and
+    `sex_head_disagree_frac`).
 
     Returns a dict of the per-frame bookkeeping (in the MODEL's own keypoint
     order, before the name permutation) plus `skipped`.
     """
     model_names = [str(n) for n in model_names]
-    gates_string = runner.gates_string()
+    identity = resolved_identity(identity if identity is not None
+                                 else getattr(runner, "identity", None))
+    runner_identity = getattr(runner, "identity", None)
+    if runner_identity is not None and str(runner_identity) != identity:
+        raise ValueError(
+            f"the runner was built for identity={runner_identity!r} but this lift was "
+            f"asked for {identity!r}; `runner.gates_string()` would then disagree with "
+            f"the gates stamped into kp3d.npz, and a later staleness check could not "
+            f"tell which rule assigned the flies")
+    gates_string = mvq_gate_string(runner.checkpoint, step=runner.step,
+                                   exist_thresh=runner.exist_thresh, identity=identity)
     out_dir = str(out_dir)
     if not force and bout_lift_is_current(out_dir, gates_string):
         if verbose:
@@ -794,7 +1020,30 @@ def lift_masked_bout(runner, frames_iter, centres, ok, *, out_dir, model_names,
     T = centres.shape[1]
     C, K, I = len(runner.cameras), runner.K, runner.I
 
-    # Row 0 is the FEMALE typed slot, row 1 the MALE one -- never a mask slot.
+    # ---- resolve the identity RULE for this bout (the requested mode above is
+    # what the gates string names; this is what actually runs).
+    _ms = mask_sex_meta or {}
+    identity_resolved = identity
+    if identity == "mask":
+        if str(_ms.get("method")) != HUMAN_REVIEW_METHOD:
+            identity_resolved = "sex"
+            warnings.warn(
+                f"lift_masked_bout({out_dir}): identity='mask' was asked for, but the "
+                f"masks' sex_meta.method is {_ms.get('method')!r}, not "
+                f"{HUMAN_REVIEW_METHOD!r} -- there is no human identity decision to "
+                f"honour, so this bout falls back to the sex head "
+                f"(identity='sex'). mvq_meta.json records the fallback.",
+                RuntimeWarning, stacklevel=2)
+        elif _ms.get("male_slot") != 1:
+            raise ValueError(
+                f"lift_masked_bout({out_dir}): identity='mask' writes fly{{f}} from MASK "
+                f"fly {{f}} and a sex.json saying male_fly=1, but these masks' human "
+                f"review says male = mask slot {_ms.get('male_slot')!r}. Re-run "
+                f"scripts/canonicalize_sam_masks.py so the male is mask slot 1, or lift "
+                f"this bout with identity='sex' -- writing it as-is would name the "
+                f"wrong fly the male.")
+
+    # Row 0 is the FEMALE (mask fly 0 / female typed slot), row 1 the MALE.
     kp3d = np.full((2, T, K, 3), np.nan, np.float32)
     kp2d = np.full((2, T, C, K, 2), np.nan, np.float32)
     vis = np.zeros((2, T, C, K), np.float32)      # 0 => the pipeline's conf gate drops it
@@ -806,8 +1055,11 @@ def lift_masked_bout(runner, frames_iter, centres, ok, *, out_dir, model_names,
     all_exist = np.full((T, I), np.nan, np.float32)   # every slot, for the meta
     n_windows = np.zeros(T, np.int8)
     no_centre = np.zeros(T, bool)
-    collapsed = np.zeros(T, bool)       # both typed slots read the same fly
+    collapsed = np.zeros(T, bool)       # both written flies read the same instance
     n_collapsed = [0, 0]                # per fly, how often IT was the dropped one
+    # identity="mask" only: how far the chosen instance's keypoint centroid sat
+    # from that fly's own mask centre (world units). The audit quantity.
+    mask_dist = np.full((2, T), np.nan, np.float32)
 
     pend, batch, rows = [], [], 0
     warned_drop = False
@@ -819,15 +1071,26 @@ def lift_masked_bout(runner, frames_iter, centres, ok, *, out_dir, model_names,
         if not pend:
             return
         out = runner.infer(concat_windows(batch))
-        for t, off, nb in pend:
+        for t, off, nb, assign in pend:
             all_exist[t] = out["exist"][off]
-            # Typed-slot read + collapse guard: see `pick_typed_pair`'s
-            # docstring for the full rationale (measured on Session0 bout 28,
-            # whose `track_qc.json` flags 90/2007 frames as merged tracks).
-            # Shared with `coarse_track.coarse_pass._read_batch` so the two
-            # routes cannot silently drift apart on this rule.
-            picks, collapsed[t], drop = pick_typed_pair(out, off, nb, runner,
-                                                        collapse_dist_units)
+            if identity_resolved == "mask":
+                # The masks' human id review decides which written fly is
+                # which; the model only says which instance is on which mask.
+                # See `pick_mask_pair`.
+                picks, dists, collapsed[t], drop = pick_mask_pair(
+                    out, off, nb, runner, centres[:, t], assign,
+                    mask_assign_units=mask_assign_units,
+                    collapse_dist_units=collapse_dist_units)
+                for fi, d in dists.items():
+                    mask_dist[fi, t] = d
+            else:
+                # Typed-slot read + collapse guard: see `pick_typed_pair`'s
+                # docstring for the full rationale (measured on Session0 bout
+                # 28, whose `track_qc.json` flags 90/2007 frames as merged
+                # tracks). Shared with `coarse_track.coarse_pass._read_batch`
+                # so the two routes cannot silently drift apart on this rule.
+                picks, collapsed[t], drop = pick_typed_pair(out, off, nb, runner,
+                                                            collapse_dist_units)
             if drop is not None:
                 n_collapsed[drop] += 1
 
@@ -847,8 +1110,11 @@ def lift_masked_bout(runner, frames_iter, centres, ok, *, out_dir, model_names,
             raise ValueError(f"frames_iter yielded more than the {T} frames the centres "
                              f"describe -- the mask npz and the video read must cover "
                              f"the SAME bout frames")
-        wc, _assign = frame_windows(centres[:, t], ok[:, t],
-                                    merge_dist_units=merge_dist_units)
+        # `assign` (which window each MASK fly went into) is what makes
+        # identity="mask" possible at all -- it is the only link back from a
+        # window to the human-reviewed mask that placed it.
+        wc, assign = frame_windows(centres[:, t], ok[:, t],
+                                   merge_dist_units=merge_dist_units)
         n_seen = t + 1
         if wc.shape[0] == 0:
             no_centre[t] = True
@@ -865,7 +1131,7 @@ def lift_masked_bout(runner, frames_iter, centres, ok, *, out_dir, model_names,
         if rows + wc.shape[0] > runner.batch:
             _flush()
         batch.append(runner.windows(frames, present, wc))
-        pend.append((t, rows, int(wc.shape[0])))
+        pend.append((t, rows, int(wc.shape[0]), np.asarray(assign, int).copy()))
         rows += int(wc.shape[0])
         n_windows[t] = int(wc.shape[0])
         if progress_every and (t + 1) % int(progress_every) == 0:
@@ -900,21 +1166,44 @@ def lift_masked_bout(runner, frames_iter, centres, ok, *, out_dir, model_names,
                         gates=np.asarray(gates_string))
         n_missing[f"fly{fly}"] = int((slot[fly] < 0).sum())
 
-    sex = _mvq_sex_json(sex_prob, exist, n_missing, T, mask_sex_meta)
+    # Did the SEX HEAD agree with who this fly turned out to be? 1 yes, 0 no,
+    # -1 no instance written this frame. Under identity="sex" this is 1
+    # wherever a fly was written (the typed slot IS the rule), so the number
+    # that matters is the "mask" one: it measures how often the human review
+    # and the model's typing disagree, which is the whole 20_04 defect.
+    typed_slot = (int(SLOT_FEMALE), int(SLOT_MALE))
+    sex_head_agrees = np.full((2, T), -1, np.int8)
+    disagree_frac = {}
+    for fly in (0, 1):
+        wrote = slot[fly] >= 0
+        sex_head_agrees[fly, wrote] = (slot[fly][wrote] == typed_slot[fly]).astype(np.int8)
+        disagree_frac[f"fly{fly}"] = (
+            float((slot[fly][wrote] != typed_slot[fly]).mean()) if wrote.any() else None)
+
+    sex = _mvq_sex_json(sex_prob, exist, n_missing, T, mask_sex_meta,
+                        identity_resolved, disagree_frac)
     atomic_save_json(os.path.join(out_dir, "sex.json"), sex)
 
-    disagree = _identity_disagreements(sex, mask_sex_meta, review_male_fly)
+    disagree = _identity_disagreements(sex, mask_sex_meta, review_male_fly,
+                                       identity_resolved)
     for msg in disagree:
         print(f"[mvq-lift] identity NOTE: {msg}", flush=True)
     meta = {
         "checkpoint": runner.checkpoint,
         "step": runner.step_label,
-        "gates": runner.gates_signature(),
+        "gates": json.loads(gates_string),
         "exist_thresh": float(runner.exist_thresh),
         "merge_dist_units": float(merge_dist_units),
         "cameras": list(runner.cameras),
         "keypoint_names_mvq": list(runner.kp_names),
         "keypoint_names_written": model_names,
+        # `identity` is what the gates string names (and what run_bout
+        # recomputes); `identity_resolved` is what THIS bout actually did --
+        # they differ only when masks with no human review forced a fallback.
+        "identity": identity,
+        "identity_resolved": identity_resolved,
+        "mask_assign_units": float(mask_assign_units),
+        "sex_head_disagree_frac": disagree_frac,
         "fly_slots": {"fly0": int(SLOT_FEMALE), "fly1": int(SLOT_MALE)},
         "fly_sex": {"fly0": "female", "fly1": "male"},
         "n_frames": int(T),
@@ -930,7 +1219,11 @@ def lift_masked_bout(runner, frames_iter, centres, ok, *, out_dir, model_names,
             "n_windows": n_windows.astype(int).tolist(),
             "no_centre": no_centre.astype(int).tolist(),
             "collapsed": collapsed.astype(int).tolist(),
+            "identity_source": [identity_resolved] * int(T),
             "slot": slot.astype(int).tolist(),
+            "slot_used": slot.astype(int).tolist(),   # the brief's name for `slot`
+            "sex_head_agrees": sex_head_agrees.astype(int).tolist(),
+            "mask_dist_units": np.round(np.nan_to_num(mask_dist, nan=-1.0), 3).tolist(),
             "window": window.astype(int).tolist(),
             "exist": np.round(np.nan_to_num(exist, nan=-1.0), 4).tolist(),
             "sex_prob": np.round(np.nan_to_num(sex_prob, nan=-1.0), 4).tolist(),
@@ -941,7 +1234,9 @@ def lift_masked_bout(runner, frames_iter, centres, ok, *, out_dir, model_names,
     atomic_save_json(os.path.join(out_dir, "mvq_meta.json"), meta)
     if verbose:
         el = time.time() - t_start
-        print(f"[mvq-lift] {out_dir}: {T} frames, missing {n_missing}, "
+        print(f"[mvq-lift] {out_dir}: {T} frames, identity {identity_resolved}, "
+              f"missing {n_missing}, "
+              f"sex-head disagree {disagree_frac}, "
               f"{int(no_centre.sum())} with no mask centre, "
               f"{int(collapsed.sum())} collapsed "
               f"({100 * (collapsed.mean() if T else 0):.1f}%, dropped "
@@ -952,6 +1247,11 @@ def lift_masked_bout(runner, frames_iter, centres, ok, *, out_dir, model_names,
             "exist": exist, "sex_prob": sex_prob, "slot": slot, "window": window,
             "no_centre": no_centre, "n_windows": n_windows,
             "collapsed": collapsed,
+            "identity": identity, "identity_resolved": identity_resolved,
+            "identity_source": [identity_resolved] * int(T),
+            "sex_head_agrees": sex_head_agrees,
+            "sex_head_disagree_frac": disagree_frac,
+            "mask_dist": mask_dist,
             "n_collapsed": {"fly0": int(n_collapsed[0]), "fly1": int(n_collapsed[1])},
             "n_missing": n_missing, "sex": sex, "meta": meta}
 
@@ -974,60 +1274,109 @@ def _check_eye_invariant(kp3d_mvq, kp3d_model, mvq_names, model_names):
             f"kp3d.npz is NOT the same anatomy in a different order")
 
 
-def _mvq_sex_json(sex_prob, exist, n_missing, T, mask_sex_meta):
-    """`sex.json` in `sexing.canonicalize_bout`'s schema, decided by the typed slots.
+def _mvq_sex_json(sex_prob, exist, n_missing, T, mask_sex_meta,
+                  identity=DEFAULT_IDENTITY, sex_head_disagree_frac=None):
+    """`sex.json` in `sexing.canonicalize_bout`'s schema.
 
     Every key that function writes is present (its consumers -- notably
     `estimate_recording_scale._determine_identity`, which is what lets
     scale.json carry a per-fly body size -- read this file), plus the mvq
     evidence the heuristic fields have no room for.
+
+    `method` names WHAT DECIDED IDENTITY, because that is what the
+    authority chain in `sexing.canonicalize_bout` keys on:
+    `mask_human_id_review` when the flies came from the masks' human review
+    (identity="mask"), `mvq_sex_head` when they came from the model's typed
+    slots (identity="sex"). Both are in that function's authoritative,
+    no-swap set; the difference is which evidence a reader should trust and
+    what `confidence` means below.
     """
+    ms = mask_sex_meta or {}
     pf = {f"fly{f}": _mean_or_none(sex_prob[f]) for f in (0, 1)}
     ex = {f"fly{f}": _mean_or_none(exist[f]) for f in (0, 1)}
-    # The sex HEAD agreeing with the slot TYPING is the confidence signal: the
-    # female slot should read P(female) > 0.5 and the male slot < 0.5. When it
-    # does not, the identity is still the slot's (that is what was trained),
-    # but the disagreement is recorded rather than smoothed over.
-    agree = (pf["fly0"] is not None and pf["fly1"] is not None
-             and pf["fly0"] > 0.5 > pf["fly1"])
+    mask_id = identity == "mask"
+    if mask_id:
+        # The human review IS the decision, so its confidence is not the sex
+        # head's -- it is "a human looked at this bout". The sex head's
+        # (dis)agreement is evidence, recorded below, not the verdict.
+        method, confidence = MASK_ID_SEX_METHOD, "user"
+        note = ("fly0 = SAM3 mask fly 0 (the female) and fly1 = mask fly 1 (the male), "
+                "per the human ID review the masks carry; per frame the mvq instance "
+                "nearest each mask's triangulated centre is written as that fly, and "
+                "the model's sex head is recorded but does not decide")
+    else:
+        # The sex HEAD agreeing with the slot TYPING is the confidence signal:
+        # the female slot should read P(female) > 0.5 and the male slot < 0.5.
+        # When it does not, the identity is still the slot's (that is what was
+        # trained), but the disagreement is recorded rather than smoothed over.
+        agree = (pf["fly0"] is not None and pf["fly1"] is not None
+                 and pf["fly0"] > 0.5 > pf["fly1"])
+        method, confidence = MVQ_SEX_METHOD, ("high" if agree else "low")
+        note = ("fly0 = the mvq FEMALE typed slot, fly1 = the mvq MALE typed slot "
+                "(models/mvq typed decoder, slots 1/2); identity is per-frame from "
+                "the model, not from mask slot order or a wing-song CV")
     return {
         "male_fly": 1,
         "original_male_fly": 1,
         "applied_swap": False,
-        "confidence": "high" if agree else "low",
-        "method": MVQ_SEX_METHOD,
-        "authority": MVQ_SEX_METHOD,
+        "confidence": confidence,
+        "method": method,
+        "authority": method,
         "heuristic_male_fly": None,
-        "heuristic_method": "not_run (mvq typed slots)",
+        "heuristic_method": f"not_run (mvq identity={identity})",
         "heuristic_agrees": None,
-        "review_file": None,
-        "review_reviewed_at": None,
+        "review_file": ms.get("review_file") if mask_id else None,
+        "review_reviewed_at": ms.get("review_reviewed_at") if mask_id else None,
         "wing_cv_original": {"fly0": None, "fly1": None},
         "cv_ratio": None,
-        "mask_song_cv": (mask_sex_meta or {}).get("song_cv"),
-        "note": ("fly0 = the mvq FEMALE typed slot, fly1 = the mvq MALE typed slot "
-                 "(models/mvq typed decoder, slots 1/2); identity is per-frame from "
-                 "the model, not from mask slot order or a wing-song CV"),
+        "mask_song_cv": ms.get("song_cv"),
+        "note": note,
         # --- mvq evidence (beyond canonicalize_bout's schema)
+        "identity": identity,
         "sex_prob": pf,                     # mean P(female) of each written fly
         "exist": ex,                        # mean existence of each written fly
+        # per fly, the fraction of WRITTEN frames whose instance was NOT the
+        # sex head's typed slot for that fly -- 0 by construction when
+        # identity="sex", and the size of the model's identity error when not
+        "sex_head_disagree_frac": dict(sex_head_disagree_frac or {}),
         "n_frames": int(T),
         "n_missing": dict(n_missing),
     }
 
 
-def _identity_disagreements(sex, mask_sex_meta, review_male_fly):
-    """Human-readable notes where another identity source disagrees with the
-    typed slots. Logged, never fatal -- the mask/manifest slot order does not
-    determine anything on this route, so a mismatch is information, not an
-    error."""
+def _identity_disagreements(sex, mask_sex_meta, review_male_fly,
+                            identity=DEFAULT_IDENTITY):
+    """Human-readable notes where the identity sources disagree.
+
+    Logged, never fatal. Under `identity="sex"` the mask/manifest slot order
+    does not determine anything, so a mismatch is information; under
+    `identity="mask"` a `male_slot != 1` has already been REFUSED upstream
+    (fly{f} IS mask fly f there), and what is worth reporting instead is how
+    often the model's sex head disagreed with the human review.
+    """
     out = []
+    ms = mask_sex_meta or {}
+    if identity == "mask":
+        d = sex.get("sex_head_disagree_frac") or {}
+        for fly in ("fly0", "fly1"):
+            v = d.get(fly)
+            if v is not None and v > 0.05:
+                out.append(
+                    f"the mvq sex head disagrees with the human mask review on "
+                    f"{100 * v:.1f}% of {fly}'s written frames (the instance on that "
+                    f"mask was not the {'female' if fly == 'fly0' else 'male'}-typed "
+                    f"slot); identity came from the review, as it should")
+        if review_male_fly is not None and int(review_male_fly) != 1:
+            out.append(
+                f"the id-review manifest says male = fly{review_male_fly} in the tree "
+                f"the reviewer watched; this run writes mask slot 1 as fly1, which the "
+                f"masks' own sex_meta says is the male")
+        return out
     if sex["confidence"] != "high":
         out.append(
             f"the mvq sex head does not separate the typed slots: mean P(female) "
             f"fly0={sex['sex_prob']['fly0']}, fly1={sex['sex_prob']['fly1']} "
             f"(expected fly0 > 0.5 > fly1)")
-    ms = mask_sex_meta or {}
     if ms.get("male_slot") is not None and int(ms["male_slot"]) != 1:
         out.append(
             f"the SAM3 masks' sex_meta says male = mask slot {ms['male_slot']} "

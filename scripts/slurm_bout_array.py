@@ -191,6 +191,8 @@ def build_mvq_lift_array_script(
     exist_thresh: float = 0.5,
     batch: int = 8,
     merge_dist_units: float = 30.0,
+    identity: str = "mask",
+    mask_assign_units: float = 10.0,
     anatomy_cfg: str = "configs/anatomy/v1.yaml",
     recording_cfg: str = "configs/recording/session0.yaml",
     bouts_csv: str = "",
@@ -253,6 +255,7 @@ PYTHONPATH=third_party/jarvis_jax:. python -u scripts/mvq_lift_bout.py \\
     --out {run_dir} --bout ${{SLURM_ARRAY_TASK_ID}} \\
     --run {checkpoint}{step_arg} --exist-thresh {exist_thresh} --batch {batch} \\
     --merge-dist-units {merge_dist_units} \\
+    --identity {identity} --mask-assign-units {mask_assign_units} \\
     --anatomy {anatomy_cfg} --recording-cfg {recording_cfg}{csv_arg}
 """
 
@@ -663,7 +666,8 @@ def main():
                   f"{args.mvq_config}.yaml sets none", file=sys.stderr)
             sys.exit(2)
         gates_string = mvq_gate_string(str(mv["checkpoint"]), step=mv.get("step"),
-                                        exist_thresh=float(mv.get("exist_thresh", 0.5)))
+                                        exist_thresh=float(mv.get("exist_thresh", 0.5)),
+                                        identity=mv.get("identity"))
         _not_current = [i for i in idxs
                         if not bout_lift_is_current(
                             os.path.join(run_root, "bouts", f"bout_{i:05d}"),
@@ -671,7 +675,7 @@ def main():
         if _not_current:
             print(f"Error: --mvq-lift skip, but {len(_not_current)} bout(s) are not a "
                   f"current mvq lift (kp3d.npz per fly matching these gates AND "
-                  f"sex.json w/ method=mvq_sex_head) under {run_root}: "
+                  f"sex.json from the lifter) under {run_root}: "
                   f"{_not_current[:10]}", file=sys.stderr)
             if not args.dry_run:
                 sys.exit(1)
@@ -694,6 +698,8 @@ def main():
             exist_thresh=float(mv.get("exist_thresh", 0.5)),
             batch=int(mv.get("batch", 8)),
             merge_dist_units=float(mv.get("merge_dist_units", 30.0)),
+            identity=str(mv.get("identity", "mask")),
+            mask_assign_units=float(mv.get("mask_assign_units", 10.0)),
             anatomy_cfg=f"configs/anatomy/{cfg.anatomy.name}.yaml",
             recording_cfg=f"configs/recording/{str(name).lower()}.yaml",
             bouts_csv=str(cfg.recording.get("bouts_csv", "") or ""),
