@@ -535,3 +535,101 @@ def test_import_keypoint_groups_recovers_when_pythonpath_holds_the_repo_root():
                        capture_output=True, text=True, cwd=str(REPO))
     assert r.returncode == 0, f"stdout={r.stdout}\nstderr={r.stderr}"
     assert "OK" in r.stdout
+
+
+# ------------------------------------------------------------- collapse guard
+def test_collapsed_frame_keeps_the_more_confident_slot_and_flags_it(tmp_path):
+    """The two typed slots are chosen INDEPENDENTLY, so on a merged window both
+    can read the same physical fly -- most likely on the mounting frames, and
+    with nothing to show for it: a duplicated instance is smoother and more
+    confident than a real one, so jitter, confidence and residual metrics all
+    rate it as excellent. A frame whose two slots agree to within
+    `collapse_dist_units` must keep only the more confident slot, NaN the
+    other, and say so."""
+    from jarvis_jax.tracking.lift_mvq import lift_masked_bout
+    from jarvis_jax.train.matching import SLOT_FEMALE, SLOT_MALE
+
+    class Collapsing(FakeRunner):
+        """Both typed slots return the SAME kp3d (the fake's per-slot offset is
+        dropped), so every frame is a collapse."""
+
+        def infer(self, w, *, prompt_on=None):
+            out = FakeRunner.infer(self, w, prompt_on=prompt_on)
+            out["kp3d"][:, SLOT_MALE] = out["kp3d"][:, SLOT_FEMALE]
+            return out
+
+    r = Collapsing(_fake_checkpoint(tmp_path), kp_names=_mvq_names(),
+                   exist_fn=lambda c: np.array([0.0, 0.7, 0.95, 0.0], np.float32))
+    centres = np.zeros((2, 2, 3), np.float32)
+    centres[1, :, 0] = 10.0                       # 10 units apart -> ONE merged window
+    out = tmp_path / "bout"
+    res = lift_masked_bout(r, _frames(2), centres, np.ones((2, 2), bool),
+                           out_dir=str(out), model_names=_model_names())
+    assert list(res["collapsed"]) == [True, True]
+    # the male slot is the more confident one (0.95 > 0.7), so the FEMALE row
+    # is the one dropped
+    assert res["n_collapsed"] == {"fly0": 2, "fly1": 0}
+    assert np.isnan(res["kp3d_mvq"][0]).all() and (res["slot"][0] == -1).all()
+    assert np.isfinite(res["kp3d_mvq"][1]).all() and (res["slot"][1] == SLOT_MALE).all()
+    meta = json.load(open(out / "mvq_meta.json"))
+    assert meta["collapsed_frac"] == pytest.approx(1.0)
+    assert meta["n_collapsed"] == {"fly0": 2, "fly1": 0}
+    assert meta["per_frame"]["collapsed"] == [1, 1]
+    assert meta["collapse_dist_units"] == pytest.approx(3.0)
+    assert meta["n_missing"]["fly0"] == 2
+    with np.load(out / "fly0" / "kp3d.npz") as z:
+        assert np.isnan(z["kp3d"]).all()
+    assert SLOT_FEMALE == 1
+
+
+def test_two_real_flies_are_not_flagged_as_collapsed(tmp_path):
+    """15 units (1.5 mm) apart is two animals, not one read twice -- the guard
+    must leave both rows alone. Without this it would silently halve every
+    close-interaction bout."""
+    from jarvis_jax.tracking.lift_mvq import lift_masked_bout
+    r = FakeRunner(_fake_checkpoint(tmp_path), kp_names=_mvq_names(),
+                   exist_fn=lambda c: np.array([0.0, 0.7, 0.95, 0.0], np.float32))
+    # the fake separates the two slots by 100 units in x; put the window
+    # centres 15 units apart so they still MERGE into one window (< 30) --
+    # merging is not what the guard keys on, AGREEMENT is.
+    centres = np.zeros((2, 2, 3), np.float32)
+    centres[1, :, 0] = 15.0
+    out = tmp_path / "bout"
+    res = lift_masked_bout(r, _frames(2), centres, np.ones((2, 2), bool),
+                           out_dir=str(out), model_names=_model_names())
+    assert list(res["n_windows"]) == [1, 1]        # merged, but NOT collapsed
+    assert not res["collapsed"].any()
+    assert res["n_collapsed"] == {"fly0": 0, "fly1": 0}
+    assert np.isfinite(res["kp3d_mvq"]).all()
+    assert json.load(open(out / "mvq_meta.json"))["collapsed_frac"] == 0.0
+
+
+def test_canonicalize_bout_moves_an_mvq_bout_to_a_different_male_slot(tmp_path):
+    """`male_slot=0` is not a convention this repo uses, but if a caller asks
+    for it the mvq DECISION (which fly is the male) must be honoured by MOVING
+    the dirs -- not discarded in favour of the wing-song heuristic, and not
+    silently ignored, leaving sex.json claiming a slot the male is not in."""
+    from jarvis_jax.tracking.sexing import MVQ_SEX_METHOD, canonicalize_bout
+    bout = tmp_path / "bout_00001"
+    (bout / "fly0").mkdir(parents=True)
+    (bout / "fly1").mkdir(parents=True)
+    (bout / "fly0" / "who.txt").write_text("female")
+    (bout / "fly1" / "who.txt").write_text("male")
+    (bout / "sex.json").write_text(json.dumps(
+        {"male_fly": 1, "original_male_fly": 1, "applied_swap": False,
+         "confidence": "high", "method": MVQ_SEX_METHOD, "authority": MVQ_SEX_METHOD,
+         "sex_prob": {"fly0": 0.96, "fly1": 0.002}, "note": "typed slots"}))
+
+    res = canonicalize_bout(str(bout), _model_names(), male_slot=0, verbose=False)
+    assert res["applied_swap"] is True
+    assert res["male_fly"] == 0 and res["original_male_fly"] == 1
+    assert res["method"] == MVQ_SEX_METHOD          # still the mvq decision
+    assert (bout / "fly0" / "who.txt").read_text() == "male"
+    on_disk = json.load(open(bout / "sex.json"))
+    assert on_disk["male_fly"] == 0 and on_disk["applied_swap"] is True
+    assert on_disk["sex_prob"] == {"fly0": 0.96, "fly1": 0.002}   # evidence kept
+
+    # idempotent: a second call sees the male already at slot 0 and does nothing
+    again = canonicalize_bout(str(bout), _model_names(), male_slot=0, verbose=False)
+    assert again["applied_swap"] is False
+    assert (bout / "fly0" / "who.txt").read_text() == "male"

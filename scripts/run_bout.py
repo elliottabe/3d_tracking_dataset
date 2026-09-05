@@ -397,7 +397,11 @@ def import_keypoint_groups():
     except ModuleNotFoundError:
         pass
     _repo = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
-    sys.path = [p for p in sys.path if os.path.abspath(p or ".") != _repo]
+    # Only drop entries that NAME the repo root. An empty string (or ".") is
+    # the "current directory" entry, whose meaning is not "the repo root" even
+    # when cwd happens to be it -- resolving those and dropping them would
+    # quietly change how every other module in the process resolves.
+    sys.path = [p for p in sys.path if not (p and os.path.abspath(p) == _repo)]
     sys.path.insert(0, _repo)
     for _m in list(sys.modules):
         if _m == "viz" or _m.startswith("viz."):

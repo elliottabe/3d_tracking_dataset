@@ -307,9 +307,12 @@ def canonicalize_bout(bout_dir, kp_names, *, mask_sex_meta=None,
     if _mvq is not None:
         out = dict(_mvq)
         out.setdefault("authority", MVQ_SEX_METHOD)
-        out.setdefault("applied_swap", False)
         male = _binary(out.get("male_fly"))
         swap = male != male_slot
+        # `applied_swap` is what THIS call did, exactly as on the heuristic
+        # path below -- not whatever the stored file remembers about an earlier
+        # one, which would make a second (no-op) call claim it moved dirs.
+        out["applied_swap"] = bool(swap)
         if swap and not dry_run:
             # Only reachable when a caller asks for the opposite convention;
             # the lifter always writes male = fly1. Honour the mvq DECISION

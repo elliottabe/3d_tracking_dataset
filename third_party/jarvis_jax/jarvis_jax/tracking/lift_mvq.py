@@ -472,6 +472,16 @@ MVQ_SEX_METHOD = "mvq_sex_head"      # == sexing.MVQ_SEX_METHOD (kept as a plain
                                      # import of sexing, which imports nothing
                                      # from jax and should stay that way)
 
+# Median per-keypoint 3D distance below which the two typed slots are judged to
+# be the SAME physical fly (world units; 3.0 == 0.3 mm). Two real flies -- even
+# a stacked mating pair -- are never that close over most of their 50
+# landmarks: the male's and female's leg tips and wing veins stay body-lengths
+# apart even when their thoraxes touch. The same instance read twice is ~0.
+# NOT a knob: it is deliberately not in the Stage-B gate signature, so a run
+# that changed it would be indistinguishable from one that did not. The value
+# used is recorded in mvq_meta.json.
+COLLAPSE_DIST_UNITS = 3.0
+
 
 def frame_windows(centres, ok=None, *, merge_dist_units=30.0):
     """One frame's crop windows from its per-fly 3D centres.
@@ -626,7 +636,8 @@ def _mean_or_none(a):
 
 
 def lift_masked_bout(runner, frames_iter, centres, ok, *, out_dir, model_names,
-                     merge_dist_units=30.0, force=False, progress_every=0,
+                     merge_dist_units=30.0, collapse_dist_units=COLLAPSE_DIST_UNITS,
+                     force=False, progress_every=0,
                      meta_extra=None, mask_sex_meta=None, review_male_fly=None,
                      verbose=True):
     """Lift one whole bout into `<out_dir>/fly0|fly1/{kp2d,kp3d}.npz` + sex/meta.
@@ -642,6 +653,10 @@ def lift_masked_bout(runner, frames_iter, centres, ok, *, out_dir, model_names,
         ok: (A,T) bool, which of those centres are usable.
         out_dir: the BOUT directory, `<run>/bouts/bout_<idx:05d>`.
         model_names: `cfg.model.KP_NAMES` -- the pipeline's keypoint order.
+        collapse_dist_units: a frame whose two typed slots agree to within this
+            median per-keypoint 3D distance is judged to be the SAME fly read
+            twice; the less confident slot is NaN'd and the frame flagged (see
+            `COLLAPSE_DIST_UNITS`).
         force: re-run a bout whose kp3d.npz already carries this gates string.
         mask_sex_meta / review_male_fly: what the SAM3 masks / the id-review
             manifest believe about identity. NOT used to decide anything (the
@@ -655,7 +670,8 @@ def lift_masked_bout(runner, frames_iter, centres, ok, *, out_dir, model_names,
         kp3d.npz  kp3d (T,K,3) world units, conf3d (T,K) = mean visibility
                   over cameras, conf3d_mvq_raw (T,K), kp_names (K,), gates
     and, per bout, `sex.json` (male_fly 1, method "mvq_sex_head") and
-    `mvq_meta.json`.
+    `mvq_meta.json` (which carries the per-frame `collapsed` flag, the per-fly
+    `n_collapsed` counts and `collapsed_frac`).
 
     Returns a dict of the per-frame bookkeeping (in the MODEL's own keypoint
     order, before the name permutation) plus `skipped`.
@@ -690,6 +706,8 @@ def lift_masked_bout(runner, frames_iter, centres, ok, *, out_dir, model_names,
     all_exist = np.full((T, I), np.nan, np.float32)   # every slot, for the meta
     n_windows = np.zeros(T, np.int8)
     no_centre = np.zeros(T, bool)
+    collapsed = np.zeros(T, bool)       # both typed slots read the same fly
+    n_collapsed = [0, 0]                # per fly, how often IT was the dropped one
 
     pend, batch, rows = [], [], 0
     warned_drop = False
@@ -703,6 +721,7 @@ def lift_masked_bout(runner, frames_iter, centres, ok, *, out_dir, model_names,
         out = runner.infer(concat_windows(batch))
         for t, off, nb in pend:
             all_exist[t] = out["exist"][off]
+            picks = {}
             for fi, want_sex in enumerate(want):
                 best, best_b = None, -1
                 for b in range(off, off + nb):
@@ -713,8 +732,34 @@ def lift_masked_bout(runner, frames_iter, centres, ok, *, out_dir, model_names,
                     # cannot claim the fly.
                     if r is not None and (best is None or r["exist"] > best["exist"]):
                         best, best_b = r, b
-                if best is None:
-                    continue                       # below exist_thresh -> NaN frame
+                if best is not None:                # else: NaN frame for this fly
+                    picks[fi] = (best, best_b)
+
+            # COLLAPSE GUARD. The two typed slots are chosen independently, so
+            # nothing above stops both of them reading the SAME physical fly --
+            # most likely on a merged window, which is exactly the mounting
+            # frames. Two real flies are never within `collapse_dist_units`
+            # over most of their 50 keypoints (a stacked mating pair still has
+            # ~2 body-lengths of separated leg/wing landmarks); the same
+            # instance read twice is ~0. So a frame whose two slots agree that
+            # closely keeps only the more confident one and says so, rather
+            # than shipping a duplicated fly that every jitter, confidence and
+            # residual metric would rate as excellent. Measured on Session0
+            # bout 28, whose `track_qc.json` flags 90/2007 frames as merged
+            # tracks. Ties keep the FEMALE (fly0): she is the fly this pipeline
+            # loses frames on, and on a tie the two reads are interchangeable.
+            if len(picks) == 2:
+                a3 = np.asarray(picks[0][0]["kp3d"], np.float64)
+                b3 = np.asarray(picks[1][0]["kp3d"], np.float64)
+                d = np.linalg.norm(a3 - b3, axis=-1)
+                d = d[np.isfinite(d)]
+                if d.size and float(np.median(d)) < float(collapse_dist_units):
+                    collapsed[t] = True
+                    drop = 1 if picks[1][0]["exist"] <= picks[0][0]["exist"] else 0
+                    n_collapsed[drop] += 1
+                    picks.pop(drop)
+
+            for fi, (best, best_b) in picks.items():
                 kp3d[fi, t] = best["kp3d"]
                 kp2d[fi, t] = best["kp2d"]
                 vis[fi, t] = best["vis"]
@@ -754,7 +799,8 @@ def lift_masked_bout(runner, frames_iter, centres, ok, *, out_dir, model_names,
         if progress_every and (t + 1) % int(progress_every) == 0:
             el = time.time() - t_start
             print(f"[mvq-lift] frame {t + 1}/{T}  "
-                  f"{(t + 1) / max(el, 1e-9):.1f} frames/s", flush=True)
+                  f"{(t + 1) / max(el, 1e-9):.1f} frames/s  "
+                  f"collapsed {int(collapsed.sum())}", flush=True)
     _flush()
     if n_seen != T:
         raise ValueError(f"frames_iter yielded {n_seen} frames but the centres describe "
@@ -802,12 +848,16 @@ def lift_masked_bout(runner, frames_iter, centres, ok, *, out_dir, model_names,
         "n_frames": int(T),
         "n_missing": n_missing,
         "n_no_centre": int(no_centre.sum()),
+        "collapse_dist_units": float(collapse_dist_units),
+        "n_collapsed": {"fly0": int(n_collapsed[0]), "fly1": int(n_collapsed[1])},
+        "collapsed_frac": float(collapsed.mean()) if T else 0.0,
         "mask_sex_meta": mask_sex_meta,
         "review_male_fly": review_male_fly,
         "identity_disagreements": disagree,
         "per_frame": {
             "n_windows": n_windows.astype(int).tolist(),
             "no_centre": no_centre.astype(int).tolist(),
+            "collapsed": collapsed.astype(int).tolist(),
             "slot": slot.astype(int).tolist(),
             "window": window.astype(int).tolist(),
             "exist": np.round(np.nan_to_num(exist, nan=-1.0), 4).tolist(),
@@ -821,11 +871,16 @@ def lift_masked_bout(runner, frames_iter, centres, ok, *, out_dir, model_names,
         el = time.time() - t_start
         print(f"[mvq-lift] {out_dir}: {T} frames, missing {n_missing}, "
               f"{int(no_centre.sum())} with no mask centre, "
+              f"{int(collapsed.sum())} collapsed "
+              f"({100 * (collapsed.mean() if T else 0):.1f}%, dropped "
+              f"fly0 {n_collapsed[0]} / fly1 {n_collapsed[1]}), "
               f"{T / max(el, 1e-9):.1f} frames/s", flush=True)
     return {"skipped": False, "out_dir": out_dir, "gates": gates_string,
             "kp3d_mvq": kp3d, "kp2d_mvq": kp2d, "vis": vis, "conf_raw": conf_raw,
             "exist": exist, "sex_prob": sex_prob, "slot": slot, "window": window,
             "no_centre": no_centre, "n_windows": n_windows,
+            "collapsed": collapsed,
+            "n_collapsed": {"fly0": int(n_collapsed[0]), "fly1": int(n_collapsed[1])},
             "n_missing": n_missing, "sex": sex, "meta": meta}
 
 
