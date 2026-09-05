@@ -491,3 +491,47 @@ def test_mvq_lift_skip_requires_the_lift_to_have_actually_happened(tmp_path, cap
     assert "mvq lift: skipped (2 bouts already lifted" in cap.out
     assert "--- mvq_lift script" not in cap.out
     assert cap.out.count("pipeline.lifter=mvq") >= 2
+
+
+# ------------------------------------------------- run_bout viz-import recovery
+def test_import_keypoint_groups_recovers_when_pythonpath_holds_the_repo_root():
+    """Session0 bout 28 died at the viz stage AFTER a 36-minute STAC solve
+    (job 39606799): `scripts/` is sys.path[0] under a direct invocation, so
+    `import viz` binds the unrelated `scripts/viz` package, and the recovery
+    path's `if _repo not in sys.path` skipped its insert because the mvq
+    sbatch text ALREADY put the repo root on sys.path via
+    `PYTHONPATH=third_party/jarvis_jax:.` -- just behind `scripts/`. The retry
+    then resolved `viz` to `scripts/viz` a second time and raised again.
+
+    Run in a subprocess reproducing exactly that layout (repo root present but
+    behind scripts/), because the fix is about interpreter state that a
+    same-process test cannot honestly recreate.
+    """
+    import subprocess
+    src = (
+        "import os, sys\n"
+        f"repo = {str(REPO)!r}\n"
+        # the failing layout: scripts/ first, repo root present but behind it
+        "sys.path.insert(0, os.path.join(repo, 'scripts'))\n"
+        "assert repo in sys.path, sys.path\n"
+        "import ast\n"
+        "src = open(os.path.join(repo, 'scripts', 'run_bout.py')).read()\n"
+        "fn = next(n for n in ast.parse(src).body\n"
+        "          if isinstance(n, ast.FunctionDef) and n.name == 'import_keypoint_groups')\n"
+        "g = {'os': os, 'sys': sys, '__file__': os.path.join(repo, 'scripts', 'run_bout.py')}\n"
+        "exec(compile(ast.Module(body=[fn], type_ignores=[]), '<rb>', 'exec'), g)\n"
+        # the poisoned binding the real failure had by this point
+        "import viz\n"
+        "assert not hasattr(viz, 'core')\n"
+        "kg = g['import_keypoint_groups']()\n"
+        "out = kg(['Scutellum', 'EyeL', 'EyeR', 'Abd_tip', 'T1L_FeTi'])\n"
+        "assert set(out) >= {'head', 'thorax', 'legs', 'abdomen'}, out\n"
+        "print('OK')\n"
+    )
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join(
+        [str(REPO / "third_party" / "jarvis_jax"), str(REPO)])
+    r = subprocess.run([__import__("sys").executable, "-c", src], env=env,
+                       capture_output=True, text=True, cwd=str(REPO))
+    assert r.returncode == 0, f"stdout={r.stdout}\nstderr={r.stderr}"
+    assert "OK" in r.stdout

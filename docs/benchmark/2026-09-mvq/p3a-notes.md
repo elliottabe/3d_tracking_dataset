@@ -700,3 +700,177 @@ observations sit on the fitted markers, the ViTPose fit has floating observation
 `sidebyside_still.png` (mesh pose matches the frame in all three rig views; the male's wing extension is
 reproduced by the fit). The female's fit is the one that improved most (7x smoother), consistent with the P2
 finding that the female is the hard fly.
+
+## Masked-bout mvq campaign (P3a final)
+
+Task 7 of the mask-free front end, but it is not mask-free: it is the route that takes the 160
+courtship bouts SAM3 has already segmented and replaces the pipeline's ViTPose+DLT front half
+(Stages A and B) with the P3a mvq lifter, leaving the keypoint filter, body-scale precompute, STAC
+IK, polish and viz stages untouched. Checkpoint
+`/gscratch/portia/eabe/data/Johnson_lab/jax_mvq_runs/mvq_t1_b16_p3a_20260904/final` (the 10000-step
+save; `configs/mvq/p3a.yaml`).
+
+### Design
+
+* **Windows.** Per frame, each fly's SAM3 mask centroids are triangulated (>= 2 valid views) and the
+  two centres become ONE 448-px multi-view crop when they are within 30 units (3 mm) -- the same
+  `coarse_centres.plan_windows` rule the coarse pass uses -- else one crop each. A frame with no
+  usable centre is NaN for both flies and is counted as `no_centre` in `mvq_meta.json`. Inference is
+  UNPROMPTED (`prompt_on=None`); the masks place the crop and nothing else.
+* **Typed slots, not mask slots.** `fly0` is the model's FEMALE typed slot (slot 1) and `fly1` its
+  MALE typed slot (slot 2), read per frame from the window with the highest existence for THAT slot.
+  `exist < 0.5` NaNs that fly's frame -- there is no fallback to an untyped slot, so a frame written
+  as "the female" is never quietly some other slot. This is the canonical identity
+  `sexing.canonicalize_bout` would enforce, so the lifter writes the bout's `sex.json` itself
+  (`male_fly: 1`, `method: "mvq_sex_head"`, per-fly mean `sex_prob`/`exist`) and `canonicalize_bout`
+  now treats that method as authoritative -- no swap, no wing-song CV -- below a HUMAN review only.
+  A mask `sex_meta` or id-review entry that disagrees is logged in `mvq_meta.json`, never acted on.
+* **Confidences.** `conf3d` = the mean per-view visibility sigmoid over cameras and `conf` (2D) = the
+  per-view visibility, because mvq's own `conf` head is a D4RT score of ~0.02-0.2 that the pipeline's
+  0.3-0.5 gates would read as garbage; the raw head is kept beside them as `conf3d_mvq_raw`.
+* **Gates string.** `{"checkpoint": ".../mvq_t1_b16_p3a_20260904/final", "exist_thresh": 0.5,
+  "lifter": "mvq", "sha256": "7608843ecbd1a10c", "step": "final"}` (sorted-key JSON) is stamped into
+  every kp3d.npz and is byte-equal to what `run_bout.py::stage_b_gate_signature` computes for
+  `pipeline.lifter=mvq mvq=p3a` -- so Stage B accepts these files WITHOUT
+  `pipeline.allow_stale_kp3d`, and refuses them the moment the config points at other weights. The
+  same string makes the lift idempotent.
+* **Keypoint/camera order.** The written axis is `cfg.model.KP_NAMES`, permuted BY NAME from the
+  model's detector order, asserted equal to KP_NAMES and checked against the rigid EyeL-EyeR spacing
+  before anything is written. The camera axis is the canonical `cfg.recording.cameras` order, which
+  the mask npz is permuted into by name -- on Session0 bout 28 the npz order really is different
+  (`['Cam2012853','Cam2012862','Cam2012855','Cam2012857','Cam2012861','Cam2012630','Cam2012631']`,
+  permutation `[5,6,0,2,3,4,1]`), so this is load-bearing, not ceremonial.
+* **Out root** `<processed>/courtship/<Session>/<recording>/pose_mvq_p3a/`. Nothing is written into
+  `pose/` (the ViTPose+DLT baseline), `pose_mvq/` (the bout-28 render npz) or `pose_mvq_ik/` (the
+  1500-frame bout-28 IK test).
+* **Chain order.** The lift array runs BEFORE precompute, so `scale.json` pools its rigid-segment
+  body scale over the WHOLE recording instead of the single bout precompute seeds -- the
+  scale-from-first-bout defect, measured 15.5 % low on Session0. The lifter's `sex.json` is also what
+  makes `estimate_recording_scale._determine_identity` return `canonical`, so `scale_by_fly` is
+  populated and `scaling.allow_shared_scale` can stay false.
+
+### Window plan on real data (Session0 bout 28, CPU pre-check)
+
+`OutFiles/mvq_task7_smoke/precheck_bout28.py`: 2007 frames, both flies have a usable 3D mask centre
+in ALL of them, so no frame is dropped for want of a centre. The two flies are a median 3.71 mm
+apart (p10 3.06, p90 4.24), so only 137/2007 frames (6.8 %) merge into one crop and 1870 plan two --
+3877 windows in total against the 4014 the old one-window-per-fly path ran. The merge is therefore a
+small saving here, not the point; the point is that on the frames where the flies DO touch (the
+mounting frames, which is where cross-fly mixing happens) the model sees both animals in one crop
+and can use its two-instance decoder rather than being asked to pick a fly out of a crop centred
+between them.
+
+### Smoke test: Session0 bout 28 (job 39606799, one A40, 2026-09-04)
+
+`OutFiles/mvq_task7_smoke/smoke_bout28.sh` -- lift the whole bout, rebuild a SAME-CHECKPOINT
+reference with the pre-existing `scripts/viz/mvq_bout_video.py --no-render` path, compare, then run
+`scripts/run_bout.py ... pipeline.lifter=mvq mvq=p3a` on the result.
+
+**Lift.** 2007 frames in 453 s (4.4 frames/s end to end, 4.7 steady-state; 3877 windows). Missing
+frames fly0 121, fly1 0; 0 frames with no mask centre. `sex.json`: `male_fly 1`, `method
+mvq_sex_head`, `confidence high` -- mean P(female) 0.965 (fly0) vs 0.0017 (fly1), mean existence
+0.948 / 0.998 -- and no `identity_disagreements`, since the masks' human review also says male =
+slot 1. Written keypoint order is `KP_NAMES` (`['Scutellum','WingL_base','WingR_base',...]`) and the
+observed EyeL-EyeR span is 0.485 mm (fly0) / 0.427 mm (fly1), which matches the 4.86-unit observed
+spacing recorded for the step-7000 run above.
+
+**ARM 1 -- new lifter vs the old path, SAME checkpoint, whole bout** (this is the acceptance gate;
+the brief's threshold is a median per-keypoint 3D difference < 0.03 mm on frames both call finite):
+
+| fly | frames | median | p90 | max | NaN frac new / ref |
+|---|---|---|---|---|---|
+| fly0 female | 2007 | **0.0 mm** | 0.0 mm | 6.18 mm | 0.060 / 0.041 |
+| fly1 male | 2007 | **0.0 mm** | 0.0 mm | 4.55 mm | 0.000 / 0.000 |
+
+Broken out by what the two code paths actually do differently:
+
+| subset | fly0 median | fly1 median |
+|---|---|---|
+| 1870 two-window frames (crops IDENTICAL) | 0.0 mm | 0.0 mm |
+| 137 merged frames (crop moved to the midpoint) | 0.152 mm | 0.081 mm |
+
+So on every frame where the two paths place the same crop the output is bit-identical, and the merge
+moves a keypoint by ~0.1 mm -- a tenth of a leg segment, and the intended behaviour (a crop centred
+between two touching flies is what lets the two-instance decoder see both).
+
+The two non-zero *maxima* on the identical-crop subset are the OTHER deliberate difference: the typed
+slot is taken from whichever window has the highest existence for that slot, so on 46/1870 frames
+(fly0) and 21/1870 (fly1) -- 2.5 % and 1.1 % -- the winner is the OTHER fly's crop, and in ALL of
+those frames the chosen window index is indeed the other fly's (checked). The NaN fractions move for
+the matching reason: the old path falls back to an untyped slot when the typed one is weak (190
+female frames did that), the new one refuses and NaNs; 69 of those 190 are recovered by the
+highest-existence rule and 121 stay NaN. Stricter by design.
+
+**ARM 2 -- context, NOT a gate.** The stored `pose_mvq/.../unprompted` arrays were produced by step
+7000, which has since been rotated out of the run's `ckpt/`; the campaign uses `final/` (10000
+steps). Different weights, so this is a model delta: median 0.011 mm (fly0) / 0.005 mm (fly1), p90
+0.262 / 0.016 mm. The two checkpoints agree closely on this bout -- worth knowing before reading the
+P3a-vs-P4 comparisons as if `final` were a different model.
+
+**Pipeline continuation (`run_bout.py ... pipeline.lifter=mvq mvq=p3a`).** Stages A and B were
+skipped -- the log contains none of their prints (`gray-fill`, `view-gate`, `kp-mask-agree`,
+`wing-collapse`, `rigid-repair`, `mask-coverage`: 0 lines) and the Stage-B gate check passed with no
+`allow_stale_kp3d`. `sex.json` was left exactly as the lifter wrote it (`male_fly 1`, `applied_swap
+false`), which is also what the human ID review for this bout says, so no fly dirs moved. Body scale
+came out of the pooled path the lifter's sex.json unlocks:
+
+    [scale] pooled over 2 bout-flies -> 0.011808  identity=canonical
+            scale_by_fly={'0': 0.011647, '1': 0.011968}
+
+(the recording's pooled reference is 0.011738, and `scaling.allow_shared_scale` stayed false).
+
+| fly | LOO reproj median px | IK fitted / measured px | ratio | mesh-mask IoU (hard) |
+|---|---|---|---|---|
+| fly0 female | 0.97 (1884 frames) | 8.11 / 1.11 | 7.3 | 0.029 |
+| fly1 male | 0.68 (2007 frames) | 3.65 / 0.78 | 4.7 | 0.025 |
+
+For scale: the ViTPose+DLT arm on this bout measured 6.26 px (female) / 2.65 px (male) LOO, so the
+observations are 4-6x better; the IK is still the bottleneck (fitted/measured 7.3x and 4.7x), exactly
+the P2 conclusion. These numbers cover the WHOLE 2007-frame bout, including the tail after ~1650
+where the female is at the arena edge, so they are worse than the 1500-frame step-7000 run recorded
+above (4.5/0.94 F, 3.6/0.88 M) and are not directly comparable to it.
+
+`track_qc.json` reports the two tracks collapsing on 90/2007 frames (4.8 %): min separation 5.34 vs a
+22.4-unit body length. This is a QC signal about the INPUT (the mounting frames) that the typed-slot
+route does not remove -- both typed slots can land on the same animal when the flies are on top of
+each other -- and it should be checked against the DLT arm before the campaign's outputs are used
+for anything downstream.
+
+**Figure read back** (`pose_mvq_p3a/bouts/bout_00028/fly0/sidebyside_still.png`, three rig views,
+opened with the Read tool). Expectation stated before looking: the 2D skeleton should sit on the
+FEMALE inside her SAM mask in all three views with nothing on the other fly, and the MuJoCo render
+should reproduce her pose. What it shows: yes for the body and legs -- head, thorax, abdomen and six
+leg chains all inside the blue mask contour in the left/top/right views, the second fly (visible at
+the top-left of two panels) untouched, and the rendered mesh's orientation matching the video in each
+view. The weakest part is the WINGS: the render splays them wider than the video's wing outline
+suggests in the two oblique views, with the magenta wing markers out at the spread tips. That is a
+wing-fit question for the IK (cf. the wing DOF convention notes), not evidence about the lifter, but
+it should be compared against the DLT arm before the campaign is trusted on wing kinematics.
+
+**Wall clock** (Session0 bout 28, 2007 frames, 2 flies):
+
+| stage | time | where |
+|---|---|---|
+| mvq lift (3877 windows) | 453 s (4.4 frames/s) | job 39606799, one A40 |
+| same-checkpoint reference via the old path | ~11 min | job 39606799 |
+| `run_bout.py` up to the viz crash (both STAC solves + polish for fly0) | 36 min | job 39606799 |
+| resumed QC + viz for fly0 and all of fly1 | 20 min | local, `CUDA_VISIBLE_DEVICES=7` |
+
+Job `39606785` was an earlier submission of the same script that died in 2 s: its driver lived in the
+node-local session scratchpad under `/tmp`, which does not exist on a compute node. The script now
+lives in `OutFiles/mvq_task7_smoke/` on shared storage.
+
+### Running the campaign
+
+    # inspect every sbatch command first
+    scripts/slurm/mvq_p3a_campaign.sh --dry-run
+
+    # pure queue mode: 11 chains, each mvq-lift array -> precompute -> IK array -> aggregate
+    scripts/slurm/mvq_p3a_campaign.sh
+
+    # lift on an interactive node (4 workers, one GPU each) and queue only the rest
+    scripts/slurm/mvq_p3a_campaign.sh --local-gpus 4
+
+`--only <timestamp>` restricts it to one recording. The lift is idempotent on the gates string, so a
+re-run costs nothing for bouts already done, and `--local-gpus` refuses to start while a training
+process matching `--guard-pattern` is alive.

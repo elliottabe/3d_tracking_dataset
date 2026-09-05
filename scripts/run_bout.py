@@ -368,6 +368,44 @@ def _import_segment_calibration():
     return optimize_segment_scales, build_segment_map
 
 
+def import_keypoint_groups():
+    """`viz.core.colors.keypoint_groups`, importable however this file was run.
+
+    `scripts/viz/` is an unrelated package of one-off viz scripts with no
+    `core` submodule. When run_bout.py is invoked directly, `sys.path[0]` is
+    `scripts/`, so a plain `import viz` binds THAT package into
+    `sys.modules['viz']` as an empty namespace package and `viz.core` does not
+    exist. Recovering needs BOTH halves:
+
+      * the repo root moved to the FRONT of sys.path, unconditionally. The
+        earlier `if _repo not in sys.path: insert(0, ...)` looked equivalent
+        and was not: the mvq lift/IK sbatch text runs run_bout.py under
+        `PYTHONPATH=third_party/jarvis_jax:.`, so the repo root is already on
+        sys.path but BEHIND `scripts/` -- the membership test skipped the
+        insert, the retry re-resolved `viz` to `scripts/viz` again, and
+        Session0 bout 28 died at the viz stage AFTER a completed 36-minute
+        STAC solve (job 39606799, 2026-09-04).
+      * the poisoned `viz*` entries dropped from sys.modules, since a cached
+        binding is not revisited by a later import.
+
+    Returns the function; raises ModuleNotFoundError if the repo really has no
+    top-level `viz` package.
+    """
+    try:
+        from viz.core.colors import keypoint_groups
+        return keypoint_groups
+    except ModuleNotFoundError:
+        pass
+    _repo = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
+    sys.path = [p for p in sys.path if os.path.abspath(p or ".") != _repo]
+    sys.path.insert(0, _repo)
+    for _m in list(sys.modules):
+        if _m == "viz" or _m.startswith("viz."):
+            del sys.modules[_m]
+    from viz.core.colors import keypoint_groups
+    return keypoint_groups
+
+
 def stage_b_gate_signature(cfg):
     """A stable string naming every setting that changes what kp3d.npz contains.
 
@@ -2308,26 +2346,7 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
             # (qc.py) deliberately has no dependency on the top-level `viz`
             # package, so that split is built HERE and passed in as
             # `group_defs`, not inside qc.py.
-            try:
-                from viz.core.colors import keypoint_groups
-            except ModuleNotFoundError:  # direct invocation: sys.path[0] is scripts/, not repo root
-                _repo = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
-                if _repo not in sys.path:
-                    sys.path.insert(0, _repo)
-                # scripts/viz/ (unrelated one-off viz scripts, no `core`
-                # submodule) sits on sys.path AHEAD of the repo root in this
-                # direct-invocation case (sys.path[0] == scripts/) and gets
-                # bound into sys.modules['viz'] as an empty namespace package
-                # by the failing attempt above; inserting the repo root
-                # afterwards does not retroactively fix that already-cached
-                # binding, so the retry below would fail identically
-                # (ModuleNotFoundError: No module named 'viz.core') without
-                # dropping it first and letting Python re-resolve `viz` fresh.
-                for _m in list(sys.modules):
-                    if _m == "viz" or _m.startswith("viz."):
-                        del sys.modules[_m]
-                from viz.core.colors import keypoint_groups
-            _kg = keypoint_groups(kp_names)
+            _kg = import_keypoint_groups()(kp_names)
             _wings_idx = [i for i in _kg["thorax"] if kp_names[i].startswith("Wing")]
             group_defs = {
                 "trunk": _kg["head"] + [i for i in _kg["thorax"] if i not in _wings_idx],
