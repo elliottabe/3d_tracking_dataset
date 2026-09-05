@@ -217,10 +217,16 @@ python scripts/coarse_pass_mvq.py \
 
 `--resume` is safe to repeat: the pass writes a complete, gates-readable
 `coarse_tracks.partial.npz` every `--partial-every` (default 2000) coarse
-frames and continues after its last frame, so the run can be split across
-several foreground calls without redoing work. The floor plane and every
-feature are recomputed over the whole concatenated track on each write, so a
-resumed run and a single-shot run produce the same file.
+frames and continues after its last frame (restoring the last detected/reused
+window centres, `last_centres`, so a blank frame right after the resume
+boundary still reuses them instead of going NaN), so the run can be split
+across several foreground calls without redoing work. The floor plane and
+every feature are recomputed over the whole concatenated track on each write,
+so a resumed run and a single-shot run have IDENTICAL FRAME COVERAGE AND
+CENTRE REUSE -- not a byte-identical file: earlier chunks' `kp3d` is read back
+from its `float16` on-disk storage, so `wing_angle_deg` (and anything else
+derived from `kp3d`) on a resumed chunk is recomputed from that f16-quantised
+value, an inherent ~0.05 mm rounding difference from a true single-shot run.
 
 ### Deviation: the floor-plane sign rule (figure-gated)
 
@@ -251,12 +257,30 @@ generating script + npz): `figures/2026-09-04-mvq-coarse-floor/floor_sign_ab.png
 What is kept: the least-squares fit over the first 2000 finite centroids, and
 positive fly heights. What is fixed: "up" is the direction the cloud is
 bottom-heavy in (mean along the normal above the median), and the offset sits
-at the 1st percentile of the along-normal coordinate, so the plane is the
+at the 3rd percentile of the along-normal coordinate, so the plane is the
 floor the flies stand on rather than their average altitude. Guarded by
 `test_fit_floor_recovers_a_known_tilted_plane_with_positive_heights`, which
 also checks the mirrored arena.
 
-### Two other things worth knowing before §5 (bout detection)
+**Fix round 1 robustness addendum.** Two gaps in the first cut: (1) every
+finite centroid was fit with no confidence gate, so low-`exist` rows (a typed
+slot barely firing, or firing on background) counted as real geometry; (2) a
+single total-least-squares SVD over floor+wall points together tilts the
+normal toward the wall in proportion to the wall's point FRACTION (every
+point gets equal SVD weight, wall points are the ones farthest from
+co-planar), so the fit's accuracy was one occlusion-heavy recording away from
+degrading. Fixed: `fit_floor` now takes an `exist` argument and fits only
+`exist >= 0.5` centroids (`coarse_pass_mvq.py` passes `tr["exist"]`); after
+the first SVD, a SECOND SVD refits the normal on only the bottom 50 % of
+points by that first pass's height, which is dominated by the true floor
+regardless of the wall fraction; the offset moved from the 1st to the 3rd
+percentile of the (refit) heights, a little less exposed to a single
+below-floor outlier. Guarded by
+`test_fit_floor_ignores_low_exist_points_and_refits_normal_on_lowest_quantile`
+(30 % wall points plus a handful of `exist=0.1` sub-floor outliers; normal
+recovered within 2 deg, offset within 1 unit of the true floor).
+
+### Signals that change meaning in an mvq file, before §5 (bout detection)
 
 * **`area` is all-NaN in an mvq file** (there are no masks). The SAM3 gates'
   area-ratio test therefore can never pass on one -- the file OPENS and every
@@ -264,6 +288,20 @@ also checks the mirrored arena.
   asserted in the test so it is discovered here and not as a mysteriously
   empty CSV. §5's detector uses the mvq features (`dist`, `wing_angle_deg`,
   `speed`, `heading_deg`, `height`, `exist`) instead.
+* **`valid`/`n_valid_cams` mean "the reprojected 3D centroid lands inside
+  camera c's image", not "camera c saw the fly".** There is exactly one 3D
+  point (the typed slot's keypoint mean) reprojected to every camera -- no
+  per-camera detection or mask -- so `n_valid_cams >= 3` is NOT an occlusion
+  signal here the way it can be read off a SAM3 file's mask-derived `valid`.
+  A camera can show `valid=True` while the fly is fully behind a wall in that
+  view, as long as the 3D point still projects inside the frame.
+* **`in_frame` is 0/1 ONLY.** SAM3's third state, `IN_FRAME_UNKNOWN = 2`
+  ("< 2 other valid cameras -- position not determinable", `sam3_driver.py`),
+  is collapsed to `0` (`IN_FRAME_NO`) in an mvq file, because there is one 3D
+  point and no notion of "not enough OTHER cameras" to be unsure against. The
+  fine pass's gap-repair idiom, which runs on runs of `IN_FRAME_YES`/
+  `IN_FRAME_NO` codes, must NOT be applied unchanged to an mvq file -- it will
+  read every out-of-frame case as a confident "no", never "unknown".
 * **`heading_deg` is measured from the male's ANTERIOR axis** (Abd_tip ->
   Scutellum), so 0 deg = the male is pointed straight at the female. The wing
   angle uses the posterior axis (Scutellum -> Abd_tip) because that is the

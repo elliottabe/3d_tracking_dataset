@@ -43,9 +43,17 @@ RESUME. The pass runs in chunks of `--partial-every` coarse frames; after
 each chunk the accumulated tracks are written to
 `<out>.partial.npz` (a COMPLETE, gates-readable file, just shorter). With
 `--resume`, an existing partial (or a complete `<out>`) is loaded and the
-pass continues at the frame after its last one. The floor plane and all the
-features are recomputed over the whole concatenated track at the end, so a
-resumed run and a single-shot run produce the same file.
+pass continues at the frame after its last one, restoring the last
+CENTRE_DETECTED/REUSED window centres (`last_centres`) so a blank frame right
+after the resume boundary still REUSES them (`centre_source == 1`) instead of
+going NaN as if there were no history. The floor plane and all the features
+are recomputed over the whole concatenated track at the end, so a resumed run
+and a single-shot run have IDENTICAL FRAME COVERAGE AND CENTRE REUSE -- not a
+byte-identical file: `load_partial` reads the earlier chunks' `kp3d` back from
+the npz's `float16` storage, so `wing_angle_deg` (and anything else derived
+from `kp3d`) on a resumed chunk is recomputed from that f16-quantised value
+rather than the original f32 model output. This is an inherent, harmless
+(~0.05 mm) rounding difference from a true single-shot run, not a resume bug.
 """
 import argparse
 import json
@@ -140,12 +148,45 @@ class SlotReader:
             cap.release()
 
 
-def load_partial(path, num_animals):
+def load_partial(path, num_animals, *, cameras=None, calib_dir=None, checkpoint=None,
+                 step_label=None, stride=None, start=None, fallback_wh=None):
     """Read a previously written coarse_tracks(.partial).npz back into a
     `coarse_pass`-shaped tracks dict so the run can continue from it.
 
     `kp3d` comes back as float16 (that is what the file stores); it is widened
     to float32 here so a resumed run's array dtypes match a fresh one's.
+    `last_centres` is restored (NaN-unpadded) so a blank frame right after the
+    resume boundary still REUSES it instead of going NaN as if there were no
+    history (see `coarse_track.unpad_last_centres`).
+
+    Beyond the fly-count check, every keyword below (when given, i.e. not
+    `None`) must match the value the file was WRITTEN with, or this raises --
+    a `--resume` with a different `--cameras`, `--calib-dir`, `--run`/`--step`,
+    `--stride` or `--start` would otherwise silently splice two different
+    geometries into one file (different camera order, different calibration,
+    a different checkpoint's keypoint semantics, a different sample grid).
+    `concat_tracks`'s own `kp_names`/frame-size check catches a DIFFERENT
+    failure mode (a bad splice that already happened in memory, within one
+    process); this one catches the input to a splice across process
+    boundaries, before it happens.
+
+    Args:
+        cameras: this run's camera list (canonical order).
+        calib_dir: this run's calibration directory.
+        checkpoint: this run's mvq run dir (`args.run`, any form -- compared
+            after `os.path.abspath`).
+        step_label: this run's mvq step ("final" or an int step), matching
+            `MVQRunner.step_label`/the meta's `mvq_step`.
+        stride, start: this run's `--stride`/`--start`.
+        fallback_wh: `(W, H)` to use if the sibling `.meta.json` is missing
+            or lacks `W`/`H` (MINOR 6: a kill between the npz write and the
+            meta write, on an OLDER file written before meta-first ordering,
+            could leave exactly that).
+
+    Raises:
+        ValueError: the fly count, or any given field above, disagrees with
+            what the file was written with -- named in the message so the
+            fix is obvious from the error alone.
     """
     with np.load(path, allow_pickle=True) as z:
         tr = {"frame": np.asarray(z["coarse_frame"], np.int64),
@@ -157,14 +198,33 @@ def load_partial(path, num_animals):
               "centre_source": np.asarray(z["centre_source"], np.int8),
               "n_windows": np.asarray(z["n_windows"], np.int8),
               "kp_names": [str(n) for n in z["kp_names"]]}
+        from jarvis_jax.tracking.coarse_track import unpad_last_centres
+        tr["last_centres"] = (unpad_last_centres(z["last_centres"])
+                              if "last_centres" in z.files else None)
     meta_path = path.rsplit(".npz", 1)[0] + ".meta.json"
     meta = json.load(open(meta_path)) if os.path.isfile(meta_path) else {}
-    tr["W"], tr["H"] = meta.get("W"), meta.get("H")
-    tr["last_centres"] = None            # the reuse chain does not survive a restart
+    tr["W"] = meta.get("W", (fallback_wh[0] if fallback_wh else None))
+    tr["H"] = meta.get("H", (fallback_wh[1] if fallback_wh else None))
     tr["floor"] = None
     if tr["exist"].shape[0] != num_animals:
         raise ValueError(f"{path} has {tr['exist'].shape[0]} flies, --num-animals is "
                          f"{num_animals}; refusing to append rows of a different shape")
+
+    def _refuse(field, got, want):
+        if got is not None and want is not None and got != want:
+            raise ValueError(f"{path} was written with {field}={got!r}, but this run has "
+                             f"{field}={want!r}; refusing to resume -- a --resume with a "
+                             f"different {field} would splice two different geometries into "
+                             f"one file")
+
+    _refuse("cameras", meta.get("cameras"), list(cameras) if cameras is not None else None)
+    _refuse("stride", meta.get("stride"), int(stride) if stride is not None else None)
+    _refuse("start", meta.get("start"), int(start) if start is not None else None)
+    _refuse("calib_dir", meta.get("calib_dir"),
+           os.path.abspath(str(calib_dir)) if calib_dir is not None else None)
+    _refuse("checkpoint", meta.get("checkpoint"),
+           os.path.abspath(str(checkpoint)) if checkpoint is not None else None)
+    _refuse("mvq_step", meta.get("mvq_step"), step_label)
     return tr
 
 
@@ -211,13 +271,18 @@ def main():
     end = int(args.end) if args.end is not None else n_frames
     all_frames = list(range(int(args.start), int(end), int(args.stride)))
 
+    step_label = "final" if args.step is None else int(args.step)
+
     out = args.out
     partial = out.rsplit(".npz", 1)[0] + ".partial.npz"
     done = None
     if args.resume:
         src = partial if os.path.isfile(partial) else (out if os.path.isfile(out) else None)
         if src:
-            done = load_partial(src, args.num_animals)
+            done = load_partial(src, args.num_animals, cameras=cameras, calib_dir=calib_dir,
+                                checkpoint=args.run, step_label=step_label,
+                                stride=args.stride, start=args.start,
+                                fallback_wh=(W, H))
             last = int(done["frame"][-1])
             all_frames = [f for f in all_frames if f > last]
             print(f"[resume] {src}: {done['frame'].shape[0]} coarse frames "
@@ -255,7 +320,12 @@ def main():
                   f"{rate:.2f} frames/s  eta {todo / max(rate, 1e-9) / 60:.1f} min", flush=True)
 
     try:
-        last_centres = None
+        # IMPORTANT 3: on a fresh run there is no history; on --resume, restore
+        # the LAST written chunk's centres (`load_partial`'s `last_centres`) so
+        # a blank frame right after the resume boundary still REUSES them
+        # (`centre_source == 1`) instead of reading as no-history NaN, which a
+        # single-shot run would not have produced.
+        last_centres = None if done is None else done["last_centres"]
         for c0 in range(0, len(all_frames), args.partial_every):
             block = all_frames[c0:c0 + args.partial_every]
             tr = coarse_pass(reader, runner, detector, frames=block,
@@ -266,13 +336,15 @@ def main():
                              init_centres=last_centres)
             last_centres = tr["last_centres"]
             chunks.append(tr)
-            _write(partial, chunks, cameras, runner, args, W, H, t_load, t_pass, final=False)
+            _write(partial, chunks, cameras, runner, args, W, H, t_load, t_pass,
+                   calib_dir=calib_dir, final=False)
             print(f"[coarse] partial written: {partial} "
                   f"({sum(int(c['frame'].shape[0]) for c in chunks)} coarse frames)", flush=True)
     finally:
         reader.close()
 
-    meta = _write(out, chunks, cameras, runner, args, W, H, t_load, t_pass, final=True)
+    meta = _write(out, chunks, cameras, runner, args, W, H, t_load, t_pass,
+                  calib_dir=calib_dir, final=True)
     if os.path.isfile(partial):
         os.remove(partial)
         pm = partial.rsplit(".npz", 1)[0] + ".meta.json"
@@ -285,14 +357,14 @@ def main():
           f"frac_trackable {meta['frac_trackable']}\n[coarse] -> {out}", flush=True)
 
 
-def _write(path, chunks, cameras, runner, args, W, H, t_load, t_pass, *, final):
+def _write(path, chunks, cameras, runner, args, W, H, t_load, t_pass, *, calib_dir, final):
     from jarvis_jax.tracking.coarse_track import (coarse_features, concat_tracks, fit_floor,
                                                   write_coarse_tracks)
     tr = concat_tracks(chunks)
     tr["W"], tr["H"] = tr.get("W") or W, tr.get("H") or H
     try:
-        floor = fit_floor(tr["centroid"])
-    except ValueError as e:                 # no finite centroid yet (early partial)
+        floor = fit_floor(tr["centroid"], exist=tr["exist"])
+    except ValueError as e:                 # no finite, trackable centroid yet (early partial)
         print(f"[coarse] floor not fit ({e}); heights are NaN in this write", flush=True)
         floor = None
     tr["floor"] = floor
@@ -303,6 +375,7 @@ def _write(path, chunks, cameras, runner, args, W, H, t_load, t_pass, *, final):
     else:
         feats = coarse_features(tr, tr["kp_names"], floor=floor)
     extra = {"checkpoint": runner.checkpoint, "mvq_step": runner.step_label,
+             "calib_dir": os.path.abspath(str(calib_dir)),
              "exist_thresh": runner.exist_thresh, "centerdetect": args.centerdetect,
              "min_score": args.min_score, "min_views": args.min_views,
              "max_resid_px": args.max_resid_px, "merge_dist_units": args.merge_dist_units,

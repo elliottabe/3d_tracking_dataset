@@ -184,6 +184,25 @@ def test_single_fly_recording_reads_the_untyped_slot(tiny):
     assert set(np.unique(tr["slot"])) <= {-1, 1, 2}
 
 
+def test_more_windows_than_batch_warns_once_and_drops_the_extra(tiny):
+    """`runner.batch` planned windows silently truncated used to drop data
+    with no signal at all. Two well-separated true centres (40 units apart,
+    over `merge_dist_units=30.0`) always plan 2 windows; with `batch=1` the
+    second is always dropped -- must warn, naming the frame, exactly ONCE
+    across the whole run (not once per frame)."""
+    from jarvis_jax.tracking.coarse_track import coarse_pass
+    root, _ = tiny
+    r = _runner(tiny, batch=1)
+    reader = FixtureReader(root, CAMS)
+    det = FakeDetector(r.cam_mats)
+    with pytest.warns(RuntimeWarning) as record:
+        tr = coarse_pass(reader, r, det, frames=[0, 1, 2], num_animals=2)
+    msgs = [str(w.message) for w in record if issubclass(w.category, RuntimeWarning)]
+    assert len(msgs) == 1, f"expected exactly one warning, got {msgs}"
+    assert "frame 0" in msgs[0] and "1 window" in msgs[0]
+    assert list(tr["n_windows"]) == [1, 1, 1]        # truncated to batch=1 every frame
+
+
 # --------------------------------------------------------------------------
 # features / floor -- pure numpy, hand-built geometry with known answers
 # --------------------------------------------------------------------------
@@ -227,6 +246,51 @@ def _arena_cloud(n_true, *, n=2000, seed=0):
     on_plane = np.stack([xy[:, 0], xy[:, 1],
                          -(n_true[0] * xy[:, 0] + n_true[1] * xy[:, 1]) / n_true[2]], 1)
     return on_plane + height[:, None] * n_true, height
+
+
+def test_fit_floor_ignores_low_exist_points_and_refits_normal_on_lowest_quantile():
+    """30 % wall points (legit detections, high `exist`) tilt a naive
+    single-pass total-least-squares normal toward the wall (every point gets
+    equal SVD weight regardless of whether it is "the floor"); a few
+    physically-impossible sub-floor points at `exist=0.1` (not real
+    detections -- the typed slot barely fired) would drag the offset below
+    the true floor if not gated out. `fit_floor(..., exist=...)` must recover
+    the true normal within 2 deg and place the TRUE floor within 1 unit of
+    height 0 despite both."""
+    from jarvis_jax.tracking.coarse_track import fit_floor
+    nrm = np.array([0.05, -0.1, 1.0]); nrm /= np.linalg.norm(nrm)
+    rng = np.random.default_rng(7)
+    n = 2000
+    height = np.where(rng.random(n) < 0.7, rng.uniform(0.0, 3.0, n), rng.uniform(10.0, 40.0, n))
+    xy = rng.uniform(-200, 200, size=(n, 2))
+    on_plane = np.stack([xy[:, 0], xy[:, 1],
+                         -(nrm[0] * xy[:, 0] + nrm[1] * xy[:, 1]) / nrm[2]], 1)
+    pts = on_plane + height[:, None] * nrm
+    exist = np.full(n, 0.9, np.float32)
+
+    # A FEW impossible sub-floor points, LOW exist -- must be gated out, not
+    # treated as real geometry.
+    n_bad = 12
+    bad_xy = rng.uniform(-200, 200, size=(n_bad, 2))
+    bad_on_plane = np.stack([bad_xy[:, 0], bad_xy[:, 1],
+                             -(nrm[0] * bad_xy[:, 0] + nrm[1] * bad_xy[:, 1]) / nrm[2]], 1)
+    bad_pts = bad_on_plane - 50.0 * nrm              # 5 mm BELOW the true floor
+    bad_exist = np.full(n_bad, 0.1, np.float32)
+
+    all_pts = np.concatenate([pts, bad_pts])[None]            # (F=1, N, 3)
+    all_exist = np.concatenate([exist, bad_exist])[None]      # (F=1, N)
+
+    floor = fit_floor(all_pts, exist=all_exist)
+    ang = np.degrees(np.arccos(np.clip(np.dot(floor.normal, nrm), -1.0, 1.0)))
+    assert ang < 2.0, f"normal off by {ang:.2f} deg -- wall/outlier points tilted the fit"
+    # the TRUE floor (on_plane, height 0 by construction) must read back near 0
+    true_floor_height = float(on_plane[0] @ floor.normal + floor.offset)
+    assert abs(true_floor_height) < 1.0, (
+        f"true floor read back at height {true_floor_height:.2f}, not within 1 unit of 0")
+
+    # the low-exist rows must actually have been excluded, not merely diluted
+    with pytest.raises(ValueError):
+        fit_floor(bad_pts[None], exist=bad_exist[None])   # only 12 low-exist points -> < 3 usable
 
 
 def test_fit_floor_recovers_a_known_tilted_plane_with_positive_heights():
@@ -516,3 +580,100 @@ def test_driver_resume_round_trips_a_partial_write(tiny, tmp_path):
     assert joined["frame"].shape == (8,) and joined["kp3d"].shape[1] == 8
     with pytest.raises(ValueError):
         drv.load_partial(str(out), 1)      # a different fly count must not silently append
+
+
+def test_load_partial_refuses_a_resume_with_a_different_field(tiny, tmp_path):
+    """Beyond the fly-count guard, `load_partial` must refuse a --resume with
+    a different --stride, --cameras, --start, --run (checkpoint) or
+    --calib-dir -- each would otherwise silently splice two different
+    geometries into one file. The error must name the mismatched field."""
+    import coarse_pass_mvq as drv
+    from jarvis_jax.tracking.coarse_track import coarse_features, fit_floor, write_coarse_tracks
+    r = _runner(tiny)
+    tr = _synthetic_tracks(r.kp_names, n=3)
+    floor = fit_floor(tr["centroid"], exist=tr["exist"])
+    feats = coarse_features(tr, r.kp_names, floor=floor)
+    out = tmp_path / "coarse_tracks.npz"
+    write_coarse_tracks(str(out), tr, feats, CAMS, session_dir="/fake", stride=16,
+                        num_animals=2, cam_mats=r.cam_mats,
+                        meta_extra={"checkpoint": "/abs/run/final", "calib_dir": "/abs/calib",
+                                   "start": 0, "mvq_step": "final"})
+
+    # every field matching -> resumes fine
+    drv.load_partial(str(out), 2, cameras=CAMS, stride=16, start=0,
+                     checkpoint="/abs/run/final", calib_dir="/abs/calib", step_label="final")
+
+    with pytest.raises(ValueError, match="stride"):
+        drv.load_partial(str(out), 2, stride=8)
+    with pytest.raises(ValueError, match="cameras"):
+        drv.load_partial(str(out), 2, cameras=list(reversed(CAMS)))
+    with pytest.raises(ValueError, match="start"):
+        drv.load_partial(str(out), 2, start=100)
+    with pytest.raises(ValueError, match="checkpoint"):
+        drv.load_partial(str(out), 2, checkpoint="/a/different/run/final")
+    with pytest.raises(ValueError, match="calib_dir"):
+        drv.load_partial(str(out), 2, calib_dir="/a/different/calib")
+    with pytest.raises(ValueError, match="mvq_step"):
+        drv.load_partial(str(out), 2, step_label=3000)
+
+
+class _FakeCenterDetectBlankFirst(_FakeCenterDetect):
+    """Like `_FakeCenterDetect`, but the FIRST frame of this process's run
+    reports no CenterDetect peak at all -- reproducing "the frame right after
+    a resume boundary has no detection". A resumed run must show
+    `centre_source == 1` (reused from the PRIOR run's last window centres),
+    not `2` (no detection AND no history), which is what a bare `load_partial`
+    that always reports `last_centres=None` used to produce."""
+
+    def peaks(self, frames):
+        if self.frame == 0:
+            self.frame += 1
+            c = self.cam_mats.shape[0]
+            return np.full((c, 2, 2), np.nan, np.float32), np.zeros((c, 2), np.float32)
+        return super().peaks(frames)
+
+
+def test_driver_resume_reuses_last_centres_across_a_blank_frame(tmp_path, monkeypatch):
+    """A resumed run whose very first sampled frame has no CenterDetect peak
+    must REUSE the previous run's last window centres (`centre_source == 1`),
+    matching what a single-shot run would have done at the same frame -- not
+    treat it as no-history NaN (`centre_source == 2`), which is what happened
+    while `load_partial` always reported `last_centres=None`."""
+    pytest.importorskip("cv2")
+    import coarse_pass_mvq as drv
+    cams = ["Cam2012630", "Cam2012631"]
+    _tiny_session(tmp_path, cams)
+    monkeypatch.setattr("jarvis_jax.tracking.lift_mvq.MVQRunner", _FakeRunner)
+    out = tmp_path / "coarse_mvq" / "coarse_tracks.npz"
+    argv = ["coarse_pass_mvq.py", "--session-dir", str(tmp_path), "--calib-dir", str(tmp_path),
+            "--cameras", ",".join(cams), "--run", "/fake/final",
+            "--centerdetect", "/fake/cd", "--stride", "8", "--start", "0", "--end", "24",
+            "--out", str(out), "--batch", "4", "--min-views", "2", "--partial-every", "2"]
+
+    # first process: frames 0, 8, 16 -- every one detected
+    monkeypatch.setattr("jarvis_jax.tracking.coarse_centres.CenterDetector", _FakeCenterDetect)
+    monkeypatch.setattr(sys, "argv", argv)
+    drv.main()
+    with np.load(out, allow_pickle=True) as z:
+        assert (z["centre_source"] == 0).all()
+
+    # second process (the resume): its FIRST sampled frame (24, the very next
+    # one after the resume boundary) has NO CenterDetect peak.
+    monkeypatch.setattr("jarvis_jax.tracking.coarse_centres.CenterDetector",
+                        _FakeCenterDetectBlankFirst)
+    argv2 = ["coarse_pass_mvq.py", "--session-dir", str(tmp_path), "--calib-dir", str(tmp_path),
+             "--cameras", ",".join(cams), "--run", "/fake/final",
+             "--centerdetect", "/fake/cd", "--stride", "8", "--start", "0", "--end", "40",
+             "--out", str(out), "--batch", "4", "--min-views", "2", "--partial-every", "2",
+             "--resume"]
+    monkeypatch.setattr(sys, "argv", argv2)
+    drv.main()
+
+    with np.load(out, allow_pickle=True) as z:
+        frames = list(z["coarse_frame"])
+        assert frames == [0, 8, 16, 24, 32]
+        i = frames.index(24)
+        assert z["centre_source"][0, i] == 1, (
+            "frame 24 (blank, right after the resume boundary) must REUSE the prior "
+            "run's last_centres (centre_source == 1), not read as no-history NaN (== 2)")
+        assert np.isfinite(z["X3d"][:, i]).all()   # reused, not NaN'd out

@@ -58,8 +58,24 @@ a SUPERSET of the SAM3 coarse pass's schema (`scripts/coarse_pass.py`), so
     coarse_frame (T,) i64      absolute video frame index of each sample
     cameras (C,) str           CANONICAL camera order
     centroid (F,C,T,2) f32     the 3D centroid REPROJECTED to each camera, px
-    valid (F,C,T) bool         finite centroid that lands inside the image
-    in_frame (F,C,T) i8        1 inside the image, 0 outside
+    valid (F,C,T) bool         finite centroid that lands inside the image --
+                               NOTE this means "the reprojected 3D centroid is
+                               inside camera c's frame", NOT "camera c saw the
+                               fly" (there is no per-camera detection here,
+                               only one 3D point reprojected everywhere), so
+                               `n_valid_cams >= 3` is NOT an occlusion signal
+                               the way it might be read from a SAM3 file where
+                               masks make `valid` a real per-camera visibility
+                               bit
+    in_frame (F,C,T) i8        1 inside the image, 0 outside -- ONLY 0/1. The
+                               SAM3 file's third state, `IN_FRAME_UNKNOWN = 2`
+                               ("< 2 other valid cameras -- position not
+                               determinable", `sam3_driver.py`), is collapsed
+                               to 0 here because there is exactly one 3D point
+                               and no notion of "not enough OTHER cameras" --
+                               a fine pass that gap-repairs by pattern-matching
+                               `IN_FRAME_YES`/`IN_FRAME_NO` runs of a SAM3 file
+                               must NOT be applied unchanged to an mvq file
     border_dist (F,C,T) f32    px from the reprojected centroid to the nearest edge
     area (F,C,T) f32           ALL NaN -- mask-free, there is no area
     area_med (F,T) f32         ALL NaN (see `area`)
@@ -85,6 +101,11 @@ a SUPERSET of the SAM3 coarse pass's schema (`scripts/coarse_pass.py`), so
     height (F,T) f32           above the fitted floor plane, units
     dist (T,) f32              == sep3d, under the mvq name
     trackable (F,T) bool       exist >= 0.5 and a finite centroid
+    last_centres (F,3) f32     the last CENTRE_DETECTED/REUSED window centres
+                               (NaN-padded, see `pad_last_centres`), so a
+                               `--resume` can restore the reuse chain across
+                               the process boundary instead of starting the
+                               new chunk with no history (`init_centres`)
 
   meta json: session_dir, stride, cameras, W, H, num_animals, n_coarse,
     coarse0 (= coarse_frame[0] // stride), source="mvq", plus the floor plane
@@ -94,6 +115,15 @@ NOTE for §5: because `area` is all-NaN, `coarse_pass_gates.py`'s area-ratio
 gate can never pass on an mvq file -- it OPENS and its shapes are right, but
 the SAM3 thresholds are not meaningful without masks. Bout detection on mvq
 tracks uses the mvq features above (distance, wing angle, speed, heading).
+
+TWO MORE SEMANTICS THAT CHANGE IN AN MVQ FILE (§5, read before gating on
+them): `valid`/`n_valid_cams` mean "the reprojected 3D centroid lands inside
+this camera's image", not "this camera saw the fly" -- there is one 3D point
+reprojected to every camera, no per-camera detection -- so `n_valid_cams >=
+3` is not an occlusion signal here the way it can be against a SAM3 file's
+masks. And `in_frame` is 0/1 ONLY: SAM3's `IN_FRAME_UNKNOWN = 2` is collapsed
+to 0 (`IN_FRAME_NO`), so the fine pass's gap-repair idiom that runs on
+`IN_FRAME_YES`/`IN_FRAME_NO` codes must not be applied to mvq files unchanged.
 """
 from __future__ import annotations
 
@@ -138,18 +168,38 @@ class FloorPlane(NamedTuple):
         return {"normal": [float(v) for v in self.normal], "offset": float(self.offset)}
 
 
-def fit_floor(centroids, *, n_fit=FLOOR_FIT_N, floor_pct=1.0):
-    """Least-squares floor plane from the FIRST `n_fit` finite coarse centroids.
+def _svd_normal(pts):
+    """Unit normal of the least-variance direction of `(N,3)` points, via SVD
+    about their mean. Not sign-resolved -- callers pick "up" themselves."""
+    _, _, vh = np.linalg.svd(pts - pts.mean(axis=0), full_matrices=False)
+    return vh[-1] / np.linalg.norm(vh[-1])
+
+
+def fit_floor(centroids, *, exist=None, n_fit=FLOOR_FIT_N, floor_pct=3.0):
+    """Least-squares floor plane from the FIRST `n_fit` finite, TRACKABLE
+    coarse centroids.
 
     Args:
         centroids: (F, N, 3) per-fly 3D centroids in frame order (what
             `coarse_pass` returns as `centroid`), or any (..., 3) array.
-        n_fit: how many finite points to fit on. The plane is a property of
-            the ARENA, so the first ~30 s of the recording is as good as all
-            of it and orders of magnitude cheaper; a whole-recording fit would
-            also be dragged by whatever the flies do at the end.
+        exist: optional, the SAME (F, N) (or `(...,)` matching `centroids`
+            minus its last axis) existence array `coarse_pass` returns as
+            `exist` -- a centroid is used only if `exist >= TRACKABLE_EXIST`
+            (0.5). Without a trackable gate, a run of low-confidence rows
+            (the typed slot barely fired, or fired on background) is fit as
+            if it were real floor/wall geometry; `None` (the default) fits
+            every finite point, matching the ungated behaviour before this
+            argument existed.
+        n_fit: how many finite, trackable points to fit on. The plane is a
+            property of the ARENA, so the first ~20 s of the recording (2000
+            coarse centroids at stride 16 == ~1000 coarse frames == ~16 000
+            video frames == ~20 s at 800 fps) is as good as all of it and
+            orders of magnitude cheaper; a whole-recording fit would also be
+            dragged by whatever the flies do at the end.
         floor_pct: the percentile of the along-normal coordinate the plane is
-            placed at (1.0 = just under the lowest observed centroids).
+            placed at (low single digits = just under the lowest observed
+            centroids; not 0/1, which is one outlier away from the true
+            floor on a real, noisy cloud).
 
     Returns:
         FloorPlane with a unit `normal` pointing UP and an `offset` that puts
@@ -170,30 +220,69 @@ def fit_floor(centroids, *, n_fit=FLOOR_FIT_N, floor_pct=1.0):
         The literal rule therefore flips the normal DOWNWARD and every height
         reads backwards -- a sign error no smoothness or residual check sees.
 
-    What is kept: the least-squares fit over the first `n_fit` finite
-    centroids, and positive fly heights. What is fixed: "up" is the direction
-    the cloud is bottom-heavy in (mean along the normal above the median --
-    flies climb up, not down), and the offset sits at the `floor_pct`
-    percentile rather than at the mean.
+    What is kept: the least-squares fit over the first `n_fit` finite,
+    trackable centroids, and positive fly heights. What is fixed: "up" is the
+    direction the cloud is bottom-heavy in (mean along the normal above the
+    median -- flies climb up, not down); a SECOND SVD pass refits the normal
+    on only the bottom half (by the first pass's height) of those points,
+    because a total-least-squares fit over floor+wall points together tilts
+    the normal toward the wall in proportion to the wall's point fraction --
+    every point gets equal SVD weight regardless of whether it is "the floor"
+    -- and the wall points are, almost by construction, the ones farthest
+    from co-planar with the true floor; the offset sits at the `floor_pct`
+    percentile of the REFIT normal's heights rather than at the mean, so a
+    handful of below-floor outliers cannot single-handedly set it.
 
     Raises:
-        ValueError: fewer than 3 finite points -- a plane through 2 points is
-            not determined, and returning an arbitrary one would give every
-            height a meaningless value rather than an obvious failure.
+        ValueError: fewer than 3 finite, trackable points -- a plane through
+            2 points is not determined, and returning an arbitrary one would
+            give every height a meaningless value rather than an obvious
+            failure.
     """
     a = np.asarray(centroids, np.float64)
     # Frame-major order: `centroids` is (F,N,3), so reshaping fly-major would
     # take "the first n_fit" all from fly 0. Transpose to (N,F,3) first.
-    pts = np.transpose(a, (1, 0, 2)).reshape(-1, 3) if a.ndim == 3 else a.reshape(-1, 3)
-    pts = pts[np.isfinite(pts).all(axis=1)]
+    pts_all = np.transpose(a, (1, 0, 2)).reshape(-1, 3) if a.ndim == 3 else a.reshape(-1, 3)
+    ok = np.isfinite(pts_all).all(axis=1)
+    if exist is not None:
+        e = np.asarray(exist, np.float64)
+        # Same frame-major reshape as `pts_all`: (F,N) -> (N,F) -> flat.
+        e = np.transpose(e, (1, 0)).reshape(-1) if a.ndim == 3 else e.reshape(-1)
+        if e.shape[0] != pts_all.shape[0]:
+            raise ValueError(f"exist has {e.shape[0]} entries but centroids reshape to "
+                             f"{pts_all.shape[0]}; exist must carry the SAME (fly, frame) axes "
+                             f"as centroids (coarse_pass's own `exist`/`centroid` arrays)")
+        ok = ok & (e >= TRACKABLE_EXIST)
+    pts = pts_all[ok]
     if pts.shape[0] < 3:
-        raise ValueError(f"floor fit needs >= 3 finite coarse centroids, got {pts.shape[0]}")
+        raise ValueError(f"floor fit needs >= 3 finite, trackable (exist >= {TRACKABLE_EXIST}) "
+                         f"coarse centroids, got {pts.shape[0]}")
     pts = pts[:int(n_fit)]
-    _, _, vh = np.linalg.svd(pts - pts.mean(axis=0), full_matrices=False)
-    normal = vh[-1] / np.linalg.norm(vh[-1])
+
+    def _oriented_up(normal, s):
+        """Flip `normal` (and its scores `s`) so the cloud is bottom-heavy
+        the "up" way: flies rest on the floor and occasionally climb, never
+        the reverse, so a correctly-oriented up-normal has mean(s) > median(s)."""
+        if s.mean() < np.median(s):
+            return -normal, -s
+        return normal, s
+
+    normal = _svd_normal(pts)
     s = pts @ normal
-    if s.mean() < np.median(s):            # bottom-heavy the other way round: flip to "up"
-        normal, s = -normal, -s
+    normal, s = _oriented_up(normal, s)
+
+    # Refit the normal on the BOTTOM half only (by this first pass's height),
+    # which is dominated by the true floor regardless of the wall fraction --
+    # see the DEVIATION note above.
+    low = s <= np.percentile(s, 50.0)
+    if low.sum() >= 3:
+        normal2 = _svd_normal(pts[low])
+        if np.dot(normal2, normal) < 0:        # keep the refit continuous with pass 1
+            normal2 = -normal2
+        normal = normal2
+        s = pts @ normal
+        normal, s = _oriented_up(normal, s)
+
     offset = -float(np.percentile(s, float(floor_pct)))
     return FloorPlane(normal.astype(np.float64), offset)
 
@@ -344,6 +433,7 @@ def coarse_pass(reader, runner, detector, *, frames, num_animals=2, merge_dist_u
     rows = 0
     W = H = None
     t_start = time.time()
+    warned_drop = False  # emit the windows-dropped warning at most once per run
 
     def _read_batch():
         """One forward over the accumulated windows; fill every pending frame."""
@@ -399,6 +489,13 @@ def coarse_pass(reader, runner, detector, *, frames, num_animals=2, merge_dist_u
             continue
 
         if wc.shape[0] > runner.batch:
+            if not warned_drop:
+                warnings.warn(
+                    f"coarse_pass: frame {fidx} planned {wc.shape[0]} windows but "
+                    f"runner.batch={runner.batch}; dropping {wc.shape[0] - runner.batch} "
+                    f"window(s) (only the first offending frame is reported)", RuntimeWarning,
+                    stacklevel=2)
+                warned_drop = True
             wc = wc[:runner.batch]
         if rows + wc.shape[0] > runner.batch:
             _read_batch()
@@ -447,6 +544,37 @@ def concat_tracks(chunks):
     return out
 
 
+def pad_last_centres(centres, num_animals):
+    """`(W,3)` window centres (W in `0..num_animals`, `plan_windows`'s own
+    output) -> a FIXED `(num_animals,3)` array, NaN-padded, for npz storage.
+
+    `coarse_pass`'s `last_centres` is one row per window, and the number of
+    windows varies frame to frame (two flies can share one window), so it
+    cannot be stored at a fixed shape as-is; NaN-padding to `num_animals` (an
+    upper bound: `plan_windows` never returns more rows than valid input
+    centres, which is capped at `num_animals`) round-trips through
+    `unpad_last_centres` losslessly.
+    """
+    out = np.full((int(num_animals), 3), np.nan, np.float32)
+    if centres is None:
+        return out
+    c = np.asarray(centres, np.float32)
+    if c.shape[0]:
+        n = min(c.shape[0], int(num_animals))
+        out[:n] = c[:n]
+    return out
+
+
+def unpad_last_centres(padded):
+    """Inverse of `pad_last_centres`: `(num_animals,3)` NaN-padded -> the
+    `(W,3)` window-centres array `coarse_pass`'s `init_centres` expects (NaN
+    rows dropped), or `None` if every row was NaN (no history to resume)."""
+    padded = np.asarray(padded, np.float32)
+    valid = ~np.isnan(padded).any(axis=1)
+    c = padded[valid]
+    return c if c.shape[0] else None
+
+
 def write_coarse_tracks(path, tracks, features, cameras, *, session_dir, stride,
                         num_animals, cam_mats, meta_extra=None):
     """`coarse_tracks.npz` + `.meta.json` in the SAM3 schema plus the mvq fields.
@@ -464,8 +592,16 @@ def write_coarse_tracks(path, tracks, features, cameras, *, session_dir, stride,
             the float64 path, which is nothing against a coarse centroid).
         meta_extra: extra keys for the meta json (checkpoint, timings, ...).
 
-    The file is written to `path + ".tmp.npz"` and `os.replace`d, so a killed
-    job never leaves a half-written npz that the gates would read as real.
+    The `.meta.json` is written FIRST (also tmp-name + `os.replace`), then the
+    npz. A kill between the two leaves a meta describing a T that is one
+    write ahead of the npz still on disk -- harmless, because `load_partial`
+    only trusts the npz's own arrays for shape/count and uses the meta for
+    run-identity fields (`cameras`, `stride`, `W`/`H`, `checkpoint`, ...) that
+    do not change between writes of the SAME run. The reverse order (npz
+    then meta, the previous behaviour) could leave a *complete* npz with NO
+    meta at all if killed in between, and `concat_tracks`/`load_partial` need
+    the meta's `W`/`H` to resume -- a partial file with no meta used to raise
+    there instead of resuming.
     """
     cameras = [str(c) for c in cameras]
     C = len(cameras)
@@ -509,8 +645,34 @@ def write_coarse_tracks(path, tracks, features, cameras, *, session_dir, stride,
     n_valid_cams = valid.sum(axis=1).astype(np.int16)
     sep3d = np.asarray(features["dist"], np.float32) if F >= 2 else np.array([], np.float32)
     coarse_frame = np.asarray(tracks["frame"], np.int64)
+    last_centres = pad_last_centres(tracks.get("last_centres"), F)
 
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+
+    # Meta FIRST (see docstring): a kill between this and the npz write below
+    # leaves a meta that is at most one write ahead of the npz on disk, which
+    # `load_partial` tolerates (it trusts the npz's own arrays for shape, the
+    # meta only for run-identity fields that are constant across writes of
+    # the same run) -- never a complete npz with no meta, which used to make
+    # a resume unable to recover W/H at all.
+    floor = tracks.get("floor")
+    meta_path = path.rsplit(".npz", 1)[0] + ".meta.json"
+    meta = {"session_dir": str(session_dir), "stride": int(stride), "cameras": cameras,
+            "W": W, "H": H, "num_animals": int(num_animals), "n_coarse": int(T),
+            "coarse0": int(coarse_frame[0] // int(stride)) if T else 0,
+            "source": "mvq",
+            "floor": floor.as_dict() if isinstance(floor, FloorPlane) else None,
+            "centre_source_counts": {
+                "detected": int((tracks["centre_source"][0] == CENTRE_DETECTED).sum()),
+                "reused": int((tracks["centre_source"][0] == CENTRE_REUSED).sum()),
+                "none": int((tracks["centre_source"][0] == CENTRE_NONE).sum())} if T else {},
+            "frac_trackable": [float(np.mean(features["trackable"][f])) for f in range(F)]}
+    meta.update(meta_extra or {})
+    tmp_meta = meta_path + ".tmp"
+    with open(tmp_meta, "w") as f:
+        json.dump(meta, f, indent=2, default=str)
+    os.replace(tmp_meta, meta_path)
+
     tmp = path + ".tmp.npz"
     np.savez_compressed(
         tmp,
@@ -532,21 +694,7 @@ def write_coarse_tracks(path, tracks, features, cameras, *, session_dir, stride,
         speed=np.asarray(features["speed"], np.float32),
         height=np.asarray(features["height"], np.float32),
         dist=np.asarray(features["dist"], np.float32),
-        trackable=np.asarray(features["trackable"], bool))
+        trackable=np.asarray(features["trackable"], bool),
+        last_centres=last_centres)
     os.replace(tmp, path)
-
-    floor = tracks.get("floor")
-    meta = {"session_dir": str(session_dir), "stride": int(stride), "cameras": cameras,
-            "W": W, "H": H, "num_animals": int(num_animals), "n_coarse": int(T),
-            "coarse0": int(coarse_frame[0] // int(stride)) if T else 0,
-            "source": "mvq",
-            "floor": floor.as_dict() if isinstance(floor, FloorPlane) else None,
-            "centre_source_counts": {
-                "detected": int((tracks["centre_source"][0] == CENTRE_DETECTED).sum()),
-                "reused": int((tracks["centre_source"][0] == CENTRE_REUSED).sum()),
-                "none": int((tracks["centre_source"][0] == CENTRE_NONE).sum())} if T else {},
-            "frac_trackable": [float(np.mean(features["trackable"][f])) for f in range(F)]}
-    meta.update(meta_extra or {})
-    with open(path.rsplit(".npz", 1)[0] + ".meta.json", "w") as f:
-        json.dump(meta, f, indent=2, default=str)
     return meta
