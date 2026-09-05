@@ -157,3 +157,22 @@ cameras to 0.0). `kp3d.npz` also gained the Stage-B `gates` string. The
 keypoint order of this script's own files is unchanged (mvq order --
 `to_pipeline(..., model_names=mvq_names)` is the identity permutation here;
 the fine pass is what writes `cfg.model.KP_NAMES` order).
+
+### Centre-shift curve on the jitter retrain, step 3000 (interim; ckpt-all job 39604340)
+
+`scripts/benchmark/mvq_centre_shift.py --run .../mvq_t1_b16_p4_jitter10_20260904 --step 3000` (val, 153 windows, unprompted policy):
+
+| shift (mm) | P3a final: MPJPE mm / miss | jitter-10 @3000: MPJPE mm / miss |
+|---|---|---|
+| 0.0 | 0.093 / 0.0 % | 0.083 / 0.0 % |
+| 0.5 | 0.097 / 0.7 % | 0.094 / 0.0 % |
+| 1.0 | 0.108 / 0.7 % | 0.102 / 0.0 % |
+| 2.0 | 0.417 / 6.5 % | 0.362 / 0.7 % |
+| 3.0 | 0.872 / 22 % | 0.663 / 0.0 % |
+
+Reading (controller): after 3000 steps of 1 mm jitter the MISS behaviour is already robust (0.7 % at 2 mm, none at
+3 mm, vs 6.5 % / 22 %) and the absolute error at 1 mm (0.102) is below the P3a model's centred error, but relative
+to its own centred value (+23 % at 1 mm) the §6 "within 10 %" rule is not yet met; the 2 mm cliff persists because
+the training jitter is +-10 units per axis (radial reach ~1.4 mm), so 2 mm is outside the trained range by design.
+Re-run on the final checkpoint decides; if still over the rule at 1 mm, the follow-up is jitter 15-20 units or a
+tighter coarse placement (stride 8), not a redesign.
