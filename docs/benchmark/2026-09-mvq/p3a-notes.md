@@ -628,3 +628,44 @@ slot is never ignored (`test_mvq_losses.py`), empty-mask donor rejection
 - `scripts/benchmark/mvq_val_baselines.py` (shared policy)
 - `docs/specs/2026-09-04-mvq-p3a-identity-existence-design.md` (§6 rejection/label + donor-pool rules, §8 three unrestored leaves + tolerant loader, §9 test list)
 - `figures/2026-09-mvq/p3a_gates/{sex_label_check.{png,json},sex_20_04_zoom.png}` and `figures/2026-09-mvq/mvq_t1_b16_local8_final30k/{prompted,unprompted}/{gate1_*.png,summary.json}` (gitignored; regenerate with the commands above)
+
+## P3a run `mvq_t1_b16_p3a_20260904` — result (2026-09-04, 10k steps, warm start from the 30k final, 8x L40S local, ~1.05 s/step)
+
+Validation every 2000 steps, both modes, 153 val windows; the 30k final checkpoint is the baseline
+(`figures/2026-09-mvq/mvq_t1_b16_local8_final30k_p2code/*/summary.json` for containment/contact-pair,
+`final/mvq_run.json` for the rest). Full trend table: `p3a_val_trend.txt` beside this file.
+
+Spec §8 acceptance (unprompted = the mask-free typed-slot route; oracle instance unless stated):
+
+| criterion | target | 30k baseline | P3a @10k | pass |
+|---|---|---|---|---|
+| unprompted policy miss fraction, single-fly windows | < 5 % | 100 % | 0.0 % | yes |
+| existence precision / recall, female slot | > 0.9 | n/a | 1.00 / 0.98 | yes |
+| existence precision / recall, male slot | > 0.9 | n/a | 1.00 / 0.96 | yes |
+| sex accuracy, group C (held-out calibration) | > 0.95 | n/a | 1.00 | yes |
+| mask containment, contact_pair cohort (26 windows) | higher than baseline | 0.786 | 0.815 | yes |
+| oracle MPJPE not worse anywhere by > 5 % | | all 0.109 mm | all 0.092 mm; group C 0.090 vs 0.093 | yes |
+
+Cohort MPJPE (oracle, mm, 30k -> P3a): two-fly 0.151 -> 0.116; contact pairs 0.275 -> 0.179 (-35 %);
+female 0.132 -> 0.114; group A 0.113 -> 0.092; group C 0.093 -> 0.090. Unprompted POLICY error
+0.160 -> 0.094 mm (misses 68 % -> 0 %). Prompted oracle 0.111 -> 0.084 mm, but prompted POLICY (slot 0)
+0.111 -> 0.107 mm: the prompted slot is now the weaker route (its sex head 0.985 vs 1.00; when
+prompted the model under-reports the second fly: male-slot recall 0.84, female-slot recall 0.56).
+
+Curve shape: geometry recovered to baseline by step 500 and plateaued from ~4000; existence
+calibrated by 2000; sex accuracy jumped 0.60 -> 0.985 between 2000 and 4000 and reached 1.00 by
+8000 (the early male bias resolved without a sampler change). Final-step numbers are within noise
+of step 8000.
+
+Bout-28 end-to-end (step-7000 checkpoint, unprompted, `scripts/viz/mvq_bout_video.py`):
+identity held across all 2007 frames (fly0 -> female slot, fly1 -> male slot, no swaps observed in
+the sampled frames); fly0 missing in 111 frames (local 1648-1772) where she sits at the arena edge,
+out of frame in one camera and clipped in three -- the female-slot existence drops to 0.23 there
+while ViTPose+DLT emits scattered junk; the prompted pass had 0 missing frames. Video:
+`figures/2026-09-mvq/bout28_p3a/bout28_mvq_unprompted_step7000.mp4`.
+
+P3b follow-ups from this run: (1) prompted-slot semantics (prompt a typed slot, or retire the prompt
+path); (2) mask-aware presence / prompted fallback for edge frames; (3) mask-free ROI placement
+(centre-jitter robustness test on this checkpoint, then a centre detector); (4) per-camera depth
+ordering and a normal-direction offset for copy-paste stacking; (5) export fix for the 20_04
+annotation sex; (6) log a running-mean loss.
