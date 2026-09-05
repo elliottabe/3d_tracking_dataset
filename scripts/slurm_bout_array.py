@@ -649,16 +649,30 @@ def main():
     #      scale-from-first-bout defect, measured 15.5% low on Session0).
     if args.lifter == 'mvq' and args.mvq_lift == 'skip':
         # The lift already ran (locally, on an interactive node). Verify rather
-        # than trust: a bout whose kp3d.npz is absent would silently fall back
-        # to Stage A/B and be DLT-triangulated inside an "mvq" run, which no
-        # later artifact distinguishes.
-        _no_kp = [i for i in idxs
-                  if not all(os.path.exists(os.path.join(
-                      run_root, "bouts", f"bout_{i:05d}", f"fly{f}", "kp3d.npz"))
-                      for f in (0, 1))]
-        if _no_kp:
-            print(f"Error: --mvq-lift skip, but {len(_no_kp)} bout(s) have no lifted "
-                  f"kp3d.npz under {run_root}: {_no_kp[:10]}", file=sys.stderr)
+        # than trust: an npz-only check would pass a bout whose lift was
+        # interrupted between writing kp3d.npz and sex.json, and precompute
+        # would then silently fall back to a shared body scale (see MEMORY
+        # scale-from-first-bout-defect). `bout_lift_is_current` is the same
+        # predicate the lifter itself uses to decide whether a bout is
+        # already done, so reuse it here instead of a weaker local check.
+        sys.path.insert(0, str(PKG_DIR))
+        from jarvis_jax.tracking.lift_mvq import bout_lift_is_current, mvq_gate_string
+        mv = cfg.get("mvq") or {}
+        if not mv.get("checkpoint"):
+            print(f"Error: --lifter mvq needs mvq.checkpoint; configs/mvq/"
+                  f"{args.mvq_config}.yaml sets none", file=sys.stderr)
+            sys.exit(2)
+        gates_string = mvq_gate_string(str(mv["checkpoint"]), step=mv.get("step"),
+                                        exist_thresh=float(mv.get("exist_thresh", 0.5)))
+        _not_current = [i for i in idxs
+                        if not bout_lift_is_current(
+                            os.path.join(run_root, "bouts", f"bout_{i:05d}"),
+                            gates_string)]
+        if _not_current:
+            print(f"Error: --mvq-lift skip, but {len(_not_current)} bout(s) are not a "
+                  f"current mvq lift (kp3d.npz per fly matching these gates AND "
+                  f"sex.json w/ method=mvq_sex_head) under {run_root}: "
+                  f"{_not_current[:10]}", file=sys.stderr)
             if not args.dry_run:
                 sys.exit(1)
         else:

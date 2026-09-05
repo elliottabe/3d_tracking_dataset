@@ -516,28 +516,51 @@ def test_dry_run_with_lifter_mvq_puts_the_lift_before_precompute(tmp_path, capsy
 def test_mvq_lift_skip_requires_the_lift_to_have_actually_happened(tmp_path, capsys,
                                                                    monkeypatch):
     """`--mvq-lift skip` (the campaign's `--local-gpus` path, which lifts on an
-    interactive node to dodge a day-deep queue) must VERIFY the kp3d.npz files
-    exist rather than trust them: a bout that was missed would fall through to
-    Stage A/B and be DLT-triangulated inside a run labelled mvq, which no later
-    artifact distinguishes."""
+    interactive node to dodge a day-deep queue) must VERIFY with
+    `bout_lift_is_current` -- the SAME predicate the lifter itself uses --
+    rather than trust a bare `kp3d.npz` existence check: a bout whose lift
+    was interrupted between writing kp3d.npz and sex.json would pass the
+    weaker check and then fall back to a shared body scale in precompute
+    (MEMORY scale-from-first-bout-defect), inside a run labelled mvq, which
+    no later artifact distinguishes."""
     m = _slurm_mod()
+    ckpt = _fake_checkpoint(tmp_path)
     pred, out = tmp_path / "sam3_masks", tmp_path / "pose_mvq_p3a"
     for i in (3, 7):
         (pred / f"bout_{i:05d}").mkdir(parents=True)
         (pred / f"bout_{i:05d}" / "sam3_masks.npz").write_bytes(b"")
     argv = ["slurm_bout_array.py", "--lifter", "mvq", "--mvq-lift", "skip", "--dry-run",
             "--slurm", "ckpt_all", f"recording.predictions_dir={pred}",
-            f"outputs.out={out}"]
+            f"outputs.out={out}", f"mvq.checkpoint={ckpt}"]
     monkeypatch.setattr("sys.argv", argv)
     m.main()
     err = capsys.readouterr().err
-    assert "2 bout(s) have no lifted kp3d.npz" in err
+    assert "2 bout(s) are not a current mvq lift" in err
 
+    # A real, GATE-MATCHING lift for both bouts (kp3d.npz per fly + sex.json).
+    from jarvis_jax.tracking.lift_mvq import lift_masked_bout
+    r = FakeRunner(ckpt, kp_names=_mvq_names())
+    centres = np.zeros((2, 1, 3), np.float32)
+    centres[1, :, 0] = 200.0
     for i in (3, 7):
-        for f in (0, 1):
-            d = out / "bouts" / f"bout_{i:05d}" / f"fly{f}"
-            d.mkdir(parents=True)
-            (d / "kp3d.npz").write_bytes(b"x")
+        lift_masked_bout(r, _frames(1), centres, np.ones((2, 1), bool),
+                         out_dir=str(out / "bouts" / f"bout_{i:05d}"),
+                         model_names=_model_names())
+
+    # Bout 3's lift is "interrupted": both kp3d.npz exist but sex.json never
+    # got written -- an npz-only check would call this bout done.
+    os.remove(out / "bouts" / "bout_00003" / "sex.json")
+    monkeypatch.setattr("sys.argv", argv)
+    m.main()
+    err = capsys.readouterr().err
+    assert "1 bout(s) are not a current mvq lift" in err
+    assert "[3]" in err
+
+    # Restoring sex.json (a completed lift) makes bout 3 current too, and the
+    # whole array reads as already-lifted.
+    lift_masked_bout(r, _frames(1), centres, np.ones((2, 1), bool),
+                     out_dir=str(out / "bouts" / "bout_00003"),
+                     model_names=_model_names(), force=True)
     monkeypatch.setattr("sys.argv", argv)
     m.main()
     cap = capsys.readouterr()
