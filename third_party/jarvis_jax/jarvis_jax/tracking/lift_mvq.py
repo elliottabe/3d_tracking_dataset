@@ -613,9 +613,22 @@ def bout_centres_3d(store, cam_mats, n_frames, t0=0):
     One batched `triangulate_dlt_batched` call for the whole bout rather than
     a jit call per frame. A frame with fewer than 2 valid mask views has no
     usable center3D and is marked not-ok (its window is skipped -> NaN output).
+
+    Raises:
+        ValueError: `store.n_flies != 2`. `lift_masked_bout` hardcodes exactly
+            TWO typed slots (female fly0, male fly1) throughout -- a mask
+            store with any other fly count would silently misindex (a single
+            fly) or silently drop flies (three or more) rather than raise,
+            since nothing downstream checks the fly axis again.
     """
     from jarvis_jax.geometry.center3d import triangulate_dlt_batched
     A = store.n_flies
+    if A != 2:
+        raise ValueError(
+            f"bout_centres_3d: store.n_flies={A}, but the masked-bout mvq lifter "
+            f"(lift_masked_bout) hardcodes exactly TWO typed slots (female fly0, male "
+            f"fly1) -- this route is for two-fly courtship bouts only. A single-fly "
+            f"(free-running) recording is not lifted through this path.")
     cam_mats = np.asarray(cam_mats, np.float32)
     pts = np.zeros((A * n_frames, len(store.cameras), 2), np.float32)
     val = np.zeros((A * n_frames, len(store.cameras)), bool)
@@ -767,11 +780,21 @@ def lift_masked_bout(runner, frames_iter, centres, ok, *, out_dir, model_names,
     if centres.ndim != 3 or centres.shape[-1] != 3 or ok.shape != centres.shape[:2]:
         raise ValueError(f"centres must be (A,T,3) and ok (A,T); got {centres.shape} "
                          f"/ {ok.shape}")
+    # Hardcoded below: exactly two typed slots (female fly0, male fly1) --
+    # `bout_centres_3d` already refuses a mask store with a different
+    # `n_flies`, but `centres`/`ok` can also be built by hand (as the tests
+    # and `scripts/mvq_lift_bout.py` sometimes do), so the same guard belongs
+    # here too, at the one place every caller passes through.
+    if centres.shape[0] != 2:
+        raise ValueError(
+            f"lift_masked_bout: centres has {centres.shape[0]} flies (A), but this "
+            f"lifter hardcodes exactly TWO typed slots (female fly0, male fly1) -- a "
+            f"different fly count would silently misindex (A=1) or silently drop flies "
+            f"(A>=3) rather than raise. This route is for two-fly courtship bouts only.")
     T = centres.shape[1]
     C, K, I = len(runner.cameras), runner.K, runner.I
 
     # Row 0 is the FEMALE typed slot, row 1 the MALE one -- never a mask slot.
-    want = [SEX_FEMALE, SEX_MALE]
     kp3d = np.full((2, T, K, 3), np.nan, np.float32)
     kp2d = np.full((2, T, C, K, 2), np.nan, np.float32)
     vis = np.zeros((2, T, C, K), np.float32)      # 0 => the pipeline's conf gate drops it

@@ -33,7 +33,7 @@ import numpy as np
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 from coarse_pass_gates import (  # noqa: E402
     BASELINE_WINDOW, BORDER_MIN_PX, MIN_CAMS, SEP_MIN_PX, apply_gates,
-    compute_gate_signals, load_ground_truth, load_tracks)
+    compute_gate_signals, is_mvq_schema, load_ground_truth, load_tracks)
 
 FLY0_RGB = (0.0, 1.0, 1.0)     # PALETTE['fly0'] BGR(255,255,0) cyan -> female
 FLY1_RGB = (1.0, 0.647, 0.0)   # PALETTE['fly1'] BGR(0,165,255) orange -> male
@@ -71,6 +71,13 @@ def main():
     args = ap.parse_args()
 
     z, meta = load_tracks(args.tracks)
+    if is_mvq_schema(z, meta):
+        raise SystemExit(
+            f"{args.tracks} is an mvq-schema coarse-tracks file (no `area`/`border_dist` -- "
+            f"mask-free, see coarse_track.py's module docstring): this script's area-ratio "
+            f"and border-distance panels would plot all-NaN and say nothing, silently. Use "
+            f"scripts/viz/coarse_tracks_check.py instead, which plots the mvq signals "
+            f"(exist, wing_angle_deg, sep3d) this file actually carries.")
     sig = compute_gate_signals(z, baseline_window=args.baseline_window)
     gates = apply_gates(sig, wing_ratio_min=args.wing_ratio_min,
                         proximity_max_px=args.proximity_max_px)

@@ -207,11 +207,16 @@ def test_wing_angle_only_trips_the_mvq_behaviour_gate(tmp_path):
 
 # --------------------------------------------------------------------------
 # Fix round 1, IMPORTANT 1: single-fly (F=1) mvq files must not crash.
-# `wing_angle_deg` has shape (1,T) (no male slot) and `write_coarse_tracks`
-# emits an EMPTY `sep3d` for F<2 -- neither courtship signal exists, so
-# `apply_gates` falls back to trackability alone (see `bout_gates`'s
-# module docstring, SINGLE-FLY note) instead of indexing out of bounds or
-# comparing against an empty array.
+# `wing_angle_deg` has shape (1,T) (no male slot) and neither courtship
+# signal exists, so `apply_gates` falls back to trackability alone (see
+# `bout_gates`'s module docstring, SINGLE-FLY note) instead of indexing out
+# of bounds or comparing against an empty array. This npz builds `sep3d`
+# EMPTY on purpose (the shape a real single-fly SAM3 file, and an mvq file
+# written before the collapse-guard fix (2026-09), both use) to prove that
+# LEGACY shape still works -- `write_coarse_tracks` now emits `sep3d`
+# all-NaN at shape (T,) for F<2 instead, which `compute_gate_signals`/
+# `apply_gates` treat identically to this empty form (see `bout_gates`'s
+# module docstring).
 # --------------------------------------------------------------------------
 def _write_mvq_npz_single_fly(path):
     """One fly, always well-tracked EXCEPT a dip in existence (simulating an

@@ -824,6 +824,11 @@ came out of the pooled path the lifter's sex.json unlocks:
 | fly0 female | 0.97 (1884 frames) | 8.11 / 1.11 | 7.3 | 0.029 |
 | fly1 male | 0.68 (2007 frames) | 3.65 / 0.78 | 4.7 | 0.025 |
 
+CAVEAT (final fix wave, 2026-09-05): this table was measured on the PRE-COLLAPSE-GUARD lift (the one
+`track_qc.json` below flags at 90/2007 frames). Re-lifting bout 28 after the collapse guard landed
+(e31b7d1) triggered on 0/2007 frames, so nothing here was actually a same-fly-read-twice collapse and
+the numbers stand unchanged.
+
 For scale: the ViTPose+DLT arm on this bout measured 6.26 px (female) / 2.65 px (male) LOO, so the
 observations are 4-6x better; the IK is still the bottleneck (fitted/measured 7.3x and 4.7x), exactly
 the P2 conclusion. These numbers cover the WHOLE 2007-frame bout, including the tail after ~1650
@@ -831,10 +836,13 @@ where the female is at the arena edge, so they are worse than the 1500-frame ste
 above (4.5/0.94 F, 3.6/0.88 M) and are not directly comparable to it.
 
 `track_qc.json` reports the two tracks collapsing on 90/2007 frames (4.8 %): min separation 5.34 vs a
-22.4-unit body length. This is a QC signal about the INPUT (the mounting frames) that the typed-slot
-route does not remove -- both typed slots can land on the same animal when the flies are on top of
-each other -- and it should be checked against the DLT arm before the campaign's outputs are used
-for anything downstream.
+22.4-unit body length. CORRECTED 2026-09-05 (final fix wave): this was NOT a QC signal about the
+input that the typed-slot route left unaddressed -- it was the absence, at the time, of the collapse
+guard `lift_masked_bout._flush` now has (landed e31b7d1, both typed slots chosen independently can
+read the same physical fly on a merged window; the guard keeps the higher-exist slot and NaNs the
+other, flagging the frame). Re-lifting bout 28 under the guard triggers it on 0/2007 frames, so this
+90-frame figure was the pre-guard defect, not an input property -- see the caveat on the LOO/IK table
+above.
 
 **Figure read back** (`pose_mvq_p3a/bouts/bout_00028/fly0/sidebyside_still.png`, three rig views,
 opened with the Read tool). Expectation stated before looking: the 2D skeleton should sit on the

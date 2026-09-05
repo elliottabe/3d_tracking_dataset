@@ -63,9 +63,11 @@ docstring) and instead carries per-fly existence, wing angle and a 3D
   SINGLE-FLY mvq recordings (F=1, `coarse_track.coarse_pass(...,
   num_animals=1)`): there is no male slot to read a wing angle from
   (`wing_angle_deg` has shape (1,T)) and no second fly to measure a
-  separation to (`write_coarse_tracks` emits an EMPTY `sep3d` for F<2), so
-  neither mvq courtship signal is defined. `apply_gates` treats both as
-  "never true" rather than raising or indexing out of bounds:
+  separation to (`write_coarse_tracks` emits `sep3d` all-NaN, shape (T,),
+  for F<2 -- the same `dist` `coarse_features` always returns, never a
+  separately-shaped empty array), so neither mvq courtship signal is
+  defined. `apply_gates` treats both as "never true" rather than raising or
+  indexing out of bounds:
   `behaviour_ok` degenerates to `trackability_ok` alone -- a single-fly bout
   table is driven purely by "is the fly locatable", which is the only
   question that makes sense without a second fly.
@@ -211,12 +213,14 @@ def apply_gates(sig, *, wing_ratio_min=None, proximity_max_px=None,
         wing_angle_deg = sig["wing_angle_deg"]
         sep3d = sig["sep3d"]
         # Single-fly recordings (F=1): there is no male slot to read a wing
-        # angle from, and `coarse_track.write_coarse_tracks` emits an EMPTY
-        # `sep3d` for F<2 (no second fly to measure a separation to) -- see
-        # the module docstring's SINGLE-FLY note. Neither courtship signal
-        # exists, so behaviour_ok is driven by trackability_ok alone rather
-        # than raising: a single-fly recording still has frames worth
-        # keeping, they are just not gated on courtship behaviour.
+        # angle from, and `coarse_track.write_coarse_tracks` emits `sep3d`
+        # all-NaN (no second fly to measure a separation to) -- see the
+        # module docstring's SINGLE-FLY note. A NaN `sep3d` compares False
+        # against `pmu` below exactly like the empty/None case this branch
+        # used to see, so behaviour_ok is unaffected either way: it is driven
+        # by trackability_ok alone rather than raising -- a single-fly
+        # recording still has frames worth keeping, they are just not gated
+        # on courtship behaviour.
         if wing_angle_deg.shape[0] > male_slot:
             with np.errstate(invalid="ignore"):
                 wing_extension = wing_angle_deg[male_slot] >= wam

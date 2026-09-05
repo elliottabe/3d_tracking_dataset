@@ -143,6 +143,34 @@ def _frames(n, C=7):
     return [(np.zeros((C, 8, 8, 3), np.uint8), np.ones(C, bool)) for _ in range(n)]
 
 
+# ------------------------------------------------------------- fly-count guard
+def test_lift_masked_bout_refuses_a_fly_count_other_than_two(tmp_path):
+    """This lifter hardcodes exactly TWO typed slots (female fly0, male
+    fly1) throughout -- a `centres`/`ok` pair with any other fly count must
+    raise a clear error, not silently index (A=1) or silently drop a fly
+    (A>=3)."""
+    from jarvis_jax.tracking.lift_mvq import lift_masked_bout
+    r = FakeRunner(_fake_checkpoint(tmp_path), kp_names=_mvq_names())
+    for a in (1, 3):
+        with pytest.raises(ValueError, match="TWO typed slots"):
+            lift_masked_bout(r, _frames(1), np.zeros((a, 1, 3), np.float32),
+                             np.ones((a, 1), bool), out_dir=str(tmp_path / f"bout{a}"),
+                             model_names=_model_names())
+
+
+def test_bout_centres_3d_refuses_a_mask_store_with_a_different_fly_count(tmp_path):
+    """`bout_centres_3d` reads `store.n_flies` directly -- the same guard
+    belongs at the earliest point that value is used, not just inside
+    `lift_masked_bout`."""
+    from jarvis_jax.tracking.lift_mvq import bout_centres_3d
+
+    class _FakeStore:
+        n_flies = 3
+
+    with pytest.raises(ValueError, match="TWO typed slots"):
+        bout_centres_3d(_FakeStore(), np.zeros((7, 4, 3), np.float32), 1)
+
+
 # --------------------------------------------------------------------- windows
 def test_frame_windows_merge_two_close_centres_and_split_far_ones():
     """Same rule as `coarse_track`/`plan_windows`: <= 30 units (3 mm) is one
