@@ -203,6 +203,52 @@ def resolved_identity(identity):
     return identity
 
 
+def resolve_mask_identity(identity, mask_sex_meta, *, where=""):
+    """The identity rule ONE bout will actually run, given what its masks carry.
+
+    `identity="mask"` only means something when the masks carry a HUMAN id
+    review; a bout whose masks do not falls back to the sex head. That
+    fallback has to be resolved BEFORE the gate string is built, by every
+    caller that builds one -- `lift_masked_bout`, `scripts/mvq_lift_bout.py`
+    and `slurm_bout_array`'s `--mvq-lift skip` verification. Stamping the
+    REQUESTED mode on a bout that ran the other rule would make
+    `bout_lift_is_current` answer True for a lift that is not the one the
+    config asks for, so a re-lift after a review is canonicalized into those
+    masks would be skipped and the bout would keep its sex-head identity
+    inside a run labelled `mask`.
+
+    Returns `(mode, fallback_message or None)` -- the message is a warning the
+    caller emits (a lifter warns, a submitter prints), never a silent switch.
+
+    Raises:
+        ValueError: `identity="mask"` with a review that puts the male at mask
+            slot 0. `fly{f}` IS mask fly `f` on that route, so `male_fly: 1`
+            would name the wrong fly. Raised here, before any work, rather
+            than after a bout has been lifted.
+    """
+    identity = resolved_identity(identity)
+    if identity != "mask":
+        return identity, None
+    ms = mask_sex_meta or {}
+    tag = f"{where}: " if where else ""
+    if str(ms.get("method")) != HUMAN_REVIEW_METHOD:
+        return "sex", (
+            f"{tag}identity='mask' was asked for, but the masks' sex_meta.method is "
+            f"{ms.get('method')!r}, not {HUMAN_REVIEW_METHOD!r} -- there is no human "
+            f"identity decision to honour, so this bout runs the sex head "
+            f"(identity='sex') and is GATED as such: a run asking for the 'mask' gate "
+            f"will not accept it, and re-canonicalizing a review into these masks makes "
+            f"it stale so the re-lift actually happens.")
+    if ms.get("male_slot") != 1:
+        raise ValueError(
+            f"{tag}identity='mask' writes fly{{f}} from MASK fly {{f}} and a sex.json "
+            f"saying male_fly=1, but these masks' human review says male = mask slot "
+            f"{ms.get('male_slot')!r}. Re-run scripts/canonicalize_sam_masks.py so the "
+            f"male is mask slot 1, or lift this bout with identity='sex' -- writing it "
+            f"as-is would name the wrong fly the male.")
+    return "mask", None
+
+
 def mvq_gate_signature(checkpoint, *, step=None, exist_thresh=None, identity=None):
     """The Stage-B `gates` payload for an mvq-lifted kp3d.npz.
 
@@ -218,10 +264,19 @@ def mvq_gate_signature(checkpoint, *, step=None, exist_thresh=None, identity=Non
     one checkpoint is refused after the config points at another, exactly as
     a changed DLT gate is.
 
-    `identity` is the REQUESTED mode, not the one a particular bout resolved
-    to: a bout whose masks carry no human review falls back to "sex" for
-    itself alone, which run_bout (which never opens the mask npz) cannot
-    know. `mvq_meta.json` records the resolved mode per bout and per frame.
+    `identity` must be the mode the bout ACTUALLY RAN, not the one the config
+    asked for: a bout whose masks carry no human review falls back to "sex"
+    for itself alone (`resolve_mask_identity`), and gating it as "mask" would
+    make `bout_lift_is_current` accept a sex-head lift for a mask-identity
+    run -- and skip the re-lift once a review is canonicalized into those
+    masks. Callers that build this string per bout therefore resolve first.
+
+    The consequence is deliberate: with `mvq.identity: mask` in the config,
+    `run_bout.stage_b_gate_signature` (which has no bout index and never opens
+    the mask npz) computes the "mask" string, so a fallback bout is REFUSED at
+    Stage B rather than silently accepted. The fix for such a bout is to give
+    its masks the human review, or to run that recording with
+    `mvq.identity=sex`.
     """
     if not checkpoint:
         raise ValueError("pipeline.lifter=mvq needs mvq.checkpoint set -- the Stage-B gate "
@@ -951,8 +1006,9 @@ def lift_masked_bout(runner, frames_iter, centres, ok, *, out_dir, model_names,
             takes the runner's own. `"mask"` needs the masks to carry a human
             id review (`mask_sex_meta["method"] == "human_id_review"`); a bout
             whose masks do not falls back to `"sex"` with a warning, and says
-            so in `mvq_meta.json`. The REQUESTED mode (not the fallback) is
-            what the gates string names -- run_bout never opens the mask npz.
+            so in `mvq_meta.json`. The RESOLVED mode is what the gates string
+            names and what the skip check compares, so a fallback bout is not
+            mistaken for a mask-identity one (see `resolve_mask_identity`).
         mask_assign_units: `identity="mask"` only -- how far an instance's
             keypoint centroid may sit from a mask's triangulated centre and
             still be that mask's fly (`MASK_ASSIGN_UNITS`). Recorded in
@@ -992,14 +1048,26 @@ def lift_masked_bout(runner, frames_iter, centres, ok, *, out_dir, model_names,
             f"asked for {identity!r}; `runner.gates_string()` would then disagree with "
             f"the gates stamped into kp3d.npz, and a later staleness check could not "
             f"tell which rule assigned the flies")
-    gates_string = mvq_gate_string(runner.checkpoint, step=runner.step,
-                                   exist_thresh=runner.exist_thresh, identity=identity)
     out_dir = str(out_dir)
+    # Resolve the EFFECTIVE mode BEFORE the gate string and the currency check.
+    # Gating on the requested mode instead would stamp `identity: mask` on a
+    # bout that actually ran the sex head, and then a re-lift after someone
+    # canonicalizes a human review into those masks would be SKIPPED as
+    # already current -- the bout would keep its sex-head identity forever
+    # inside a run labelled mask.
+    identity_resolved, _fallback = resolve_mask_identity(identity, mask_sex_meta,
+                                                         where=out_dir)
+    if _fallback:
+        warnings.warn(_fallback, RuntimeWarning, stacklevel=2)
+    gates_string = mvq_gate_string(runner.checkpoint, step=runner.step,
+                                   exist_thresh=runner.exist_thresh,
+                                   identity=identity_resolved)
     if not force and bout_lift_is_current(out_dir, gates_string):
         if verbose:
-            print(f"[mvq-lift] skip {out_dir}: kp3d.npz already carries these gates",
-                  flush=True)
-        return {"skipped": True, "out_dir": out_dir, "gates": gates_string}
+            print(f"[mvq-lift] skip {out_dir}: kp3d.npz already carries these gates "
+                  f"(identity {identity_resolved})", flush=True)
+        return {"skipped": True, "out_dir": out_dir, "gates": gates_string,
+                "identity": identity, "identity_resolved": identity_resolved}
 
     centres = np.asarray(centres, np.float32)
     ok = np.asarray(ok, bool)
@@ -1019,29 +1087,6 @@ def lift_masked_bout(runner, frames_iter, centres, ok, *, out_dir, model_names,
             f"(A>=3) rather than raise. This route is for two-fly courtship bouts only.")
     T = centres.shape[1]
     C, K, I = len(runner.cameras), runner.K, runner.I
-
-    # ---- resolve the identity RULE for this bout (the requested mode above is
-    # what the gates string names; this is what actually runs).
-    _ms = mask_sex_meta or {}
-    identity_resolved = identity
-    if identity == "mask":
-        if str(_ms.get("method")) != HUMAN_REVIEW_METHOD:
-            identity_resolved = "sex"
-            warnings.warn(
-                f"lift_masked_bout({out_dir}): identity='mask' was asked for, but the "
-                f"masks' sex_meta.method is {_ms.get('method')!r}, not "
-                f"{HUMAN_REVIEW_METHOD!r} -- there is no human identity decision to "
-                f"honour, so this bout falls back to the sex head "
-                f"(identity='sex'). mvq_meta.json records the fallback.",
-                RuntimeWarning, stacklevel=2)
-        elif _ms.get("male_slot") != 1:
-            raise ValueError(
-                f"lift_masked_bout({out_dir}): identity='mask' writes fly{{f}} from MASK "
-                f"fly {{f}} and a sex.json saying male_fly=1, but these masks' human "
-                f"review says male = mask slot {_ms.get('male_slot')!r}. Re-run "
-                f"scripts/canonicalize_sam_masks.py so the male is mask slot 1, or lift "
-                f"this bout with identity='sex' -- writing it as-is would name the "
-                f"wrong fly the male.")
 
     # Row 0 is the FEMALE (mask fly 0 / female typed slot), row 1 the MALE.
     kp3d = np.full((2, T, K, 3), np.nan, np.float32)

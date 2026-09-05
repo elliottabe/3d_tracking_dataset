@@ -660,19 +660,34 @@ def main():
         # predicate the lifter itself uses to decide whether a bout is
         # already done, so reuse it here instead of a weaker local check.
         sys.path.insert(0, str(PKG_DIR))
-        from jarvis_jax.tracking.lift_mvq import bout_lift_is_current, mvq_gate_string
+        from jarvis_jax.tracking.lift_mvq import (bout_lift_is_current, mvq_gate_string,
+                                                  resolve_mask_identity)
+        from jarvis_jax.tracking.sexing import read_sex_meta
         mv = cfg.get("mvq") or {}
         if not mv.get("checkpoint"):
             print(f"Error: --lifter mvq needs mvq.checkpoint; configs/mvq/"
                   f"{args.mvq_config}.yaml sets none", file=sys.stderr)
             sys.exit(2)
-        gates_string = mvq_gate_string(str(mv["checkpoint"]), step=mv.get("step"),
-                                        exist_thresh=float(mv.get("exist_thresh", 0.5)),
-                                        identity=mv.get("identity"))
+
+        def _gates_for(i):
+            """This bout's gate string, with `mvq.identity` resolved against ITS
+            masks -- the same resolution the lifter does. A bout whose masks
+            carry no human id review runs (and is gated as) the sex head even
+            under `identity: mask`; comparing it against the unresolved 'mask'
+            string would call a finished lift missing, and comparing a
+            'mask'-gated lift against a resolved 'sex' string would call a
+            fallback lift done."""
+            _sm = read_sex_meta(os.path.join(predictions_dir, f"bout_{i:05d}",
+                                             "sam3_masks.npz"))
+            _id, _ = resolve_mask_identity(mv.get("identity"), _sm)
+            return mvq_gate_string(str(mv["checkpoint"]), step=mv.get("step"),
+                                   exist_thresh=float(mv.get("exist_thresh", 0.5)),
+                                   identity=_id)
+
         _not_current = [i for i in idxs
                         if not bout_lift_is_current(
                             os.path.join(run_root, "bouts", f"bout_{i:05d}"),
-                            gates_string)]
+                            _gates_for(i))]
         if _not_current:
             print(f"Error: --mvq-lift skip, but {len(_not_current)} bout(s) are not a "
                   f"current mvq lift (kp3d.npz per fly matching these gates AND "

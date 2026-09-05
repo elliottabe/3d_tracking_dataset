@@ -74,7 +74,8 @@ from omegaconf import OmegaConf  # noqa: E402
 from jarvis_jax.predict.synced_reader import load_plan, read_window  # noqa: E402
 from jarvis_jax.tracking.lift_mvq import (BoutMaskStore, MVQRunner,  # noqa: E402
                                           bout_centres_3d, bout_lift_is_current,
-                                          lift_masked_bout, resolve_bout_frames)
+                                          lift_masked_bout, mvq_gate_string,
+                                          resolve_bout_frames, resolve_mask_identity)
 from jarvis_jax.tracking.sexing import (load_review, read_sex_meta,  # noqa: E402
                                         review_key_for)
 
@@ -186,12 +187,12 @@ def main(argv=None):
     runner = MVQRunner(args.run, step=args.step, attn_impl=args.attn_impl,
                        calib_dir=calib_dir, cameras=cameras, batch=int(args.batch),
                        exist_thresh=float(args.exist_thresh), identity=args.identity)
-    gates_string = runner.gates_string()
     print(f"[mvq-lift] checkpoint {runner.checkpoint} step {runner.step_label}; "
           f"K={runner.K} slots={runner.I} exist_thresh={runner.exist_thresh} "
           f"identity={runner.identity}; "
           f"unrestored={runner.meta.get('_unrestored_leaves', [])}", flush=True)
-    print(f"[mvq-lift] gates {gates_string}", flush=True)
+    print(f"[mvq-lift] gates (identity={runner.identity}) {runner.gates_string()}",
+          flush=True)
     print(f"[mvq-lift] {len(bouts)} bout(s): {bouts}", flush=True)
 
     review = load_review(args.review) if args.review else {}
@@ -199,13 +200,25 @@ def main(argv=None):
     n_done = n_skipped = 0
     for bout in bouts:
         out_dir = os.path.join(args.out, "bouts", f"bout_{bout:05d}")
+        mask_npz = os.path.join(predictions_dir, f"bout_{bout:05d}", "sam3_masks.npz")
+        # The masks' sex_meta decides whether `--identity mask` can be honoured
+        # for THIS bout, so it is read (cheap -- one small npz member) BEFORE
+        # the skip check: gating a fallback bout as "mask" would let a re-lift
+        # be skipped after a human review is canonicalized into its masks.
+        mask_sex_meta = read_sex_meta(mask_npz)
+        identity, fallback = resolve_mask_identity(args.identity, mask_sex_meta,
+                                                   where=f"bout {bout}")
+        if fallback:
+            print(f"[mvq-lift] WARNING {fallback}", flush=True)
+        gates_string = mvq_gate_string(runner.checkpoint, step=runner.step,
+                                       exist_thresh=runner.exist_thresh,
+                                       identity=identity)
         if not args.force and bout_lift_is_current(out_dir, gates_string):
-            print(f"[mvq-lift] bout {bout}: skip (kp3d.npz already carries these gates)",
-                  flush=True)
+            print(f"[mvq-lift] bout {bout}: skip (kp3d.npz already carries these gates, "
+                  f"identity {identity})", flush=True)
             n_skipped += 1
             continue
         t0_wall = time.time()
-        mask_npz = os.path.join(predictions_dir, f"bout_{bout:05d}", "sam3_masks.npz")
         store = BoutMaskStore(mask_npz, cameras)
         abs_start, abs_end, n_csv = resolve_bout_frames(args.session_dir, bout,
                                                         bouts_csv=args.bouts_csv)
@@ -230,7 +243,7 @@ def main(argv=None):
             identity=args.identity,
             mask_assign_units=float(args.mask_assign_units), force=args.force,
             progress_every=int(args.progress_every),
-            mask_sex_meta=read_sex_meta(mask_npz), review_male_fly=review_male,
+            mask_sex_meta=mask_sex_meta, review_male_fly=review_male,
             meta_extra={"bout": int(bout), "session_dir": str(args.session_dir),
                         "masks_npz": mask_npz, "bouts_csv": args.bouts_csv,
                         "frame_start": int(abs_start),

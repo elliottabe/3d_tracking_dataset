@@ -270,7 +270,10 @@ def test_writer_emits_model_order_canonical_identity_and_gates(tmp_path):
     from jarvis_jax.tracking.lift_mvq import lift_masked_bout, mvq_gate_string
     model_names, mvq_names = _model_names(), _mvq_names()
     ckpt = _fake_checkpoint(tmp_path)
-    r = FakeRunner(ckpt, kp_names=mvq_names)
+    # explicitly the SEX-head route: fly0 == typed slot 1, fly1 == typed slot 2
+    # is what this test asserts, and with no mask sex_meta `identity="mask"`
+    # would resolve to exactly the same rule but be labelled differently
+    r = FakeRunner(ckpt, kp_names=mvq_names, identity="sex")
     T = 3
     centres = np.zeros((2, T, 3), np.float32)
     centres[1, :, 0] = 200.0
@@ -285,7 +288,8 @@ def test_writer_emits_model_order_canonical_identity_and_gates(tmp_path):
             assert z["conf3d"].shape == (T, len(model_names))
             np.testing.assert_allclose(z["conf3d"], 0.8)       # mean per-view visibility
             np.testing.assert_allclose(z["conf3d_mvq_raw"], 0.05)
-            assert str(z["gates"]) == mvq_gate_string(ckpt, step=None, exist_thresh=0.5)
+            assert str(z["gates"]) == mvq_gate_string(ckpt, step=None, exist_thresh=0.5,
+                                                      identity="sex")
             # fly0 IS the female typed slot (slot 1) and fly1 the male (slot 2).
             # Both flies are read out of the SAME window here (the two centres
             # are 200 units apart, so there are two windows, and the fake gives
@@ -341,7 +345,7 @@ def test_gates_string_is_what_run_bout_stage_b_expects(tmp_path):
     staleness check with `pipeline.lifter: mvq`, without `allow_stale_kp3d`."""
     from jarvis_jax.tracking.lift_mvq import lift_masked_bout
     ckpt = _fake_checkpoint(tmp_path)
-    r = FakeRunner(ckpt, kp_names=_mvq_names(), exist_thresh=0.55)
+    r = FakeRunner(ckpt, kp_names=_mvq_names(), exist_thresh=0.55, identity="sex")
     centres = np.zeros((2, 1, 3), np.float32)
     centres[1, :, 0] = 200.0
     out = tmp_path / "bout"
@@ -355,14 +359,14 @@ def test_gates_string_is_what_run_bout_stage_b_expects(tmp_path):
     cfg = OmegaConf.create({"detector": {"conf_thresh": 0.3},
                             "pipeline": {"lifter": "mvq"},
                             "mvq": {"checkpoint": ckpt, "step": None,
-                                    "exist_thresh": 0.55}})
+                                    "exist_thresh": 0.55, "identity": "sex"}})
     with np.load(out / "fly0" / "kp3d.npz") as z:
         assert str(z["gates"]) == g["stage_b_gate_signature"](cfg)
 
 
 def test_lift_is_idempotent_and_force_reruns(tmp_path):
     from jarvis_jax.tracking.lift_mvq import bout_lift_is_current, lift_masked_bout
-    r = FakeRunner(_fake_checkpoint(tmp_path), kp_names=_mvq_names())
+    r = FakeRunner(_fake_checkpoint(tmp_path), kp_names=_mvq_names(), identity="sex")
     centres = np.zeros((2, 1, 3), np.float32)
     centres[1, :, 0] = 200.0
     out = tmp_path / "bout"
@@ -372,7 +376,8 @@ def test_lift_is_idempotent_and_force_reruns(tmp_path):
     assert bout_lift_is_current(str(out), r.gates_string())
     # a different checkpoint (or exist_thresh) is NOT current -- that is the
     # whole point of stamping the gates string
-    other = FakeRunner(_fake_checkpoint(tmp_path, "final2"), kp_names=_mvq_names())
+    other = FakeRunner(_fake_checkpoint(tmp_path, "final2"), kp_names=_mvq_names(),
+                       identity="sex")
     assert not bout_lift_is_current(str(out), other.gates_string())
 
     res = lift_masked_bout(r, _frames(1), centres, np.ones((2, 1), bool),
@@ -390,7 +395,7 @@ def test_lift_is_not_current_without_sex_json(tmp_path):
     re-submitted array skips it forever and the recording falls back to one
     shared body scale instead of a per-fly one."""
     from jarvis_jax.tracking.lift_mvq import bout_lift_is_current, lift_masked_bout
-    r = FakeRunner(_fake_checkpoint(tmp_path), kp_names=_mvq_names())
+    r = FakeRunner(_fake_checkpoint(tmp_path), kp_names=_mvq_names(), identity="sex")
     centres = np.zeros((2, 1, 3), np.float32)
     centres[1, :, 0] = 200.0
     out = tmp_path / "bout"
@@ -950,6 +955,55 @@ def test_mask_identity_falls_back_to_the_sex_head_without_a_human_review(tmp_pat
     assert meta["per_frame"]["identity_source"] == ["sex"]
     # the sex.json method names what actually decided identity
     assert json.load(open(out / "sex.json"))["method"] == "mvq_sex_head"
+
+
+def test_a_fallback_bout_is_gated_as_sex_and_is_not_current_for_mask(tmp_path):
+    """The fallback must be gated on the mode that ACTUALLY RAN, not the one
+    asked for.
+
+    A bout whose masks carry no human review runs the sex head even under
+    `--identity mask`. If it were stamped `identity: mask`, then
+    `bout_lift_is_current` would answer True for the mask gate -- and the
+    moment someone canonicalizes a human review into those masks, the re-lift
+    that should now produce mask identities would be SKIPPED as already
+    current, leaving a sex-head bout inside a run labelled `mask` with nothing
+    downstream able to tell.
+    """
+    from jarvis_jax.tracking.lift_mvq import (bout_lift_is_current, lift_masked_bout,
+                                              mvq_gate_string, resolve_mask_identity)
+    ckpt = _fake_checkpoint(tmp_path)
+    centres, ok = _two_mask_windows()
+    r = PlacedFake(ckpt, kp_names=_mvq_names(), exist_fn=_female_window_reads_male())
+    out = tmp_path / "bout"
+    with pytest.warns(RuntimeWarning, match="human_id_review"):
+        res = lift_masked_bout(r, _frames(1), centres, ok, out_dir=str(out),
+                               model_names=_model_names(), identity="mask",
+                               mask_sex_meta={"method": "mask_area_vote", "male_slot": 1})
+
+    g_sex = mvq_gate_string(ckpt, step=None, exist_thresh=0.5, identity="sex")
+    g_mask = mvq_gate_string(ckpt, step=None, exist_thresh=0.5, identity="mask")
+    assert res["gates"] == g_sex                       # stamped as what it RAN
+    with np.load(out / "fly0" / "kp3d.npz") as z:
+        assert str(z["gates"]) == g_sex
+    assert bout_lift_is_current(str(out), g_sex)
+    assert not bout_lift_is_current(str(out), g_mask)   # the re-lift will happen
+
+    # and once the masks DO carry the review, the resolution -- and so the gate
+    # the caller compares against -- becomes "mask", which this bout fails
+    assert resolve_mask_identity("mask", {"method": "mask_area_vote"})[0] == "sex"
+    assert resolve_mask_identity("mask", HUMAN_MASKS)[0] == "mask"
+    assert resolve_mask_identity("sex", HUMAN_MASKS)[0] == "sex"     # never upgraded
+    assert resolve_mask_identity("mask", None)[1] is not None        # a message, not silence
+
+    # re-lifting the SAME bout after the review lands is not skipped, and now
+    # writes mask identities
+    r2 = PlacedFake(ckpt, kp_names=_mvq_names(), exist_fn=_female_window_reads_male())
+    res2 = lift_masked_bout(r2, _frames(1), centres, ok, out_dir=str(out),
+                            model_names=_model_names(), identity="mask",
+                            mask_sex_meta=HUMAN_MASKS)
+    assert res2["skipped"] is False and res2["identity_resolved"] == "mask"
+    assert res2["gates"] == g_mask and res2["slot"][0, 0] == 2
+    assert json.load(open(out / "sex.json"))["method"] == "mask_human_id_review"
 
 
 def test_mask_identity_refuses_masks_whose_male_is_not_slot_1(tmp_path):

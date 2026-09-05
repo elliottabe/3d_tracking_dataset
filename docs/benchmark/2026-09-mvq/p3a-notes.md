@@ -931,10 +931,10 @@ method in `canonicalize_bout`'s authoritative no-swap set beside `mvq_sex_head`,
 `identity` is in `mvq_gate_signature`/`mvq_gate_string` and `run_bout.stage_b_gate_signature`
 passes `cfg.mvq.identity`, so a run switched between the modes refuses the other's bouts instead of
 reusing them -- **every existing `pose_mvq_p3a` lift is now stale by design** (its gates string has
-no `identity` key). The gate names the REQUESTED mode, not a per-bout fallback: run_bout never
-opens the mask npz, and `identity_resolved` in `mvq_meta.json` is where the fallback is visible.
-`mask_assign_units` is deliberately NOT in the signature, for the same reason as
-`collapse_dist_units` -- recorded in `mvq_meta.json` instead.
+no `identity` key). The gate names the mode the bout **actually ran** -- `resolve_mask_identity` is
+called before the gate string is built, so a bout that fell back to `sex` is stamped `sex` and a
+`mask` run does not accept it. `mask_assign_units` is deliberately NOT in the signature, for the
+same reason as `collapse_dist_units` -- recorded in `mvq_meta.json` instead.
 
 ### Smoke: 20_04 bouts 25 and 5 re-lifted with `--identity mask`
 
@@ -1050,3 +1050,44 @@ test's cfg has no `outputs`); nothing in this change touches `main_from_cfg`.
    prompted branch with her mask as the prompt.
 3. `mask_assign_units` is CLI/meta-only, not gated. If it is ever tuned per recording, that choice
    will not invalidate a kp3d.npz -- deliberate, but worth revisiting if it stops being a constant.
+
+### Fix round 1 (review): gate on the RESOLVED identity, not the requested one
+
+The first cut built the gate string from the requested `identity` and only then resolved the
+human-review fallback, so a bout whose masks carry no review ran the sex head but was stamped
+`identity: mask`. `bout_lift_is_current` would then answer True for the `mask` gate, and the moment
+someone canonicalized a review into those masks the re-lift that should now produce mask identities
+would be **skipped as already current** -- a sex-head bout inside a run labelled `mask`, with
+nothing downstream able to tell.
+
+`resolve_mask_identity(identity, mask_sex_meta)` is now the one place the fallback is decided
+(returning `(mode, fallback_message_or_None)`, and raising on `male_slot != 1`), and every caller
+that builds a gate string resolves first:
+
+- `lift_masked_bout` resolves **before** the gate string and the currency/skip check; the stamped
+  gates, `mvq_meta.json`'s `identity_source`/`identity_resolved` and `sex.json`'s method are all the
+  resolved mode.
+- `scripts/mvq_lift_bout.py` reads each bout's `sex_meta` (one small npz member) **before** its
+  per-bout skip check and gates on the resolved mode -- previously one gate string for the whole
+  invocation.
+- `slurm_bout_array`'s `--mvq-lift skip` verification does the same per bout (`_gates_for(i)`), so
+  it neither calls a finished fallback lift missing nor calls a fallback lift "done" for a mask run.
+
+Consequence, deliberate and documented in `mvq_gate_signature`: `run_bout.stage_b_gate_signature`
+has no bout index and never opens the mask npz, so with `mvq.identity: mask` a fallback bout is
+**refused at Stage B** rather than silently accepted. The fix for such a bout is to give its masks
+the human review (then re-lift, which is no longer skipped) or to run that recording with
+`mvq.identity=sex`. No campaign bout is affected -- all 160 carry `human_id_review` + `male_slot: 1`.
+
+Verified on real data: `mvq_lift_bout.py` re-run over 20_04 bouts 5 and 25 now prints
+`skip (kp3d.npz already carries these gates, identity mask)` for both, and
+`run_bout.stage_b_gate_signature` with the real `configs/mvq/p3a.yaml` reproduces the smoke lift's
+stamped string byte-for-byte while refusing the old sex-head campaign lift.
+
+Tests: `test_lift_masked_bout.py` **31 passed** (+1: a fallback bout is stamped `sex`, is current
+for the `sex` gate, is NOT current for the `mask` gate, and re-lifts -- not skips -- once the review
+lands). Four pre-existing tests that exercise the sex-head route with no mask `sex_meta` now say
+`identity="sex"` explicitly instead of relying on the default label. `test_slurm_courtship_array`
+4 passed; `test_lift_mvq`/`test_sexing`/`test_run_bout_sexing`/`test_sam3_sexing`/
+`test_recanonicalize_masks`/`test_coarse_pass_gates`/`test_coarse_pass_timeline_mvq_refusal`/
+`test_coarse_track` 80 passed.
