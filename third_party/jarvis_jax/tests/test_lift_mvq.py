@@ -97,6 +97,61 @@ def test_runner_infer_and_read_typed_shapes(tiny):
     assert male is None or male["slot"] == 2
 
 
+def _fake_out(r, exists, sex_prob=None, xyz_norm=None):
+    """A hand-built `infer` result with chosen per-slot existence -- lets the
+    slot rules be tested without a forward whose existences are whatever the
+    1-step tiny model happens to emit."""
+    I, K, C = r.I, r.K, len(r.cameras)
+    xyz = np.zeros((1, I, K, 3), np.float32)
+    if xyz_norm is not None:                        # distance of each slot from the ROI origin
+        xyz[0, :, :, 0] = np.asarray(xyz_norm, np.float32)[:, None]
+    return {"exist": np.asarray(exists, np.float32)[None],
+            "xyz": xyz,
+            "kp3d": np.zeros((1, I, K, 3), np.float32),
+            "kp2d": np.zeros((1, I, C, K, 2), np.float32),
+            "vis": np.full((1, I, C, K), 0.5, np.float32),
+            "conf_raw": np.zeros((1, I, K), np.float32),
+            "sex_prob": np.asarray(sex_prob if sex_prob is not None else [0.5] * I,
+                                   np.float32)[None]}
+
+
+def test_exist_thresh_is_honoured_by_both_slot_rules(tiny):
+    """The runner's `exist_thresh` must gate the POLICY too, not just
+    `read_typed`. A slot at 0.6 is above the module default (0.5) and below a
+    runner configured at 0.7: if `policy_slot` still filtered on the constant
+    it would hand back the very slot `read_typed` just refused."""
+    lax = _runner(tiny)                                    # exist_thresh defaults to 0.5
+    strict = _runner(tiny, exist_thresh=0.7)
+    out = _fake_out(lax, [0.0, 0.6, 0.2, 0.0], xyz_norm=[9.0, 1.0, 2.0, 9.0])
+    assert lax.read_typed(out, 0, want_sex=0)["slot"] == 1
+    assert lax.policy_slot(out, 0, prompted=False, has_mask=False) == 1
+    assert strict.read_typed(out, 0, want_sex=0) is None
+    assert strict.policy_slot(out, 0, prompted=False, has_mask=False) is None
+    # and above the strict threshold both rules agree again
+    hi = _fake_out(lax, [0.0, 0.8, 0.2, 0.0], xyz_norm=[9.0, 1.0, 2.0, 9.0])
+    assert strict.read_typed(hi, 0, want_sex=0)["slot"] == 1
+    assert strict.policy_slot(hi, 0, prompted=False, has_mask=False) == 1
+
+
+def test_read_typed_single_fly_takes_whichever_typed_slot_exists(tiny):
+    """Spec §4.2: a single-fly recording asks for SEX_UNKNOWN and gets
+    whichever typed slot exists -- the sex is REPORTED, not assumed -- the
+    higher existence when both clear the threshold, None when neither does."""
+    from jarvis_jax.train.matching import SEX_UNKNOWN
+    r = _runner(tiny)
+    male_only = r.read_typed(_fake_out(r, [0.0, 0.1, 0.9, 0.0], sex_prob=[.5, .8, .05, .5]),
+                             0, want_sex=SEX_UNKNOWN)
+    assert male_only["slot"] == 2 and male_only["sex_prob"] == pytest.approx(0.05)
+    female_only = r.read_typed(_fake_out(r, [0.0, 0.9, 0.2, 0.0], sex_prob=[.5, .95, .1, .5]),
+                               0, want_sex=SEX_UNKNOWN)
+    assert female_only["slot"] == 1 and female_only["sex_prob"] == pytest.approx(0.95)
+    both_male = r.read_typed(_fake_out(r, [0.0, 0.8, 0.9, 0.0]), 0, want_sex=SEX_UNKNOWN)
+    assert both_male["slot"] == 2 and both_male["exist"] == pytest.approx(0.9)
+    both_female = r.read_typed(_fake_out(r, [0.0, 0.95, 0.6, 0.0]), 0, want_sex=SEX_UNKNOWN)
+    assert both_female["slot"] == 1 and both_female["exist"] == pytest.approx(0.95)
+    assert r.read_typed(_fake_out(r, [0.9, 0.2, 0.1, 0.9]), 0, want_sex=SEX_UNKNOWN) is None
+
+
 def test_concat_windows_batches_frames_and_refuses_mixed_prompts(tiny):
     """A batch spans FRAMES (different images), so the callers build one
     window per frame and concatenate. Concatenating a prompted window with an
@@ -148,6 +203,12 @@ def test_to_pipeline_permutes_by_name_and_signs_gates(tiny):
     assert abs(p["conf3d"].mean() - 0.9) < 1e-6
     assert p["conf3d_mvq_raw"].shape == (T, K) and abs(p["conf3d_mvq_raw"].mean() - 0.05) < 1e-6
     assert p["gates"]["lifter"] == "mvq" and len(p["gates"]["sha256"]) == 16
+    # `conf3d` averages over CAMERAS, so a wrongly shaped `vis` must refuse
+    # rather than average over time and return a plausible (T,K)-shaped lie
+    with pytest.raises(ValueError, match="vis"):
+        r.to_pipeline(kp3d, kp2d, vis[:, 0], raw, model_names)
+    with pytest.raises(ValueError, match="kp2d"):
+        r.to_pipeline(kp3d, kp2d[:, :3], vis, raw, model_names)
 
 
 def _stage_b_gate_signature():
@@ -184,3 +245,12 @@ def test_gates_signature_round_trips_through_run_bout(tiny):
                             "wing_collapse": {"enabled": False},
                             "rigid_repair": {"enabled": False}})
     assert "lifter" not in sig(dlt)
+    # "latest" is not a checkpoint identity: it names a different step every
+    # time the training job saves, so a signature built from it would compare
+    # equal to a kp3d.npz produced by DIFFERENT weights. Refuse it by name.
+    latest = OmegaConf.merge(cfg, OmegaConf.create({"mvq": {"step": "latest"}}))
+    with pytest.raises(ValueError, match="concrete int"):
+        sig(latest)
+    from jarvis_jax.tracking.lift_mvq import mvq_gate_signature
+    with pytest.raises(ValueError, match="concrete int"):
+        mvq_gate_signature(final, step="latest")

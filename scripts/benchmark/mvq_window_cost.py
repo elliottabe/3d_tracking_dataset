@@ -115,7 +115,11 @@ def main():
     res = {
         "checkpoint": os.path.abspath(a.run), "step": runner.step_label,
         "attn_impl": a.attn_impl or runner.meta["model"].get("attn_impl"),
+        # `device_kind` is the CARD ("NVIDIA L40S" vs "NVIDIA A40"): the cost
+        # differs by ~1.85x between them, which is enough to flip §7's
+        # stride decision, so the number is meaningless without it.
         "backend": jax.default_backend(), "device": str(jax.devices()[0]),
+        "device_kind": jax.devices()[0].device_kind,
         "crops_dtype": str(w["crops"].dtype), "batch": a.batch,
         "session_dir": a.session_dir, "frame": int(a.frame),
         "centre_units": [float(x) for x in a.centre], "jitter_mm": a.jitter_mm,

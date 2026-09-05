@@ -35,7 +35,8 @@ def typed_candidates(n_instances: int) -> list[int]:
     return list(range(1, n_instances)) if n_instances == N_SLOTS else list(range(n_instances))
 
 
-def policy_instance(exist_probs, xyz, *, prompted: bool, has_mask: bool):
+def policy_instance(exist_probs, xyz, *, prompted: bool, has_mask: bool,
+                    exist_thresh: float = EXIST_THRESH):
     """The instance a real inference call would report -- no ground truth.
 
     `exist_probs` (I,): sigmoid of the existence head. `xyz` (I,T,K,3):
@@ -43,7 +44,7 @@ def policy_instance(exist_probs, xyz, *, prompted: bool, has_mask: bool):
 
     Prompted AND the window has a usable mask -> slot 0, which the prompt
     token targets. Otherwise (unprompted, or prompted with no usable mask):
-    among `typed_candidates` that clear `EXIST_THRESH`, the one whose mean
+    among `typed_candidates` that clear `exist_thresh`, the one whose mean
     predicted centroid over (T,K) sits nearest the ROI origin -- the host fly
     is cropped to be near that centre by construction
     (`data/v12_windows.py`), so this is the cheapest correct proxy for "which
@@ -51,13 +52,21 @@ def policy_instance(exist_probs, xyz, *, prompted: bool, has_mask: bool):
     no candidate clears the threshold: there is nothing to score, so the
     sample is excluded from the policy MPJPE and counted in
     `policy_miss_frac` instead.
+
+    `exist_thresh` defaults to the module constant, which is what every
+    metric-producing call site passes (the acceptance numbers, the overlay
+    figure and the val baselines must all threshold identically). A caller
+    that runs the model at a DIFFERENT threshold -- `tracking/lift_mvq.py`'s
+    `MVQRunner(exist_thresh=...)`, whose `read_typed` gates on its own value
+    -- passes it here too, or the policy would hand back the very slot the
+    typed read just refused.
     """
     if prompted and has_mask:
         return SLOT_PROMPTED
     exist_probs = np.asarray(exist_probs)
     xyz = np.asarray(xyz)
     cand = np.array([s for s in typed_candidates(xyz.shape[0])
-                     if exist_probs[s] >= EXIST_THRESH], dtype=int)
+                     if exist_probs[s] >= exist_thresh], dtype=int)
     if cand.size == 0:
         return None
     return int(cand[np.argmin(np.linalg.norm(xyz[cand].mean(axis=(1, 2)), axis=-1))])

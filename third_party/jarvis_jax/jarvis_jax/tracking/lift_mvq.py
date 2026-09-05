@@ -55,7 +55,8 @@ from jarvis_jax.geometry.reprojection_tool import ReprojectionTool
 from jarvis_jax.models.mvq.checkpoint import load_mvq_model
 from jarvis_jax.models.mvq.model import assemble
 from jarvis_jax.models.mvq.policy import EXIST_THRESH, policy_instance
-from jarvis_jax.train.matching import N_SLOTS, SEX_FEMALE, SEX_MALE, SLOT_FEMALE, SLOT_MALE
+from jarvis_jax.train.matching import (N_SLOTS, SEX_FEMALE, SEX_MALE, SEX_UNKNOWN,
+                                       SLOT_FEMALE, SLOT_MALE)
 # `_fwd` is the SAME jitted forward `train_mvq.evaluate` uses, on purpose: a
 # second wrapper would be a second compilation of the same graph and one more
 # place for an inference/eval divergence to hide.
@@ -74,6 +75,28 @@ def _sigmoid(x):
     return 1.0 / (1.0 + np.exp(-np.asarray(x, np.float64)))
 
 
+def resolved_step(step):
+    """`step` as a CONCRETE int, or None for a `final/` dir.
+
+    `"latest"` is refused by name. It is not a checkpoint identity -- it
+    names a different step every time the training job saves -- so a gate
+    signature built from it would compare EQUAL to a kp3d.npz produced by
+    different weights, which is the exact failure the signature exists to
+    catch. `MVQRunner` resolves it once at construction (see `step_label`)
+    and stores the int; a config has to carry the int.
+    """
+    if step is None:
+        return None
+    try:
+        return int(step)
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"mvq.step must be a concrete int; resolve {step!r} before writing the config "
+            f"(MVQRunner resolves 'latest' at construction and exposes it as `step`/"
+            f"`step_label`) -- a signature built from a moving step would accept a "
+            f"kp3d.npz produced by different weights") from None
+
+
 def checkpoint_dir(checkpoint, step=None):
     """The directory a `(checkpoint, step)` pair actually loads from.
 
@@ -81,7 +104,8 @@ def checkpoint_dir(checkpoint, step=None):
     dir and the weights live in `<run>/ckpt/<step>` -- the same convention as
     `models/mvq/checkpoint.py::load_mvq_model`.
     """
-    return str(checkpoint) if step is None else os.path.join(str(checkpoint), "ckpt", str(int(step)))
+    step = resolved_step(step)
+    return str(checkpoint) if step is None else os.path.join(str(checkpoint), "ckpt", str(step))
 
 
 def checkpoint_sha256(checkpoint, step=None, *, n=16):
@@ -144,9 +168,10 @@ def mvq_gate_signature(checkpoint, *, step=None, exist_thresh=None):
     if not checkpoint:
         raise ValueError("pipeline.lifter=mvq needs mvq.checkpoint set -- the Stage-B gate "
                          "signature must name the weights that produced kp3d.npz")
+    step = resolved_step(step)                    # refuses "latest" by name
     return {"lifter": "mvq",
             "checkpoint": os.path.abspath(str(checkpoint)),
-            "step": "final" if step is None else int(step),
+            "step": "final" if step is None else step,
             "sha256": checkpoint_sha256(checkpoint, step),
             "exist_thresh": float(EXIST_THRESH if exist_thresh is None else exist_thresh)}
 
@@ -199,6 +224,7 @@ class MVQRunner:
         self.M, self.t = _affine_np(self.rt.camera_matrices)                 # (C,2,3),(C,2) f64
         self.batch = int(batch)
         self.exist_thresh = float(exist_thresh)
+        self._gates = None
 
     # ------------------------------------------------------------------ windows
     def windows(self, frames, present, centres, prompt_mask=None):
@@ -314,19 +340,30 @@ class MVQRunner:
         """`models/mvq/policy.py::policy_instance` for window `bi` -- the
         SHARED inference-time slot choice (slot 0 when there is a prompt to
         follow, else the typed candidate nearest the ROI centre, None on a
-        miss). Kept here so no caller re-adds the T axis by hand."""
+        miss). Kept here so no caller re-adds the T axis by hand, and so the
+        policy filters on THIS runner's `exist_thresh`: with the module
+        default it could otherwise return the very slot `read_typed` had just
+        refused as too weak."""
         return policy_instance(out["exist"][bi], out["xyz"][bi][:, None],
-                               prompted=prompted, has_mask=has_mask)
+                               prompted=prompted, has_mask=has_mask,
+                               exist_thresh=self.exist_thresh)
 
     def read_typed(self, out, bi, want_sex):
         """The typed slot for one sex of window `bi`, or None below threshold.
 
-        `want_sex` is a `train.matching` sex code (0 female, 1 male) and maps
-        to the FIXED P3a slot table: slot 1 female, slot 2 male (slot 0 is the
-        prompted slot, 3 is "other"). No fallback and no guessing -- a caller
-        that wants the untyped nearest-candidate rule asks `policy_slot` for
-        it explicitly, so a frame reported as "the female" is never quietly
-        some other slot.
+        `want_sex` is a `train.matching` sex code and maps to the FIXED P3a
+        slot table: 0 female -> slot 1, 1 male -> slot 2 (slot 0 is the
+        prompted slot, 3 is "other"). No fallback and no guessing for a known
+        sex -- a caller that wants the untyped nearest-candidate rule asks
+        `policy_slot` for it explicitly, so a frame reported as "the female"
+        is never quietly some other slot.
+
+        SEX_UNKNOWN (-1) is the SINGLE-FLY rule (spec §4.2): take whichever
+        typed slot exists -- the higher existence when both clear the
+        threshold -- and REPORT its sex (`sex_prob`, `slot`) rather than
+        assuming one. A single-fly recording has no second animal to
+        disambiguate against, so demanding a particular typed slot there
+        would drop every frame the model happened to type the other way.
         """
         if self.I != N_SLOTS:
             raise ValueError(
@@ -334,13 +371,20 @@ class MVQRunner:
                 f"(0 prompted, 1 female, 2 male, 3 other) -- a legacy untyped run's slots "
                 f"have no fixed meaning, so read_typed cannot name one")
         want = int(want_sex)
-        if want not in (SEX_FEMALE, SEX_MALE):
-            raise ValueError(f"want_sex must be {SEX_FEMALE} (female) or {SEX_MALE} (male), "
-                             f"got {want_sex!r}")
-        slot = SLOT_FEMALE if want == SEX_FEMALE else SLOT_MALE
+        if want not in (SEX_FEMALE, SEX_MALE, SEX_UNKNOWN):
+            raise ValueError(f"want_sex must be {SEX_FEMALE} (female), {SEX_MALE} (male) or "
+                             f"{SEX_UNKNOWN} (unknown -- the single-fly rule), got {want_sex!r}")
+        if want == SEX_UNKNOWN:
+            live = [s for s in (SLOT_FEMALE, SLOT_MALE)
+                    if float(out["exist"][bi, s]) >= self.exist_thresh]
+            if not live:
+                return None
+            slot = max(live, key=lambda s: float(out["exist"][bi, s]))
+        else:
+            slot = SLOT_FEMALE if want == SEX_FEMALE else SLOT_MALE
+            if float(out["exist"][bi, slot]) < self.exist_thresh:
+                return None
         exist = float(out["exist"][bi, slot])
-        if exist < self.exist_thresh:
-            return None
         return {"slot": int(slot),
                 "kp3d": out["kp3d"][bi, slot],
                 "kp2d": out["kp2d"][bi, slot],
@@ -367,20 +411,37 @@ class MVQRunner:
         from jarvis_jax.tracking.predict_2d import detector_to_model_perm
         model_names = [str(n) for n in model_names]
         perm = detector_to_model_perm(self.kp_names, model_names)
-        vis = np.asarray(vis)[..., perm]
-        return {"kp2d": np.asarray(kp2d)[..., perm, :],
+        vis, kp2d = np.asarray(vis), np.asarray(kp2d)
+        # `conf3d` averages over the CAMERA axis. A `vis` of the wrong rank
+        # would average over time (or over nothing) and still come back with
+        # a plausible (T,K) shape -- a confidence that is silently the wrong
+        # statistic, which nothing downstream could notice.
+        if vis.ndim != 3:
+            raise ValueError(f"vis must be (T,C,K) per-view visibility, got {vis.shape}; "
+                             f"conf3d is its mean over the CAMERA axis")
+        if kp2d.shape[:-1] != vis.shape:
+            raise ValueError(f"kp2d {kp2d.shape} and vis {vis.shape} disagree: kp2d must be "
+                             f"(T,C,K,2) over the same frames, cameras and keypoints")
+        vis = vis[..., perm]
+        return {"kp2d": kp2d[..., perm, :],
                 "conf": vis,
                 "kp3d": np.asarray(kp3d)[..., perm, :],
-                "conf3d": vis.mean(axis=1),
+                "conf3d": vis.mean(axis=-2),          # over CAMERAS, not time
                 "conf3d_mvq_raw": np.asarray(conf_raw)[..., perm],
                 "kp_names": np.array(model_names),
                 "cameras": np.array(self.cameras),
                 "gates": self.gates_signature()}
 
     def gates_signature(self):
-        """This checkpoint's Stage-B `gates` payload (see `mvq_gate_signature`)."""
-        return mvq_gate_signature(self.checkpoint, step=self.step,
-                                  exist_thresh=self.exist_thresh)
+        """This checkpoint's Stage-B `gates` payload (see `mvq_gate_signature`).
+
+        Computed once and cached: it hashes the checkpoint's metadata files,
+        and every bout-fly written by a pass asks for it.
+        """
+        if self._gates is None:
+            self._gates = mvq_gate_signature(self.checkpoint, step=self.step,
+                                             exist_thresh=self.exist_thresh)
+        return dict(self._gates)
 
     def gates_string(self):
         """`gates_signature` as the string stored inside kp3d.npz -- byte-equal
