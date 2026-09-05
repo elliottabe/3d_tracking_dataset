@@ -176,9 +176,23 @@ per-stage wall clock for the 3 GPU-hour acceptance.
 
 ## 5. Bout detection: hand gates, then a learned detector
 
-**5.1 Baseline.** `scripts/coarse_pass_gates.py` unchanged, fed the mvq coarse tracks
-through the shared schema (§4.3). Its thresholds were tuned against 20_04's reviewed
-bouts; they are the first thing validated in §8.
+**5.1 Baseline.** `scripts/coarse_pass_gates.py` fed the mvq coarse tracks through the
+shared schema (§4.3) -- but its area-ratio trackability gate can never pass on an mvq
+file (`area`/`area_med` are all-NaN: there are no masks), which the original plan here
+did not anticipate. Fixed in P4b task 5: the gate logic moved to
+`jarvis_jax/tracking/bout_gates.py` (the script is now a thin re-exporting CLI wrapper)
+and dispatches on the file's own schema (`is_mvq_schema`: meta `source == "mvq"` or an
+`exist` array). On an mvq file, `trackability_ok` drops the area/border gate for
+`per_fly_trackable = (exist >= 0.5) & (n_valid_cams >= MIN_CAMS)`, and `behaviour_ok`
+becomes `(wing_angle_deg[male] >= --wing-angle-min, default 30 deg) | (sep3d <=
+--proximity-max-units, default 30 world units)` in place of the SAM3 area-ratio /
+sep2d_med gate -- the mvq coarse pass has no masks but does have the model's own wing
+angle and a true 3D (not reprojected-2D) separation. `separable` and `behaviour_ok` both
+fall back gracefully (bypassed to "always true") for single-fly (F=1) recordings, which
+have no second fly to gate proximity or wing angle against. The SAM3 path (no `exist`
+array) is unchanged and regression-tested byte-identical to the pre-task-5 script. Its
+thresholds were tuned against 20_04's reviewed bouts; they are the first thing validated
+in §8.
 
 **5.2 Learned detector (`jarvis_jax/tracking/bout_detector.py`).** A per-coarse-frame
 classifier over a temporal window (default 32 coarse frames = 0.64 s) of the §4.3

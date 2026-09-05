@@ -60,6 +60,16 @@ docstring) and instead carries per-fly existence, wing angle and a 3D
   they are tuned/defaulted here and reported as judgment calls, not measured
   constants.
 
+  SINGLE-FLY mvq recordings (F=1, `coarse_track.coarse_pass(...,
+  num_animals=1)`): there is no male slot to read a wing angle from
+  (`wing_angle_deg` has shape (1,T)) and no second fly to measure a
+  separation to (`write_coarse_tracks` emits an EMPTY `sep3d` for F<2), so
+  neither mvq courtship signal is defined. `apply_gates` treats both as
+  "never true" rather than raising or indexing out of bounds:
+  `behaviour_ok` degenerates to `trackability_ok` alone -- a single-fly bout
+  table is driven purely by "is the fly locatable", which is the only
+  question that makes sense without a second fly.
+
 in_bout(t) = trackability_ok(t) AND behaviour_ok(t); contiguous runs (with a
 minimum duration and small-gap bridging, both tunable) become bout windows.
 
@@ -167,10 +177,20 @@ def apply_gates(sig, *, wing_ratio_min=None, proximity_max_px=None,
         sig["area_ratio"], sig["border_med"], sig["n_valid_cams"], sig["sep2d_med"])
     num_animals, T = area_ratio.shape
     mvq = bool(sig.get("mvq", False))
+    single_fly = num_animals < 2
 
-    with np.errstate(invalid="ignore"):
-        separable = sep2d_med >= sep_min_px
-    separable = np.nan_to_num(separable.astype(float), nan=0.0).astype(bool)
+    if single_fly:
+        # A lone fly has nothing to be "not separable" FROM -- the merged-
+        # identity gate is about telling two flies apart, so it is
+        # meaningless (not merely undefined) here. Both schemas leave
+        # `sep2d_med` all-NaN for a single-fly file (`write_coarse_tracks`
+        # only fills it when F>=2), so reading it literally would make
+        # `separable` -- and therefore every bout -- permanently False.
+        separable = np.ones(T, dtype=bool)
+    else:
+        with np.errstate(invalid="ignore"):
+            separable = sep2d_med >= sep_min_px
+        separable = np.nan_to_num(separable.astype(float), nan=0.0).astype(bool)
 
     if mvq:
         exist = sig["exist"]
@@ -190,9 +210,23 @@ def apply_gates(sig, *, wing_ratio_min=None, proximity_max_px=None,
         pmu = PROXIMITY_MAX_UNITS_DEFAULT if proximity_max_units is None else proximity_max_units
         wing_angle_deg = sig["wing_angle_deg"]
         sep3d = sig["sep3d"]
-        with np.errstate(invalid="ignore"):
-            wing_extension = wing_angle_deg[male_slot] >= wam
-            close_proximity = sep3d <= pmu
+        # Single-fly recordings (F=1): there is no male slot to read a wing
+        # angle from, and `coarse_track.write_coarse_tracks` emits an EMPTY
+        # `sep3d` for F<2 (no second fly to measure a separation to) -- see
+        # the module docstring's SINGLE-FLY note. Neither courtship signal
+        # exists, so behaviour_ok is driven by trackability_ok alone rather
+        # than raising: a single-fly recording still has frames worth
+        # keeping, they are just not gated on courtship behaviour.
+        if wing_angle_deg.shape[0] > male_slot:
+            with np.errstate(invalid="ignore"):
+                wing_extension = wing_angle_deg[male_slot] >= wam
+        else:
+            wing_extension = np.zeros(T, dtype=bool)
+        if sep3d is not None and sep3d.size:
+            with np.errstate(invalid="ignore"):
+                close_proximity = sep3d <= pmu
+        else:
+            close_proximity = np.zeros(T, dtype=bool)
     else:
         wrm = WING_RATIO_MIN_DEFAULT if wing_ratio_min is None else wing_ratio_min
         pmp = PROXIMITY_MAX_PX_DEFAULT if proximity_max_px is None else proximity_max_px
@@ -202,6 +236,13 @@ def apply_gates(sig, *, wing_ratio_min=None, proximity_max_px=None,
     wing_extension = np.nan_to_num(wing_extension.astype(float), nan=0.0).astype(bool)
     close_proximity = np.nan_to_num(close_proximity.astype(float), nan=0.0).astype(bool)
     behaviour_ok = wing_extension | close_proximity
+    if mvq and single_fly:
+        # Neither mvq courtship signal is defined without a second fly (see
+        # the guard above and the module docstring's SINGLE-FLY note): fall
+        # back to trackability alone rather than an all-False `behaviour_ok`
+        # OR-of-two-Falses, which would make in_bout permanently empty --
+        # a crash traded for a silently-useless bout table is not a fix.
+        behaviour_ok = np.ones(T, dtype=bool)
 
     in_bout = trackability_ok & behaviour_ok
     return dict(trackability_ok=trackability_ok, behaviour_ok=behaviour_ok,

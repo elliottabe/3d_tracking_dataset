@@ -138,6 +138,126 @@ def test_mvq_gates_emit_one_bout_covering_the_close_stretch(tmp_path):
     assert int(rows[0]["end_frame"]) == exp_e
 
 
+def _write_mvq_npz_proximity_only(path):
+    """Same three phases, but ONLY sep3d moves (wing_angle_deg stays at the
+    5 deg baseline throughout, never reaching the 30 deg default) -- isolates
+    the `close_proximity` half of `behaviour_ok`'s OR from `wing_extension`,
+    per fix-round-1 MINOR 3 (the combined trace can't tell OR from AND)."""
+    coarse_frame = _coarse_frame()
+    area_med = np.full((2, T), np.nan, np.float32)
+    border_med = np.full((2, T), np.nan, np.float32)
+    n_valid_cams = np.full((2, T), 7, np.int16)
+    sep2d_med = np.full(T, 200.0, np.float32)
+    sep3d = np.full(T, 500.0, np.float32)
+    sep3d[CLOSE_S:CLOSE_E] = 10.0
+    exist = np.full((2, T), 0.9, np.float32)
+    wing_angle_deg = np.full((2, T), 5.0, np.float32)     # NEVER extended
+
+    np.savez_compressed(path, coarse_frame=coarse_frame, area_med=area_med,
+                        border_med=border_med, n_valid_cams=n_valid_cams,
+                        sep2d_med=sep2d_med, sep3d=sep3d, exist=exist,
+                        wing_angle_deg=wing_angle_deg)
+
+
+def _write_mvq_npz_wing_angle_only(path):
+    """Same three phases, but ONLY wing_angle_deg moves (sep3d stays at the
+    500-unit "far apart" baseline throughout, never reaching the 30-unit
+    default) -- isolates `wing_extension` from `close_proximity`."""
+    coarse_frame = _coarse_frame()
+    area_med = np.full((2, T), np.nan, np.float32)
+    border_med = np.full((2, T), np.nan, np.float32)
+    n_valid_cams = np.full((2, T), 7, np.int16)
+    sep2d_med = np.full(T, 200.0, np.float32)
+    sep3d = np.full(T, 500.0, np.float32)                 # NEVER close
+    exist = np.full((2, T), 0.9, np.float32)
+    wing_angle_deg = np.full((2, T), 5.0, np.float32)
+    wing_angle_deg[1, CLOSE_S:CLOSE_E] = 45.0
+
+    np.savez_compressed(path, coarse_frame=coarse_frame, area_med=area_med,
+                        border_med=border_med, n_valid_cams=n_valid_cams,
+                        sep2d_med=sep2d_med, sep3d=sep3d, exist=exist,
+                        wing_angle_deg=wing_angle_deg)
+
+
+def test_proximity_only_trips_the_mvq_behaviour_gate(tmp_path):
+    npz = tmp_path / "coarse_tracks.npz"
+    _write_mvq_npz_proximity_only(npz)
+    res = gates.run(str(npz), str(tmp_path / "bouts.csv"), session_tag="test",
+                    wing_ratio_min=gates.WING_RATIO_MIN_DEFAULT,
+                    proximity_max_px=gates.PROXIMITY_MAX_PX_DEFAULT,
+                    min_duration=3, max_gap=2, baseline_window=gates.BASELINE_WINDOW)
+    assert len(res["windows"]) == 1, res["windows"]
+    assert res["windows"][0] == _expected_window()
+    assert not res["gates"]["wing_extension"].any(), "wing angle never rose -- must not fire"
+    assert res["gates"]["close_proximity"][CLOSE_S:CLOSE_E].all()
+
+
+def test_wing_angle_only_trips_the_mvq_behaviour_gate(tmp_path):
+    npz = tmp_path / "coarse_tracks.npz"
+    _write_mvq_npz_wing_angle_only(npz)
+    res = gates.run(str(npz), str(tmp_path / "bouts.csv"), session_tag="test",
+                    wing_ratio_min=gates.WING_RATIO_MIN_DEFAULT,
+                    proximity_max_px=gates.PROXIMITY_MAX_PX_DEFAULT,
+                    min_duration=3, max_gap=2, baseline_window=gates.BASELINE_WINDOW)
+    assert len(res["windows"]) == 1, res["windows"]
+    assert res["windows"][0] == _expected_window()
+    assert not res["gates"]["close_proximity"].any(), "flies never got close -- must not fire"
+    assert res["gates"]["wing_extension"][CLOSE_S:CLOSE_E].all()
+
+
+# --------------------------------------------------------------------------
+# Fix round 1, IMPORTANT 1: single-fly (F=1) mvq files must not crash.
+# `wing_angle_deg` has shape (1,T) (no male slot) and `write_coarse_tracks`
+# emits an EMPTY `sep3d` for F<2 -- neither courtship signal exists, so
+# `apply_gates` falls back to trackability alone (see `bout_gates`'s
+# module docstring, SINGLE-FLY note) instead of indexing out of bounds or
+# comparing against an empty array.
+# --------------------------------------------------------------------------
+def _write_mvq_npz_single_fly(path):
+    """One fly, always well-tracked EXCEPT a dip in existence (simulating an
+    occlusion) during the same [CLOSE_S,CLOSE_E) window used elsewhere --
+    since there is no courtship gate for a single fly, trackability alone
+    must decide the bout boundaries: TWO windows (before/after the dip), not
+    one covering everything and not zero."""
+    coarse_frame = _coarse_frame()
+    area_med = np.full((1, T), np.nan, np.float32)
+    border_med = np.full((1, T), np.nan, np.float32)
+    n_valid_cams = np.full((1, T), 7, np.int16)
+    sep2d_med = np.full(T, np.nan, np.float32)            # real single-fly files: no 2nd fly
+    sep3d = np.array([], np.float32)                      # real single-fly files: EMPTY
+    exist = np.full((1, T), 0.9, np.float32)
+    exist[0, CLOSE_S:CLOSE_E] = 0.3                        # dips below EXIST_MIN (0.5)
+    wing_angle_deg = np.full((1, T), 5.0, np.float32)      # no male slot (shape[0]=1)
+
+    np.savez_compressed(path, coarse_frame=coarse_frame, area_med=area_med,
+                        border_med=border_med, n_valid_cams=n_valid_cams,
+                        sep2d_med=sep2d_med, sep3d=sep3d, exist=exist,
+                        wing_angle_deg=wing_angle_deg)
+
+
+def test_single_fly_mvq_npz_runs_without_crashing(tmp_path):
+    npz = tmp_path / "coarse_tracks.npz"
+    _write_mvq_npz_single_fly(npz)
+
+    res = gates.run(str(npz), str(tmp_path / "bouts.csv"), session_tag="test",
+                    wing_ratio_min=gates.WING_RATIO_MIN_DEFAULT,
+                    proximity_max_px=gates.PROXIMITY_MAX_PX_DEFAULT,
+                    min_duration=3, max_gap=2, baseline_window=gates.BASELINE_WINDOW)
+
+    assert res["gates"]["mvq"] is True
+    # behaviour_ok bypassed to all-True (no 2nd fly): in_bout == trackability_ok,
+    # which is False exactly during the existence dip -- two windows, not one
+    # spanning the whole recording and not zero.
+    assert res["gates"]["behaviour_ok"].all()
+    assert not res["gates"]["trackability_ok"][CLOSE_S:CLOSE_E].any()
+    assert res["gates"]["trackability_ok"][:CLOSE_S].all()
+    assert res["gates"]["trackability_ok"][CLOSE_E:].all()
+    assert len(res["windows"]) == 2, res["windows"]
+    cf = _coarse_frame()
+    assert res["windows"][0] == (int(cf[0]), int(cf[CLOSE_S - 1]))
+    assert res["windows"][1] == (int(cf[CLOSE_E]), int(cf[T - 1]))
+
+
 def test_mvq_detection_also_works_via_meta_json_without_an_exist_array(tmp_path):
     """The npz-`exist`-array detection is the common case (Task 4 always
     writes both); `is_mvq_schema` must ALSO honour a meta json that merely
