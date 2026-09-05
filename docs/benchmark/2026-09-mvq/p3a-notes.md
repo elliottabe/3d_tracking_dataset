@@ -669,3 +669,34 @@ path); (2) mask-aware presence / prompted fallback for edge frames; (3) mask-fre
 (centre-jitter robustness test on this checkpoint, then a centre detector); (4) per-camera depth
 ordering and a normal-direction offset for copy-paste stacking; (5) export fix for the 20_04
 annotation sex; (6) log a running-mean loss.
+
+## Bout 28 through the IK pipeline on mvq keypoints (2026-09-04, jobs 39593529 + 39593671)
+
+Inputs staged from the step-7000 unprompted run (`pose_mvq/bouts/bout_00028/unprompted/`): local frames
+0-1500 (the female leaves the arena edge-wards after ~1650), keypoints permuted BY NAME to `model.KP_NAMES`
+(EyeL-EyeR invariant checked identical before/after), pipeline-facing conf = view visibility (mvq's D4RT
+conf3d ~0.05 is not a probability; raw kept as `conf3d_mvq_raw`), a 1500-frame companion masks npz
+(`run_bout.py` takes T from the masks), `pipeline.allow_stale_kp3d=true`, `recording.bouts_csv` pointed at a
+one-row CSV (the session's unified CSV is a broken symlink). Run root `pose_mvq_ik/`; the ViTPose+DLT fit is
+the `_courtship_backup` pose tree (older pipeline version -- its qc.json lacks the newer keys).
+
+| fly | metric | ViTPose+DLT | mvq |
+|---|---|---|---|
+| female | LOO reprojection, median px | 6.26 | 0.87 |
+| female | fitted-keypoint frame-to-frame RMS (outputs.h5 units) | 1.53 | 0.20 |
+| female | fitted EyeL-EyeR CV | 6.2 % | 0.7 % |
+| male | LOO reprojection, median px | 2.65 | 0.69 |
+| male | fitted-keypoint frame-to-frame RMS | 0.385 | 0.234 |
+| male | fitted EyeL-EyeR CV | 0.5 % | 0.4 % |
+| both | NaN frames after IK | 0 | 0 |
+| both | IK fitted vs measured reprojection (mvq only), median px | - | 4.5 / 0.94 (F), 3.6 / 0.88 (M) |
+
+Fitted eye spacing differs between the runs (3.3 vs 4.7 units for the female; each run fits its own body
+scale): mvq's matches its observed spacing (4.86 units); the ViTPose fit shrank it -- the marker-offset
+absorption failure CLAUDE.md warns about. To be looked at with the scale QC before promotion.
+
+Figures read: `figures/2026-09-mvq/bout28_p3a/ik_compare_fly0_f{669,1337}.png` (compare_stac_fits; mvq
+observations sit on the fitted markers, the ViTPose fit has floating observations off the legs/head) and both
+`sidebyside_still.png` (mesh pose matches the frame in all three rig views; the male's wing extension is
+reproduced by the fit). The female's fit is the one that improved most (7x smoother), consistent with the P2
+finding that the female is the hard fly.
