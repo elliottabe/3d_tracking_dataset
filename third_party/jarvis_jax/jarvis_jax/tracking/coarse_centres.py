@@ -44,13 +44,27 @@ Pipeline, per frame:
 Every distance/centre in this module is 0.1 mm world units and every pixel
 is FULL-IMAGE px (not heatmap px, not crop px) unless named otherwise --
 see CLAUDE.md on labelling with real names and units.
+
+CAMERA-ORDER CONTRACT (CLAUDE.md's camera-order trap, restated here because
+this is the one place a caller's per-camera array first meets a per-camera
+calibration array): every per-camera axis in this module -- `peaks[c]`,
+`scores[c]` and `cam_mats[c]` -- MUST be the same camera `c`, in the
+CANONICAL order (`cfg.recording.cameras`, == the calibration glob order,
+== `ReprojectionTool`'s own key order). Nothing here re-sorts or matches by
+name; a caller holding an array in a DIFFERENT camera order (e.g. a mask
+npz's own stored `cameras` array) must permute it into canonical order
+FIRST, exactly as `tracking.lift_mvq.MVQRunner` requires for its `cameras`
+argument. `lift_peaks_to_centres` checks the one thing it can verify
+cheaply -- that `peaks` and `cam_mats` agree on camera COUNT -- and raises
+`ValueError` on a mismatch; it cannot detect a same-length but
+wrongly-ordered camera axis, which is why the contract is stated here too.
 """
 from __future__ import annotations
 
 import numpy as np
 
 from jarvis_jax.eval.centerdetect_decode import extract_top_k_peaks, peaks_to_full_image
-from jarvis_jax.geometry.center3d import triangulate_dlt_batched, project_center_to_cameras
+from jarvis_jax.geometry.center3d import triangulate_dlt_batched
 
 CENTERDETECT_INPUT_SIZE = 320
 CENTERDETECT_HEATMAP_SIZE = 160
@@ -98,7 +112,10 @@ def _peaks_from_heatmap(hm, img_w, img_h, min_score=0.2):
 
     Returns:
         peaks: (C, 2, 2) float32 full-image [x, y] px, NaN where score < min_score.
-        scores: (C, 2) float32 raw heatmap confidence (unthresholded).
+        scores: (C, 2) float32 RAW heatmap confidence, always returned
+            unthresholded/un-NaN'd -- a peak being unusable is signalled by
+            its COORDINATES being NaN, not by its score. Callers (e.g.
+            `lift_peaks_to_centres`) gate on the peak, not the score.
     """
     hm = np.asarray(hm)
     heatmap_size = hm.shape[1] if hm.ndim >= 3 else hm.shape[0]
@@ -110,10 +127,40 @@ def _peaks_from_heatmap(hm, img_w, img_h, min_score=0.2):
     return full, conf
 
 
+def _centerdetect_preprocess(frame):
+    """One full RGB frame -> the 320x320 CenterDetect model input.
+
+    Resizes with PIL `Image.BILINEAR` -- NOT `cv2.resize(..., INTER_LINEAR)`
+    -- because that is what `jarvis_jax/data/v5_centerdetect.py` uses at
+    TRAINING time. PIL's resize is antialiased (a proper low-pass box/tent
+    filter before subsampling); cv2's `INTER_LINEAR` point-samples with no
+    antialiasing. At this dataset's ~6x horizontal squash (1936 -> 320) that
+    difference is not cosmetic: measured mean |delta| of 11/255 between the
+    two resized images -- exactly the confident, self-consistent,
+    wrong-for-a-reason-no-metric-catches failure mode CLAUDE.md warns about,
+    here as a train/inference preprocessing mismatch rather than an index
+    bug.
+
+    Args:
+        frame: (H, W, 3) uint8 RGB.
+    Returns:
+        (320, 320, 3) float32, ImageNet-normalised.
+    """
+    from PIL import Image
+    from jarvis_jax.data.device import IMAGENET_MEAN_J, IMAGENET_STD_J
+
+    resized = np.asarray(Image.fromarray(frame).resize(
+        (CENTERDETECT_INPUT_SIZE, CENTERDETECT_INPUT_SIZE), Image.BILINEAR))
+    mean = np.asarray(IMAGENET_MEAN_J, np.float32)
+    std = np.asarray(IMAGENET_STD_J, np.float32)
+    return ((resized.astype(np.float32) / 255.0 - mean) / std).astype(np.float32)
+
+
 class CenterDetector:
     """Thin CenterDetect inference wrapper: full frames -> top-2 peaks per
     camera in full-image px. GPU/checkpoint-heavy -- never exercised in unit
-    tests (those hit `_peaks_from_heatmap` directly on synthetic heatmaps).
+    tests (those hit `_peaks_from_heatmap` and `_centerdetect_preprocess`
+    directly, on synthetic heatmaps/frames).
     """
 
     def __init__(self, ckpt_dir, *, min_score: float = 0.2):
@@ -121,28 +168,25 @@ class CenterDetector:
         self._model = _restore_centerdetect(ckpt_dir)
 
     def peaks(self, frames):
-        """frames: (C, H, W, 3) uint8 RGB full frames (one per camera).
+        """frames: (C, H, W, 3) uint8 RGB full frames -- camera `c` here
+        must be the SAME camera as `cam_mats[c]` later passed to
+        `lift_peaks_to_centres` (see module docstring's camera-order
+        contract); this method itself has no camera identity of its own to
+        check that against, so the contract is the caller's to keep.
 
         Returns:
             peaks: (C, 2, 2) float32 full-image px, NaN where score < min_score.
-            scores: (C, 2) float32.
+            scores: (C, 2) float32 raw confidence (unthresholded; see
+                `_peaks_from_heatmap`).
         """
-        import cv2
         import jax.numpy as jnp
-        from jarvis_jax.data.device import IMAGENET_MEAN_J, IMAGENET_STD_J
 
         frames = np.asarray(frames)
         if frames.ndim != 4 or frames.shape[-1] != 3:
             raise ValueError(f"frames must be (C,H,W,3), got {frames.shape}")
         c, img_h, img_w = frames.shape[0], frames.shape[1], frames.shape[2]
 
-        resized = np.stack([
-            cv2.resize(frames[i], (CENTERDETECT_INPUT_SIZE, CENTERDETECT_INPUT_SIZE),
-                       interpolation=cv2.INTER_LINEAR)
-            for i in range(c)
-        ]).astype(np.float32)
-        x = (jnp.asarray(resized) / 255.0 - IMAGENET_MEAN_J) / IMAGENET_STD_J
-
+        x = jnp.asarray(np.stack([_centerdetect_preprocess(frames[i]) for i in range(c)]))
         hm = np.asarray(self._model(x, use_running_average=True))  # (C,160,160,1)
         return _peaks_from_heatmap(hm, img_w, img_h, self.min_score)
 
@@ -186,7 +230,14 @@ def _seed_candidates(peaks, cam_mats):
 
 
 def _project_batch(centres3d, cam_mats):
-    """(N,3) world points, (C,4,3) cam_mats -> (N,C,2) full-image px."""
+    """(N,3) world points, (C,4,3) cam_mats -> (N,C,2) full-image px.
+
+    The batched/vectorised equivalent of
+    `jarvis_jax.geometry.center3d.project_center_to_cameras` (same
+    `p_h @ M`, perspective-divide convention) over N candidate points at
+    once, so `_score_candidates` needs one einsum instead of a Python loop
+    over candidates.
+    """
     M = np.asarray(cam_mats, np.float64)
     ph = np.concatenate(
         [np.asarray(centres3d, np.float64), np.ones((centres3d.shape[0], 1))], axis=1)
@@ -223,7 +274,16 @@ def lift_peaks_to_centres(peaks, scores, cam_mats, *, min_views=3,
 
     Args:
         peaks: (C, 2, 2) float32 full-image px, NaN for a missing peak.
-        scores: (C, 2) float32 per-peak confidence (NaN where peaks is NaN).
+            `peaks[c]` MUST be the same camera as `cam_mats[c]` -- see the
+            module docstring's camera-order contract.
+        scores: (C, 2) float32 RAW per-peak confidence (as returned by
+            `_peaks_from_heatmap`/`CenterDetector.peaks`, unthresholded). A
+            peak being unusable is driven entirely by ITS COORDINATES being
+            NaN in `peaks` (that is what gates it out of `_seed_candidates`
+            and drives its reprojection distance to NaN -> inf -> not an
+            inlier in `_score_candidates`) -- `scores` need not be NaN'd in
+            lockstep; a NaN score is tolerated (treated as 0 when summing)
+            but never required.
         cam_mats: (C, 4, 3) DLT projection matrices (`ReprojectionTool.camera_matrices`).
         min_views: stop once the best remaining candidate has fewer inlier
             cameras than this (default 3 -- triangulation needs >=2, this
@@ -236,10 +296,22 @@ def lift_peaks_to_centres(peaks, scores, cam_mats, *, min_views=3,
         centres: (max_animals, 3) float32, NaN-padded.
         n_views: (max_animals,) int32, 0-padded.
         score: (max_animals,) float32, 0-padded (summed inlier peak score).
+
+    Raises:
+        ValueError: if `peaks` and `cam_mats` disagree on camera count --
+            the one camera-order mismatch this function can detect (it
+            cannot tell a same-length but wrongly-ORDERED camera axis; that
+            is on the caller, per the module docstring).
     """
     peaks = np.array(peaks, dtype=np.float32, copy=True)
     scores = np.array(scores, dtype=np.float32, copy=True)
     cam_mats = np.asarray(cam_mats, np.float32)
+    if peaks.shape[0] != cam_mats.shape[0]:
+        raise ValueError(
+            f"peaks camera axis ({peaks.shape[0]}) must match cam_mats "
+            f"camera axis ({cam_mats.shape[0]}) -- peaks[c]/scores[c] and "
+            f"cam_mats[c] must be the SAME camera, in canonical order "
+            f"(see module docstring's camera-order contract).")
     n_cams = peaks.shape[0]
 
     out_centres = np.full((max_animals, 3), np.nan, np.float32)
