@@ -452,12 +452,20 @@ def test_driver_default_cameras_is_the_canonical_order():
     assert drv.default_cameras() == CAMS
 
 
-def test_driver_slot_reader_matches_read_window_byte_for_byte(tmp_path):
-    """The driver keeps its `cv2.VideoCapture`s OPEN across sampled frames
-    instead of calling `read_window(..., T=1)` 31k times. That is only safe if
-    it reads the SAME pixels: this writes two tiny mp4s, samples them at
-    stride 7 with both readers, and requires byte equality (a seek/cursor bug
-    would return the neighbouring frame, which looks entirely plausible)."""
+@pytest.mark.parametrize("start", [0, 5])
+def test_driver_slot_reader_matches_read_window_byte_for_byte(tmp_path, start):
+    """`SlotReader` now decodes each camera FORWARD ONLY on its own thread
+    (`grab()` through the frames the stride skips, `retrieve()` only at the
+    stride hit) instead of `read_window(..., T=1)` 31k times, and instead of
+    the old kept-open-capture reader that still re-seeked every call (the
+    reader-throughput defect: 0.39 coarse frames/s / ~22h ETA on a real
+    498k-frame recording -- CPU-bound in repeated keyframe-seek + GOP
+    redecode, `real-run-wave-report.md` Step 2). That is only safe if it
+    reads the SAME pixels: this writes two tiny mp4s, samples them at stride
+    7 for >= 5 coarse frames (`start=0` -- a fresh run -- and `start=5`, a
+    NON-ZERO start standing in for a `--resume` boundary) with both readers,
+    and requires byte equality (a wrong grab/retrieve landing would return
+    the neighbouring frame, which looks entirely plausible)."""
     cv2 = pytest.importorskip("cv2")
     import coarse_pass_mvq as drv
     from jarvis_jax.predict.synced_reader import load_plan, read_window
@@ -474,14 +482,41 @@ def test_driver_slot_reader_matches_read_window_byte_for_byte(tmp_path):
         vw.release()
     plan = load_plan(str(tmp_path))
     assert plan is None                       # no sync_plan.json -> positional, as Session0
-    reader = drv.SlotReader(str(tmp_path), cams, plan)
+    stride = 7
+    slots = list(range(start, n, stride))
+    assert len(slots) >= 5                    # exercise a real strided sequence, not one hit
+    reader = drv.SlotReader(str(tmp_path), cams, plan, start_slot=start, stride=stride)
     try:
         assert (reader.W, reader.H) == (W, H)
-        for slot in range(0, n, 7):
+        for slot in slots:
             got, present = reader(slot)
             want, want_present = next(iter(read_window(str(tmp_path), cams, plan, slot, 1)))
             assert present.tolist() == want_present.tolist()
             np.testing.assert_array_equal(got, want)
+    finally:
+        reader.close()
+
+
+def test_driver_slot_reader_rejects_out_of_sequence_slot(tmp_path):
+    """`SlotReader` is forward-only: a caller that skips ahead of, or falls
+    behind, the strictly-increasing sequence it was started with must get a
+    loud error, never a silently wrong (stale/neighbouring) frame."""
+    cv2 = pytest.importorskip("cv2")
+    import coarse_pass_mvq as drv
+    from jarvis_jax.predict.synced_reader import load_plan
+
+    cams, n, H, W = ["Cam1"], 20, 48, 64
+    vw = cv2.VideoWriter(str(tmp_path / "Cam1.mp4"),
+                         cv2.VideoWriter_fourcc(*"mp4v"), 30, (W, H))
+    for i in range(n):
+        vw.write(np.full((H, W, 3), i % 256, np.uint8))
+    vw.release()
+    plan = load_plan(str(tmp_path))
+    reader = drv.SlotReader(str(tmp_path), cams, plan, start_slot=0, stride=4)
+    try:
+        reader(0)
+        with pytest.raises(AssertionError):
+            reader(8)                          # skipped the expected slot 4
     finally:
         reader.close()
 

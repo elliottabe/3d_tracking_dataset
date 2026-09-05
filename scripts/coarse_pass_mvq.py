@@ -33,11 +33,21 @@ camera's image, which still looks almost plausible.
 
 FRAME IO. `jarvis_jax.predict.synced_reader` owns the canonical-slot ->
 mp4-position mapping (`load_plan` + `slot_positions`); Session0 has no
-`sync_plan.json`, so the mapping is positional. This script uses those
-helpers with the `cv2.VideoCapture`s KEPT OPEN across frames rather than
-calling `read_window(..., T=1)` per sampled frame: at stride 16 that would
-open and close 7 captures ~31k times per recording, which costs more than
-the model does. The frames read are byte-identical either way.
+`sync_plan.json`, so the mapping is positional. `SlotReader` uses those
+helpers, but NOT via `read_window(..., T=1)` per sampled frame and NOT via a
+kept-open capture whose cursor is re-seeked every call (that was measured at
+0.39 coarse frames/s / ~22h ETA on a real 498k-frame recording -- CPU-bound
+on repeated keyframe-seek + GOP redecode, ~470% CPU / ~0% GPU;
+`.superpowers/sdd/2026-09-04-mvq-maskfree-p4a-p4b/real-run-wave-report.md`
+Step 2). Instead each camera gets its own thread (`_CamStream`) that decodes
+the mp4 FORWARD ONLY -- `grab()` (decode, discard) through the frames the
+stride skips, `retrieve()` only at the stride hit -- so after the one
+initial seek (to the run's start/resume slot) every mp4 frame is decoded at
+most once, ever, and decode for the next slot overlaps whatever the main
+thread is doing with the current one. The frames read are byte-identical to
+`read_window`'s, for the SAME strictly-increasing slot sequence
+`SlotReader` was started with (see its docstring); it is not a general
+random-access reader.
 
 RESUME. The pass runs in chunks of `--partial-every` coarse frames; after
 each chunk the accumulated tracks are written to
@@ -58,7 +68,9 @@ rather than the original f32 model output. This is an inherent, harmless
 import argparse
 import json
 import os
+import queue
 import sys
+import threading
 import time
 
 import numpy as np
@@ -109,55 +121,186 @@ def video_size(session_dir, camera):
     return n, w, h
 
 
+class _CamStream:
+    """One camera's forward-only decode, owned by its own thread.
+
+    `coarse_pass` calls the reader with a STRICTLY INCREASING sequence of
+    canonical slots, `start_slot, start_slot+stride, start_slot+2*stride, ...`
+    (see `jarvis_jax.tracking.coarse_track.coarse_pass`'s frame loop and
+    `main`'s `all_frames = range(start, end, stride)`). The old reader (kept
+    captures open, but still called `cv2.VideoCapture.set(CAP_PROP_POS_FRAMES,
+    ...)` on every sampled frame because its cursor only ever advanced by 1
+    per read while the request jumped by `stride`) turned every coarse frame
+    into a keyframe seek + a decode of the whole GOP back up to the target --
+    measured at 0.39 coarse frames/s / ~22h ETA on a real 498k-frame
+    recording (`.superpowers/sdd/2026-09-04-mvq-maskfree-p4a-p4b/
+    real-run-wave-report.md` Step 2), with ps showing ~470% CPU and ~0% GPU,
+    i.e. CPU-bound in decode, not GPU-bound in the mvq forward (36ms/window,
+    `scripts/benchmark/mvq_window_cost.py`).
+
+    This class instead walks the mp4 FORWARD ONLY: `cap.grab()` (decode,
+    discard) through every frame the stride skips, `cap.retrieve()` only at
+    the stride hit that is actually wanted -- so each mp4 frame is decoded
+    at most once for the whole pass, and after the ONE initial seek (to
+    `start_slot`, which on `--resume` is the resume boundary -- "a resume
+    seeks once to the boundary then streams") there is no seek and no
+    redundant GOP re-decode ever again. It runs in its own thread (cv2
+    releases the GIL around `grab`/`retrieve`/`read`) so up to `cameras`-many
+    decodes proceed in parallel and decode for slot N+1 overlaps whatever the
+    main thread (CenterDetect peaks, mvq batching/forward) is doing with slot
+    N's frames -- feeding a small bounded queue rather than the main thread
+    blocking on one camera at a time.
+
+    A camera whose plan drops a slot (only possible with a real
+    `sync_plan.json`; Session0 has none, so `plan is None` and every slot is
+    positional and present) yields `frame=None, present=False` for that slot
+    without touching the decode cursor -- the NEXT present slot's absolute
+    target position naturally catches the cursor up across the gap, exactly
+    as the old per-call seek did, just via `grab()` instead of `set()`.
+    """
+
+    def __init__(self, session_dir, cam, plan, start_slot, stride, queue_size=4):
+        from jarvis_jax.predict.synced_reader import slot_positions
+        self._slot_positions = slot_positions
+        self.session_dir, self.cam, self.plan = str(session_dir), cam, plan
+        self.start_slot, self.stride = int(start_slot), int(stride)
+        self.q = queue.Queue(maxsize=int(queue_size))
+        self.H = self.W = None
+        self.error = None
+        self._stop = threading.Event()
+        self._ready = threading.Event()
+        self._checked = 0     # first N stride hits whose exact position is asserted
+        self._n_check = 5
+        self._thread = threading.Thread(target=self._run, daemon=True, name=f"camstream-{cam}")
+        self._thread.start()
+        self._ready.wait()    # blocks only until H/W (or a startup error) are known
+        if self.error is not None:
+            raise self.error
+
+    def _run(self):
+        import cv2
+        cv2.setNumThreads(1)  # this thread decodes one stream; don't fan out internally
+        path = os.path.join(self.session_dir, f"{self.cam}.mp4")
+        cap = cv2.VideoCapture(path)
+        try:
+            if not cap.isOpened():
+                raise FileNotFoundError(path)
+            self.H = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            self.W = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        except Exception as e:
+            self.error = e
+            self._ready.set()
+            cap.release()
+            return
+        self._ready.set()
+        cursor = None
+        slot = self.start_slot
+        try:
+            while not self._stop.is_set():
+                pos, pres = self._slot_positions(self.plan, self.cam, slot, 1)
+                pos_i, present_i = pos[0], pres[0]
+                frame = None
+                if present_i:
+                    if cursor is None or pos_i < cursor:
+                        cap.set(cv2.CAP_PROP_POS_FRAMES, pos_i)  # the ONE seek (start/resume)
+                        cursor = pos_i
+                    ok = True
+                    while cursor < pos_i:            # discard the stride-skipped frames
+                        ok = cap.grab()
+                        if not ok:
+                            break
+                        cursor += 1
+                    if ok:
+                        ok = cap.grab()               # decode the WANTED frame (not yet retrieved)
+                    if not ok:
+                        cursor = None                 # EOF
+                    if cursor is not None:
+                        ok, fr = cap.retrieve()
+                        if ok:
+                            if self._checked < self._n_check:
+                                actual = int(cap.get(cv2.CAP_PROP_POS_FRAMES)) - 1
+                                assert actual == pos_i, (
+                                    f"{self.cam}: frame-index drift at slot {slot} -- "
+                                    f"expected mp4 frame {pos_i}, CAP_PROP_POS_FRAMES "
+                                    f"reports {actual} (sequential grab/retrieve landed "
+                                    f"on the wrong frame)")
+                                self._checked += 1
+                            frame = cv2.cvtColor(fr, cv2.COLOR_BGR2RGB)
+                            cursor += 1
+                        else:
+                            cursor = None
+                self._put((slot, frame, bool(present_i and frame is not None)))
+                slot += self.stride
+        except Exception as e:
+            self.error = e
+            self._put((slot, None, None))  # unblock a waiting `get` with the error
+        finally:
+            cap.release()
+
+    def _put(self, item):
+        while not self._stop.is_set():
+            try:
+                self.q.put(item, timeout=0.2)
+                return
+            except queue.Full:
+                continue
+
+    def get(self, slot):
+        got_slot, frame, present = self.q.get()
+        if self.error is not None:
+            raise RuntimeError(f"{self.cam} reader thread failed") from self.error
+        assert got_slot == slot, (
+            f"{self.cam}: reader produced slot {got_slot}, caller asked for {slot} -- "
+            f"the driver must call in the same strictly-increasing stride sequence "
+            f"the stream was started with")
+        return frame, present
+
+    def close(self):
+        self._stop.set()
+        self._thread.join(timeout=5)
+
+
 class SlotReader:
-    """`coarse_pass`'s reader over one recording, with the captures kept open.
+    """`coarse_pass`'s reader over one recording: one `_CamStream` thread per
+    camera, each decoding sequentially FORWARD ONLY (see `_CamStream`).
 
     `__call__(slot)` returns `(frames (C,H,W,3) uint8 RGB, present (C,) bool)`
     for one CANONICAL slot, in `cameras` order -- the same bytes
     `synced_reader.read_window(session_dir, cameras, plan, slot, 1)` yields
-    (it uses the same `slot_positions` mapping and the same `_read_at` seek),
-    without reopening the captures on every sampled frame. A camera that
-    dropped the slot, or whose read fails, yields a black frame and
-    `present=False`, which the model gates out through `cam_valid`.
+    for the SAME strictly-increasing slot sequence this was constructed with
+    (`start_slot, start_slot+stride, ...`; see `_CamStream`'s docstring for
+    why: unlike `read_window`, which can answer any single slot via a seek,
+    this reader trades that generality for never re-decoding a GOP).
     """
 
-    def __init__(self, session_dir, cameras, plan):
-        import cv2
-        from jarvis_jax.predict.synced_reader import slot_positions
-        self._cv2 = cv2
-        self._slot_positions = slot_positions
+    def __init__(self, session_dir, cameras, plan, start_slot=0, stride=1, queue_size=4):
         self.session_dir, self.cameras, self.plan = str(session_dir), list(cameras), plan
-        self.caps, self.cursors = [], []
-        for c in self.cameras:
-            cap = cv2.VideoCapture(os.path.join(self.session_dir, f"{c}.mp4"))
-            if not cap.isOpened():
-                raise FileNotFoundError(os.path.join(self.session_dir, f"{c}.mp4"))
-            self.caps.append(cap)
-            self.cursors.append(None)
-        self.H = int(self.caps[0].get(cv2.CAP_PROP_FRAME_HEIGHT))
-        self.W = int(self.caps[0].get(cv2.CAP_PROP_FRAME_WIDTH))
+        self.streams = []
+        try:
+            for c in self.cameras:
+                self.streams.append(_CamStream(self.session_dir, c, plan, start_slot, stride,
+                                               queue_size=queue_size))
+        except Exception:
+            for s in self.streams:            # one camera failed to open -- stop the rest
+                s.close()
+            raise
+        self.H = self.streams[0].H
+        self.W = self.streams[0].W
 
     def __call__(self, slot):
-        from jarvis_jax.predict.synced_reader import _read_at
+        slot = int(slot)
         out = np.zeros((len(self.cameras), self.H, self.W, 3), np.uint8)
         present = np.zeros(len(self.cameras), bool)
-        for ci, cam in enumerate(self.cameras):
-            pos, pres = self._slot_positions(self.plan, cam, int(slot), 1)
-            if not pres[0]:
-                continue
-            if self.cursors[ci] is None:
-                self.caps[ci].set(self._cv2.CAP_PROP_POS_FRAMES, pos[0])
-                self.cursors[ci] = pos[0]
-            fr, self.cursors[ci] = _read_at(self.caps[ci], self.cursors[ci], pos[0])
-            if fr is None:
-                continue
-            out[ci] = self._cv2.cvtColor(fr, self._cv2.COLOR_BGR2RGB)
-            present[ci] = True
+        for ci, stream in enumerate(self.streams):
+            frame, pres = stream.get(slot)
+            if pres:
+                out[ci] = frame
+                present[ci] = True
         return out, present
 
     def close(self):
-        for cap in self.caps:
-            cap.release()
+        for stream in self.streams:
+            stream.close()
 
 
 def load_partial(path, num_animals, *, cameras=None, calib_dir=None, checkpoint=None,
@@ -320,7 +463,13 @@ def main():
     print(f"[coarse] models loaded in {t_load:.1f}s (mvq step {runner.step_label}, "
           f"K={runner.K}, I={runner.I})", flush=True)
 
-    reader = SlotReader(args.session_dir, cameras, load_plan(args.session_dir))
+    # `_CamStream` decodes forward-only from ONE start slot and expects every
+    # later call at exactly `start_slot + k*stride` -- `all_frames` (already
+    # resume-filtered above) IS that sequence, so its first element (or
+    # `--start` if there is nothing left to do) is the one seek.
+    reader_start = all_frames[0] if all_frames else args.start
+    reader = SlotReader(args.session_dir, cameras, load_plan(args.session_dir),
+                       start_slot=reader_start, stride=args.stride)
     chunks = [done] if done is not None else []
     n_done = 0 if done is None else int(done["frame"].shape[0])
     t_pass = time.time()
