@@ -234,44 +234,47 @@ mask-free replacement for `scripts/coarse_pass.py`. Writes
 
 ### Coarse pass timing
 
+**History (2026-09-04, real-run wave): the ORIGINAL `SlotReader` re-seeked
+(`CAP_PROP_POS_FRAMES`) on every sampled frame, turning each coarse frame
+into a keyframe seek + GOP redecode -- STOPPED at 500/31125 coarse frames,
+`0.39 frames/s`, ETA ~22h (~11x over the 2h stop threshold). That is no
+longer the current state; see the fix and the real run below.**
+
+**Reader fix (`perf(mvq)` 2f60c8b).** `SlotReader` now runs one thread per
+camera that decodes each mp4 FORWARD ONLY -- `grab()` (decode, discard)
+through the frames the stride skips, `retrieve()` only at the stride hit --
+so after the one initial seek (the run's start/resume slot) every frame is
+decoded at most once, ever. Reader-only benchmark, 200 stride-16 coarse
+frames on the real 20_04 recording, no GPU:
+
+| reader | coarse frames/s | wall clock (200 frames) |
+|---|---|---|
+| old (re-seek every frame) | **0.412** | 485.6s |
+| new (forward-only, per-camera threads) | **47.3** | 4.2s |
+
+~115x faster, comfortably past the >=15 frames/s target.
+
 | stage | wall clock | notes |
 |---|---|---|
-| model load (mvq + CenterDetect) | **10.9s** | `[coarse] models loaded in 10.9s (mvq step final, K=50, I=4)` |
-| coarse pass, 20_04 @ stride 16 | **STOPPED at 500/31125 frames** | `[coarse] 500/31125 coarse frames  0.39 frames/s  eta 1321.8 min` |
+| model load (mvq + CenterDetect) | **6.2s** | `[coarse] models loaded in 6.2s (mvq step final, K=50, I=4)` |
+| coarse pass, 20_04 @ stride 16, full run | **221.2 min (2.35 coarse frames/s end-to-end)** | `[coarse] done: 31125 coarse frames in 221.2 min (2.35 frames/s)` |
 
-**Real run status (2026-09-04, real-run wave): STOPPED, plan budget blown.**
-Ran on GPU 1 (`CUDA_VISIBLE_DEVICES=1`; GPU 0/7 held memory from another
-agent's smoke test at various points -- never used). Command exactly as
-below (this section's own command, `--resume` included). `[coarse] frames
-0..497993 stride 16 -> 31125 coarse frames (1936x448)` and `models loaded in
-10.9s` printed promptly (23:09:35-23:09:48), then the first
-`--progress-every` (default 500) line took **13m28s** more to appear:
-`[coarse] 500/31125 coarse frames  0.39 frames/s  eta 1321.8 min` (~22 hours).
-This is ~11x over the brief's 2h stop threshold and ~47x slower than task
-2's window-cost extrapolation for this same stride/recording (~28 min, see
-"Window cost" above) -- so the process was killed (`kill -TERM`, confirmed
-gone, all 8 GPUs back to 0 MiB; no partial file was written -- the first
-`--partial-every` checkpoint is at 2000 coarse frames, never reached).
+**Real run (2026-09-05, post-reader-fix): COMPLETE.** GPU 7
+(`CUDA_VISIBLE_DEVICES=7`), command as below. With the reader fixed, the
+bottleneck moved from IO (reader) to COMPUTE: the end-to-end rate climbed
+from 4.00 frames/s (first 500 frames, still JIT-warming-up) to ~4.7-5.2
+frames/s by frame 1500 on an otherwise-idle node, then settled to ~2.0-2.35
+frames/s for most of the run once GPUs 0-3 picked up a concurrent 4-worker
+lift campaign (expected contention, noted by the coordinator; not a reader
+regression -- the reader itself is no longer the constraint). At the
+observed steady rate the per-coarse-frame cost (CenterDetect peaks + mvq
+windows/forward + Python glue in `coarse_pass`'s frame loop) now bounds
+throughput, not video IO -- profiling THAT path is Plan 2 work, not part of
+this fix. `centre_source {'detected': 26131, 'reused': 4993, 'none': 1}`,
+`frac_trackable [0.478 female, 0.981 male]` (see "Female trackability"
+below for what the low female number means).
 
-Diagnosis (brief, no code changes made -- policy: report a slowdown, don't
-fix by editing code): `ps` showed the process at 470-475% CPU the entire
-13.5 minutes (vs. ~0% GPU utilization in spot checks), i.e. CPU-bound, not
-GPU-bound. `--batch` defaults to 32 (matches the batched-window measurement
-in task 2), so this is not an obvious batch-size regression reachable by a
-flag. The most likely explanation is the per-camera video frame IO/decode
-path (`cv2.VideoCapture` positional seeks across 7 open captures per coarse
-frame, called out as a possible cost in the script's own docstring) being
-far more expensive on this recording/node than the task-2 single-frame-set
-timing measured. **Steps 3 (gates) and 4 (figure gates 1-2) of this wave
-could not run on real 20_04 data as a result** -- both need a completed
-`coarse_tracks.npz`, which does not exist. Flagged for the coordinator:
-either accept coarse_pass_mvq.py as a long (multi-hour, `--resume`-able,
-queued) batch job rather than an interactive <1h step, or have someone
-familiar with the video-IO path profile `SlotReader`/`read_window` before
-the next real-run attempt.
-
-Command to run, once GPUs are free (only the timing differs from plan; the
-`final/` appears and the GPUs are free:
+Command to run (`final/` present, GPU free):
 
 ```
 module load cuda/12.9.1
@@ -311,6 +314,100 @@ round-2 addendum), do not trust the sign silently -- rerun with `--up-hint
 x,y,z` taken from a visually-confirmed floor-majority stretch of the SAME
 recording, and once confirmed, carry that hint into the recording config so
 the fine pass (§4.4+) does not have to re-derive it.
+
+### Floor block, real 20_04 run -- read and resolved
+
+The finished run's `.meta.json` read `floor.orientation == "skew"`,
+`floor.skew == 0.0773`, below the 0.1 marginal threshold -- exactly the
+"do not trust the sign silently" case the plan calls out (this value was
+already visible, unchanged, at every earlier partial write from 2000 coarse
+frames on: `fit_floor` fits only the first `n_fit` trackable centroids, so
+it cannot move as later frames are appended).
+
+Checked BOTH signs directly on the data rather than guessing: reran
+`fit_floor` with `up_hint = normal` and `up_hint = -normal` on the (then
+22000-frame) trackable centroids and compared the resulting height
+distributions -- the current (skew-chosen) sign gives median height
+**11.13** units (p95 29.2, 9.1% negative); the flipped sign gives median
+**14.43** (p95 29.3, 8.9% negative). Neither sign puts the trackable median
+tightly inside "0 to +10" (both are dragged up by the same long
+wall-climbing tail visible in both directions, which is why the naive
+"heights should be positive" check does not discriminate sign here -- a
+`floor_pct` percentile-anchored offset makes ~97% of points read positive
+under EITHER sign by construction), but the as-is sign is smaller and
+therefore the better of the two -- CONFIRMING, not flipping, the
+skew-heuristic's choice. On the full 31125-frame run this holds: median
+trackable height **11.29** units (n=45404, p5 -1.22, p95 28.98, 9.3%
+negative) -- in the expected ballpark (order of magnitude, majority
+positive) with the known long wall-climbing tail, no sign flip warranted.
+
+Resolved by rerunning ONLY the floor fit, not the whole pass: `--resume
+--up-hint 0.02861028716178626,0.8444639223438807,-0.5348477683678864` (the
+current normal's own components) against the COMPLETE `coarse_tracks.npz`.
+With `all_frames` already fully covered, `main()` loads the finished file,
+does zero mvq/CenterDetect forward work (`done: 31125 coarse frames in 0.0
+min`), and only recomputes `fit_floor`/`coarse_features`/the write with the
+hint -- `floor.orientation` is now `"hint"` (was `"skew"`), same `normal`/
+`offset` (confirming the sign, not changing it), `skew` still recorded
+(0.0773) so the two remain cross-checkable. No `--up-hint` rerun of the full
+pass was needed.
+
+### Female trackability (the hard-case check CLAUDE.md asks for)
+
+`frac_trackable` came out **[0.478 female, 0.981 male]** -- the female
+(`exist >= 0.5`) is trackable on only 48% of coarse frames, vs. 98% for the
+male. Determined which of the two explanations it is:
+
+**Genuine absence, not a typed-read artefact.** Of the 16262 female
+"untrackable" coarse frames, `exist` is not a low NUMBER there -- it is
+**NaN in all 16262/16262** of them, and `centroid` is NaN in the same
+16262/16262. That means the typed female slot was never READ at all in
+these frames (not read-with-low-confidence): `n_windows` was **1** (only
+one window planned that coarse frame -- i.e. CenterDetect/triangulation/
+`plan_windows` produced a single fly-centre, with nothing separately
+resolvable as the female) in 14063/16262 (86.5%) of them, and 2 (two windows
+planned, but her typed slot still unfilled -- e.g. both windows read as the
+male, or her window's identity read failed) in 2198/16262 (13.5%). This is
+option (i), genuine absence of a confident female localisation upstream of
+the typed read, not option (ii), a confident window that mvq scored low.
+
+**Distribution.** Fairly uniform across the recording -- 40-65% missing in
+every one of 10 equal deciles, no single stretch drives it. Missing runs are
+mostly brief (median 2 coarse frames = 32 real frames = 40ms at 800fps) but
+occasionally long (mean 11.2 coarse frames; max 311 = ~6.2s; 22.8% of runs
+>= 10 coarse frames). The male's height is modestly higher during
+female-missing frames (median 13.9 vs 12.3 units; wall-ish >10-unit frac
+66.5% vs 58.4%), consistent with -- though not proof of -- these being more
+often wall-interaction periods, where triangulating the female specifically
+(not the male, whose own `n_valid_cams` is unchanged at a median of 7 either
+way) is harder.
+
+**Why this matters for §5/gates.** A female-missing frame makes `sep3d`
+(inter-fly 3D distance, needed for the mvq proximity gate) NaN, and a NaN
+comparison is always False -- so the proximity half of `behaviour_ok` cannot
+fire there regardless of the true distance. Per-bout female-missing
+fraction is highly variable (0% in bouts 7/17/20/30, 100% in bout 8,
+89.7-97.9% in bouts 19/22/26) rather than uniform, and this variability
+lines up exactly with which reviewed bouts the gate misses -- see "Gates vs
+reviewed bouts" below: the 3 unmatched ground-truth bouts (8, 19, 26) are
+precisely the 3 with near-total (92-100%) female-missing fraction.
+
+**`collapsed`**: present in the file (all `bool`, all-`False`, 31125x2), but
+this is a placeholder, not a real measurement. The 221-minute forward pass
+itself ran BEFORE the concurrent fix-wave's collapse-guard commits
+(`e31b7d1`/`57fac05`) landed on this branch -- `coarse_pass`'s per-frame
+picking loop at that time had no collapse check at all. The key appears now
+only because the LATER floor-only `--up-hint` rerun (a fresh process,
+03:45) imported the by-then-updated `load_partial`, which defaults a
+pre-existing file's missing `collapsed` to all-`False` rather than
+`KeyError`ing (`scripts/coarse_pass_mvq.py` diff, `2f60c8b..HEAD`). All-False
+here means "never checked", not "checked and found zero collapses" --
+`n_collapsed: 0` in the meta should be read the same way. Every OTHER
+derived field in this file (`dist`, `heading_deg`, `speed`, `wing_angle_deg`,
+`height`, `trackable`, `sep3d`, reprojection fields) is unaffected: the
+fix-wave's other coarse_track.py changes touch only the forward `coarse_pass`
+loop (not exercised by a floor-only rerun) and metadata bookkeeping, not
+`coarse_features`/`fit_floor` themselves (diffed directly, `2f60c8b..HEAD`).
 
 ### Deviation: the floor-plane sign rule (figure-gated)
 
@@ -418,27 +515,98 @@ cloud, no hint: `pytest.warns`, sign deliberately not asserted). The existing
   `coarse_features`; a heading whose zero meant "facing away" would be read
   backwards by every downstream gate.
 
-## Gates vs reviewed bouts (task 5, spec §5.1) -- 2026-09-04, real-run wave
+## Gates vs reviewed bouts (task 5, spec §5.1) -- 2026-09-05, post-reader-fix wave
 
-**BLOCKED, not run.** `scripts/coarse_pass_gates.py --tracks
-$OUT/coarse_tracks.npz --out-csv $OUT/bouts_mvq_gates.csv --ground-truth
-$REC/courtship_bouts_fly0_summary.csv` needs the real `coarse_tracks.npz`
-from the coarse pass above, which does not exist (that step was stopped at
-500/31125 coarse frames -- see "Coarse pass timing"). No recall/precision/
-boundary-offset numbers against the 30 reviewed bouts
-(`courtship_bouts_fly0_summary.csv`, confirmed 30 rows) are available this
-wave. Command verified runnable (`--help` read, `--session-tag` is
-required and was not in the brief's flag list -- would need e.g.
-`Session0/2025_10_20_13_20_04_fly0`) but not executed against real data.
+**RUN, against the real, completed 20_04 `coarse_tracks.npz`.**
 
-## Figure gates 1-2 (task 6, spec §8.1/§8.2) -- 2026-09-04, real-run wave
+```
+python scripts/coarse_pass_gates.py --tracks $OUT/coarse_tracks.npz \
+  --out-csv $OUT/bouts_mvq_gates.csv \
+  --session-tag Session0/2025_10_20_13_20_04_fly0 \
+  --ground-truth $REC/courtship_bouts_fly0_summary.csv
+```
 
-**BLOCKED, not run.** Both `scripts/viz/coarse_centres_check.py` and
-`scripts/viz/coarse_tracks_check.py` need the same real `coarse_tracks.npz`
-(figure gate 2 also needs `bouts_mvq_gates.csv` from task 5, itself blocked).
-Task 6's own report already validated both scripts end-to-end on synthetic
-tracks (`figures/2026-09-mvq/p4_maskfree/synthetic_check/`, read and
-described there); that synthetic validation stands, but the real-20_04
-reading against the actual coarse pass output (are the centres within the
-fly bodies; do reviewed bouts coincide with close-distance/wing-extension
-episodes) is deferred until the coarse pass is re-run to completion.
+(default thresholds: wing-angle-min 30deg, proximity-max-units 30, min-views
+3, min-duration/max-gap as coded; `--session-tag` is required, not in the
+original brief's flag list -- `Session0/2025_10_20_13_20_04_fly0` matches
+the reviewed CSV's own `fly_id` column.)
+
+| metric | value |
+|---|---|
+| gate-derived bouts emitted | 542 |
+| recall (reviewed bouts with >=1 overlapping gate window) | **0.900** (27/30) |
+| precision (gate windows overlapping >=1 reviewed bout) | **0.083** (45/542) |
+| start-offset median | -67.0 frames |
+| end-offset median | -93.0 frames |
+| unmatched ground-truth bouts | **8, 19, 26** |
+
+Recall is high and boundary offsets are small (order 1 coarse-sample-worth
+of frames) given the mvq gates have no area/mask signal at all. Precision is
+low -- 542 emitted windows against 30 reviewed bouts, expected without an
+area-ratio-style gate to suppress default-threshold noise (spec explicitly
+leaves `WING_ANGLE_MIN`/`PROXIMITY_MAX_UNITS` as judgment calls, not
+measured constants; not retuned here, thresholds are §5's job to calibrate).
+
+**The 3 misses are explained, not mysterious**: bouts 8, 19 and 26 are
+EXACTLY the 3 reviewed bouts with near-total female-missing fraction (100%,
+91.7%, 97.9% -- see "Female trackability" above) -- `sep3d` is NaN
+throughout those windows, so the proximity half of `behaviour_ok` cannot
+fire, and no gate window ever overlaps them. This is a trackability gap, not
+a threshold-tuning problem; retuning `--proximity-max-units`/
+`--wing-angle-min` cannot fix a NaN comparison.
+
+## Figure gates 1-2 (task 6, spec §8.1/§8.2) -- 2026-09-05, post-reader-fix wave
+
+**RUN**, against the real, completed 20_04 `coarse_tracks.npz` (figure gate 2
+also against the real `bouts_mvq_gates.csv` from above). GPU 7 for
+CenterDetect peaks (figure gate 1 only; figure gate 2 is pure plotting).
+
+**Figure gate 1** (`scripts/viz/coarse_centres_check.py` ->
+`figures/2026-09-mvq/p4_maskfree/coarse_centres_check.png`, read with the
+Read tool). Expectation (spec §8.1): every visible fly has a centre within
+its body in both cameras; touching flies can share one centre; no centre on
+a wall/reflection. **PASS.** Across all 13 sampled real-frame/camera pairs
+(overhead `Cam2012630` + side `Cam2012861`), the orange (male) circle sits
+on his body in every frame he is visible, in BOTH cameras, including
+wing-extended and close-approach frames. The cyan (female) circle, when
+drawn, likewise lands on her body (not on the light-blue floor/wall band
+visible in several overhead frames, not on a reflection) -- but it is
+simply ABSENT in a large fraction of frames (matches the 48% trackable
+number directly: e.g. frame 326256 and 476384 show a fully-visible female
+fly with NO cyan circle at all), i.e. the failure mode already established
+is "never localised", never "confidently mislocalised". One ambiguous case
+(the side camera at frame 326256, orange circle over a dark region with no
+clearly visible fly) is most plausibly a low-visibility side-camera view
+rather than a bad centre, since the SAME 3D point's overhead reprojection
+that frame lands correctly on the male's body (both reprojections come from
+one 3D point, so a correct overhead placement is strong evidence the 3D
+point itself, and hence the side reprojection, is also correct). A few
+CenterDetect peaks (yellow squares, recomputed on demand, not stored) sit
+off-fly on background/corners in 2-3 frames -- expected noise in the
+upstream peak detector, not a defect in the fitted centres §8.1 is judging.
+
+**Figure gate 2** (`scripts/viz/coarse_tracks_check.py` ->
+`figures/2026-09-mvq/p4_maskfree/coarse_tracks_check.png`, read with the
+Read tool). Expectation (spec §8.2): reviewed bouts coincide with
+close-distance/wing-extension episodes; a bout that does not is recorded as
+such. **PASS**, with the mechanism visible in the same figure. The script's
+own signal-presence check reports **0/30 reviewed bouts unexplained** (every
+reviewed window shows close distance <=3mm or male wing angle >=30deg
+SOMEWHERE inside it -- a looser test than the gate itself, see below) --
+title confirms this. The top 3 panels (inter-fly distance, male wing angle,
+per-fly speed) visibly show reviewed-bout (grey) and gate-derived (green)
+shading DENSELY overlapping the distance troughs and wing-angle spikes
+across the whole 10.5-minute recording; the bout-28 zoom panel shows a
+textbook approach (distance falling from ~22mm to ~2mm over ~2000 frames)
+immediately followed by a sustained wing-angle oscillation (40-90deg) inside
+the reviewed window. The existence panel makes the female-trackability
+finding visible directly: the orange (male) trace sits at ~1.0 almost
+throughout, while the cyan (female) trace is visibly choppy and dips below
+the 0.5 line frequently and for extended stretches across the ENTIRE
+recording (not one localised patch) -- exactly the "fairly uniform, 40-65%
+per decile" distribution measured numerically above. This is also why the
+figure's own "0/30 unexplained" (signal present somewhere in the window) and
+the gate's "27/30 matched" (gate must fire, needing `exist>=0.5` at the SAME
+frame as behaviour) disagree by exactly 3: the behavioural signal is there,
+but the trackability gate cannot see it through the female's NaN stretches
+in bouts 8, 19 and 26.
