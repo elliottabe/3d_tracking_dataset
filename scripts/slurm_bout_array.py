@@ -170,6 +170,93 @@ python -u scripts/sam3_masks.py sam3.session_dir={session_dir} sam3.out={masks_o
 """
 
 
+def build_mvq_lift_array_script(
+    *,
+    job_name: str,
+    partition: str,
+    account: str,
+    cpus: int,
+    mem: int,
+    gpus: int,
+    time_limit: str,
+    requeue: bool,
+    constraint: str = "",
+    conda_env: str,
+    idxs: list[int],
+    session_dir: str,
+    predictions_dir: str,
+    run_dir: str,
+    checkpoint: str,
+    step=None,
+    exist_thresh: float = 0.5,
+    batch: int = 8,
+    merge_dist_units: float = 30.0,
+    anatomy_cfg: str = "configs/anatomy/v1.yaml",
+    recording_cfg: str = "configs/recording/session0.yaml",
+    bouts_csv: str = "",
+    dependency: str = "",
+) -> str:
+    """mvq lift array (`--lifter mvq`): one task per bout, GPU, JAX env.
+
+    Replaces Stages A+B for this run: each task writes
+    `<run_dir>/bouts/bout_<idx:05d>/fly{0,1}/{kp2d,kp3d}.npz` plus sex.json
+    from the typed-slot mvq lifter, and the rest of the chain (precompute ->
+    IK array -> aggregate) then runs unchanged with `pipeline.lifter=mvq`.
+
+    Placed BEFORE precompute on purpose. The body-scale precompute pools
+    `scale.json` over every bout of the recording that is already
+    triangulated; running the whole lift array first means it pools all of
+    them instead of the one bout it was seeded with (the scale-from-first-bout
+    defect, measured 15.5% low on Session0).
+
+    Same env lines as the IK array -- `module load cuda/12.9.1` and the
+    LD_LIBRARY_PATH/JAX_PLATFORMS unsets, without which the forward silently
+    runs on CPU -- plus `PYTHONPATH=third_party/jarvis_jax:.`, because the
+    editable install can point at a DIFFERENT checkout than the one this
+    submitter was run from.
+    """
+    requeue_line = "#SBATCH --requeue" if requeue else ""
+    constraint_line = (f"#SBATCH --constraint={constraint}" if constraint else "")
+    dependency_line = f"#SBATCH --dependency={dependency}" if dependency else ""
+    step_arg = "" if step in (None, "", "null") else f" --step {step}"
+    csv_arg = f" --bouts-csv {shlex.quote(str(bouts_csv))}" if bouts_csv else ""
+    return f"""#!/bin/bash
+#SBATCH --job-name={job_name}
+#SBATCH --partition={partition}
+#SBATCH --account={account}
+#SBATCH --time={time_limit}
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task={cpus}
+#SBATCH --gpus={gpus}
+#SBATCH --mem={mem}G
+#SBATCH --array={_array_spec(idxs)}
+#SBATCH --open-mode=append
+#SBATCH -o {run_dir}/slurm-mvqlift-%A_%a.out
+{dependency_line}
+{requeue_line}
+{constraint_line}
+set -x
+source ~/.bashrc
+micromamba activate {conda_env}
+module load cuda/12.9.1
+export LD_PRELOAD="$CONDA_PREFIX/lib/libstdc++.so.6"   # cv2 (video reads)
+unset LD_LIBRARY_PATH                       # let JAX use its bundled CUDA wheels
+unset JAX_PLATFORMS                         # NEVER inherit JAX_PLATFORMS=cpu from the submit env
+export XLA_PYTHON_CLIENT_MEM_FRACTION=0.9
+echo "Node: $SLURMD_NODENAME  job: $SLURM_JOB_ID  task: $SLURM_ARRAY_TASK_ID"
+nvidia-smi -L
+cd {PROJECT_DIR}
+mkdir -p {run_dir}
+PYTHONPATH=third_party/jarvis_jax:. python -u scripts/mvq_lift_bout.py \\
+    --session-dir {session_dir} --predictions-dir {predictions_dir} \\
+    --out {run_dir} --bout ${{SLURM_ARRAY_TASK_ID}} \\
+    --run {checkpoint}{step_arg} --exist-thresh {exist_thresh} --batch {batch} \\
+    --merge-dist-units {merge_dist_units} \\
+    --anatomy {anatomy_cfg} --recording-cfg {recording_cfg}{csv_arg}
+"""
+
+
 def build_precompute_script(
     *,
     job_name: str,
@@ -232,7 +319,11 @@ export XLA_PYTHON_CLIENT_MEM_FRACTION=0.9
 echo "Node: $SLURMD_NODENAME  job: $SLURM_JOB_ID"
 nvidia-smi -L
 cd {PROJECT_DIR}
-python -u scripts/run_bout.py --config-name={config_name} ++bout_ids={bout_id}{overrides}
+# PYTHONPATH before the editable install: `pip install -e` can point at a
+# DIFFERENT checkout of jarvis_jax than the tree this job was submitted from
+# (this repo is routinely worked on in git worktrees), and the job would then
+# run code the submitter never saw.
+PYTHONPATH=third_party/jarvis_jax:. python -u scripts/run_bout.py --config-name={config_name} ++bout_ids={bout_id}{overrides}
 """
 
 
@@ -296,7 +387,8 @@ export XLA_PYTHON_CLIENT_MEM_FRACTION=0.9
 echo "Node: $SLURMD_NODENAME  job: $SLURM_JOB_ID  task: $SLURM_ARRAY_TASK_ID"
 nvidia-smi -L
 cd {PROJECT_DIR}
-python -u scripts/run_bout.py --config-name={config_name} ++bout_ids=${{SLURM_ARRAY_TASK_ID}}{overrides}
+# see build_precompute_script on why PYTHONPATH precedes the editable install
+PYTHONPATH=third_party/jarvis_jax:. python -u scripts/run_bout.py --config-name={config_name} ++bout_ids=${{SLURM_ARRAY_TASK_ID}}{overrides}
 """
 
 
@@ -405,9 +497,39 @@ def main():
                         "so the array does not queue a task per already-good "
                         "bout. Indices not present under predictions_dir are an "
                         "error rather than a silent no-op.")
+    p.add_argument('--lifter', default='dlt', choices=('dlt', 'mvq'),
+                   help="Which code produces kp2d/kp3d. 'dlt' (default) is the "
+                        "SAM3 -> ViTPose -> DLT chain. 'mvq' replaces Stages A+B "
+                        "with an mvq lift array (scripts/mvq_lift_bout.py) placed "
+                        "before precompute, skips the SAM3 stage entirely (masks "
+                        "are an INPUT there), and passes pipeline.lifter=mvq plus "
+                        "the --mvq-config group to every run_bout.py command.")
+    p.add_argument('--mvq-lift', default='array', choices=('array', 'skip'),
+                   help="With --lifter mvq: 'array' (default) queues the lift as a "
+                        "GPU array before precompute. 'skip' assumes the lift has "
+                        "already run -- e.g. scripts/slurm/mvq_p3a_campaign.sh "
+                        "--local-gpus N lifted the recording on an interactive node "
+                        "to dodge the queue -- and chains precompute -> IK -> "
+                        "aggregate straight off the existing kp3d.npz files. It is "
+                        "still safe if a bout was missed: run_bout.py's Stage A/B "
+                        "would then RE-DERIVE that bout with the DLT chain, so the "
+                        "skip is checked below rather than trusted.")
+    p.add_argument('--mvq-config', default='p3a',
+                   help='configs/mvq/<name>.yaml -- the checkpoint/exist_thresh '
+                        'block. The SAME values reach the lift array and '
+                        "run_bout.py, so the lifter's gates string is exactly what "
+                        "Stage B's staleness check recomputes.")
     p.add_argument('--dry-run', action='store_true',
                    help='Print the scripts + dependency chain without submitting')
     args, passthrough = p.parse_known_args()
+
+    # The lifter selection is a CONFIG fact, not just a submitter flag: it has to
+    # reach run_bout.py (else Stage B would recompute DLT keypoints over the
+    # lifted ones) AND compose_cfg here (else cfg.mvq is None and the lift array
+    # has no checkpoint to name). One place sets both.
+    if args.lifter == 'mvq':
+        passthrough = list(passthrough) + [f'mvq={args.mvq_config}',
+                                           'pipeline.lifter=mvq']
 
     if not PKG_DIR.is_dir():
         print(f"Error: jarvis_jax package not found at {PKG_DIR}", file=sys.stderr)
@@ -494,8 +616,18 @@ def main():
               f"{f'  (dependency={dependency})' if dependency else ''}")
 
     # (a)/(b) Stage-0 SAM3 array -- only when some bout lacks sam3_masks.npz.
+    # With --lifter mvq the masks are an INPUT (the lift places its crops from
+    # their centroids and never re-segments), so a missing one is an error to
+    # report rather than work to queue.
     sam3_dep = None
-    if missing:
+    if args.lifter == 'mvq' and missing:
+        print(f"Error: --lifter mvq consumes existing SAM3 masks, but {len(missing)} "
+              f"of {n_bouts} bouts lack sam3_masks.npz: {missing[:10]}", file=sys.stderr)
+        if not args.dry_run:
+            sys.exit(1)
+    elif args.lifter == 'mvq':
+        print("\nSAM3: skipped (--lifter mvq consumes the existing masks)")
+    elif missing:
         sam3_job = f"sam3ct_{name}"[:60]
         sam3_script = build_sam3_array_script(
             job_name=sam3_job, partition=sl.partition, account=sl.account,
@@ -510,7 +642,52 @@ def main():
     else:
         print("\nSAM3: skipped (every discovered bout already has sam3_masks.npz)")
 
-    # (c) precompute (offsets fit-once), gated on SAM3.
+    # (b2) mvq lift array -- BEFORE precompute on purpose. The body-scale
+    #      precompute pools scale.json over every bout of the recording that is
+    #      already triangulated; lifting the whole recording first means it
+    #      pools all of them instead of the one bout it was seeded with (the
+    #      scale-from-first-bout defect, measured 15.5% low on Session0).
+    if args.lifter == 'mvq' and args.mvq_lift == 'skip':
+        # The lift already ran (locally, on an interactive node). Verify rather
+        # than trust: a bout whose kp3d.npz is absent would silently fall back
+        # to Stage A/B and be DLT-triangulated inside an "mvq" run, which no
+        # later artifact distinguishes.
+        _no_kp = [i for i in idxs
+                  if not all(os.path.exists(os.path.join(
+                      run_root, "bouts", f"bout_{i:05d}", f"fly{f}", "kp3d.npz"))
+                      for f in (0, 1))]
+        if _no_kp:
+            print(f"Error: --mvq-lift skip, but {len(_no_kp)} bout(s) have no lifted "
+                  f"kp3d.npz under {run_root}: {_no_kp[:10]}", file=sys.stderr)
+            if not args.dry_run:
+                sys.exit(1)
+        else:
+            print(f"\nmvq lift: skipped ({len(idxs)} bouts already lifted under "
+                  f"{run_root})")
+    elif args.lifter == 'mvq':
+        mv = cfg.get("mvq") or {}
+        if not mv.get("checkpoint"):
+            print(f"Error: --lifter mvq needs mvq.checkpoint; configs/mvq/"
+                  f"{args.mvq_config}.yaml sets none", file=sys.stderr)
+            sys.exit(2)
+        mvq_script = build_mvq_lift_array_script(
+            job_name=f"mvqlift_{name}"[:60], partition=sl.partition, account=sl.account,
+            cpus=sl.cpus, mem=sl.mem, gpus=gpus, time_limit=sl.time,
+            constraint=str(sl.get("constraint", "") or ""),
+            requeue=requeue, conda_env=sl.conda_env, idxs=idxs,
+            session_dir=session_dir, predictions_dir=predictions_dir, run_dir=run_root,
+            checkpoint=str(mv["checkpoint"]), step=mv.get("step"),
+            exist_thresh=float(mv.get("exist_thresh", 0.5)),
+            batch=int(mv.get("batch", 8)),
+            merge_dist_units=float(mv.get("merge_dist_units", 30.0)),
+            anatomy_cfg=f"configs/anatomy/{cfg.anatomy.name}.yaml",
+            recording_cfg=f"configs/recording/{str(name).lower()}.yaml",
+            bouts_csv=str(cfg.recording.get("bouts_csv", "") or ""),
+            dependency=sam3_dep or "")
+        _run("mvq_lift", mvq_script, sam3_dep)
+        sam3_dep = f"afterok:{submitted['mvq_lift']}"
+
+    # (c) precompute (offsets fit-once), gated on SAM3 (or on the mvq lift).
     precompute_job = f"ctprecomp_{name}"[:60]
     precompute_script = build_precompute_script(
         job_name=precompute_job, partition=sl.partition, account=sl.account,
@@ -546,6 +723,7 @@ def main():
         Path(run_root).mkdir(parents=True, exist_ok=True)
         print(f"\nDependency chain: "
               f"{'sam3(' + submitted['sam3'] + ') -> ' if 'sam3' in submitted else ''}"
+              f"{'mvq_lift(' + submitted['mvq_lift'] + ') -> ' if 'mvq_lift' in submitted else ''}"
               f"precompute({submitted['precompute']}) -> "
               f"jax_array({submitted['jax_array']}) -> aggregate({submitted['aggregate']})")
         print(f"Monitor : squeue -u $USER")

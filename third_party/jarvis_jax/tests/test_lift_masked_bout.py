@@ -27,6 +27,7 @@ What is actually load-bearing here, and why each check exists:
     typed-slot lift would swap fly dirs the model already typed.
 """
 import ast
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -38,6 +39,7 @@ from omegaconf import OmegaConf
 REPO = Path(__file__).resolve().parents[3]
 RUN_BOUT = REPO / "scripts" / "run_bout.py"
 ANATOMY_V1 = REPO / "configs" / "anatomy" / "v1.yaml"
+SLURM_ARRAY = REPO / "scripts" / "slurm_bout_array.py"
 
 CAMS = ["Cam2012630", "Cam2012631", "Cam2012853", "Cam2012855",
         "Cam2012857", "Cam2012861", "Cam2012862"]
@@ -393,3 +395,99 @@ def test_canonicalize_bout_treats_mvq_sex_head_as_authoritative(tmp_path):
     res = canonicalize_bout(str(bout), names, verbose=False,
                             mask_sex_meta={"method": "human_id_review", "male_slot": 1})
     assert res["method"] == "human_id_review_masks"
+# -------------------------------------------------------------- slurm plumbing
+def _slurm_mod():
+    spec = importlib.util.spec_from_file_location("slurm_bout_array_wt", SLURM_ARRAY)
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
+
+
+def test_mvq_lift_array_script_env_and_command():
+    m = _slurm_mod()
+    s = m.build_mvq_lift_array_script(
+        job_name="mvq", partition="ckpt-all", account="portia", cpus=8, mem=48,
+        gpus=1, time_limit="12:00:00", requeue=True, constraint="h200|a40",
+        conda_env="3d_tracking", idxs=[1, 4, 28], session_dir="/s",
+        predictions_dir="/p", run_dir="/r", checkpoint="/ckpt/final", step=None,
+        exist_thresh=0.5, batch=8, anatomy_cfg="configs/anatomy/v1.yaml",
+        recording_cfg="configs/recording/session0.yaml")
+    assert "--array=1,4,28" in s and "--requeue" in s
+    assert "scripts/mvq_lift_bout.py" in s
+    assert "--bout ${SLURM_ARRAY_TASK_ID}" in s
+    assert "--run /ckpt/final" in s and "--step" not in s      # final/ carries no step
+    # the same JAX env lines as the IK array -- a missing `module load cuda`
+    # silently runs the lifter on CPU
+    for line in ("module load cuda/12.9.1", "unset LD_LIBRARY_PATH",
+                 "unset JAX_PLATFORMS", "XLA_PYTHON_CLIENT_MEM_FRACTION=0.9",
+                 "LD_PRELOAD"):
+        assert line in s
+    # the editable install points at ANOTHER checkout; without this the job
+    # imports a different jarvis_jax than the one being tested
+    assert "PYTHONPATH=third_party/jarvis_jax:." in s
+    s2 = m.build_mvq_lift_array_script(
+        job_name="mvq", partition="ckpt-all", account="portia", cpus=8, mem=48,
+        gpus=1, time_limit="12:00:00", requeue=True, conda_env="3d_tracking",
+        idxs=[1], session_dir="/s", predictions_dir="/p", run_dir="/r",
+        checkpoint="/ckpt", step=9000, exist_thresh=0.5, batch=8,
+        anatomy_cfg="configs/anatomy/v1.yaml",
+        recording_cfg="configs/recording/session0.yaml")
+    assert "--step 9000" in s2
+
+
+def test_dry_run_with_lifter_mvq_puts_the_lift_before_precompute(tmp_path, capsys, monkeypatch):
+    """`--lifter mvq` must (a) skip SAM3 entirely -- masks are an INPUT here --
+    (b) run the lift array before precompute, so the body-scale precompute
+    pools over mvq keypoints for the whole recording rather than one bout, and
+    (c) pass `pipeline.lifter=mvq` to every run_bout command, without which
+    Stage B would recompute DLT keypoints over the top of the lifted ones."""
+    m = _slurm_mod()
+    pred = tmp_path / "sam3_masks"
+    for i in (3, 7):
+        (pred / f"bout_{i:05d}").mkdir(parents=True)
+        (pred / f"bout_{i:05d}" / "sam3_masks.npz").write_bytes(b"")
+    monkeypatch.setattr(
+        "sys.argv",
+        ["slurm_bout_array.py", "--lifter", "mvq", "--dry-run", "--slurm", "ckpt_all",
+         f"recording.predictions_dir={pred}", f"outputs.out={tmp_path / 'pose_mvq_p3a'}"])
+    m.main()
+    out = capsys.readouterr().out
+    assert out.index("--- mvq_lift script") < out.index("--- precompute script")
+    assert "--- sam3 script" not in out
+    assert "scripts/mvq_lift_bout.py" in out
+    assert "--array=3,7" in out
+    assert out.count("pipeline.lifter=mvq") >= 2               # precompute + jax array
+    assert "mvq=p3a" in out
+
+
+def test_mvq_lift_skip_requires_the_lift_to_have_actually_happened(tmp_path, capsys,
+                                                                   monkeypatch):
+    """`--mvq-lift skip` (the campaign's `--local-gpus` path, which lifts on an
+    interactive node to dodge a day-deep queue) must VERIFY the kp3d.npz files
+    exist rather than trust them: a bout that was missed would fall through to
+    Stage A/B and be DLT-triangulated inside a run labelled mvq, which no later
+    artifact distinguishes."""
+    m = _slurm_mod()
+    pred, out = tmp_path / "sam3_masks", tmp_path / "pose_mvq_p3a"
+    for i in (3, 7):
+        (pred / f"bout_{i:05d}").mkdir(parents=True)
+        (pred / f"bout_{i:05d}" / "sam3_masks.npz").write_bytes(b"")
+    argv = ["slurm_bout_array.py", "--lifter", "mvq", "--mvq-lift", "skip", "--dry-run",
+            "--slurm", "ckpt_all", f"recording.predictions_dir={pred}",
+            f"outputs.out={out}"]
+    monkeypatch.setattr("sys.argv", argv)
+    m.main()
+    err = capsys.readouterr().err
+    assert "2 bout(s) have no lifted kp3d.npz" in err
+
+    for i in (3, 7):
+        for f in (0, 1):
+            d = out / "bouts" / f"bout_{i:05d}" / f"fly{f}"
+            d.mkdir(parents=True)
+            (d / "kp3d.npz").write_bytes(b"x")
+    monkeypatch.setattr("sys.argv", argv)
+    m.main()
+    cap = capsys.readouterr()
+    assert "mvq lift: skipped (2 bouts already lifted" in cap.out
+    assert "--- mvq_lift script" not in cap.out
+    assert cap.out.count("pipeline.lifter=mvq") >= 2
