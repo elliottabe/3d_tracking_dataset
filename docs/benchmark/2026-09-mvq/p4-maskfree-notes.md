@@ -80,3 +80,80 @@ with 1mm jitter (`jitter_units` an order of magnitude larger than today's
 interpolated coarse-track centres. Per the task brief: STOP after Task 1 and
 report this; Tasks 2-3 (which do not depend on the retrained checkpoint) can
 proceed, and the controller should schedule the retrain before Task 4.
+
+## Window cost (2026-09-04)
+
+Task 2 of `.superpowers/sdd/2026-09-04-mvq-maskfree-p4a-p4b` (spec §7). One
+batched, single-pass `MVQRunner.infer` on 32 real windows built from ONE
+synced frame set of bout 28 (`Session0/2025_10_20_13_20_04`, frame 446975,
+all 7 cameras present), centres jittered +-3mm around fly0's mvq centroid on
+that frame; 2 warm-ups then 20 timed iterations
+(`scripts/benchmark/mvq_window_cost.py`, JSON beside the figure dir). The
+checkpoint is `mvq_t1_b16_p3a_20260904/final`, its own `attn_impl: cudnn`,
+fp32 crops (uint8 in, `normalize_crops` to fp32 -- the same dtype path
+training used).
+
+| GPU | batch of 32 | infer | + window build (CPU crop) | total | §7 decision |
+|---|---:|---:|---:|---:|---|
+| **L40S** (g3106, the acceptance card) | 1148 +- 27 ms | 35.9 ms/window | 0.6 | **36.4 ms/window** | **stride 1** |
+| A40 (g3051, first run) | 2094 +- 40 ms | 65.4 ms/window | 1.7 | 67.2 ms/window | stride 2 |
+
+**Decision: the fine pass runs at STRIDE 1.** The rule in §7 is stride 1 at or
+below 60 ms/window, and the acceptance criterion is "under 3 GPU-hours per
+recording on one L40S" -- on that card the measured cost is 36.4 ms/window,
+below the 40 ms the §7 budget assumed. Scaled to a recording (498k frames):
+coarse at stride 16 is ~31k frames x ~1.5 windows ~= 28 min, the fine pass
+~30 bouts x 2000 frames x ~1.5 windows ~= 55 min, so ~1.4 GPU-h of mvq plus
+CenterDetect -- inside the 3 GPU-hour acceptance with room to spare.
+
+The first measurement landed on an **A40** (submit_task.sh's constraint list
+is `h200|a100|l40s|l40|a40`, and ckpt-all gave it an A40), where the same
+code costs 1.85x as much and would flip the decision to stride 2. The number
+is therefore card-dependent and only the L40S row answers the spec's
+question; a run of the mask-free front end scheduled onto an A40 should
+either use stride 2 or expect ~2.6 GPU-h of mvq. Pin the card
+(`--constraint=l40s`) when re-measuring.
+
+Not measured: bf16 crops. cuDNN flash attention accepted the fp32 path
+without complaint (the same path training used), so there was no forcing
+reason to change the checkpoint's numerics for a timing run; if the fine
+pass ever needs more headroom, a bf16 arm is the first thing to try and it
+is a numerics change that has to be re-validated against the P3a gates, not
+a flag.
+
+Commands:
+```
+scripts/slurm/submit_task.sh --time 0:30:00 --mem 32 mvq_wincost \
+  "export HF_HOME=/gscratch/portia/eabe/data/Johnson_lab/sam3 HF_TOKEN= \
+   PYTHONPATH=third_party/jarvis_jax:. && \
+   python scripts/benchmark/mvq_window_cost.py \
+     --run /gscratch/portia/eabe/data/Johnson_lab/jax_mvq_runs/mvq_t1_b16_p3a_20260904/final \
+     --session-dir /gscratch/portia/eabe/data/Johnson_lab/Video_recordings/courtship/Session0/2025_10_20_13_20_04 \
+     --frame 446975"
+# and the same command in an sbatch with --constraint=l40s (job 39595689)
+```
+Artifacts: `figures/2026-09-mvq/p4_maskfree/window_cost.json` (A40) and
+`figures/2026-09-mvq/p4_maskfree/l40s/window_cost.json` (L40S).
+
+### Bout-video refactor equivalence (same task)
+
+`scripts/viz/mvq_bout_video.py` now goes through `MVQRunner`. Pre- vs
+post-refactor on bout 28, `--n 4 --attn_impl xla` on CPU, checkpoint
+`mvq_t1_b16_p3a_20260904/final` (the reference had to be regenerated: the
+earlier smoke used `--step latest` = step 7000, and orbax has since kept
+only steps 8000-10000, so the pre-refactor script from git `HEAD` was re-run
+at `final/` for the comparison): **max |difference| = 0.0 exactly** on
+`kp3d`, `kp2d` and the per-view `conf`, for both flies in both the prompted
+and unprompted modes, with identical NaN patterns and an identical
+`per_frame` block (slot, fallback, has_mask, exist, sex_prob) in
+`mvq_meta.json`.
+
+One deliberate, documented change to the artifacts: `kp3d.npz`'s `conf3d` is
+now the pipeline-facing confidence (the per-view visibility sigmoid averaged
+over cameras, spec §2) instead of the raw mvq confidence head, which is
+preserved unchanged beside it as `conf3d_mvq_raw` (verified equal to the old
+`conf3d` to 0.0, and the new `conf3d` equal to the old `conf`'s mean over
+cameras to 0.0). `kp3d.npz` also gained the Stage-B `gates` string. The
+keypoint order of this script's own files is unchanged (mvq order --
+`to_pipeline(..., model_names=mvq_names)` is the identity permutation here;
+the fine pass is what writes `cfg.model.KP_NAMES` order).

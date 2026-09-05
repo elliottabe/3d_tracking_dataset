@@ -247,6 +247,27 @@ class V12WindowDataset:
         rec = self.windows[i][0]
         return list(self._rt(rec).cameras.keys())
 
+    def _frame_infos(self, rec, frame, fly=0):
+        """`[(img_id, ann_id) | None]` per CAMERA ROW for one frameset.
+
+        The row order is `camera_names`' (== `_rt(rec).cameras`, the order of
+        the `crops`/`M`/`t_local` camera axis), and a camera with no resolved
+        slot in this frameset is None. Tests and figure scripts use it to
+        decode the SAME full frames `_build` cropped, so a window built by
+        another code path (`tracking/lift_mvq.py::MVQRunner.windows`) can be
+        compared against this loader's pixel for pixel -- resolving the
+        images BY CAMERA NAME here rather than trusting the frameset's own
+        slot order.
+        """
+        rt = self._rt(rec)
+        cam_to_row = {n: i for i, n in enumerate(rt.cameras.keys())}
+        out = [None] * rt.num_cameras
+        for img_id, ann_id in iter_resolved_slots(self._fs[(rec, int(frame), int(fly))]):
+            c = cam_to_row.get(self._img[img_id]["file_name"].split("/")[1])
+            if c is not None:
+                out[c] = (img_id, ann_id)
+        return out
+
     # ------------------------------------------------------------------ helpers
     def _rt(self, rec):
         return self._tools[self.manifest[rec]["calib_group"]]

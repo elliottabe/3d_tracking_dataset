@@ -35,16 +35,26 @@ The hard case is deliberately in frame: fly0 is the FEMALE (walls, occlusion,
 OOD poses -- where this pipeline fails), all seven cameras are shown, and the
 render covers the whole bout rather than a flattering mid-bout frame.
 
+The windowing, forward pass, slot choice and artifact format all live in
+`jarvis_jax.tracking.lift_mvq.MVQRunner` (spec §4.2), which the coarse and
+fine passes of the mask-free front end share with this script; what is local
+here is the SAM3 mask store (this is the only prompted consumer left), the
+mask-centroid DLT that places the windows, and the rendering.
+
 ORDER DISCIPLINE (CLAUDE.md; both traps were live bugs here):
   * CAMERA axis is the canonical `cfg.recording.cameras` order everywhere --
-    it is asserted equal to `ReprojectionTool`'s own key order, the SAM3 mask
-    axis is permuted into it BY NAME (the same `_camera_permutation`
+    `MVQRunner` asserts it equal to `ReprojectionTool`'s own key order, the
+    SAM3 mask axis is permuted into it BY NAME (the same `_camera_permutation`
     `load_bout_masks` uses), and the baseline artifacts are loaded through
     `viz.core.bout_artifacts.load_bout_kp(..., cameras=...)`.
   * KEYPOINT axis: mvq speaks the v12 detector order (`meta["keypoint_names"]`)
     and the pipeline artifacts speak MODEL order. They are the same 50 names
     in DIFFERENT orders, so the baseline is permuted into mvq order BY NAME
-    through the named accessors, never by integer index.
+    through the named accessors, never by integer index. This script's OWN
+    npz files stay in mvq order (`to_pipeline(..., model_names=mvq_names)`,
+    an identity permutation) because the render and its baseline arm both
+    speak that order; the fine pass (§4.4) is what writes `cfg.model.KP_NAMES`
+    order for the pipeline.
 
 Usage (CPU smoke on 4 frames, then the real thing on a GPU node):
 
@@ -80,18 +90,14 @@ import cv2  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
 from omegaconf import OmegaConf  # noqa: E402
 
-from jarvis_jax.data.transforms import crop_origin  # noqa: E402
-from jarvis_jax.data.v12_windows import CROP, _affine_np  # noqa: E402
 from jarvis_jax.geometry.center3d import triangulate_dlt_batched  # noqa: E402
-from jarvis_jax.geometry.reprojection_tool import ReprojectionTool  # noqa: E402
-from jarvis_jax.models.mvq.checkpoint import load_mvq_model  # noqa: E402
-from jarvis_jax.models.mvq.model import assemble  # noqa: E402
-from jarvis_jax.models.mvq.policy import EXIST_THRESH, policy_instance  # noqa: E402
 from jarvis_jax.predict.sam3_driver import parse_bouts, session_tag_for  # noqa: E402
 from jarvis_jax.predict.synced_reader import load_plan, read_window  # noqa: E402
 from jarvis_jax.tracking.bout_masks import _camera_permutation, unpack_one  # noqa: E402
-from jarvis_jax.train.matching import SLOT_FEMALE, SLOT_MALE, SLOT_PROMPTED  # noqa: E402
-from jarvis_jax.train.train_mvq import MM_PER_UNIT, _fwd, normalize_crops  # noqa: E402
+from jarvis_jax.tracking.lift_mvq import MVQRunner, concat_windows  # noqa: E402
+from jarvis_jax.train.matching import (SEX_FEMALE, SEX_MALE, SLOT_FEMALE,  # noqa: E402
+                                       SLOT_MALE, SLOT_PROMPTED)
+from jarvis_jax.train.train_mvq import MM_PER_UNIT  # noqa: E402
 from viz.core.bout_artifacts import load_bout_kp  # noqa: E402
 from viz.core.colors import PALETTE, leg_chains  # noqa: E402
 from viz.core.io import write_video  # noqa: E402
@@ -129,10 +135,6 @@ FLY_BGR = {0: _bgr("fly0"), 1: _bgr("fly1")}                       # cyan / oran
 FLY_RGB = {0: _rgb("fly0"), 1: _rgb("fly1")}
 BASELINE_BGR = (255, 255, 255)
 BASELINE_RGB = (0.55, 0.55, 0.55)   # readable grey on the 3D panel's white ground
-
-
-def sigmoid(x):
-    return 1.0 / (1.0 + np.exp(-np.asarray(x, np.float64)))
 
 
 # ---------------------------------------------------------------- geometry / IO helpers
@@ -242,35 +244,13 @@ def centers_3d(store, cam_mats, n_frames, t0):
 
 
 # ---------------------------------------------------------------- inference
-def build_window(frames, present, store, fly, t, center, M, tvec, img_wh):
-    """One (fly, frame) inference window -- mirrors V12WindowDataset._build's
-    inference half exactly: crop every camera at the projection of the SAME
-    window-level center3D, carry the local offset of that projection, and hand
-    the fly's own SAM3 mask (cropped identically) in as the prompt."""
-    W, H = img_wh
-    C = M.shape[0]
-    origin = np.zeros((C, 2), np.int32)
-    crops = np.zeros((C, CROP, CROP, 3), np.uint8)
-    prompt = np.zeros((C, CROP, CROP), bool)
-    for c in range(C):
-        u, v = M[c] @ center + tvec[c]
-        x0, y0 = crop_origin([u, v, 0, 0], W, H, CROP)
-        origin[c] = (x0, y0)
-        crops[c] = frames[c][y0:y0 + CROP, x0:x0 + CROP]
-        prompt[c] = store.mask_at(fly, c, t)[y0:y0 + CROP, x0:x0 + CROP]
-    t_local = (M @ center + tvec - origin).astype(np.float32)        # (C,2)
-    return dict(crops=crops, cam_valid=np.asarray(present, bool), t_local=t_local,
-                prompt_mask=prompt, origin=origin, center=center.astype(np.float32),
-                fly=fly, t=t)
-
-
 def _empty_mode_arrays(n, C, K, I):
     """`I` is the checkpoint's OWN slot count (`n_instances`), not the P3a
     constant: a legacy 3-slot run must not be silently padded to 4."""
     return dict(kp2d=np.full((n, C, K, 2), np.nan, np.float32),
                 conf=np.zeros((n, C, K), np.float32),
                 kp3d=np.full((n, K, 3), np.nan, np.float32),
-                conf3d=np.zeros((n, K), np.float32),
+                conf_raw=np.zeros((n, K), np.float32),
                 slot=np.full(n, -1, np.int32),
                 fallback=np.zeros(n, bool),
                 has_mask=np.zeros(n, bool),
@@ -278,90 +258,83 @@ def _empty_mode_arrays(n, C, K, I):
                 sex_prob=np.full((n, I), np.nan, np.float32))
 
 
-def run_inference(model, store, args, cameras, cam_mats, M, tvec, sex_slot, K, I, t0, n):
+def run_inference(runner, store, args, sex_code, t0, n):
     """Both passes (unprompted + prompted) over `n` frames x every fly.
+
+    The window geometry, the forward and the slot policy all come from
+    `MVQRunner`; what this function owns is the SAM3 prompt (built per window
+    from the fly's OWN mask, cropped at the runner's origin) and the batching
+    across frames -- a batch spans frames, so each frame's windows are built
+    as its images arrive and concatenated until `--batch` of them exist.
 
     Returns `{mode: {fly: arrays}}`, arrays as in `_empty_mode_arrays`.
     """
-    C = len(cameras)
+    cameras = runner.cameras
     plan = load_plan(args.session_dir)
     abs_start, _, _ = args._frames
-    centers, ok3d = centers_3d(store, cam_mats, n, t0)
-    res = {m: {f: _empty_mode_arrays(n, C, K, I) for f in range(store.n_flies)}
+    centers, ok3d = centers_3d(store, runner.cam_mats, n, t0)
+    res = {m: {f: _empty_mode_arrays(n, len(cameras), runner.K, runner.I)
+               for f in range(store.n_flies)}
            for m in ("unprompted", "prompted")}
     B = int(args.batch)
-    Mb = np.broadcast_to(M.astype(np.float32)[None], (B, C, 2, 3))
-    buf, done, t_start = [], 0, time.time()
+    buf, rows, done, t_start = [], [], 0, time.time()
 
-    def flush(buf):
-        if not buf:
+    def flush(buf, rows):
+        if not rows:
             return
-        B0 = len(buf)
-        pad = [buf[-1]] * (B - B0)
-        rows = buf + pad
-        crops = np.stack([r["crops"] for r in rows])[:, None]         # (B,1,C,448,448,3)
-        cam_valid = np.stack([r["cam_valid"] for r in rows])[:, None]  # (B,1,C)
-        t_local = np.stack([r["t_local"] for r in rows])[:, None]      # (B,1,C,2)
-        prompt = np.stack([r["prompt_mask"] for r in rows])[:, None]   # (B,1,C,448,448)
-        origin = np.stack([r["origin"] for r in rows]).astype(np.float32)   # (B,C,2)
-        center = np.stack([r["center"] for r in rows])                 # (B,3)
-        j = dict(crops=jnp.asarray(crops), cam_valid=jnp.asarray(cam_valid),
-                 M=jnp.asarray(Mb), t_local=jnp.asarray(t_local),
-                 prompt_mask=jnp.asarray(prompt))
-        # same has_mask definition as train_mvq.evaluate: a prompt only counts
-        # in a camera that is itself valid
-        has_mask = np.asarray((prompt.any((3, 4)) & cam_valid).any((1, 2)))
+        w = concat_windows(buf)
+        has_mask = runner.has_mask(w)
         for mode, prompted in (("unprompted", False), ("prompted", True)):
-            on = jnp.asarray(np.full(B, prompted) & has_mask)
-            out = _fwd(model, normalize_crops(j["crops"]), j["cam_valid"], j["M"],
-                       j["t_local"], j["prompt_mask"], on)
-            kp3d, conf3d, kp2d, sex_prob = assemble(out, center, origin,
-                                                    cam_valid=np.asarray(cam_valid))
-            xyz = np.asarray(out["xyz"])                               # (B,I,T,K,3) ROI-local
-            exist = sigmoid(np.asarray(out["exist_logit"]))            # (B,I)
-            vis = sigmoid(np.asarray(out["vis_logit"]))                # (B,I,T,C,K)
-            for b in range(B0):
-                r = rows[b]
-                fly, i = r["fly"], r["t"] - t0
+            out = runner.infer(w, prompt_on=(has_mask if prompted else None))
+            for b, (fly, t) in enumerate(rows):
+                i = t - t0
                 a = res[mode][fly]
-                a["exist"][i] = exist[b]
-                a["sex_prob"][i] = sex_prob[b]
+                a["exist"][i] = out["exist"][b]
+                a["sex_prob"][i] = out["sex_prob"][b]
                 a["has_mask"][i] = bool(has_mask[b])
                 if prompted:
                     # the SHARED policy: slot 0 when there is a prompt to follow,
                     # and its own typed-candidate rule when there is not
-                    slot = policy_instance(exist[b], xyz[b], prompted=True,
-                                           has_mask=bool(has_mask[b]))
+                    slot = runner.policy_slot(out, b, prompted=True,
+                                              has_mask=bool(has_mask[b]))
                     a["fallback"][i] = slot != SLOT_PROMPTED
                 else:
-                    slot = sex_slot[fly]
-                    if exist[b][slot] < EXIST_THRESH:
+                    typed = runner.read_typed(out, b, want_sex=sex_code[fly])
+                    slot = None if typed is None else typed["slot"]
+                    if typed is None:
                         a["fallback"][i] = True
-                        slot = policy_instance(exist[b], xyz[b], prompted=False, has_mask=False)
+                        slot = runner.policy_slot(out, b, prompted=False, has_mask=False)
                 if slot is None:                                       # policy MISS -> NaN frame
                     continue
                 a["slot"][i] = int(slot)
-                a["kp3d"][i] = kp3d[b, slot, 0]
-                a["conf3d"][i] = conf3d[b, slot, 0]
-                a["kp2d"][i] = kp2d[b, slot, 0]
-                a["conf"][i] = vis[b, slot, 0]
+                a["kp3d"][i] = out["kp3d"][b, slot]
+                a["conf_raw"][i] = out["conf_raw"][b, slot]
+                a["kp2d"][i] = out["kp2d"][b, slot]
+                a["conf"][i] = out["vis"][b, slot]
         return
 
     reader = read_window(args.session_dir, cameras, plan, abs_start + t0, n)
-    img_wh = (store.W, store.H)
     for i, (frames, present) in enumerate(reader):
         t = t0 + i
-        for fly in range(store.n_flies):
-            if not ok3d[fly, i]:
-                continue
-            buf.append(build_window(frames, present, store, fly, t, centers[fly, i],
-                                    M, tvec, img_wh))
-            if len(buf) == B:
-                flush(buf); buf = []; done += B
+        flies = [f for f in range(store.n_flies) if ok3d[f, i]]
+        if not flies:
+            continue
+        # one window per fly of THIS frame, each prompted with that fly's own
+        # mask -- `b` indexes `flies`, so the prompt follows the fly its window
+        # is centred on -- then split into single rows so the batch can span
+        # frames exactly as before.
+        w = runner.windows(frames, present, centers[flies, i],
+                           prompt_mask=lambda b, c, _f=flies, _t=t: store.mask_at(_f[b], c, _t))
+        for b, fly in enumerate(flies):
+            buf.append({k: v[b:b + 1] for k, v in w.items()})
+            rows.append((fly, t))
+            if len(rows) == B:
+                flush(buf, rows); buf, rows = [], []
+                done += B
                 el = time.time() - t_start
                 print(f"[mvq] {done} windows, frame {t - t0 + 1}/{n}, "
                       f"{el:.0f}s ({el / max(done, 1):.2f}s/window)", flush=True)
-    flush(buf)
+    flush(buf, rows)
     return res
 
 
@@ -609,12 +582,15 @@ def build_parser():
 def main():
     args = build_parser().parse_args()
     cameras = [str(c) for c in OmegaConf.load(args.recording_cfg).cameras]
-    rt = ReprojectionTool(os.path.join(args.session_dir, "calibration"))
-    assert list(rt.cameras.keys()) == cameras, (
-        f"calibration glob order {list(rt.cameras.keys())} != canonical "
-        f"{cameras}; every camera axis in this script assumes they are the same")
-    cam_mats = np.asarray(rt.camera_matrices, np.float32)             # (C,4,3) canonical
-    M, tvec = _affine_np(rt.camera_matrices)                          # (C,2,3),(C,2) float64
+    # The runner owns the checkpoint, the calibration and the window geometry;
+    # its constructor is also where the canonical-vs-glob camera-order
+    # assertion lives, and where "latest" is resolved ONCE to a concrete step
+    # (the run dir can be a LIVE training job, so resolving it twice can name
+    # a step that is not the one in the model -- provenance that is wrong
+    # exactly when it matters).
+    runner = MVQRunner(args.run, step=args.step, attn_impl=args.attn_impl,
+                       calib_dir=os.path.join(args.session_dir, "calibration"),
+                       cameras=cameras, batch=int(args.batch))
 
     masks_npz = args.masks_npz or os.path.join(
         args.processed_dir, "sam3_masks", f"bout_{args.bout:05d}", "sam3_masks.npz")
@@ -636,34 +612,19 @@ def main():
     else:
         print(f"[mvq] WARNING: no {sex_json}; assuming male_fly=1 (post-canonicalization default)")
     args._fly_sex = {f: ("male" if f == male_fly else "female") for f in range(store.n_flies)}
+    sex_code = {f: (SEX_MALE if f == male_fly else SEX_FEMALE) for f in range(store.n_flies)}
     sex_slot = {f: (SLOT_MALE if f == male_fly else SLOT_FEMALE) for f in range(store.n_flies)}
     args._sex_slot = sex_slot
     print(f"[mvq] bout {args.bout} frames {abs_start + t0}..{abs_start + t0 + n - 1} "
           f"({n} of {store.T}); {args._fly_sex}; slots {sex_slot}", flush=True)
 
-    # "latest" is RESOLVED TO A CONCRETE STEP HERE, before the load, and that int
-    # is what is both loaded and stamped into mvq_meta.json / the video name. The
-    # run dir is a LIVE training job, so resolving it twice (once inside
-    # load_mvq_model, once to report it) can name a step that is not the one in
-    # the model -- provenance that is wrong exactly when it matters.
-    step = args.step
-    if step == "latest":
-        import orbax.checkpoint as ocp
-        mgr = ocp.CheckpointManager(os.path.abspath(os.path.join(args.run, "ckpt")),
-                                    options=ocp.CheckpointManagerOptions(read_only=True))
-        step = int(mgr.latest_step())
-    elif step is not None:
-        step = int(step)
-    model, meta = load_mvq_model(args.run, step=step, attn_impl=args.attn_impl)
-    mvq_names = list(meta["keypoint_names"])
-    K = len(mvq_names)
+    mvq_names = runner.kp_names
     edges = skeleton_edges(mvq_names)
-    step_used = step if step is not None else "final"
-    print(f"[mvq] checkpoint {args.run} step {step_used}; K={K}; "
-          f"unrestored={meta.get('_unrestored_leaves', [])}", flush=True)
+    step_used = runner.step_label
+    print(f"[mvq] checkpoint {args.run} step {step_used}; K={runner.K}; "
+          f"unrestored={runner.meta.get('_unrestored_leaves', [])}", flush=True)
 
-    I = int(meta["model"]["n_instances"])
-    res = run_inference(model, store, args, cameras, cam_mats, M, tvec, sex_slot, K, I, t0, n)
+    res = run_inference(runner, store, args, sex_code, t0, n)
 
     out_dir = args.out_dir or os.path.join(args.processed_dir, "pose_mvq", "bouts",
                                            f"bout_{args.bout:05d}")
@@ -675,10 +636,20 @@ def main():
             a = res[mode][fly]
             d = os.path.join(out_dir, mode, f"fly{fly}")
             os.makedirs(d, exist_ok=True)
-            np.savez_compressed(os.path.join(d, "kp2d.npz"), kp2d=a["kp2d"], conf=a["conf"],
-                                cameras=np.array(cameras), kp_names=np.array(mvq_names))
-            np.savez_compressed(os.path.join(d, "kp3d.npz"), kp3d=a["kp3d"], conf3d=a["conf3d"],
-                                kp_names=np.array(mvq_names))
+            # `model_names=mvq_names` is the IDENTITY permutation: these files
+            # stay in mvq keypoint order (see the module docstring). What
+            # `to_pipeline` adds over the raw arrays is the pipeline's
+            # confidence convention (`conf3d` = the per-view visibility
+            # sigmoid averaged over cameras, since the mvq confidence head is
+            # a D4RT score of ~0.02-0.2 and the pipeline thresholds at
+            # 0.3-0.5) with the raw head value kept as `conf3d_mvq_raw`, and
+            # the Stage-B `gates` signature naming the checkpoint.
+            p = runner.to_pipeline(a["kp3d"], a["kp2d"], a["conf"], a["conf_raw"], mvq_names)
+            np.savez_compressed(os.path.join(d, "kp2d.npz"), kp2d=p["kp2d"], conf=p["conf"],
+                                cameras=p["cameras"], kp_names=p["kp_names"])
+            np.savez_compressed(os.path.join(d, "kp3d.npz"), kp3d=p["kp3d"], conf3d=p["conf3d"],
+                                conf3d_mvq_raw=p["conf3d_mvq_raw"], kp_names=p["kp_names"],
+                                gates=json.dumps(p["gates"], sort_keys=True))
             per_frame[mode][f"fly{fly}"] = {
                 "slot": a["slot"].tolist(),
                 "fallback": a["fallback"].astype(int).tolist(),
@@ -689,14 +660,15 @@ def main():
             }
     meta_out = {
         "checkpoint": os.path.abspath(args.run), "step": step_used,
+        "gates": runner.gates_signature(),
         "keypoint_names": mvq_names, "cameras": cameras,
         "bout": args.bout, "frame_start": int(abs_start + t0), "n_frames": int(n),
         "bout_frame_range": [int(abs_start), int(abs_end)],
         "male_fly": male_fly, "fly_sex": args._fly_sex,
         "sex_slot": {f"fly{f}": int(s) for f, s in sex_slot.items()},
-        "exist_thresh": EXIST_THRESH, "vis_thresh": VIS_THRESH,
+        "exist_thresh": runner.exist_thresh, "vis_thresh": VIS_THRESH,
         "mm_per_unit": MM_PER_UNIT,
-        "unrestored_leaves": meta.get("_unrestored_leaves", []),
+        "unrestored_leaves": runner.meta.get("_unrestored_leaves", []),
         "per_frame": per_frame,
     }
     with open(os.path.join(out_dir, "mvq_meta.json"), "w") as f:
