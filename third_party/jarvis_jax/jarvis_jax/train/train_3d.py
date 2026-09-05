@@ -28,6 +28,13 @@ guard).
 CLI (Hydra; see configs/):
     python -m jarvis_jax.train.train_3d run_id=myrun train=inline3d \\
         train.total_steps=2000 paths=hyak
+
+LEGACY: HybridNet lost the A/B to ViTPose->DLT/IK (see docs/benchmark
+ab-hybridnet-vs-dlt-ik). Its run dir (`paths.hybridnet_runs_root`, e.g.
+jax_hybridnet_runs) was deleted in the 2026-09-05 storage cleanup and the
+key removed from paths/*.yaml; pass `paths.runs_root=<dir>` explicitly (a
+fresh dir is fine -- run_dir_for() creates it) if this trainer is ever
+revived.
 """
 import dataclasses
 import os

@@ -20,8 +20,9 @@ def test_base_config_resolves():
     # Full resolution must not raise (catches missing interpolations).
     OmegaConf.resolve(cfg)
     assert cfg.paths.runs_root
-    assert cfg.paths.cache_dir
     assert cfg.run_id
+    # paths.cache_dir was removed 2026-09-05 (legacy cached3d cache, see
+    # configs/paths/hyak.yaml); its consumers now require an explicit override.
 
 
 def test_build_dataclass_filters_unknown_keys():
@@ -91,7 +92,8 @@ def test_precompute_main_from_cfg_maps_config(monkeypatch):
     mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
     captured = {}
     monkeypatch.setattr(mod, "run_precompute", lambda **kw: captured.update(kw), raising=False)
-    cfg = _compose(["paths=hyak", "cache=default", "cache.split=train", "cache.batch=16"])
+    cfg = _compose(["paths=hyak", "cache=default", "cache.split=train", "cache.batch=16",
+                    "+paths.cache_dir=/tmp/test_repro_cache"])
     mod.main_from_cfg(cfg)
     assert captured["split"] == "train"
     assert captured["batch"] == 16
@@ -111,9 +113,22 @@ def test_precompute_main_from_cfg_dataset_version_override(monkeypatch):
     mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
     captured = {}
     monkeypatch.setattr(mod, "run_precompute", lambda **kw: captured.update(kw), raising=False)
-    cfg = _compose(["paths=hyak", "cache=default", "cache.dataset_version=v3"])
+    cfg = _compose(["paths=hyak", "cache=default", "cache.dataset_version=v3",
+                    "+paths.cache_dir=/tmp/test_repro_cache"])
     mod.main_from_cfg(cfg)
     assert captured["dataset_version"] == "v3"
+
+
+def test_cached3d_main_from_cfg_requires_cache_dir_override(monkeypatch):
+    """paths.cache_dir was removed 2026-09-05 (legacy cache deleted); without
+    an explicit override the legacy trainer must fail with a clear message,
+    not a dangling-interpolation error."""
+    import jarvis_jax.train.train_3d_cached as m
+    monkeypatch.setattr(m, "run_cached_training", lambda *a, **kw: (_ for _ in ()).throw(
+        AssertionError("should not run without a cache_dir override")))
+    cfg = _compose(["paths=hyak", "train=cached3d", "run_id=unittest"])
+    with pytest.raises(SystemExit, match="cache_dir"):
+        m.main_from_cfg(cfg)
 
 
 def test_cached3d_main_from_cfg_maps_config(monkeypatch):
@@ -127,7 +142,8 @@ def test_cached3d_main_from_cfg_maps_config(monkeypatch):
 
     monkeypatch.setattr(m, "run_cached_training", fake_run)
     cfg = _compose(["paths=hyak", "train=cached3d", "run_id=unittest",
-                    "train.total_steps=5", "train.sharpen=3"])
+                    "train.total_steps=5", "train.sharpen=3",
+                    "+paths.cache_dir=/tmp/test_cached3d_cache"])
     m.main_from_cfg(cfg)
     assert captured["tcfg"].total_steps == 5
     assert captured["tcfg"].sharpen == 3.0
@@ -200,7 +216,8 @@ def test_viz_main_from_cfg_maps_config(monkeypatch):
     captured = {}
     monkeypatch.setattr(mod, "run_compare", lambda **kw: captured.update(kw), raising=False)
     cfg = _compose(["paths=hyak", "viz=default",
-                    "viz.run1=/a/final", "viz.run2=/b/final", "viz.sharpen2=3"])
+                    "viz.run1=/a/final", "viz.run2=/b/final", "viz.sharpen2=3",
+                    "+paths.cache_dir=/tmp/test_viz_cache"])
     mod.main_from_cfg(cfg)
     assert captured["run1"] == "/a/final" and captured["run2"] == "/b/final"
     assert captured["sharpen2"] == 3.0

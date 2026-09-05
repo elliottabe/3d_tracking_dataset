@@ -184,8 +184,13 @@ def run_diag(*, cache_dir, run, out):
 
 
 def main_from_cfg(cfg):
+    cache_dir = cfg.paths.get("cache_dir", None)
+    if cache_dir is None:
+        raise SystemExit(
+            "paths.cache_dir was removed 2026-09-05 (LEGACY cached3d/HybridNet "
+            "cache deleted). Pass paths.cache_dir=<dir> explicitly to rebuild it.")
     return run_diag(
-        cache_dir=cfg.paths.cache_dir,
+        cache_dir=cache_dir,
         run=cfg.viz.run2,
         out=cfg.viz.out,
     )

@@ -266,7 +266,9 @@ ${paths.runs_root}/${run_id}/
 Run roots depend on the training mode:
 - **Cached 3D** (`train=cached3d`): `${paths.runs_root}` (e.g., `jax_cached3d_runs`)
 - **2D ViTPose** (`train=vit2d`): `${paths.vit_runs_root}` (e.g., `jax_vitpose_runs`)
-- **Inline 3D** (`train=inline3d`): `${paths.hybridnet_runs_root}` (e.g., `jax_hybridnet_runs`)
+- **Inline 3D** (`train=inline3d`): LEGACY (lost the A/B to ViTPose->DLT/IK);
+  `paths.hybridnet_runs_root` and its run dir (`jax_hybridnet_runs`) were
+  removed 2026-09-05 -- pass `paths.runs_root=<dir>` explicitly if revived
 
 On Hyak, these expand to `/gscratch/portia/eabe/data/Johnson_lab/jax_*_runs/` by default.
 

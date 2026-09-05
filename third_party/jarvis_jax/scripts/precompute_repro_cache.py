@@ -482,11 +482,17 @@ def main_from_cfg(cfg):
     red_data_unified_V3 tree instead.
     """
     from jarvis_jax.config import ViTPoseConfig
+    cache_dir = cfg.paths.get("cache_dir", None)
+    if cache_dir is None:
+        raise SystemExit(
+            "paths.cache_dir was removed 2026-09-05 (LEGACY: this repro-volume "
+            "cache feeds only the dropped cached3d/HybridNet trainer). Pass "
+            "paths.cache_dir=<dir> explicitly to rebuild one.")
     vitpose_cfg = build_dataclass(ViTPoseConfig, cfg.model.vitpose)
     return run_precompute(
         root=cfg.paths.data_root,
         vitpose_ckpt=cfg.paths.vitpose_ckpt,
-        cache_dir=cfg.paths.cache_dir,
+        cache_dir=cache_dir,
         split=cfg.cache.split,
         batch=cfg.cache.batch,
         limit=cfg.cache.limit,

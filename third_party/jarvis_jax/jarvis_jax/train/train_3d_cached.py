@@ -18,6 +18,12 @@ Per-step transform (matches HybridNet3D.__call__ post-reproject path exactly)
 CLI (Hydra; see configs/):
     python -m jarvis_jax.train.train_3d_cached run_id=myrun train=cached3d \\
         train.total_steps=20000 train.sharpen=3 paths=hyak
+
+LEGACY: cached3d/HybridNet lost the A/B to ViTPose->DLT/IK (see
+docs/benchmark ab-hybridnet-vs-dlt-ik); its repro-volume cache and run dirs
+were deleted in the 2026-09-05 storage cleanup and `paths.cache_dir` no
+longer exists. Pass `paths.cache_dir=<dir>` explicitly and rebuild the cache
+(scripts/precompute_repro_cache.py) if this trainer is ever revived.
 """
 from __future__ import annotations
 
@@ -517,10 +523,16 @@ def run_cached_training(
 
 def main_from_cfg(cfg):
     """Map a composed Hydra config into CachedConfig + run cached training."""
+    cache_dir = cfg.paths.get("cache_dir", None)
+    if cache_dir is None:
+        raise SystemExit(
+            "paths.cache_dir was removed 2026-09-05 (LEGACY cached3d/HybridNet "
+            "cache deleted). Pass paths.cache_dir=<dir> explicitly and rebuild "
+            "it with scripts/precompute_repro_cache.py.")
     tcfg = build_dataclass(CachedConfig, cfg.train)
     run_dir = run_dir_for(cfg)
     return run_cached_training(
-        cfg.paths.cache_dir,
+        cache_dir,
         out_dir=os.path.join(run_dir, "final"),
         ckpt_dir=os.path.join(run_dir, "ckpt"),
         tcfg=tcfg,

@@ -7,10 +7,8 @@ user: ${oc.env:USER,eabe}
 # V5Dataset over V3Dataset. Versioned, not a moving symlink, so a run's
 # .hydra/overrides.yaml records which root it trained on.
 data_root:      /gscratch/portia/${paths.user}/data/Johnson_lab/red_data/red_data_3d_v12_export0902
-cache_dir:      /gscratch/portia/${paths.user}/data/Johnson_lab/jax_repro_cache/v3
 runs_root:           /gscratch/portia/${paths.user}/data/Johnson_lab/jax_cached3d_runs
 vit_runs_root:       /gscratch/portia/${paths.user}/data/Johnson_lab/jax_vitpose_runs
-hybridnet_runs_root: /gscratch/portia/${paths.user}/data/Johnson_lab/jax_hybridnet_runs
 processed_root:      /gscratch/portia/${paths.user}/data/Johnson_lab/processed
 vitpose_ckpt:   /gscratch/portia/${paths.user}/data/Johnson_lab/jax_vitpose_runs/v4_8gpu_20260808/final
 mae_npz:        /gscratch/portia/${paths.user}/data/Johnson_lab/mae_vitb.npz
@@ -18,6 +16,15 @@ body_model_dir: /gscratch/portia/${paths.user}/Research/MyRepos/fruitfly_body_mo
 project_dir:    /gscratch/portia/${paths.user}/Research/MyRepos/
 general_model:  /gscratch/portia/${paths.user}/data/Johnson_lab/red_data/general_model
 mvq_runs_root:       /gscratch/portia/${paths.user}/data/Johnson_lab/jax_mvq_runs
+# REMOVED 2026-09-05: `cache_dir` and `hybridnet_runs_root`. jax_repro_cache,
+# jax_cached3d_runs's hybridnet arm, and jax_hybridnet_runs were emptied and
+# deleted in the 2026-09-05 storage cleanup; both keys' only consumers are
+# the legacy cached3d/HybridNet trainer+cache-builder+diag scripts (dropped
+# per docs/benchmark ab-hybridnet-vs-dlt-ik -- ViTPose->DLT/IK won the A/B),
+# not the live ViTPose trainer (train_keypoints.py never reads cache_dir).
+# Those consumers now raise a clear error instead of resolving a dangling
+# interpolation; retrain from scratch (rebuild the cache, repoint runs_root
+# at a fresh dir) if the HybridNet arm is ever revived.
 # REMOVED 2026-09-02: `v5_root` and `v3_root`. Both pointed at roots that no
 # longer exist (red_data_3d_v5, red_data_unified_V3), and their only consumer
 # -- scripts/build_v5_dataset.py -- is superseded by

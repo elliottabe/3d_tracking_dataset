@@ -390,9 +390,15 @@ def run_compare(*, root, cache_dir=None, cache_dir1=None, cache_dir2=None,
 
 
 def main_from_cfg(cfg):
+    cache_dir = cfg.paths.get("cache_dir", None)
+    if cache_dir is None:
+        raise SystemExit(
+            "paths.cache_dir was removed 2026-09-05 (LEGACY cached3d/HybridNet "
+            "cache deleted). Pass paths.cache_dir=<dir> explicitly, or use "
+            "viz.cache_dir1/cache_dir2 directly.")
     return run_compare(
         root=cfg.paths.data_root,
-        cache_dir=cfg.paths.cache_dir,
+        cache_dir=cache_dir,
         cache_dir1=getattr(cfg.viz, "cache_dir1", "") or None,
         cache_dir2=getattr(cfg.viz, "cache_dir2", "") or None,
         run1=cfg.viz.run1,
