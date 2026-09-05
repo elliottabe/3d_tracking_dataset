@@ -483,6 +483,63 @@ MVQ_SEX_METHOD = "mvq_sex_head"      # == sexing.MVQ_SEX_METHOD (kept as a plain
 COLLAPSE_DIST_UNITS = 3.0
 
 
+def pick_typed_pair(out, off, nb, runner, collapse_dist_units=COLLAPSE_DIST_UNITS):
+    """Read the FEMALE (fi=0) and MALE (fi=1) typed slots for one pending
+    frame's windows `[off, off + nb)` of an `infer` output, apply the
+    collapse guard, and return the survivors.
+
+    Shared by `lift_masked_bout._flush` (bout lift) and
+    `coarse_track.coarse_pass._read_batch` (recording-wide coarse pass) so
+    the two routes cannot silently drift apart on this rule -- the review
+    that asked for this extraction found the guard present in one and
+    missing from the other (`coarse_track._read_batch` had no collapse
+    check at all).
+
+    For each typed slot, take the window with the HIGHEST existence for that
+    slot (never the first), so a near-empty window cannot claim the fly. Then:
+
+    COLLAPSE GUARD. The two typed slots are chosen INDEPENDENTLY, so nothing
+    above stops both of them reading the SAME physical fly -- most likely on
+    a merged window, which is exactly the mounting frames. Two real flies are
+    never within `collapse_dist_units` over most of their 50 keypoints (a
+    stacked mating pair still has ~2 body-lengths of separated leg/wing
+    landmarks); the same instance read twice is ~0. So a frame whose two
+    slots agree that closely keeps only the more confident one, rather than
+    shipping a duplicated fly that every jitter, confidence and residual
+    metric would rate as excellent. Ties keep the FEMALE (fi=0): she is the
+    fly this pipeline loses frames on, and on a tie the two reads are
+    interchangeable.
+
+    Returns:
+        picks: {fi: (read_typed_result, absolute_window_index)} for fi in
+            {0, 1} that a typed slot was found for -- 0, 1 or 2 entries.
+        collapsed: bool, whether the collapse guard fired this frame.
+        dropped_fi: the fi (0 or 1) the guard NaN'd, or None if it did not
+            fire (or fewer than 2 typed slots were read at all).
+    """
+    picks = {}
+    for fi, want_sex in enumerate((SEX_FEMALE, SEX_MALE)):
+        best, best_b = None, -1
+        for b in range(off, off + nb):
+            r = runner.read_typed(out, b, want_sex=want_sex)
+            if r is not None and (best is None or r["exist"] > best["exist"]):
+                best, best_b = r, b
+        if best is not None:
+            picks[fi] = (best, best_b)
+
+    collapsed, dropped_fi = False, None
+    if len(picks) == 2:
+        a3 = np.asarray(picks[0][0]["kp3d"], np.float64)
+        b3 = np.asarray(picks[1][0]["kp3d"], np.float64)
+        d = np.linalg.norm(a3 - b3, axis=-1)
+        d = d[np.isfinite(d)]
+        if d.size and float(np.median(d)) < float(collapse_dist_units):
+            collapsed = True
+            dropped_fi = 1 if picks[1][0]["exist"] <= picks[0][0]["exist"] else 0
+            picks.pop(dropped_fi)
+    return picks, collapsed, dropped_fi
+
+
 def frame_windows(centres, ok=None, *, merge_dist_units=30.0):
     """One frame's crop windows from its per-fly 3D centres.
 
@@ -741,43 +798,15 @@ def lift_masked_bout(runner, frames_iter, centres, ok, *, out_dir, model_names,
         out = runner.infer(concat_windows(batch))
         for t, off, nb in pend:
             all_exist[t] = out["exist"][off]
-            picks = {}
-            for fi, want_sex in enumerate(want):
-                best, best_b = None, -1
-                for b in range(off, off + nb):
-                    r = runner.read_typed(out, b, want_sex=want_sex)
-                    # More than one window can host the same typed slot (two
-                    # crops, each containing part of the pair); take the most
-                    # confident, never the first, so a near-empty window
-                    # cannot claim the fly.
-                    if r is not None and (best is None or r["exist"] > best["exist"]):
-                        best, best_b = r, b
-                if best is not None:                # else: NaN frame for this fly
-                    picks[fi] = (best, best_b)
-
-            # COLLAPSE GUARD. The two typed slots are chosen independently, so
-            # nothing above stops both of them reading the SAME physical fly --
-            # most likely on a merged window, which is exactly the mounting
-            # frames. Two real flies are never within `collapse_dist_units`
-            # over most of their 50 keypoints (a stacked mating pair still has
-            # ~2 body-lengths of separated leg/wing landmarks); the same
-            # instance read twice is ~0. So a frame whose two slots agree that
-            # closely keeps only the more confident one and says so, rather
-            # than shipping a duplicated fly that every jitter, confidence and
-            # residual metric would rate as excellent. Measured on Session0
-            # bout 28, whose `track_qc.json` flags 90/2007 frames as merged
-            # tracks. Ties keep the FEMALE (fly0): she is the fly this pipeline
-            # loses frames on, and on a tie the two reads are interchangeable.
-            if len(picks) == 2:
-                a3 = np.asarray(picks[0][0]["kp3d"], np.float64)
-                b3 = np.asarray(picks[1][0]["kp3d"], np.float64)
-                d = np.linalg.norm(a3 - b3, axis=-1)
-                d = d[np.isfinite(d)]
-                if d.size and float(np.median(d)) < float(collapse_dist_units):
-                    collapsed[t] = True
-                    drop = 1 if picks[1][0]["exist"] <= picks[0][0]["exist"] else 0
-                    n_collapsed[drop] += 1
-                    picks.pop(drop)
+            # Typed-slot read + collapse guard: see `pick_typed_pair`'s
+            # docstring for the full rationale (measured on Session0 bout 28,
+            # whose `track_qc.json` flags 90/2007 frames as merged tracks).
+            # Shared with `coarse_track.coarse_pass._read_batch` so the two
+            # routes cannot silently drift apart on this rule.
+            picks, collapsed[t], drop = pick_typed_pair(out, off, nb, runner,
+                                                        collapse_dist_units)
+            if drop is not None:
+                n_collapsed[drop] += 1
 
             for fi, (best, best_b) in picks.items():
                 kp3d[fi, t] = best["kp3d"]

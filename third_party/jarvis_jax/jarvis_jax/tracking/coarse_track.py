@@ -82,7 +82,9 @@ a SUPERSET of the SAM3 coarse pass's schema (`scripts/coarse_pass.py`), so
     border_med (F,T) f32       median border_dist over valid cameras
     n_valid_cams (F,T) i16
     X3d (F,T,3) f32            the 3D centroid (mean of the fly's finite keypoints)
-    sep3d (T,) f32             inter-fly 3D distance (empty array if F < 2)
+    sep3d (T,) f32             inter-fly 3D distance (all-NaN, same shape as
+                               `dist`/`heading_deg`, when F < 2 -- never a
+                               separately-shaped empty array)
     sep2d_med (T,) f32         median per-camera 2D centroid separation
     filled (T,) bool           this coarse index was processed (always True here;
                                emptiness is carried by `valid`/`n_valid_cams`)
@@ -95,6 +97,12 @@ a SUPERSET of the SAM3 coarse pass's schema (`scripts/coarse_pass.py`), so
     sex_prob (F,T) f32         P(female) of the slot that was read
     slot (F,T) i8              which model slot (1 female, 2 male; -1 = miss)
     centre_source (F,T) i8     0/1/2 as above
+    collapsed (F,T) bool       both typed slots read the same physical fly this
+                               frame (`lift_mvq.pick_typed_pair`'s collapse
+                               guard, shared with the bout lifter); the LOWER-
+                               exist slot was NaN'd and this is True on BOTH
+                               its rows. All-False when F==1 (no second slot
+                               to collapse against).
     wing_angle_deg (F,T) f32   max over L/R of the body-axis-to-wing angle
     heading_deg (T,) f32       male's facing direction vs the male->female vector
     speed (F,T) f32            units per coarse frame
@@ -137,7 +145,7 @@ import numpy as np
 
 from jarvis_jax.tracking.coarse_centres import (_project_batch, cluster_centres,
                                                 lift_peaks_to_centres, plan_windows)
-from jarvis_jax.tracking.lift_mvq import concat_windows
+from jarvis_jax.tracking.lift_mvq import COLLAPSE_DIST_UNITS, concat_windows, pick_typed_pair
 from jarvis_jax.train.matching import SEX_FEMALE, SEX_MALE, SEX_UNKNOWN
 
 CENTRE_DETECTED, CENTRE_REUSED, CENTRE_NONE = 0, 1, 2
@@ -476,7 +484,9 @@ def coarse_pass(reader, runner, detector, *, frames, num_animals=2, merge_dist_u
     Returns a dict of arrays (F = num_animals, N = len(frames), K = runner.K):
         frame (N,) i64, kp3d (F,N,K,3) f32 world, centroid (F,N,3) f32,
         exist (F,N) f32, sex_prob (F,N) f32, slot (F,N) i8, centre_source
-        (F,N) i8, n_windows (N,) i8, plus kp_names, W, H, last_centres, floor.
+        (F,N) i8, n_windows (N,) i8, collapsed (F,N) bool (F==2 only -- see
+        `pick_typed_pair`; all-False when F==1), plus kp_names, W, H,
+        last_centres, floor.
 
     `centre_source` is per fly for the fine pass's benefit, but the reuse rule
     is per FRAME today (a frame either has centres or it does not), so both
@@ -495,6 +505,10 @@ def coarse_pass(reader, runner, detector, *, frames, num_animals=2, merge_dist_u
     slot = np.full((F, N), -1, np.int8)
     centre_source = np.full((F, N), CENTRE_NONE, np.int8)
     n_windows = np.zeros(N, np.int8)
+    # Both typed slots read the same fly -- only meaningful with two typed
+    # slots (F==2); stays all-False for a single-animal (F==1) recording,
+    # which has no second slot to collapse against. See `pick_typed_pair`.
+    collapsed = np.zeros((F, N), bool)
 
     want = [SEX_UNKNOWN] if F == 1 else [SEX_FEMALE, SEX_MALE]
     prev_centres = None if init_centres is None else np.asarray(init_centres, np.float32)
@@ -513,17 +527,30 @@ def coarse_pass(reader, runner, detector, *, frames, num_animals=2, merge_dist_u
             return
         out = runner.infer(concat_windows(batch))
         for t, off, nb in pend:
-            for fi, want_sex in enumerate(want):
-                best = None
-                for b in range(off, off + nb):
-                    r = runner.read_typed(out, b, want_sex=want_sex)
-                    # More than one window can host the same typed slot (two
-                    # flies, two crops); take the most confident, never the
-                    # first, so a near-empty window cannot claim the fly.
-                    if r is not None and (best is None or r["exist"] > best["exist"]):
-                        best = r
-                if best is None:
-                    continue
+            if F == 2:
+                # Typed-slot read (highest-exist window per slot) + the
+                # collapse guard -- the SAME rule `lift_mvq.lift_masked_bout`
+                # applies, via the shared helper, so the coarse pass and the
+                # bout lifter cannot silently disagree about when two typed
+                # reads are the same physical fly (this call site previously
+                # had NO collapse guard at all).
+                picks, is_collapsed, _dropped = pick_typed_pair(out, off, nb, runner)
+                collapsed[:, t] = is_collapsed
+            else:
+                picks = {}
+                for fi, want_sex in enumerate(want):
+                    best, best_b = None, -1
+                    for b in range(off, off + nb):
+                        r = runner.read_typed(out, b, want_sex=want_sex)
+                        # More than one window can host the same typed slot
+                        # (two flies, two crops); take the most confident,
+                        # never the first, so a near-empty window cannot
+                        # claim the fly.
+                        if r is not None and (best is None or r["exist"] > best["exist"]):
+                            best, best_b = r, b
+                    if best is not None:
+                        picks[fi] = (best, best_b)
+            for fi, (best, _best_b) in picks.items():
                 pts = np.asarray(best["kp3d"], np.float32)
                 kp3d[fi, t] = pts
                 ok = np.isfinite(pts).all(axis=-1)
@@ -585,7 +612,7 @@ def coarse_pass(reader, runner, detector, *, frames, num_animals=2, merge_dist_u
     return {"frame": np.asarray(frame_list, np.int64),
             "kp3d": kp3d, "centroid": centroid, "exist": exist, "sex_prob": sex_prob,
             "slot": slot, "centre_source": centre_source, "n_windows": n_windows,
-            "kp_names": list(runner.kp_names), "W": W, "H": H,
+            "collapsed": collapsed, "kp_names": list(runner.kp_names), "W": W, "H": H,
             "last_centres": prev_centres, "floor": floor}
 
 
@@ -608,7 +635,7 @@ def concat_tracks(chunks):
                              f"vs {(c['W'], c['H'])}")
     out = dict(first)
     out["frame"] = np.concatenate([c["frame"] for c in chunks], axis=0)
-    for k in ("kp3d", "centroid", "exist", "sex_prob", "slot", "centre_source"):
+    for k in ("kp3d", "centroid", "exist", "sex_prob", "slot", "centre_source", "collapsed"):
         out[k] = np.concatenate([c[k] for c in chunks], axis=1)
     out["n_windows"] = np.concatenate([c["n_windows"] for c in chunks], axis=0)
     out["last_centres"] = chunks[-1].get("last_centres")
@@ -714,7 +741,14 @@ def write_coarse_tracks(path, tracks, features, cameras, *, session_dir, stride,
             d2 = np.linalg.norm(uv[0] - uv[1], axis=-1)
             sep2d_med = np.nanmedian(np.where(both, d2, np.nan), axis=0).astype(np.float32)
     n_valid_cams = valid.sum(axis=1).astype(np.int16)
-    sep3d = np.asarray(features["dist"], np.float32) if F >= 2 else np.array([], np.float32)
+    # `features["dist"]` is ALREADY (T,) all-NaN when F < 2 (`coarse_features`
+    # never shapes it to F -- see its docstring), so this is `dist` under its
+    # SAM3-schema name in every case, never a separately-shaped empty array
+    # (`bout_gates.load_tracks` handles a NaN-filled `sep3d` and an empty one
+    # identically: `.size` truthy either way is read then compared, and a
+    # NaN-vs-threshold comparison is always False, so single-fly `bout_gates`
+    # behaviour is unchanged by this).
+    sep3d = np.asarray(features["dist"], np.float32)
     coarse_frame = np.asarray(tracks["frame"], np.int64)
     last_centres = pad_last_centres(tracks.get("last_centres"), F)
 
@@ -737,7 +771,9 @@ def write_coarse_tracks(path, tracks, features, cameras, *, session_dir, stride,
                 "detected": int((tracks["centre_source"][0] == CENTRE_DETECTED).sum()),
                 "reused": int((tracks["centre_source"][0] == CENTRE_REUSED).sum()),
                 "none": int((tracks["centre_source"][0] == CENTRE_NONE).sum())} if T else {},
-            "frac_trackable": [float(np.mean(features["trackable"][f])) for f in range(F)]}
+            "frac_trackable": [float(np.mean(features["trackable"][f])) for f in range(F)],
+            "n_collapsed": int(np.asarray(
+                tracks.get("collapsed", np.zeros((F, T), bool)))[0].sum()) if T else 0}
     meta.update(meta_extra or {})
     tmp_meta = meta_path + ".tmp"
     with open(tmp_meta, "w") as f:
@@ -759,6 +795,7 @@ def write_coarse_tracks(path, tracks, features, cameras, *, session_dir, stride,
         sex_prob=np.asarray(tracks["sex_prob"], np.float32),
         slot=np.asarray(tracks["slot"], np.int8),
         centre_source=np.asarray(tracks["centre_source"], np.int8),
+        collapsed=np.asarray(tracks.get("collapsed", np.zeros((F, T), bool)), bool),
         n_windows=np.asarray(tracks["n_windows"], np.int8),
         wing_angle_deg=np.asarray(features["wing_angle_deg"], np.float32),
         heading_deg=np.asarray(features["heading_deg"], np.float32),

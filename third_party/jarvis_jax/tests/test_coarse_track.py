@@ -184,6 +184,91 @@ def test_single_fly_recording_reads_the_untyped_slot(tiny):
     assert set(np.unique(tr["slot"])) <= {-1, 1, 2}
 
 
+class _PairFakeRunner:
+    """A minimal runner stand-in for `coarse_pass`'s F==2 collapse-guard call
+    site (`_read_batch` -> `pick_typed_pair`, Finding E). `windows`/`infer`
+    are stubs that only carry the world window centres through; `read_typed`
+    is fully caller-controlled (`read_fn(out, bi, want_sex)`) so a frame's
+    two typed reads can be pinned to an EXACT collapse (identical kp3d) or an
+    EXACT non-collapse (well-separated kp3d), without depending on what a
+    real model happens to predict."""
+
+    def __init__(self, cam_mats, kp_names, read_fn, batch=8):
+        self.cam_mats, self.kp_names = cam_mats, list(kp_names)
+        self.K, self.batch = len(self.kp_names), int(batch)
+        self._read_fn = read_fn
+
+    def windows(self, frames, present, centres):
+        c = np.atleast_2d(np.asarray(centres, np.float32))
+        return {"centres": c, "crops": np.zeros((c.shape[0], 1), np.uint8)}
+
+    def infer(self, w):
+        return {"centres": np.asarray(w["centres"], np.float32)}
+
+    def read_typed(self, out, bi, want_sex):
+        return self._read_fn(out, bi, want_sex)
+
+
+def test_read_batch_collapse_guard_flags_identical_reads_and_nans_the_lower_exist_slot(tiny):
+    """`coarse_pass`'s `_read_batch` had NO collapse guard before this fix
+    (review Finding E) -- unlike `lift_mvq.lift_masked_bout`, which already
+    had one. A merged window (one CenterDetect peak this frame) whose female
+    and male typed reads are IDENTICAL (median per-keypoint distance 0 units,
+    far under `COLLAPSE_DIST_UNITS`=3) must be flagged `collapsed` on BOTH
+    rows and keep only the higher-exist slot -- male here (0.95 > 0.90) --
+    NaN-ing the female, exactly like the bout lifter's own guard."""
+    from jarvis_jax.tracking.coarse_track import coarse_pass
+    from jarvis_jax.train.matching import SEX_FEMALE, SEX_MALE
+    root, _ = tiny
+    r = _runner(tiny)
+    kp = np.arange(r.K * 3, dtype=np.float32).reshape(r.K, 3)   # one fixed, non-trivial kp3d
+
+    def read_fn(out, bi, want_sex):
+        female = want_sex == SEX_FEMALE
+        return {"slot": 1 if female else 2, "kp3d": kp,
+                "exist": 0.90 if female else 0.95, "sex_prob": 0.8 if female else 0.2}
+
+    fake = _PairFakeRunner(r.cam_mats, r.kp_names, read_fn)
+    det = FakeDetector(r.cam_mats, n_flies=1)      # one peak -> one merged window
+    tr = coarse_pass(FixtureReader(root, CAMS), fake, det, frames=[0], num_animals=2)
+
+    assert tr["collapsed"].shape == (2, 1)
+    assert tr["collapsed"][:, 0].all(), "both rows must be flagged, not just the dropped one"
+    assert np.isnan(tr["kp3d"][0, 0]).all(), "the lower-exist (female) slot must be NaN'd"
+    np.testing.assert_allclose(tr["kp3d"][1, 0], kp)
+    assert tr["exist"][1, 0] == pytest.approx(0.95) and tr["slot"][1, 0] == 2
+
+
+def test_read_batch_does_not_flag_two_distinct_flies_as_collapsed(tiny):
+    """Two real flies, each read only by its own typed slot from its own
+    (well-separated) window, must NOT be flagged `collapsed` and both rows
+    must survive -- the guard keys on the two typed reads AGREEING, not on
+    merely sharing a frame."""
+    from jarvis_jax.tracking.coarse_track import coarse_pass
+    from jarvis_jax.train.matching import SEX_FEMALE
+    root, _ = tiny
+    r = _runner(tiny)
+
+    def read_fn(out, bi, want_sex):
+        c = np.asarray(out["centres"][bi], np.float32)
+        is_female_window = float(c[0]) < 20.0          # fly0 near x=0, fly1 near x=40
+        want_female = want_sex == SEX_FEMALE
+        if want_female != is_female_window:
+            return None                                  # this window is not that sex
+        kp = np.full((r.K, 3), c, np.float32)
+        return {"slot": 1 if want_female else 2, "kp3d": kp,
+                "exist": 0.9, "sex_prob": 0.8 if want_female else 0.2}
+
+    fake = _PairFakeRunner(r.cam_mats, r.kp_names, read_fn)
+    det = FakeDetector(r.cam_mats, n_flies=2)      # two well-separated peaks -> two windows
+    tr = coarse_pass(FixtureReader(root, CAMS), fake, det, frames=[0], num_animals=2)
+
+    assert not tr["collapsed"].any()
+    assert np.isfinite(tr["kp3d"][0, 0]).all() and np.isfinite(tr["kp3d"][1, 0]).all()
+    d = np.linalg.norm(tr["kp3d"][0, 0, 0] - tr["kp3d"][1, 0, 0])
+    assert d > 30.0, "the two flies' kp3d must stay well apart, not agree"
+
+
 def test_more_windows_than_batch_warns_once_and_drops_the_extra(tiny):
     """`runner.batch` planned windows silently truncated used to drop data
     with no signal at all. Two well-separated true centres (40 units apart,
@@ -208,13 +293,15 @@ def test_more_windows_than_batch_warns_once_and_drops_the_extra(tiny):
 # --------------------------------------------------------------------------
 def _synthetic_tracks(kp_names, *, n=4):
     """Two flies: the male (fly 1) at the origin facing +x with its left wing
-    30 deg off the body axis; the female (fly 0) 100 units straight ahead of
-    him at +x, so the heading is EXACTLY 0 deg and the inter-fly distance
-    EXACTLY 100 units. Both sit 20 units above the z=0 floor."""
+    20 deg off the body axis (deliberately OFF the `WING_ANGLE_MIN_DEFAULT`
+    (30 deg) gate boundary -- 30.0 exactly would make a rounding wobble in
+    the gate comparison invisible); the female (fly 0) 100 units straight
+    ahead of him at +x, so the heading is EXACTLY 0 deg and the inter-fly
+    distance EXACTLY 100 units. Both sit 20 units above the z=0 floor."""
     K = len(kp_names)
     i = {nm: k for k, nm in enumerate(kp_names)}
     kp3d = np.full((2, n, K, 3), np.nan, np.float32)
-    ang = np.deg2rad(30.0)
+    ang = np.deg2rad(20.0)
     for t in range(n):
         for f, base in ((1, np.array([0.0, 0.0, 20.0])), (0, np.array([100.0, 0.0, 20.0]))):
             kp3d[f, t, i["Scutellum"]] = base
@@ -232,6 +319,7 @@ def _synthetic_tracks(kp_names, *, n=4):
             "sex_prob": np.full((2, n), 0.5, np.float32),
             "slot": np.stack([np.ones(n, np.int8), np.full(n, 2, np.int8)]),
             "centre_source": np.zeros((2, n), np.int8),
+            "collapsed": np.zeros((2, n), bool),
             "n_windows": np.full(n, 2, np.int8),
             "kp_names": list(kp_names), "W": 1936, "H": 448}
 
@@ -367,7 +455,7 @@ def test_coarse_features_known_angles_distance_and_height(tiny):
     assert ft["heading_deg"].shape == (n,)
     assert ft["speed"].shape == (2, n) and ft["height"].shape == (2, n)
     assert ft["dist"].shape == (n,) and ft["trackable"].shape == (2, n)
-    np.testing.assert_allclose(ft["wing_angle_deg"], 30.0, atol=1e-3)
+    np.testing.assert_allclose(ft["wing_angle_deg"], 20.0, atol=1e-3)
     np.testing.assert_allclose(ft["heading_deg"], 0.0, atol=1e-3)
     np.testing.assert_allclose(ft["dist"], 100.0, atol=1e-3)
     np.testing.assert_allclose(ft["height"], 20.0, atol=1e-3)
@@ -442,6 +530,31 @@ def test_write_coarse_tracks_is_read_by_the_sam3_gates_loader(tiny, tmp_path):
     assert res["meta"]["source"] == "mvq" and res["windows"] == []
 
 
+def test_write_coarse_tracks_sep3d_matches_dist_shape_for_a_single_fly(tiny, tmp_path):
+    """A single-fly (F=1) file has no second fly to measure a separation to,
+    so `sep3d` must be the SAME all-NaN (T,) array `coarse_features` already
+    returns as `dist` -- never a separately-shaped empty array (the old
+    behaviour, which `bout_gates`/`coarse_pass_gates` special-cased around;
+    see `bout_gates`'s module docstring)."""
+    from jarvis_jax.tracking.coarse_track import (coarse_features, fit_floor,
+                                                  write_coarse_tracks)
+    r = _runner(tiny)
+    two = _synthetic_tracks(r.kp_names, n=4)
+    tr = dict(two)
+    for k in ("kp3d", "centroid", "exist", "sex_prob", "slot", "centre_source", "collapsed"):
+        tr[k] = two[k][1:2]                      # keep just the male (fly1) row -> F=1
+    floor = fit_floor(tr["centroid"])
+    ft = coarse_features(tr, r.kp_names, floor=floor)
+    assert ft["dist"].shape == (4,) and np.isnan(ft["dist"]).all()
+    out = tmp_path / "coarse_tracks_single.npz"
+    write_coarse_tracks(str(out), tr, ft, CAMS, session_dir="/fake",
+                        stride=16, num_animals=1, cam_mats=r.cam_mats)
+    with np.load(out) as z:
+        assert z["sep3d"].shape == (4,)
+        assert np.isnan(z["sep3d"]).all()
+        np.testing.assert_array_equal(z["sep3d"], z["dist"])
+
+
 # --------------------------------------------------------------------------
 # scripts/coarse_pass_mvq.py -- the pieces that are not IO
 # --------------------------------------------------------------------------
@@ -462,15 +575,18 @@ def test_driver_slot_reader_matches_read_window_byte_for_byte(tmp_path, start):
     498k-frame recording -- CPU-bound in repeated keyframe-seek + GOP
     redecode, `real-run-wave-report.md` Step 2). That is only safe if it
     reads the SAME pixels: this writes two tiny mp4s, samples them at stride
-    7 for >= 5 coarse frames (`start=0` -- a fresh run -- and `start=5`, a
+    7 for >= 10 coarse frames (`start=0` -- a fresh run -- and `start=5`, a
     NON-ZERO start standing in for a `--resume` boundary) with both readers,
     and requires byte equality (a wrong grab/retrieve landing would return
-    the neighbouring frame, which looks entirely plausible)."""
+    the neighbouring frame, which looks entirely plausible). >= 10 hits
+    deliberately runs PAST the reader's old first-5-hits-only frame-index
+    check (`_n_check = 5`): that check now runs on every stride hit, and this
+    is the regression test that a drift past hit 5 would still be caught."""
     cv2 = pytest.importorskip("cv2")
     import coarse_pass_mvq as drv
     from jarvis_jax.predict.synced_reader import load_plan, read_window
 
-    cams, n, H, W = ["Cam1", "Cam2"], 40, 48, 64
+    cams, n, H, W = ["Cam1", "Cam2"], 70, 48, 64
     for ci, c in enumerate(cams):
         vw = cv2.VideoWriter(str(tmp_path / f"{c}.mp4"),
                              cv2.VideoWriter_fourcc(*"mp4v"), 30, (W, H))
@@ -484,7 +600,7 @@ def test_driver_slot_reader_matches_read_window_byte_for_byte(tmp_path, start):
     assert plan is None                       # no sync_plan.json -> positional, as Session0
     stride = 7
     slots = list(range(start, n, stride))
-    assert len(slots) >= 5                    # exercise a real strided sequence, not one hit
+    assert len(slots) >= 10                   # past the old 5-hit check window
     reader = drv.SlotReader(str(tmp_path), cams, plan, start_slot=start, stride=stride)
     try:
         assert (reader.W, reader.H) == (W, H)
@@ -553,8 +669,21 @@ class _FakeRunner:
         for base, tip, dy in (("WingL_base", "WingL_V13", 20.0), ("WingR_base", "WingR_V13", -20.0)):
             kp[i[base]] = c
             kp[i[tip]] = c + [-35.0, dy, 0.0]
-        return {"slot": 1 if want_sex in (0, -1) else 2, "kp3d": kp,
-                "exist": 0.9, "sex_prob": 0.8 if want_sex in (0, -1) else 0.2}
+        # This window's fly is FEMALE when its centre is near x < 20 (fly0's
+        # track in `_FakeCenterDetect.peaks`), MALE otherwise (fly1's track).
+        # A typed read for the OTHER sex is below `exist_thresh` and returns
+        # None, same as the real `MVQRunner.read_typed` -- without this, both
+        # typed reads of a window resolved to the SAME kp3d regardless of
+        # `want_sex`, and `pick_typed_pair`'s collapse guard (correctly)
+        # judged two independent, identical-looking reads to be one physical
+        # fly counted twice.
+        is_female_window = float(c[0]) < 20.0
+        want_female = want_sex in (0, -1)
+        exist = 0.9 if (want_female == is_female_window or want_sex == -1) else 0.1
+        if exist < self.exist_thresh:
+            return None
+        return {"slot": 1 if want_female else 2, "kp3d": kp,
+                "exist": exist, "sex_prob": 0.8 if want_female else 0.2}
 
 
 class _FakeCenterDetect:

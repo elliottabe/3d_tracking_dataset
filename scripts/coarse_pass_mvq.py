@@ -169,8 +169,6 @@ class _CamStream:
         self.error = None
         self._stop = threading.Event()
         self._ready = threading.Event()
-        self._checked = 0     # first N stride hits whose exact position is asserted
-        self._n_check = 5
         self._thread = threading.Thread(target=self._run, daemon=True, name=f"camstream-{cam}")
         self._thread.start()
         self._ready.wait()    # blocks only until H/W (or a startup error) are known
@@ -217,14 +215,20 @@ class _CamStream:
                     if cursor is not None:
                         ok, fr = cap.retrieve()
                         if ok:
-                            if self._checked < self._n_check:
-                                actual = int(cap.get(cv2.CAP_PROP_POS_FRAMES)) - 1
-                                assert actual == pos_i, (
+                            # Checked on EVERY stride hit, not just the first
+                            # few: a drift that only appears later in the
+                            # decode (e.g. after a dropped/corrupt GOP) would
+                            # otherwise run silently past whatever window the
+                            # check used to stop at. Cheap (one more
+                            # `cap.get` per already-decoded frame) next to the
+                            # grab/retrieve it follows.
+                            actual = int(cap.get(cv2.CAP_PROP_POS_FRAMES)) - 1
+                            if actual != pos_i:
+                                raise RuntimeError(
                                     f"{self.cam}: frame-index drift at slot {slot} -- "
                                     f"expected mp4 frame {pos_i}, CAP_PROP_POS_FRAMES "
                                     f"reports {actual} (sequential grab/retrieve landed "
                                     f"on the wrong frame)")
-                                self._checked += 1
                             frame = cv2.cvtColor(fr, cv2.COLOR_BGR2RGB)
                             cursor += 1
                         else:
@@ -352,6 +356,11 @@ def load_partial(path, num_animals, *, cameras=None, calib_dir=None, checkpoint=
               "slot": np.asarray(z["slot"], np.int8),
               "centre_source": np.asarray(z["centre_source"], np.int8),
               "n_windows": np.asarray(z["n_windows"], np.int8),
+              # "collapsed" postdates some on-disk partials/finals; a file
+              # written before it existed has no second-slot collapse guard
+              # to report, so default to all-False rather than KeyError.
+              "collapsed": (np.asarray(z["collapsed"], bool) if "collapsed" in z.files
+                           else np.zeros((int(num_animals), len(z["coarse_frame"])), bool)),
               "kp_names": [str(n) for n in z["kp_names"]]}
         from jarvis_jax.tracking.coarse_track import unpad_last_centres
         tr["last_centres"] = (unpad_last_centres(z["last_centres"])
