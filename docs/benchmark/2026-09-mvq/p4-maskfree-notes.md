@@ -176,3 +176,97 @@ to its own centred value (+23 % at 1 mm) the §6 "within 10 %" rule is not yet m
 the training jitter is +-10 units per axis (radial reach ~1.4 mm), so 2 mm is outside the trained range by design.
 Re-run on the final checkpoint decides; if still over the rule at 1 mm, the follow-up is jitter 15-20 units or a
 tighter coarse placement (stride 8), not a redesign.
+
+## Coarse pass (task 4, spec §4.3) -- 2026-09-04
+
+`jarvis_jax/tracking/coarse_track.py` + `scripts/coarse_pass_mvq.py`: the
+mask-free replacement for `scripts/coarse_pass.py`. Writes
+`coarse_tracks.npz` in the SAM3 coarse-pass schema plus the mvq fields, so
+`scripts/coarse_pass_gates.py::load_tracks` opens either file (asserted in
+`tests/test_coarse_track.py`, which runs the gates' own
+`compute_gate_signals`/`apply_gates` on an mvq file).
+
+### Coarse pass timing
+
+| stage | wall clock | notes |
+|---|---|---|
+| model load (mvq + CenterDetect) | PENDING | printed as `[coarse] models loaded in Xs` |
+| coarse pass, 20_04 @ stride 16 | PENDING | printed as `[coarse] done: N coarse frames in X min` |
+
+**Real run status: NOT RUN.** The retrained checkpoint
+`mvq_t1_b16_p4_jitter10_20260904/final` did not exist at the end of this task
+(training was at step 4000 of its schedule and still held all 8 GPUs at
+~41 GB each), and the brief forbids waiting on it. Command to run, once the
+`final/` appears and the GPUs are free:
+
+```
+module load cuda/12.9.1
+export LD_PRELOAD=$CONDA_PREFIX/lib/libstdc++.so.6
+unset LD_LIBRARY_PATH JAX_PLATFORMS
+export HF_HOME=/gscratch/portia/eabe/data/Johnson_lab/sam3 HF_TOKEN= \
+       CUDA_VISIBLE_DEVICES=0 XLA_PYTHON_CLIENT_MEM_FRACTION=0.6 \
+       PYTHONPATH=third_party/jarvis_jax:.
+python scripts/coarse_pass_mvq.py \
+  --session-dir /gscratch/portia/eabe/data/Johnson_lab/Video_recordings/courtship/Session0/2025_10_20_13_20_04 \
+  --calib-dir   /gscratch/portia/eabe/data/Johnson_lab/Video_recordings/courtship/Session0/2025_10_20_13_20_04/calibration \
+  --run  /gscratch/portia/eabe/data/Johnson_lab/jax_mvq_runs/mvq_t1_b16_p4_jitter10_20260904/final \
+  --centerdetect /gscratch/portia/eabe/data/Johnson_lab/jax_centerdetect_runs/cd_focal_bg30/ckpt/epoch_004 \
+  --stride 16 --resume \
+  --out /gscratch/portia/eabe/data/Johnson_lab/processed/courtship/Session0/2025_10_20_13_20_04/coarse_mvq/coarse_tracks.npz
+```
+
+`--resume` is safe to repeat: the pass writes a complete, gates-readable
+`coarse_tracks.partial.npz` every `--partial-every` (default 2000) coarse
+frames and continues after its last frame, so the run can be split across
+several foreground calls without redoing work. The floor plane and every
+feature are recomputed over the whole concatenated track on each write, so a
+resumed run and a single-shot run produce the same file.
+
+### Deviation: the floor-plane sign rule (figure-gated)
+
+The plan's wording was "least-squares plane on the first 2000 finite coarse
+centroids, sign chosen so the median fly height is positive". Implemented
+literally that is not just under-determined, it is BACKWARDS on real data,
+and the A/B figure says so:
+
+* a least-squares plane runs through the MEAN of the points, so "height above
+  it" measures the mean height of the FLIES, not the glass, and the median
+  residual is ~0 by construction;
+* flies rest on the floor and occasionally climb, so the cloud is
+  bottom-heavy and that median residual is NEGATIVE -- the rule then flips
+  the normal DOWNWARD, and every height reads mirrored.
+
+Measured on a synthetic arena (90 % of centroids within 0.3 mm of the glass,
+10 % up a wall at 1-4 mm, plane tilted ~11 deg):
+
+| | dot(normal, true up) | median height | max abs height error |
+|---|---|---|---|
+| literal rule | **-1.000** | +2.25 units | **75.8 units (7.6 mm)** |
+| shipped `fit_floor` | +1.000 | +1.69 units | 0.36 units (0.036 mm) |
+
+The literal rule's fitted heights lie on a slope **-1** line against the
+truth: a fly 4 mm up a wall reads as 3.6 mm BELOW the floor. Figure (and its
+generating script + npz): `figures/2026-09-04-mvq-coarse-floor/floor_sign_ab.png`.
+
+What is kept: the least-squares fit over the first 2000 finite centroids, and
+positive fly heights. What is fixed: "up" is the direction the cloud is
+bottom-heavy in (mean along the normal above the median), and the offset sits
+at the 1st percentile of the along-normal coordinate, so the plane is the
+floor the flies stand on rather than their average altitude. Guarded by
+`test_fit_floor_recovers_a_known_tilted_plane_with_positive_heights`, which
+also checks the mirrored arena.
+
+### Two other things worth knowing before §5 (bout detection)
+
+* **`area` is all-NaN in an mvq file** (there are no masks). The SAM3 gates'
+  area-ratio test therefore can never pass on one -- the file OPENS and every
+  shape is right, but `apply_gates` returns an empty bout table. That is
+  asserted in the test so it is discovered here and not as a mysteriously
+  empty CSV. §5's detector uses the mvq features (`dist`, `wing_angle_deg`,
+  `speed`, `heading_deg`, `height`, `exist`) instead.
+* **`heading_deg` is measured from the male's ANTERIOR axis** (Abd_tip ->
+  Scutellum), so 0 deg = the male is pointed straight at the female. The wing
+  angle uses the posterior axis (Scutellum -> Abd_tip) because that is the
+  axis a wing is held relative to. Both are documented in
+  `coarse_features`; a heading whose zero meant "facing away" would be read
+  backwards by every downstream gate.
