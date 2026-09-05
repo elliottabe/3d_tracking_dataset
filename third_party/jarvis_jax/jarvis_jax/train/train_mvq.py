@@ -59,6 +59,7 @@ class MVQTrainConfig:
     copy_paste_opposite_sex_p: float = 0.7
     copy_paste_contact_p: float = 0.3
     warm_start: str | None = None
+    jitter_units: float = 3.0  # train-time window-centre jitter, world units (0.1 mm); P4 §6 raises it to 10 for the mask-free route
 
 
 _MEAN = jnp.asarray(IMAGENET_MEAN); _STD = jnp.asarray(IMAGENET_STD)
@@ -476,7 +477,8 @@ def run_training(root, *, out_dir, ckpt_dir, mcfg: MVQConfig, tcfg: MVQTrainConf
     # val cohort should fail fast, not after minutes of backbone init.
     copy_paste = (CopyPasteParams(p=tcfg.copy_paste_p, opposite_sex_p=tcfg.copy_paste_opposite_sex_p,
                                   contact_p=tcfg.copy_paste_contact_p) if tcfg.copy_paste_p > 0 else None)
-    train_sets = {T: V12WindowDataset(root, "train", T=T, train=True, seed=tcfg.seed, copy_paste=copy_paste)
+    train_sets = {T: V12WindowDataset(root, "train", T=T, train=True, seed=tcfg.seed, copy_paste=copy_paste,
+                                      jitter_units=tcfg.jitter_units)
                  for T in tcfg.window_lengths}
     val_ds = V12WindowDataset(root, "val", T=1, train=False)
     names = train_sets[tcfg.window_lengths[0]].keypoint_names

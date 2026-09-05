@@ -397,3 +397,50 @@ def test_warm_start_is_skipped_when_the_run_already_has_a_checkpoint(tmp_path, c
     out2 = capsys.readouterr().out
     assert res["resumed_from"] == 1
     assert "SKIPPED" in out2 and "restored" not in out2
+
+
+def test_train_dataset_receives_configured_jitter_units(tmp_path, monkeypatch):
+    """`MVQTrainConfig.jitter_units` must reach the TRAIN `V12WindowDataset`(s)
+    `run_training` builds (line ~479), not just sit unused on the config --
+    P4 spec section 6's conditional retrain raises it from the dataset
+    default (3.0, 0.3 mm) to 10.0 (1 mm) to make the model robust to the
+    coarse-pass's off-centre windows. Wrap the real dataset class to record
+    every `jitter_units` kwarg it is constructed with, run a 1-step tiny
+    training with `jitter_units=7.5`, and assert that value (not the
+    dataset's own default) was passed for the train split(s)."""
+    import jarvis_jax.train.train_mvq as train_mvq
+    from jarvis_jax.data.v12_windows import V12WindowDataset as RealV12WindowDataset
+    from jarvis_jax.models.mvq import MVQConfig
+    from jarvis_jax.train.train_mvq import run_training, MVQTrainConfig
+    from jarvis_jax.train.losses_mvq import LossWeights
+    from jarvis_jax.data.mv_augment import MVAugParams
+
+    seen = []
+
+    class RecordingV12WindowDataset(RealV12WindowDataset):
+        def __init__(self, *a, **kw):
+            seen.append({"train": kw.get("train"), "jitter_units": kw.get("jitter_units")})
+            super().__init__(*a, **kw)
+
+    monkeypatch.setattr(train_mvq, "V12WindowDataset", RecordingV12WindowDataset)
+
+    root = make_v12_root(tmp_path)
+    mcfg = MVQConfig(crop=448, patch=16, embed_dim=32, num_keypoints=50, num_cameras=7, n_instances=4,
+                     n_local=1, n_global=1, dec_layers_3d=2, dec_layers_2d=1, dec_heads=4, mlp_ratio=2.0,
+                     refine_passes=1, patch_rgb=3, fourier_bands=2, backbone="tiny", backbone_depth=1,
+                     backbone_heads=4, remat=False)
+    tcfg = MVQTrainConfig(total_steps=1, batch_size=2, warmup_steps=1, eval_every=1, save_every=1,
+                          log_every=1, num_workers=1, pretrained=False, window_lengths=(1,), smoke=True,
+                          jitter_units=7.5)
+    run_training(root, out_dir=str(tmp_path / "final"), ckpt_dir=str(tmp_path / "ckpt"),
+                mcfg=mcfg, tcfg=tcfg, aug=MVAugParams(enabled=False), weights=LossWeights())
+
+    train_calls = [c for c in seen if c["train"] is True]
+    assert train_calls, "no train-split V12WindowDataset was constructed"
+    for c in train_calls:
+        assert c["jitter_units"] == tcfg.jitter_units, (
+            f"train dataset got jitter_units={c['jitter_units']!r}, expected {tcfg.jitter_units!r} "
+            f"(the dataset's own default is 3.0 -- run_training must pass tcfg.jitter_units explicitly)")
+    # the val split is unaffected: it is built with train=False and no jitter kwarg
+    val_calls = [c for c in seen if c["train"] is False]
+    assert val_calls and all(c["jitter_units"] is None for c in val_calls)

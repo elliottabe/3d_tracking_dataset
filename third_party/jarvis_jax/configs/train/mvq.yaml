@@ -25,6 +25,7 @@ copy_paste_p: 0.0                # P3a §6: multi-view copy-paste augmentation r
 copy_paste_opposite_sex_p: 0.7   # P3a §6: fraction of pastes drawing an opposite-sex donor
 copy_paste_contact_p: 0.3        # P3a §6: fraction of pastes placed in the stacked-pair (contact) regime
 warm_start: null                 # P3a §8: path to another run's `final/` dir for shape-tolerant warm start
+jitter_units: 3.0                # train-time window-centre jitter, world units (0.1 mm); P4 §6 raises it to 10 for the mask-free route
 # loss weights (spec 2026-09-03 §5) -- starting points, swept in P3
 loss:
   reproj: 1.0
