@@ -36,10 +36,12 @@ OOD poses -- where this pipeline fails), all seven cameras are shown, and the
 render covers the whole bout rather than a flattering mid-bout frame.
 
 The windowing, forward pass, slot choice and artifact format all live in
-`jarvis_jax.tracking.lift_mvq.MVQRunner` (spec §4.2), which the coarse and
-fine passes of the mask-free front end share with this script; what is local
-here is the SAM3 mask store (this is the only prompted consumer left), the
-mask-centroid DLT that places the windows, and the rendering.
+`jarvis_jax.tracking.lift_mvq` (spec §4.2), which the coarse and fine passes of
+the mask-free front end share with this script -- as do the SAM3 mask store
+(`BoutMaskStore`), the mask-centroid DLT that places the windows
+(`bout_centres_3d`) and the bouts-CSV lookup (`resolve_bout_frames`), which
+moved there with the masked-bout lifter. What is local here is the SAM3 PROMPT
+(this is the only prompted consumer left) and the rendering.
 
 ORDER DISCIPLINE (CLAUDE.md; both traps were live bugs here):
   * CAMERA axis is the canonical `cfg.recording.cameras` order everywhere --
@@ -87,14 +89,16 @@ sys.path.insert(0, os.path.join(ROOT, "third_party", "jarvis_jax"))
 sys.path.insert(0, ROOT)
 
 import cv2  # noqa: E402
-import jax.numpy as jnp  # noqa: E402
 from omegaconf import OmegaConf  # noqa: E402
 
-from jarvis_jax.geometry.center3d import triangulate_dlt_batched  # noqa: E402
-from jarvis_jax.predict.sam3_driver import parse_bouts, session_tag_for  # noqa: E402
 from jarvis_jax.predict.synced_reader import load_plan, read_window  # noqa: E402
-from jarvis_jax.tracking.bout_masks import _camera_permutation, unpack_one  # noqa: E402
-from jarvis_jax.tracking.lift_mvq import MVQRunner, concat_windows  # noqa: E402
+# The SAM3 mask store, the mask-centroid DLT and the bouts-CSV lookup moved
+# into `lift_mvq` when the masked-bout lifter (Task 7) started needing the
+# same three pieces; this script keeps using them from there so the render
+# and the pipeline artifacts are placed by identical code.
+from jarvis_jax.tracking.lift_mvq import (BoutMaskStore, MVQRunner,  # noqa: E402
+                                          bout_centres_3d as centers_3d,
+                                          concat_windows, resolve_bout_frames)
 from jarvis_jax.train.matching import (SEX_FEMALE, SEX_MALE, SLOT_FEMALE,  # noqa: E402
                                        SLOT_MALE, SLOT_PROMPTED)
 from jarvis_jax.train.train_mvq import MM_PER_UNIT  # noqa: E402
@@ -152,95 +156,6 @@ def skeleton_edges(kp_names):
         if a in idx and b in idx:
             edges.append((idx[a], idx[b]))
     return edges
-
-
-def resolve_bout_frames(session_dir, bout_idx):
-    """(start_frame, end_frame, n_frames) for `bout_idx` from the session's bouts CSVs.
-
-    The unified CSV is a symlink into a `Predictions_3D_*` dir that no longer
-    exists on this session, so the per-fly CSVs (whose `fly_id` carries a
-    `_fly<f>` suffix the unified one does not) are the fallback. The result is
-    cross-checked against the mask npz's own frame count by the caller.
-    """
-    tag = session_tag_for(str(session_dir))
-    tries = [(os.path.join(session_dir, "courtship_bouts_unified_summary.csv"), tag)]
-    tries += [(os.path.join(session_dir, f"courtship_bouts_fly{f}_summary.csv"), f"{tag}_fly{f}")
-              for f in (0, 1)]
-    errs = []
-    for path, want in tries:
-        try:
-            rows = parse_bouts(path, want, bout_ids=[bout_idx])
-        except OSError as e:                                   # broken symlink / absent
-            errs.append(f"{os.path.basename(path)}: {e}"); continue
-        if rows:
-            r = rows[0]
-            return int(r["start"]), int(r["end"]), int(r["n"])
-        errs.append(f"{os.path.basename(path)}: no row for bout {bout_idx} / fly_id {want!r}")
-    raise KeyError(f"bout {bout_idx} not found in any bouts CSV under {session_dir}: {errs}")
-
-
-class BoutMaskStore:
-    """SAM3 masks for one bout, camera axis reordered BY NAME, unpacked LAZILY.
-
-    `tracking.bout_masks.load_bout_masks` unpacks the WHOLE bout eagerly:
-    (2007, 7, 448, 1936) bool is 12.2 GB for ONE fly and 24 GB for the pair,
-    which does not fit in the job's memory alongside the model. This holds the
-    packed array instead (3 GB) and unpacks one (fly, camera, frame) on demand
-    with that module's OWN `unpack_one`, permuting the camera axis with that
-    module's OWN `_camera_permutation` -- the same two functions
-    `load_bout_masks` composes, so the by-name identity guarantee is identical.
-    A legacy npz with no `cameras` name array is REFUSED rather than assumed
-    positional (that assumption is the camera-scramble bug).
-    """
-
-    def __init__(self, npz_path, cameras):
-        z = np.load(npz_path)
-        if "cameras" not in z.files:
-            raise RuntimeError(
-                f"{npz_path} predates the `cameras` name array, so its camera axis "
-                f"cannot be verified by name -- a permutation would silently crop "
-                f"each fly out of the wrong camera. Re-run SAM3 for this bout.")
-        self.npz_cameras = [str(c) for c in np.asarray(z["cameras"]).tolist()]
-        self.cameras = [str(c) for c in cameras]
-        self.perm = _camera_permutation(self.npz_cameras, self.cameras)
-        self.packed = z["packed"]                                    # (A,C,T,H,Wb)
-        self.valid = np.asarray(z["valid"])[:, self.perm]            # (A,C,T) canonical
-        self.centroids = np.asarray(z["centroids"], np.float32)[:, self.perm]  # (A,C,T,2)
-        self.H, self.W = int(z["shape"][0]), int(z["shape"][1])
-        self.n_flies, self.T = self.packed.shape[0], self.packed.shape[2]
-
-    def valid_at(self, fly, t):
-        return np.asarray(self.valid[fly, :, t], bool)               # (C,)
-
-    def centroid_at(self, fly, t):
-        return np.asarray(self.centroids[fly, :, t], np.float64)     # (C,2)
-
-    def mask_at(self, fly, cam_i, t):
-        """(H,W) bool for canonical camera index `cam_i`."""
-        return unpack_one(self.packed, fly, int(self.perm[cam_i]), t, self.W)
-
-
-def centers_3d(store, cam_mats, n_frames, t0):
-    """(A, n_frames, 3) DLT of each fly's valid mask centroids + (A, n_frames) ok.
-
-    One batched `triangulate_dlt_batched` call for the whole bout rather than
-    a jit call per frame. A frame with fewer than 2 valid mask views has no
-    usable center3D and is marked not-ok (its window is skipped -> NaN output).
-    """
-    A = store.n_flies
-    pts = np.zeros((A * n_frames, len(store.cameras), 2), np.float32)
-    val = np.zeros((A * n_frames, len(store.cameras)), bool)
-    for fly in range(A):
-        for i in range(n_frames):
-            r = fly * n_frames + i
-            pts[r] = store.centroid_at(fly, t0 + i)
-            val[r] = store.valid_at(fly, t0 + i)
-    ok = val.sum(axis=1) >= 2
-    cm = np.broadcast_to(np.asarray(cam_mats, np.float32)[None], (A * n_frames,) + cam_mats.shape)
-    xyz = np.asarray(triangulate_dlt_batched(jnp.asarray(pts), jnp.asarray(cm), jnp.asarray(val)))
-    xyz = np.where((ok & np.isfinite(xyz).all(axis=1))[:, None], xyz, np.nan)
-    ok = ok & np.isfinite(xyz).all(axis=1)
-    return xyz.reshape(A, n_frames, 3), ok.reshape(A, n_frames)
 
 
 # ---------------------------------------------------------------- inference

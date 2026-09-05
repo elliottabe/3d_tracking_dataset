@@ -1,0 +1,40 @@
+# @package mvq
+# The P3a typed-slot mvq lifter (spec 2026-09-04-mvq-maskfree-frontend-design).
+#
+# Selected with `pipeline.lifter=mvq mvq=p3a`. With that pair set, run_bout.py
+# does NOT run Stages A/B (ViTPose 2D + DLT triangulation): `scripts/
+# mvq_lift_bout.py` has already written kp2d.npz/kp3d.npz into the bout dirs,
+# and Stage B's staleness check reads the `gates` string those files carry --
+# `stage_b_gate_signature` returns `mvq_gate_string(checkpoint, step,
+# exist_thresh)` here, so a run pointed at DIFFERENT weights refuses the bout
+# rather than silently reusing it.
+#
+# `checkpoint` is a `final/` dir, so `step` is null. To pin an intermediate
+# save instead, set `checkpoint` to the RUN dir and `step` to a CONCRETE int:
+# "latest" is refused by name (it names a different step every time the
+# training job saves, so a gate signature built from it would compare EQUAL to
+# a kp3d.npz produced by different weights).
+checkpoint: /gscratch/portia/eabe/data/Johnson_lab/jax_mvq_runs/mvq_t1_b16_p3a_20260904/final
+step: null
+
+# Existence threshold for a typed slot. Below it the fly's frame is NaN rather
+# than falling back to an untyped slot -- a frame reported as "the female" is
+# never quietly some other slot. Enrolled in the gate signature because it
+# decides WHICH FRAMES ARE NaN in kp3d.npz.
+exist_thresh: 0.5
+
+# Windows per forward. The 448-crop x 7-camera DINOv3-B forward is the cost
+# here; 8 fits comfortably on a 48 GB card at XLA_PYTHON_CLIENT_MEM_FRACTION
+# 0.9 alongside the mask store. NOT part of the gate signature (batching
+# cannot change the result -- short batches are padded and the padding
+# dropped).
+batch: 8
+
+# Two flies whose 3D mask centroids are within this many world units (30 ==
+# 3 mm) share ONE crop, which is the model's own two-instance case. Same rule
+# and same default as the coarse pass (coarse_centres.plan_windows).
+merge_dist_units: 30.0
+
+# null keeps the checkpoint's own attention implementation (cudnn for this
+# run). Set "xla" to run these weights on a CPU.
+attn_impl: null

@@ -8,6 +8,11 @@ defaults:
   - ik: default
   - outputs: default
   - slurm: ckpt_g2
+  # Optional group, absent by default: `mvq=p3a` selects the typed-slot mvq
+  # lifter's checkpoint/threshold block (configs/mvq/*.yaml). It is only read
+  # when `pipeline.lifter=mvq`, which is what makes Stage B's gate signature
+  # name the mvq weights instead of the DLT gates.
+  - mvq: null
 
 model: ${anatomy.model}
 bout_ids: ''      # '' = all; else comma-separated
@@ -23,6 +28,16 @@ seed: 0
 # windows across a brand-new recording without spending any GPU time on IK.
 pipeline:
   stop_after: null   # null | 'triangulate'
+  # Which code produced kp2d.npz/kp3d.npz.
+  #   'dlt' (default) -- Stage A (ViTPose 2D) + Stage B (DLT triangulation)
+  #     run here, gated by cfg.detector/masks/wing_collapse/rigid_repair.
+  #   'mvq'           -- scripts/mvq_lift_bout.py wrote both files ahead of
+  #     time from the multi-view mvq lifter's typed slots; Stages A and B are
+  #     skipped (their artifacts already exist) and stage_b_gate_signature
+  #     names the CHECKPOINT + exist_thresh instead of the DLT gates, so a
+  #     bout produced by other weights is still refused. Pair it with a
+  #     `mvq=<group>` selection, e.g. `pipeline.lifter=mvq mvq=p3a`.
+  lifter: dlt
   # Accept an existing kp3d.npz even if it was produced under different Stage-B
   # gates. Stage B's gates (view-conf, mask-agreement, wing-collapse,
   # rigid-repair) only run when kp3d.npz is (re)computed, so a resumed run with

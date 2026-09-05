@@ -111,6 +111,17 @@ HUMAN_REVIEW_METHOD = "human_id_review"      # sex_meta.method written by the
                                              # review canonicalizer
 _REVIEWED_STATUS = ("confirmed", "swapped")
 
+# `sex.json.method` written by the mvq bout lifter
+# (`jarvis_jax.tracking.lift_mvq.lift_masked_bout`). That pipeline does not
+# assign identity by slot ordering at all: fly0 IS the model's FEMALE typed
+# slot and fly1 IS its MALE typed slot, decided per frame by the network's own
+# sex head. Re-deciding such a bout from the wing-song CV could only replace a
+# per-frame model decision with a weaker whole-bout heuristic, and a swap
+# would move fly dirs whose contents are already named -- so
+# `canonicalize_bout` treats this method as authoritative (below only a HUMAN
+# review, which outranks everything).
+MVQ_SEX_METHOD = "mvq_sex_head"
+
 
 def _binary(x):
     """x if it is exactly 0 or 1 (and not a bool), else None."""
@@ -185,6 +196,29 @@ def review_from_manifest_entry(entry):
                      f"REVIEWED tree's fly dirs")
 
 
+def read_mvq_sex_json(bout_dir):
+    """The mvq lifter's own decision for this bout, or None.
+
+    Only a `sex.json` whose `method` is `MVQ_SEX_METHOD` and whose `male_fly`
+    is a usable 0/1 int counts; anything else (a heuristic sex.json this
+    module wrote on an earlier run, a hand-edited file, a missing key) returns
+    None so the normal authority chain runs unchanged.
+    """
+    path = os.path.join(str(bout_dir), "sex.json")
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path) as f:
+            doc = json.load(f)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(doc, dict) or str(doc.get("method")) != MVQ_SEX_METHOD:
+        return None
+    if _binary(doc.get("male_fly")) is None:
+        return None
+    return doc
+
+
 _SWAP_TMP = ".fly_swap_tmp"
 
 
@@ -249,7 +283,14 @@ def canonicalize_bout(bout_dir, kp_names, *, mask_sex_meta=None,
       2. `review_entry`, an id_review manifest entry -- only meaningful when
          `bout_dir` is the tree the reviewer watched (see the note above
          review_from_mask_meta);
-      3. the wing-song CV heuristic (sex_bout_from_pose).
+      3. an existing `sex.json` written by the mvq bout lifter
+         (`method == MVQ_SEX_METHOD`): its fly dirs ARE the model's typed
+         female/male slots, so there is nothing left to decide. That bout
+         short-circuits -- no wing-song CV, no swap when the male is already
+         at `male_slot`, and the file is left exactly as written (it carries
+         per-fly `sex_prob`/`exist` this function does not know how to
+         regenerate);
+      4. the wing-song CV heuristic (sex_bout_from_pose).
 
     The wing-song CV is computed either way and reported as `heuristic_male_fly`
     / `heuristic_agrees`, so a human/heuristic disagreement is visible in
@@ -257,6 +298,34 @@ def canonicalize_bout(bout_dir, kp_names, *, mask_sex_meta=None,
     the male is not already at male_slot (unless dry_run) and writes sex.json
     (unless dry_run). Idempotent. Returns the decision dict.
     """
+    # Authority 3 (see the docstring): a bout the mvq lifter already typed.
+    # Checked BEFORE the wing-song CV is computed -- not merely before it is
+    # believed -- so the short-circuit is also what makes re-canonicalizing a
+    # whole mvq run free.
+    _human = review_from_mask_meta(mask_sex_meta) or review_from_manifest_entry(review_entry)
+    _mvq = None if _human is not None else read_mvq_sex_json(bout_dir)
+    if _mvq is not None:
+        out = dict(_mvq)
+        out.setdefault("authority", MVQ_SEX_METHOD)
+        out.setdefault("applied_swap", False)
+        male = _binary(out.get("male_fly"))
+        swap = male != male_slot
+        if swap and not dry_run:
+            # Only reachable when a caller asks for the opposite convention;
+            # the lifter always writes male = fly1. Honour the mvq DECISION
+            # (which fly is the male) while moving it to the requested slot,
+            # rather than discarding it for the heuristic.
+            _swap_fly_dirs(bout_dir)
+            out.update(male_fly=male_slot, original_male_fly=male, applied_swap=True)
+            with open(os.path.join(bout_dir, "sex.json"), "w") as f:
+                json.dump(out, f, indent=2)
+        if verbose:
+            print(f"[sexing] {os.path.basename(os.path.normpath(str(bout_dir)))}: "
+                  f"authority={out['authority']} method={out.get('method')} "
+                  f"male=fly{out.get('male_fly')} swap={out['applied_swap']} "
+                  f"(mvq typed slots -- wing-song CV not run)")
+        return out
+
     kp_index = _kp_index(kp_names)
 
     def load_cv(fly):
@@ -276,9 +345,7 @@ def canonicalize_bout(bout_dir, kp_names, *, mask_sex_meta=None,
         heuristic = sex_bout_from_pose(cv0, cv1, mask_sex_meta=mask_sex_meta,
                                        ratio_thr=ratio_thr, high_ratio=high_ratio)
 
-    decision = review_from_mask_meta(mask_sex_meta)
-    if decision is None:
-        decision = review_from_manifest_entry(review_entry)
+    decision = _human                      # computed above, before the CV
     authority = "human_review" if decision is not None else "heuristic"
     if decision is None:
         decision = heuristic

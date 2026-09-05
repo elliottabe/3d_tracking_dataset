@@ -45,6 +45,8 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import time
+import warnings
 
 import jax.numpy as jnp
 import numpy as np
@@ -447,3 +449,465 @@ class MVQRunner:
         """`gates_signature` as the string stored inside kp3d.npz -- byte-equal
         to what `run_bout.py::stage_b_gate_signature` computes for this run."""
         return json.dumps(self.gates_signature(), sort_keys=True)
+
+
+# =============================================================================
+# Masked-bout lifter (Task 7): SAM3-detected bouts -> pipeline bout dirs
+# =============================================================================
+# The coarse pass (§4.3) finds its window centres with CenterDetect. A
+# courtship bout that SAM3 has already segmented has better centres for free:
+# the DLT of each fly's per-camera mask centroid. Everything downstream of the
+# centre -- the window geometry, the forward, the typed-slot read, the name
+# permutation -- is the SAME code the coarse pass uses, so the two passes
+# cannot drift apart.
+#
+# IDENTITY. The mask slots are NOT the identity here. `fly0` is the model's
+# FEMALE typed slot and `fly1` its MALE typed slot, per frame, from the sex
+# head; the masks only place the crop. That is why the lifter can write a
+# `sex.json` with `method = "mvq_sex_head"` and why `canonicalize_bout` must
+# not then re-decide the bout from the wing-song CV.
+
+MVQ_SEX_METHOD = "mvq_sex_head"      # == sexing.MVQ_SEX_METHOD (kept as a plain
+                                     # string here so this module needs no
+                                     # import of sexing, which imports nothing
+                                     # from jax and should stay that way)
+
+
+def frame_windows(centres, ok=None, *, merge_dist_units=30.0):
+    """One frame's crop windows from its per-fly 3D centres.
+
+    `centres` (A,3) world units, `ok` (A,) bool (default: the finite rows). Two
+    flies within `merge_dist_units` (30 units == 3 mm) share ONE 448-px crop --
+    the model's own two-instance case, and the same rule `coarse_track` uses
+    via `coarse_centres.plan_windows`, so the bout lifter and the coarse pass
+    never disagree about what a window is.
+
+    Returns `(window_centres (W,3) float32, assignment (A,) int)`; a fly with
+    no centre gets assignment -1 and contributes no window. A frame with no
+    centre at all yields `W == 0`: its flies are NaN, which is strictly better
+    than a window at the world origin (that would crop the arena floor and come
+    back with a confident, perfectly smooth fit of nothing).
+    """
+    from jarvis_jax.tracking.coarse_centres import plan_windows
+    c = np.array(centres, np.float32, copy=True)
+    if c.ndim != 2 or c.shape[-1] != 3:
+        raise ValueError(f"centres must be (A,3) world coordinates, got {c.shape}")
+    if ok is not None:
+        c[~np.asarray(ok, bool).reshape(-1)] = np.nan
+    return plan_windows(c, merge_dist_units=merge_dist_units)
+
+
+class BoutMaskStore:
+    """SAM3 masks for one bout, camera axis reordered BY NAME, unpacked LAZILY.
+
+    `tracking.bout_masks.load_bout_masks` unpacks the WHOLE bout eagerly:
+    (2007, 7, 448, 1936) bool is 12.2 GB for ONE fly and 24 GB for the pair,
+    which does not fit in the job's memory alongside the model. This holds the
+    packed array instead (3 GB) and unpacks one (fly, camera, frame) on demand
+    with that module's OWN `unpack_one`, permuting the camera axis with that
+    module's OWN `_camera_permutation` -- the same two functions
+    `load_bout_masks` composes, so the by-name identity guarantee is identical.
+    A legacy npz with no `cameras` name array is REFUSED rather than assumed
+    positional (that assumption is the camera-scramble bug).
+    """
+
+    def __init__(self, npz_path, cameras):
+        from jarvis_jax.tracking.bout_masks import _camera_permutation
+        z = np.load(npz_path)
+        if "cameras" not in z.files:
+            raise RuntimeError(
+                f"{npz_path} predates the `cameras` name array, so its camera axis "
+                f"cannot be verified by name -- a permutation would silently crop "
+                f"each fly out of the wrong camera. Re-run SAM3 for this bout.")
+        self.npz_cameras = [str(c) for c in np.asarray(z["cameras"]).tolist()]
+        self.cameras = [str(c) for c in cameras]
+        self.perm = _camera_permutation(self.npz_cameras, self.cameras)
+        self.packed = z["packed"]                                    # (A,C,T,H,Wb)
+        self.valid = np.asarray(z["valid"])[:, self.perm]            # (A,C,T) canonical
+        self.centroids = np.asarray(z["centroids"], np.float32)[:, self.perm]  # (A,C,T,2)
+        self.H, self.W = int(z["shape"][0]), int(z["shape"][1])
+        self.n_flies, self.T = self.packed.shape[0], self.packed.shape[2]
+
+    def valid_at(self, fly, t):
+        return np.asarray(self.valid[fly, :, t], bool)               # (C,)
+
+    def centroid_at(self, fly, t):
+        return np.asarray(self.centroids[fly, :, t], np.float64)     # (C,2)
+
+    def mask_at(self, fly, cam_i, t):
+        """(H,W) bool for canonical camera index `cam_i`."""
+        from jarvis_jax.tracking.bout_masks import unpack_one
+        return unpack_one(self.packed, fly, int(self.perm[cam_i]), t, self.W)
+
+
+def bout_centres_3d(store, cam_mats, n_frames, t0=0):
+    """(A, n_frames, 3) DLT of each fly's valid mask centroids + (A, n_frames) ok.
+
+    One batched `triangulate_dlt_batched` call for the whole bout rather than
+    a jit call per frame. A frame with fewer than 2 valid mask views has no
+    usable center3D and is marked not-ok (its window is skipped -> NaN output).
+    """
+    from jarvis_jax.geometry.center3d import triangulate_dlt_batched
+    A = store.n_flies
+    cam_mats = np.asarray(cam_mats, np.float32)
+    pts = np.zeros((A * n_frames, len(store.cameras), 2), np.float32)
+    val = np.zeros((A * n_frames, len(store.cameras)), bool)
+    for fly in range(A):
+        for i in range(n_frames):
+            r = fly * n_frames + i
+            pts[r] = store.centroid_at(fly, t0 + i)
+            val[r] = store.valid_at(fly, t0 + i)
+    ok = val.sum(axis=1) >= 2
+    cm = np.broadcast_to(cam_mats[None], (A * n_frames,) + cam_mats.shape)
+    xyz = np.asarray(triangulate_dlt_batched(jnp.asarray(pts), jnp.asarray(cm),
+                                             jnp.asarray(val)))
+    xyz = np.where((ok & np.isfinite(xyz).all(axis=1))[:, None], xyz, np.nan)
+    ok = ok & np.isfinite(xyz).all(axis=1)
+    return xyz.reshape(A, n_frames, 3), ok.reshape(A, n_frames)
+
+
+def resolve_bout_frames(session_dir, bout_idx, bouts_csv=None):
+    """(start_frame, end_frame, n_frames) for `bout_idx` from the session's bouts CSVs.
+
+    On Session0 the unified CSV is a symlink into a `Predictions_3D_*` dir that
+    no longer exists, so the per-fly CSVs (whose `fly_id` carries a `_fly<f>`
+    suffix the unified one does not) are the fallback. `bouts_csv`, when given,
+    is tried FIRST, under both key shapes. The result is cross-checked against
+    the mask npz's own frame count by the caller.
+    """
+    from jarvis_jax.predict.sam3_driver import parse_bouts, session_tag_for
+    tag = session_tag_for(str(session_dir))
+    tries = []
+    if bouts_csv:
+        tries += [(str(bouts_csv), tag)]
+        tries += [(str(bouts_csv), f"{tag}_fly{f}") for f in (0, 1)]
+    tries += [(os.path.join(session_dir, "courtship_bouts_unified_summary.csv"), tag)]
+    tries += [(os.path.join(session_dir, f"courtship_bouts_fly{f}_summary.csv"),
+               f"{tag}_fly{f}") for f in (0, 1)]
+    errs = []
+    for path, want in tries:
+        try:
+            rows = parse_bouts(path, want, bout_ids=[bout_idx])
+        except OSError as e:                                   # broken symlink / absent
+            errs.append(f"{os.path.basename(path)}: {e}")
+            continue
+        if rows:
+            r = rows[0]
+            return int(r["start"]), int(r["end"]), int(r["n"])
+        errs.append(f"{os.path.basename(path)}: no row for bout {bout_idx} / fly_id {want!r}")
+    raise KeyError(f"bout {bout_idx} not found in any bouts CSV under {session_dir}: {errs}")
+
+
+def bout_lift_is_current(out_dir, gates_string, n_flies=2):
+    """True when every `<out_dir>/fly*/kp3d.npz` exists and carries `gates_string`.
+
+    The gates string names the checkpoint and the existence threshold, so this
+    is the same staleness contract `run_bout.py`'s Stage B enforces: a bout
+    lifted by different weights is NOT current and gets re-run, while a
+    re-submitted array skips the work it already did.
+    """
+    for fly in range(int(n_flies)):
+        p = os.path.join(str(out_dir), f"fly{fly}", "kp3d.npz")
+        if not (os.path.exists(p) and os.path.getsize(p) > 0):
+            return False
+        try:
+            with np.load(p) as z:
+                if "gates" not in z.files or str(z["gates"]) != str(gates_string):
+                    return False
+        except (OSError, ValueError):
+            return False
+    return True
+
+
+def _mean_or_none(a):
+    a = np.asarray(a, np.float64)
+    a = a[np.isfinite(a)]
+    return None if a.size == 0 else float(a.mean())
+
+
+def lift_masked_bout(runner, frames_iter, centres, ok, *, out_dir, model_names,
+                     merge_dist_units=30.0, force=False, progress_every=0,
+                     meta_extra=None, mask_sex_meta=None, review_male_fly=None,
+                     verbose=True):
+    """Lift one whole bout into `<out_dir>/fly0|fly1/{kp2d,kp3d}.npz` + sex/meta.
+
+    Args:
+        runner: `MVQRunner` (or anything with the same `windows`/`infer`/
+            `read_typed`/`to_pipeline`/`gates_string` surface).
+        frames_iter: iterable of `(frames (C,H,W,3) uint8 RGB, present (C,))`
+            in the runner's CANONICAL camera order, one item per bout frame --
+            `predict.synced_reader.read_window(...)` in production.
+        centres: (A,T,3) per-fly 3D window centres in world units (the DLT of
+            the SAM3 mask centroids -- `bout_centres_3d`).
+        ok: (A,T) bool, which of those centres are usable.
+        out_dir: the BOUT directory, `<run>/bouts/bout_<idx:05d>`.
+        model_names: `cfg.model.KP_NAMES` -- the pipeline's keypoint order.
+        force: re-run a bout whose kp3d.npz already carries this gates string.
+        mask_sex_meta / review_male_fly: what the SAM3 masks / the id-review
+            manifest believe about identity. NOT used to decide anything (the
+            typed slots are the decision); recorded, and any disagreement
+            logged, in `mvq_meta.json`.
+
+    Writes, per fly (0 = FEMALE typed slot, 1 = MALE typed slot -- the
+    canonical identity `canonicalize_bout` would enforce):
+        kp2d.npz  kp2d (T,C,K,2) full-frame px, conf (T,C,K) per-view
+                  visibility, cameras (C,), kp_names (K,)
+        kp3d.npz  kp3d (T,K,3) world units, conf3d (T,K) = mean visibility
+                  over cameras, conf3d_mvq_raw (T,K), kp_names (K,), gates
+    and, per bout, `sex.json` (male_fly 1, method "mvq_sex_head") and
+    `mvq_meta.json`.
+
+    Returns a dict of the per-frame bookkeeping (in the MODEL's own keypoint
+    order, before the name permutation) plus `skipped`.
+    """
+    model_names = [str(n) for n in model_names]
+    gates_string = runner.gates_string()
+    out_dir = str(out_dir)
+    if not force and bout_lift_is_current(out_dir, gates_string):
+        if verbose:
+            print(f"[mvq-lift] skip {out_dir}: kp3d.npz already carries these gates",
+                  flush=True)
+        return {"skipped": True, "out_dir": out_dir, "gates": gates_string}
+
+    centres = np.asarray(centres, np.float32)
+    ok = np.asarray(ok, bool)
+    if centres.ndim != 3 or centres.shape[-1] != 3 or ok.shape != centres.shape[:2]:
+        raise ValueError(f"centres must be (A,T,3) and ok (A,T); got {centres.shape} "
+                         f"/ {ok.shape}")
+    T = centres.shape[1]
+    C, K, I = len(runner.cameras), runner.K, runner.I
+
+    # Row 0 is the FEMALE typed slot, row 1 the MALE one -- never a mask slot.
+    want = [SEX_FEMALE, SEX_MALE]
+    kp3d = np.full((2, T, K, 3), np.nan, np.float32)
+    kp2d = np.full((2, T, C, K, 2), np.nan, np.float32)
+    vis = np.zeros((2, T, C, K), np.float32)      # 0 => the pipeline's conf gate drops it
+    conf_raw = np.zeros((2, T, K), np.float32)
+    exist = np.full((2, T), np.nan, np.float32)
+    sex_prob = np.full((2, T), np.nan, np.float32)
+    slot = np.full((2, T), -1, np.int8)
+    window = np.full((2, T), -1, np.int8)
+    all_exist = np.full((T, I), np.nan, np.float32)   # every slot, for the meta
+    n_windows = np.zeros(T, np.int8)
+    no_centre = np.zeros(T, bool)
+
+    pend, batch, rows = [], [], 0
+    warned_drop = False
+    t_start = time.time()
+    n_seen = 0
+
+    def _flush():
+        nonlocal pend, batch, rows
+        if not pend:
+            return
+        out = runner.infer(concat_windows(batch))
+        for t, off, nb in pend:
+            all_exist[t] = out["exist"][off]
+            for fi, want_sex in enumerate(want):
+                best, best_b = None, -1
+                for b in range(off, off + nb):
+                    r = runner.read_typed(out, b, want_sex=want_sex)
+                    # More than one window can host the same typed slot (two
+                    # crops, each containing part of the pair); take the most
+                    # confident, never the first, so a near-empty window
+                    # cannot claim the fly.
+                    if r is not None and (best is None or r["exist"] > best["exist"]):
+                        best, best_b = r, b
+                if best is None:
+                    continue                       # below exist_thresh -> NaN frame
+                kp3d[fi, t] = best["kp3d"]
+                kp2d[fi, t] = best["kp2d"]
+                vis[fi, t] = best["vis"]
+                conf_raw[fi, t] = best["conf_raw"]
+                exist[fi, t] = best["exist"]
+                sex_prob[fi, t] = best["sex_prob"]
+                slot[fi, t] = best["slot"]
+                window[fi, t] = best_b - off
+        pend, batch, rows = [], [], 0
+
+    for t, (frames, present) in enumerate(frames_iter):
+        if t >= T:
+            raise ValueError(f"frames_iter yielded more than the {T} frames the centres "
+                             f"describe -- the mask npz and the video read must cover "
+                             f"the SAME bout frames")
+        wc, _assign = frame_windows(centres[:, t], ok[:, t],
+                                    merge_dist_units=merge_dist_units)
+        n_seen = t + 1
+        if wc.shape[0] == 0:
+            no_centre[t] = True
+            continue
+        if wc.shape[0] > runner.batch:
+            if not warned_drop:
+                warnings.warn(
+                    f"lift_masked_bout: frame {t} planned {wc.shape[0]} windows but "
+                    f"runner.batch={runner.batch}; dropping "
+                    f"{wc.shape[0] - runner.batch} window(s) (only the first "
+                    f"offending frame is reported)", RuntimeWarning, stacklevel=2)
+                warned_drop = True
+            wc = wc[:runner.batch]
+        if rows + wc.shape[0] > runner.batch:
+            _flush()
+        batch.append(runner.windows(frames, present, wc))
+        pend.append((t, rows, int(wc.shape[0])))
+        rows += int(wc.shape[0])
+        n_windows[t] = int(wc.shape[0])
+        if progress_every and (t + 1) % int(progress_every) == 0:
+            el = time.time() - t_start
+            print(f"[mvq-lift] frame {t + 1}/{T}  "
+                  f"{(t + 1) / max(el, 1e-9):.1f} frames/s", flush=True)
+    _flush()
+    if n_seen != T:
+        raise ValueError(f"frames_iter yielded {n_seen} frames but the centres describe "
+                         f"{T}; kp3d.npz must have exactly the masks' T or every "
+                         f"downstream stage silently mis-indexes time")
+
+    # ---- write the pipeline artifacts, keypoint axis permuted BY NAME
+    from jarvis_jax.tracking.resume import atomic_save_json, atomic_save_npz
+    os.makedirs(out_dir, exist_ok=True)
+    n_missing = {}
+    for fly in (0, 1):
+        p = runner.to_pipeline(kp3d[fly], kp2d[fly], vis[fly], conf_raw[fly], model_names)
+        if list(p["kp_names"]) != model_names:
+            raise RuntimeError(
+                f"to_pipeline returned keypoint order {list(p['kp_names'])[:4]}... which "
+                f"is not cfg.model.KP_NAMES -- the pipeline would read every landmark as "
+                f"a different body part")
+        _check_eye_invariant(kp3d[fly], p["kp3d"], runner.kp_names, model_names)
+        d = os.path.join(out_dir, f"fly{fly}")
+        os.makedirs(d, exist_ok=True)
+        atomic_save_npz(os.path.join(d, "kp2d.npz"), kp2d=p["kp2d"], conf=p["conf"],
+                        cameras=p["cameras"], kp_names=p["kp_names"])
+        atomic_save_npz(os.path.join(d, "kp3d.npz"), kp3d=p["kp3d"], conf3d=p["conf3d"],
+                        conf3d_mvq_raw=p["conf3d_mvq_raw"], kp_names=p["kp_names"],
+                        gates=np.asarray(gates_string))
+        n_missing[f"fly{fly}"] = int((slot[fly] < 0).sum())
+
+    sex = _mvq_sex_json(sex_prob, exist, n_missing, T, mask_sex_meta)
+    atomic_save_json(os.path.join(out_dir, "sex.json"), sex)
+
+    disagree = _identity_disagreements(sex, mask_sex_meta, review_male_fly)
+    for msg in disagree:
+        print(f"[mvq-lift] identity NOTE: {msg}", flush=True)
+    meta = {
+        "checkpoint": runner.checkpoint,
+        "step": runner.step_label,
+        "gates": runner.gates_signature(),
+        "exist_thresh": float(runner.exist_thresh),
+        "merge_dist_units": float(merge_dist_units),
+        "cameras": list(runner.cameras),
+        "keypoint_names_mvq": list(runner.kp_names),
+        "keypoint_names_written": model_names,
+        "fly_slots": {"fly0": int(SLOT_FEMALE), "fly1": int(SLOT_MALE)},
+        "fly_sex": {"fly0": "female", "fly1": "male"},
+        "n_frames": int(T),
+        "n_missing": n_missing,
+        "n_no_centre": int(no_centre.sum()),
+        "mask_sex_meta": mask_sex_meta,
+        "review_male_fly": review_male_fly,
+        "identity_disagreements": disagree,
+        "per_frame": {
+            "n_windows": n_windows.astype(int).tolist(),
+            "no_centre": no_centre.astype(int).tolist(),
+            "slot": slot.astype(int).tolist(),
+            "window": window.astype(int).tolist(),
+            "exist": np.round(np.nan_to_num(exist, nan=-1.0), 4).tolist(),
+            "sex_prob": np.round(np.nan_to_num(sex_prob, nan=-1.0), 4).tolist(),
+            "exist_all_slots": np.round(np.nan_to_num(all_exist, nan=-1.0), 4).tolist(),
+        },
+    }
+    meta.update(meta_extra or {})
+    atomic_save_json(os.path.join(out_dir, "mvq_meta.json"), meta)
+    if verbose:
+        el = time.time() - t_start
+        print(f"[mvq-lift] {out_dir}: {T} frames, missing {n_missing}, "
+              f"{int(no_centre.sum())} with no mask centre, "
+              f"{T / max(el, 1e-9):.1f} frames/s", flush=True)
+    return {"skipped": False, "out_dir": out_dir, "gates": gates_string,
+            "kp3d_mvq": kp3d, "kp2d_mvq": kp2d, "vis": vis, "conf_raw": conf_raw,
+            "exist": exist, "sex_prob": sex_prob, "slot": slot, "window": window,
+            "no_centre": no_centre, "n_windows": n_windows,
+            "n_missing": n_missing, "sex": sex, "meta": meta}
+
+
+def _check_eye_invariant(kp3d_mvq, kp3d_model, mvq_names, model_names):
+    """EyeL-EyeR spacing is a RIGID head landmark pair: a by-name permutation
+    cannot change it, and a by-index one almost certainly does. Cheap, and it
+    is the check that would have caught the keypoint-order bug in CLAUDE.md."""
+    if not ({"EyeL", "EyeR"} <= set(mvq_names) and {"EyeL", "EyeR"} <= set(model_names)):
+        return
+    iL, iR = mvq_names.index("EyeL"), mvq_names.index("EyeR")
+    jL, jR = model_names.index("EyeL"), model_names.index("EyeR")
+    d0 = np.nan_to_num(np.linalg.norm(kp3d_mvq[:, iL] - kp3d_mvq[:, iR], axis=-1))
+    d1 = np.nan_to_num(np.linalg.norm(kp3d_model[:, jL] - kp3d_model[:, jR], axis=-1))
+    if not np.allclose(d0, d1, atol=1e-4):
+        bad = int(np.argmax(np.abs(d0 - d1)))
+        raise RuntimeError(
+            f"EyeL-EyeR distance moved through the keypoint permutation "
+            f"({d0[bad]:.4f} -> {d1[bad]:.4f} units at frame {bad}); the written "
+            f"kp3d.npz is NOT the same anatomy in a different order")
+
+
+def _mvq_sex_json(sex_prob, exist, n_missing, T, mask_sex_meta):
+    """`sex.json` in `sexing.canonicalize_bout`'s schema, decided by the typed slots.
+
+    Every key that function writes is present (its consumers -- notably
+    `estimate_recording_scale._determine_identity`, which is what lets
+    scale.json carry a per-fly body size -- read this file), plus the mvq
+    evidence the heuristic fields have no room for.
+    """
+    pf = {f"fly{f}": _mean_or_none(sex_prob[f]) for f in (0, 1)}
+    ex = {f"fly{f}": _mean_or_none(exist[f]) for f in (0, 1)}
+    # The sex HEAD agreeing with the slot TYPING is the confidence signal: the
+    # female slot should read P(female) > 0.5 and the male slot < 0.5. When it
+    # does not, the identity is still the slot's (that is what was trained),
+    # but the disagreement is recorded rather than smoothed over.
+    agree = (pf["fly0"] is not None and pf["fly1"] is not None
+             and pf["fly0"] > 0.5 > pf["fly1"])
+    return {
+        "male_fly": 1,
+        "original_male_fly": 1,
+        "applied_swap": False,
+        "confidence": "high" if agree else "low",
+        "method": MVQ_SEX_METHOD,
+        "authority": MVQ_SEX_METHOD,
+        "heuristic_male_fly": None,
+        "heuristic_method": "not_run (mvq typed slots)",
+        "heuristic_agrees": None,
+        "review_file": None,
+        "review_reviewed_at": None,
+        "wing_cv_original": {"fly0": None, "fly1": None},
+        "cv_ratio": None,
+        "mask_song_cv": (mask_sex_meta or {}).get("song_cv"),
+        "note": ("fly0 = the mvq FEMALE typed slot, fly1 = the mvq MALE typed slot "
+                 "(models/mvq typed decoder, slots 1/2); identity is per-frame from "
+                 "the model, not from mask slot order or a wing-song CV"),
+        # --- mvq evidence (beyond canonicalize_bout's schema)
+        "sex_prob": pf,                     # mean P(female) of each written fly
+        "exist": ex,                        # mean existence of each written fly
+        "n_frames": int(T),
+        "n_missing": dict(n_missing),
+    }
+
+
+def _identity_disagreements(sex, mask_sex_meta, review_male_fly):
+    """Human-readable notes where another identity source disagrees with the
+    typed slots. Logged, never fatal -- the mask/manifest slot order does not
+    determine anything on this route, so a mismatch is information, not an
+    error."""
+    out = []
+    if sex["confidence"] != "high":
+        out.append(
+            f"the mvq sex head does not separate the typed slots: mean P(female) "
+            f"fly0={sex['sex_prob']['fly0']}, fly1={sex['sex_prob']['fly1']} "
+            f"(expected fly0 > 0.5 > fly1)")
+    ms = mask_sex_meta or {}
+    if ms.get("male_slot") is not None and int(ms["male_slot"]) != 1:
+        out.append(
+            f"the SAM3 masks' sex_meta says male = mask slot {ms['male_slot']} "
+            f"(method {ms.get('method')!r}); the mvq route reads TYPED slots, so "
+            f"fly1 is the male regardless of mask slot order")
+    if review_male_fly is not None and int(review_male_fly) != 1:
+        out.append(
+            f"the id-review manifest says male = fly{review_male_fly} in the tree the "
+            f"reviewer watched; this run's fly1 is the mvq male typed slot")
+    return out
