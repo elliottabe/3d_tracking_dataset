@@ -1,0 +1,641 @@
+{
+ "bouts": [
+  {
+   "bout": 1,
+   "T": 513,
+   "jump_before": 0.04483430799220273,
+   "jump_after": 0.007797270955165692,
+   "strad_before": 0.001949317738791423,
+   "strad_after": 0.001949317738791423,
+   "drop_fly0": 0.07693548387096774,
+   "drop_fly1": 0.07711500974658869,
+   "n_other_mask": {
+    "fly0": 123,
+    "fly1": 1686
+   },
+   "n_spike": {
+    "fly0": 354,
+    "fly1": 292
+   },
+   "n_frames_testable": 513,
+   "seconds": 0.91
+  },
+  {
+   "bout": 2,
+   "T": 568,
+   "jump_before": 0.017605633802816902,
+   "jump_after": 0.017605633802816902,
+   "strad_before": 0.00528169014084507,
+   "strad_after": 0.0,
+   "drop_fly0": 0.05178861788617886,
+   "drop_fly1": 0.005669014084507042,
+   "n_other_mask": {
+    "fly0": 179,
+    "fly1": 98
+   },
+   "n_spike": {
+    "fly0": 1095,
+    "fly1": 63
+   },
+   "n_frames_testable": 479,
+   "seconds": 0.99
+  },
+  {
+   "bout": 3,
+   "T": 1089,
+   "jump_before": 0.013774104683195593,
+   "jump_after": 0.006427915518824609,
+   "strad_before": 0.013774104683195593,
+   "strad_after": 0.011937557392102846,
+   "drop_fly0": 0.006823289070480082,
+   "drop_fly1": 0.006850321395775941,
+   "n_other_mask": {
+    "fly0": 200,
+    "fly1": 235
+   },
+   "n_spike": {
+    "fly0": 134,
+    "fly1": 138
+   },
+   "n_frames_testable": 1089,
+   "seconds": 2.33
+  },
+  {
+   "bout": 4,
+   "T": 394,
+   "jump_before": 0.027918781725888325,
+   "jump_after": 0.005076142131979695,
+   "strad_before": 0.2639593908629442,
+   "strad_after": 0.03553299492385787,
+   "drop_fly0": 0.27862745098039216,
+   "drop_fly1": 0.03892307692307692,
+   "n_other_mask": {
+    "fly0": 2206,
+    "fly1": 610
+   },
+   "n_spike": {
+    "fly0": 636,
+    "fly1": 149
+   },
+   "n_frames_testable": 394,
+   "seconds": 0.63
+  },
+  {
+   "bout": 5,
+   "T": 789,
+   "jump_before": 0.011406844106463879,
+   "jump_after": 0.0,
+   "strad_before": 0.022813688212927757,
+   "strad_after": 0.022813688212927757,
+   "drop_fly0": 0.06302233902759527,
+   "drop_fly1": 0.031002949852507376,
+   "n_other_mask": {
+    "fly0": 1588,
+    "fly1": 964
+   },
+   "n_spike": {
+    "fly0": 810,
+    "fly1": 87
+   },
+   "n_frames_testable": 789,
+   "seconds": 1.62
+  },
+  {
+   "bout": 6,
+   "T": 1055,
+   "jump_before": 0.007582938388625593,
+   "jump_after": 0.004739336492890996,
+   "strad_before": 0.0,
+   "strad_after": 0.0,
+   "drop_fly0": 0.023406698564593303,
+   "drop_fly1": 0.0018957345971563982,
+   "n_other_mask": {
+    "fly0": 30,
+    "fly1": 0
+   },
+   "n_spike": {
+    "fly0": 1193,
+    "fly1": 100
+   },
+   "n_frames_testable": 1055,
+   "seconds": 2.18
+  },
+  {
+   "bout": 7,
+   "T": 1126,
+   "jump_before": 0.0017761989342806395,
+   "jump_after": 0.0,
+   "strad_before": 0.0,
+   "strad_after": 0.0,
+   "drop_fly0": 0.0005192307692307692,
+   "drop_fly1": 0.0014209591474245115,
+   "n_other_mask": {
+    "fly0": 0,
+    "fly1": 37
+   },
+   "n_spike": {
+    "fly0": 27,
+    "fly1": 43
+   },
+   "n_frames_testable": 1126,
+   "seconds": 2.37
+  },
+  {
+   "bout": 8,
+   "T": 754,
+   "jump_before": 0.034482758620689655,
+   "jump_after": 0.034482758620689655,
+   "strad_before": 0.0,
+   "strad_after": 0.0,
+   "drop_fly0": 0.013766233766233767,
+   "drop_fly1": 0.004907161803713528,
+   "n_other_mask": {
+    "fly0": 1,
+    "fly1": 0
+   },
+   "n_spike": {
+    "fly0": 52,
+    "fly1": 185
+   },
+   "n_frames_testable": 754,
+   "seconds": 0.71
+  },
+  {
+   "bout": 9,
+   "T": 939,
+   "jump_before": 0.011714589989350373,
+   "jump_after": 0.008519701810436636,
+   "strad_before": 0.0,
+   "strad_after": 0.0,
+   "drop_fly0": 0.030086526576019776,
+   "drop_fly1": 0.003812566560170394,
+   "n_other_mask": {
+    "fly0": 9,
+    "fly1": 142
+   },
+   "n_spike": {
+    "fly0": 1208,
+    "fly1": 37
+   },
+   "n_frames_testable": 939,
+   "seconds": 1.95
+  },
+  {
+   "bout": 10,
+   "T": 1741,
+   "jump_before": 0.049971280873061456,
+   "jump_after": 0.005743825387708214,
+   "strad_before": 0.11717403790924756,
+   "strad_after": 0.07696726019529006,
+   "drop_fly0": 0.07992544268406337,
+   "drop_fly1": 0.08914655679811653,
+   "n_other_mask": {
+    "fly0": 3483,
+    "fly1": 6816
+   },
+   "n_spike": {
+    "fly0": 805,
+    "fly1": 757
+   },
+   "n_frames_testable": 1741,
+   "seconds": 3.35
+  },
+  {
+   "bout": 11,
+   "T": 655,
+   "jump_before": 0.0,
+   "jump_after": 0.0,
+   "strad_before": 0.0,
+   "strad_after": 0.0,
+   "drop_fly0": 0.002021772939346812,
+   "drop_fly1": 0.000732824427480916,
+   "n_other_mask": {
+    "fly0": 1,
+    "fly1": 0
+   },
+   "n_spike": {
+    "fly0": 64,
+    "fly1": 24
+   },
+   "n_frames_testable": 655,
+   "seconds": 1.4
+  },
+  {
+   "bout": 12,
+   "T": 1025,
+   "jump_before": 0.0,
+   "jump_after": 0.0,
+   "strad_before": 0.018536585365853658,
+   "strad_after": 0.000975609756097561,
+   "drop_fly0": 0.09714285714285714,
+   "drop_fly1": 0.00011707317073170732,
+   "n_other_mask": {
+    "fly0": 1597,
+    "fly1": 0
+   },
+   "n_spike": {
+    "fly0": 1531,
+    "fly1": 6
+   },
+   "n_frames_testable": 1025,
+   "seconds": 1.69
+  },
+  {
+   "bout": 13,
+   "T": 935,
+   "jump_before": 0.0,
+   "jump_after": 0.0,
+   "strad_before": 0.0,
+   "strad_after": 0.0,
+   "drop_fly0": 0.07675033025099075,
+   "drop_fly1": 0.00017112299465240642,
+   "n_other_mask": {
+    "fly0": 0,
+    "fly1": 0
+   },
+   "n_spike": {
+    "fly0": 2905,
+    "fly1": 8
+   },
+   "n_frames_testable": 740,
+   "seconds": 1.18
+  },
+  {
+   "bout": 14,
+   "T": 1174,
+   "jump_before": 0.0,
+   "jump_after": 0.0,
+   "strad_before": 0.0017035775127768314,
+   "strad_after": 0.0,
+   "drop_fly0": 0.11904347826086957,
+   "drop_fly1": 6.814310051107325e-05,
+   "n_other_mask": {
+    "fly0": 2442,
+    "fly1": 0
+   },
+   "n_spike": {
+    "fly0": 1665,
+    "fly1": 4
+   },
+   "n_frames_testable": 1174,
+   "seconds": 1.92
+  },
+  {
+   "bout": 15,
+   "T": 546,
+   "jump_before": 0.0,
+   "jump_after": 0.0,
+   "strad_before": 0.0,
+   "strad_after": 0.0,
+   "drop_fly0": 0.11591397849462366,
+   "drop_fly1": 0.00029304029304029304,
+   "n_other_mask": {
+    "fly0": 0,
+    "fly1": 0
+   },
+   "n_spike": {
+    "fly0": 2695,
+    "fly1": 8
+   },
+   "n_frames_testable": 164,
+   "seconds": 0.23
+  },
+  {
+   "bout": 16,
+   "T": 1413,
+   "jump_before": 0.047416843595187545,
+   "jump_after": 0.019815994338287332,
+   "strad_before": 0.01840056617126681,
+   "strad_after": 0.013446567586694975,
+   "drop_fly0": 0.027477203647416414,
+   "drop_fly1": 0.042179759377211606,
+   "n_other_mask": {
+    "fly0": 222,
+    "fly1": 2330
+   },
+   "n_spike": {
+    "fly0": 682,
+    "fly1": 650
+   },
+   "n_frames_testable": 1413,
+   "seconds": 2.56
+  },
+  {
+   "bout": 17,
+   "T": 821,
+   "jump_before": 0.007308160779537149,
+   "jump_after": 0.007308160779537149,
+   "strad_before": 0.0,
+   "strad_after": 0.0,
+   "drop_fly0": 0.000925700365408039,
+   "drop_fly1": 0.0004141291108404385,
+   "n_other_mask": {
+    "fly0": 0,
+    "fly1": 0
+   },
+   "n_spike": {
+    "fly0": 38,
+    "fly1": 17
+   },
+   "n_frames_testable": 821,
+   "seconds": 1.78
+  },
+  {
+   "bout": 18,
+   "T": 963,
+   "jump_before": 0.003115264797507788,
+   "jump_after": 0.0010384215991692627,
+   "strad_before": 0.0,
+   "strad_after": 0.0,
+   "drop_fly0": 0.011959064327485381,
+   "drop_fly1": 0.0007684319833852544,
+   "n_other_mask": {
+    "fly0": 74,
+    "fly1": 1
+   },
+   "n_spike": {
+    "fly0": 335,
+    "fly1": 36
+   },
+   "n_frames_testable": 963,
+   "seconds": 1.92
+  },
+  {
+   "bout": 19,
+   "T": 395,
+   "jump_before": 0.07088607594936709,
+   "jump_after": 0.06835443037974684,
+   "strad_before": 0.0,
+   "strad_after": 0.0,
+   "drop_fly0": 0.0934375,
+   "drop_fly1": 0.002481012658227848,
+   "n_other_mask": {
+    "fly0": 1,
+    "fly1": 0
+   },
+   "n_spike": {
+    "fly0": 298,
+    "fly1": 49
+   },
+   "n_frames_testable": 390,
+   "seconds": 0.37
+  },
+  {
+   "bout": 20,
+   "T": 1160,
+   "jump_before": 0.005172413793103448,
+   "jump_after": 0.005172413793103448,
+   "strad_before": 0.0,
+   "strad_after": 0.0,
+   "drop_fly0": 0.02205704407951599,
+   "drop_fly1": 0.0003448275862068965,
+   "n_other_mask": {
+    "fly0": 30,
+    "fly1": 0
+   },
+   "n_spike": {
+    "fly0": 1246,
+    "fly1": 20
+   },
+   "n_frames_testable": 1160,
+   "seconds": 2.6
+  },
+  {
+   "bout": 21,
+   "T": 935,
+   "jump_before": 0.012834224598930482,
+   "jump_after": 0.012834224598930482,
+   "strad_before": 0.011764705882352941,
+   "strad_after": 0.0,
+   "drop_fly0": 0.1011371237458194,
+   "drop_fly1": 0.0014331550802139036,
+   "n_other_mask": {
+    "fly0": 2273,
+    "fly1": 0
+   },
+   "n_spike": {
+    "fly0": 2263,
+    "fly1": 67
+   },
+   "n_frames_testable": 935,
+   "seconds": 1.96
+  },
+  {
+   "bout": 22,
+   "T": 1393,
+   "jump_before": 0.0,
+   "jump_after": 0.0,
+   "strad_before": 0.0007178750897343862,
+   "strad_after": 0.0007178750897343862,
+   "drop_fly0": 0.08967634854771785,
+   "drop_fly1": 0.00025843503230437906,
+   "n_other_mask": {
+    "fly0": 0,
+    "fly1": 0
+   },
+   "n_spike": {
+    "fly0": 5403,
+    "fly1": 18
+   },
+   "n_frames_testable": 0,
+   "seconds": 0.02
+  },
+  {
+   "bout": 23,
+   "T": 665,
+   "jump_before": 0.0,
+   "jump_after": 0.0,
+   "strad_before": 0.0,
+   "strad_after": 0.0,
+   "drop_fly0": 0.029228441754916793,
+   "drop_fly1": 0.00018045112781954887,
+   "n_other_mask": {
+    "fly0": 0,
+    "fly1": 0
+   },
+   "n_spike": {
+    "fly0": 966,
+    "fly1": 6
+   },
+   "n_frames_testable": 611,
+   "seconds": 1.17
+  },
+  {
+   "bout": 24,
+   "T": 823,
+   "jump_before": 0.0,
+   "jump_after": 0.0,
+   "strad_before": 0.0,
+   "strad_after": 0.0,
+   "drop_fly0": 5.5401662049861494e-05,
+   "drop_fly1": 0.00014580801944106926,
+   "n_other_mask": {
+    "fly0": 0,
+    "fly1": 0
+   },
+   "n_spike": {
+    "fly0": 2,
+    "fly1": 6
+   },
+   "n_frames_testable": 823,
+   "seconds": 1.74
+  },
+  {
+   "bout": 25,
+   "T": 429,
+   "jump_before": 0.0,
+   "jump_after": 0.0,
+   "strad_before": 0.002331002331002331,
+   "strad_after": 0.0,
+   "drop_fly0": 0.01958702064896755,
+   "drop_fly1": 0.00037296037296037296,
+   "n_other_mask": {
+    "fly0": 59,
+    "fly1": 0
+   },
+   "n_spike": {
+    "fly0": 273,
+    "fly1": 8
+   },
+   "n_frames_testable": 429,
+   "seconds": 0.87
+  },
+  {
+   "bout": 26,
+   "T": 748,
+   "jump_before": 0.02406417112299465,
+   "jump_after": 0.02406417112299465,
+   "strad_before": 0.004010695187165776,
+   "strad_after": 0.004010695187165776,
+   "drop_fly0": 0.0948491879350348,
+   "drop_fly1": 0.004358288770053476,
+   "n_other_mask": {
+    "fly0": 57,
+    "fly1": 0
+   },
+   "n_spike": {
+    "fly0": 1987,
+    "fly1": 163
+   },
+   "n_frames_testable": 717,
+   "seconds": 0.63
+  },
+  {
+   "bout": 27,
+   "T": 1580,
+   "jump_before": 0.0,
+   "jump_after": 0.0,
+   "strad_before": 0.0,
+   "strad_after": 0.0,
+   "drop_fly0": 0.04578374920025592,
+   "drop_fly1": 0.00017721518987341773,
+   "n_other_mask": {
+    "fly0": 518,
+    "fly1": 0
+   },
+   "n_spike": {
+    "fly0": 3060,
+    "fly1": 14
+   },
+   "n_frames_testable": 1068,
+   "seconds": 2.24
+  },
+  {
+   "bout": 28,
+   "T": 2007,
+   "jump_before": 0.0,
+   "jump_after": 0.0,
+   "strad_before": 0.0004982561036372695,
+   "strad_after": 0.0004982561036372695,
+   "drop_fly0": 0.009790605546123373,
+   "drop_fly1": 7.972097658196313e-05,
+   "n_other_mask": {
+    "fly0": 343,
+    "fly1": 0
+   },
+   "n_spike": {
+    "fly0": 522,
+    "fly1": 8
+   },
+   "n_frames_testable": 2007,
+   "seconds": 3.91
+  },
+  {
+   "bout": 29,
+   "T": 514,
+   "jump_before": 0.007782101167315175,
+   "jump_after": 0.0038910505836575876,
+   "strad_before": 0.11284046692607004,
+   "strad_after": 0.007782101167315175,
+   "drop_fly0": 0.15097560975609756,
+   "drop_fly1": 0.0046502057613168725,
+   "n_other_mask": {
+    "fly0": 2424,
+    "fly1": 89
+   },
+   "n_spike": {
+    "fly0": 671,
+    "fly1": 24
+   },
+   "n_frames_testable": 514,
+   "seconds": 1.01
+  },
+  {
+   "bout": 30,
+   "T": 1298,
+   "jump_before": 0.03466872110939907,
+   "jump_after": 0.00847457627118644,
+   "strad_before": 0.004622496147919877,
+   "strad_after": 0.0030816640986132513,
+   "drop_fly0": 0.009206349206349206,
+   "drop_fly1": 0.023235747303543913,
+   "n_other_mask": {
+    "fly0": 294,
+    "fly1": 1220
+   },
+   "n_spike": {
+    "fly0": 83,
+    "fly1": 288
+   },
+   "n_frames_testable": 1298,
+   "seconds": 2.51
+  }
+ ],
+ "n_frames": 28447,
+ "pose_jump_before": 0.013744858860336766,
+ "pose_jump_after": 0.00643301578373818,
+ "straddle_before": 0.0166274123809189,
+ "straddle_after": 0.007487608535170668,
+ "frac_dropped": {
+  "fly0": 0.046504249806826964,
+  "fly1": 0.01238624301181799
+ },
+ "by_group": {
+  "head": {
+   "dropped": 1473,
+   "finite": 84786,
+   "frac": 0.01737315122779704
+  },
+  "thorax": {
+   "dropped": 2709,
+   "finite": 197834,
+   "frac": 0.013693298421909278
+  },
+  "abdomen": {
+   "dropped": 22,
+   "finite": 56524,
+   "frac": 0.0003892152006227443
+  },
+  "legs": {
+   "dropped": 13299,
+   "finite": 1073956,
+   "frac": 0.012383188882970996
+  }
+ },
+ "seconds": 48.78,
+ "thresholds": {
+  "min_views": 3,
+  "own_margin_px": 6.0,
+  "max_step_units": 5.0
+ }
+}

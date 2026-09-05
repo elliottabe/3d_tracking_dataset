@@ -194,6 +194,10 @@ def build_mvq_lift_array_script(
     identity: str = "mask",
     mask_assign_margin_units: float = 8.0,
     mask_assign_max_units: float = 60.0,
+    containment: str = "on",
+    containment_min_views: int = 3,
+    containment_own_margin_px: float = 6.0,
+    containment_max_step_units: float = 5.0,
     anatomy_cfg: str = "configs/anatomy/v1.yaml",
     recording_cfg: str = "configs/recording/session0.yaml",
     bouts_csv: str = "",
@@ -258,6 +262,10 @@ PYTHONPATH=third_party/jarvis_jax:. python -u scripts/mvq_lift_bout.py \\
     --merge-dist-units {merge_dist_units} \\
     --identity {identity} --mask-assign-margin-units {mask_assign_margin_units} \\
     --mask-assign-max-units {mask_assign_max_units} \\
+    --containment {containment} \\
+    --containment-min-views {containment_min_views} \\
+    --containment-own-margin-px {containment_own_margin_px} \\
+    --containment-max-step-units {containment_max_step_units} \\
     --anatomy {anatomy_cfg} --recording-cfg {recording_cfg}{csv_arg}
 """
 
@@ -689,7 +697,8 @@ def main():
             _id, _ = resolve_mask_identity(mv.get("identity"), _sm)
             return mvq_gate_string(str(mv["checkpoint"]), step=mv.get("step"),
                                    exist_thresh=float(mv.get("exist_thresh", 0.5)),
-                                   identity=_id)
+                                   identity=_id,
+                                   containment=mv.get("containment"))
 
         _not_current = [i for i in idxs
                         if not bout_lift_is_current(
@@ -706,6 +715,9 @@ def main():
             print(f"\nmvq lift: skipped ({len(idxs)} bouts already lifted under "
                   f"{run_root})")
     elif args.lifter == 'mvq':
+        sys.path.insert(0, str(PKG_DIR))
+        from jarvis_jax.tracking.lift_mvq import (
+            resolved_containment as _resolved_containment)
         mv = cfg.get("mvq") or {}
         if not mv.get("checkpoint"):
             print(f"Error: --lifter mvq needs mvq.checkpoint; configs/mvq/"
@@ -724,6 +736,12 @@ def main():
             identity=str(mv.get("identity", "mask")),
             mask_assign_margin_units=float(mv.get("mask_assign_margin_units", 8.0)),
             mask_assign_max_units=float(mv.get("mask_assign_max_units", 60.0)),
+            # `resolved_containment` because a YAML `containment: on` is the
+            # BOOLEAN True (PyYAML 1.1), and the CLI takes the string.
+            containment=("on" if _resolved_containment(mv.get("containment")) else "off"),
+            containment_min_views=int(mv.get("containment_min_views", 3)),
+            containment_own_margin_px=float(mv.get("containment_own_margin_px", 6.0)),
+            containment_max_step_units=float(mv.get("containment_max_step_units", 5.0)),
             anatomy_cfg=f"configs/anatomy/{cfg.anatomy.name}.yaml",
             recording_cfg=f"configs/recording/{str(name).lower()}.yaml",
             bouts_csv=str(cfg.recording.get("bouts_csv", "") or ""),

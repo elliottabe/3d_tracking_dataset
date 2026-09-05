@@ -1194,3 +1194,141 @@ Honest caveat from the same read-back: within her body the keypoints are biased 
 identical in v1 and new -- it is this detector's known weakness on the female in an oblique
 wall pose, not something either identity rule changed. Crops kept beside the figure as
 `identity_mask_bout8_round2_zoom_v1.png` / `_zoom_new.png`.
+
+---
+
+## Mask-containment filter (Task 9, 2026-09-05)
+
+Per-keypoint filter in the masked-bout mvq lifter
+(`jarvis_jax.tracking.lift_mvq.mask_containment_filter`), applied inside
+`lift_masked_bout` **after** the identity assignment and **before** the write,
+under the same condition as `identity=mask` (the masks carry a human id
+review). CLI `--containment {on,off}` (default `on`), config
+`configs/mvq/p3a.yaml: containment: "on"`, and `containment` is now part of
+`mvq_gate_signature` -- so every lift produced before this change reads as
+**not current** and is re-lifted.
+
+### The defect it targets
+
+Identity is decided per FRAME (`pick_mask_pair`) and the collapse guard is a
+per-frame test, so neither can see what is left: in contact frames the male
+instance absorbs PART of the female's body. Measured on the 30-bout r2 lift of
+`2025_10_20_13_20_04`: 1.4 % of frames have >= 5 male keypoints stepping
+> 0.5 mm in one frame, 1.7 % have >= 5 male keypoints nearer her centroid than
+his, and **264 of the 391 pose-jump frames have her slot NaN** -- her mask is
+fine, her keypoints are not, and his wander onto her. Bout 1 frame 364 puts 17
+male keypoints (T1 legs, trochanters) on the female; bout 3 frame 56 puts 26.
+The instance is mostly correct, so NaN-ing the frame would throw away a good
+male: the fix has to be per keypoint.
+
+### Rules and thresholds
+
+1. **Containment.** In every camera where BOTH flies' masks are valid, the 3D
+   keypoint is reprojected and tested against the other fly's mask (as-is) and
+   its own **dilated by `own_margin`**. "On the other fly" = inside the other
+   AND outside its own, in >= `min_views` of those cameras -> NaN in kp3d, in
+   kp2d in every view, and in conf. Being outside its OWN mask is *never* on
+   its own a reason to drop -- legs extend past a SAM mask and occluded parts
+   project outside it -- and the own-mask dilation errs in the same
+   keep-the-keypoint direction.
+2. **Temporal.** A frame-to-frame step > `max_step_units` makes the keypoint
+   SUSPECT in **both** frames of the pair; it is dropped only if it also fails
+   rule 1 at either end (so the frame it jumped *off* is cleaned too) or the
+   step exceeds `2 * max_step_units` -- a pure spike. Steps are measured on the
+   INPUT track, before rule 1 NaNs anything.
+
+| threshold | default | why |
+|---|---|---|
+| `min_views` | 3 | of 7 cameras; on 20_04 3-7 have both masks valid, and no single bad SAM mask can reach 3 |
+| `own_margin` | 6 px | SAM's fly masks sit ~2-5 px inside the silhouette; a tarsus one leg segment past the edge must not read as "outside its own" |
+| `max_step_units` | 5 (0.5 mm / (1/800 s)) | 400 mm/s for ONE landmark; no fly part does this |
+
+Thresholds live in `mvq_meta.json`, **not** in the gate signature (re-tuning
+one must not charge a 12-minute STAC re-solve per bout-fly -- the same choice
+already made for `collapse_dist_units`). `mvq_meta.json` gains
+`containment`, the three thresholds, and `containment_report` with per-fly
+`n_kp_dropped_other_mask` / `n_kp_dropped_spike` and per-frame counts; the CLI
+prints the totals.
+
+### Before / after
+
+Regenerate with (the script is the durable artifact; the PNGs are gitignored):
+
+```
+PYTHONPATH=third_party/jarvis_jax:. python scripts/viz/containment_check.py \
+  --run <proc>/2025_10_20_13_20_04/pose_mvq_p3a_r2 \
+  --masks <proc>/2025_10_20_13_20_04/sam3_masks \
+  --session-dir <video>/courtship/Session0/2025_10_20_13_20_04 \
+  --bout 1 --bout 4 --fly 1 --save-npz OutFiles/containment_check \
+  --out figures/2026-09-mvq/p3a_campaign_female_misses/containment_bout1_bout4.png
+```
+
+The two bouts in the figure (offline, r2 arrays untouched; filtered copies in
+`OutFiles/containment_check/`):
+
+| bout | T | pose-jump | straddle | kps dropped, male (fly1) | kps dropped, female (fly0) | filter time |
+|---|---|---|---|---|---|---|
+| 1 | 513 | 4.48 % -> **0.78 %** | 0.19 % -> 0.19 % | **7.71 %** (1686 other-mask + 292 spike) | 7.69 % | 0.9 s |
+| 4 | 394 | 2.79 % -> **0.51 %** | 26.40 % -> **3.55 %** | **3.89 %** (610 + 149) | 27.86 % (2206 + 636) | 0.6 s |
+
+Bouts 1 and 4 are two of the seven concentrated bouts, so their drop rates are
+the worst case, not the headline. Over the **whole recording** (30 bouts,
+28 447 frames, `--all-bouts`, scorecard in
+`docs/benchmark/2026-09-mvq/2026-09-05-containment/containment_scorecard.json`):
+
+* pose-jump frames **1.37 % -> 0.64 %**, straddle frames **1.66 % -> 0.75 %**
+* keypoints dropped: **male 1.24 %** (17 503 / 1 413 100) -- under the 3 %
+  budget -- female **4.65 %** (51 157 / 1 100 050)
+* male by group: head 1.74 %, thorax 1.37 %, abdomen 0.04 %, legs 1.24 %. The
+  drop is spread across groups, which is what a real other-fly signal looks
+  like; a legs-only or head-only pattern would have meant a mask artefact.
+
+Straddle only halves rather than vanishing, because the two metrics do not
+measure the same thing: a male keypoint can be nearer her centroid while still
+inside HIS own mask (his head extended toward her), and the filter leaves that
+alone by design. Part of the pose-jump gain is also self-fulfilling -- the
+spike rule removes large steps, and pose-jump counts large steps. The
+containment rule ALONE takes bout 4's straddle from 26.40 % to 4.06 %, which is
+the number that is not circular.
+
+### Cost
+
+Bout 1 (513 frames) costs **0.9 s** and 7 182 lazy `BoutMaskStore.mask_at`
+unpacks (2 flies x 7 cameras x 513 frames). The lift itself runs this
+recording at 5-6 frames/s (bout 4: 394 frames in 64 s), so bout 1's lift is
+~85-100 s and the filter is **~1 % of lift time**, against the ~20 % budget.
+What makes it cheap: all 50 keypoints of a frame are tested against one
+unpacked mask at once, each (fly, camera, frame) mask is unpacked at most once
+per frame, cameras where nothing of that fly reprojects in-image are skipped,
+and the own-mask dilation is a ~113-offset disc lookup per keypoint rather than
+a real dilation of a 448x1936 mask.
+
+### Figure read-back (Read tool, both PNGs)
+
+`figures/2026-09-mvq/p3a_campaign_female_misses/containment_bout1_bout4.png`
+-- 6 frames (bout 1 f374/f351/f71, bout 4 f230/f220/f260), overhead
+Cam2012630 and side Cam2012855, male keypoints before (left) / after (right),
+orange = his SAM outline, cyan = hers, red X = dropped.
+
+**Expectation met.** In every before panel the red X's sit inside the CYAN
+outline -- on her thorax and abdomen -- and in the after panels those points
+are gone while the orange circles on his own body are unchanged and in the same
+pixels. Counts: 50 male keypoints before, 29 / 35 / 37 / 38 / 39 / 40 after,
+i.e. he keeps 58-80 % in the WORST frames of these bouts (92-96 % bout-wide).
+Bout 4's panels also show 2-3 X's in open background between the flies -- the
+pure-spike branch removing points that are on neither fly.
+
+Honest caveats from the same read-back:
+* a handful of male points survive right at her outline's edge (the 3-view
+  quorum abstains); the filter is deliberately on the keep side there.
+* `..._female_check_bout4_bout15.png` runs the same check on the FEMALE, the
+  fly this pipeline fails on, and shows her two distinct failure modes. In
+  **bout 4** her written keypoints are largely ON THE MALE's body and are
+  correctly removed -- which is what her 27.86 % is; one frame (f113) loses
+  47 of 50, so although the filter never *decides* to NaN a fly, a wholly
+  misplaced instance is effectively erased keypoint by keypoint. In **bout 15**
+  she has ZERO containment drops (median 2 both-valid cameras, so only 164 of
+  546 frames are even testable) and 2 695 pure-spike drops: her track flings
+  points into empty background, and the pair rule takes the good frame adjacent
+  to each garbage one with it. Bouts 22 and 13 are the same story. That pair
+  behaviour is the main cost of the temporal rule and is documented as such.

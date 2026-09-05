@@ -448,7 +448,9 @@ def stage_b_gate_signature(cfg):
     # existence threshold that decided which frames are NaN, and which
     # IDENTITY rule named the two written flies (`mvq.identity`: the masks'
     # human review or the model's sex head -- they disagree on 40% of one
-    # recording's frames), so that is what the signature names -- same
+    # recording's frames) plus whether the per-keypoint mask-CONTAINMENT
+    # filter deleted keypoints from it (`mvq.containment`), so that is what
+    # the signature names -- same
     # contract (stored inside kp3d.npz, a mismatch refuses the bout), and an
     # mvq bout passes without `allow_stale_kp3d`.
     if str((cfg.get("pipeline") or {}).get("lifter", "dlt")) == "mvq":
@@ -456,7 +458,8 @@ def stage_b_gate_signature(cfg):
         _mv = cfg.get("mvq") or {}
         return mvq_gate_string(_mv.get("checkpoint"), step=_mv.get("step"),
                                exist_thresh=_mv.get("exist_thresh"),
-                               identity=_mv.get("identity"))
+                               identity=_mv.get("identity"),
+                               containment=_mv.get("containment"))
 
     _wc = cfg.get("wing_collapse") or {}
     _rr = cfg.get("rigid_repair") or {}

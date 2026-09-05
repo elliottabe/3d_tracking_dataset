@@ -1034,8 +1034,14 @@ def test_a_fallback_bout_is_gated_as_sex_and_is_not_current_for_mask(tmp_path):
                                model_names=_model_names(), identity="mask",
                                mask_sex_meta={"method": "mask_area_vote", "male_slot": 1})
 
-    g_sex = mvq_gate_string(ckpt, step=None, exist_thresh=0.5, identity="sex")
-    g_mask = mvq_gate_string(ckpt, step=None, exist_thresh=0.5, identity="mask")
+    # `containment="off"` throughout this file: these lifts pass no
+    # `mask_store` (they build `centres`/`ok` by hand), and the containment
+    # filter needs the masks themselves, so it cannot run and the lift is
+    # gated as off. `tests/test_lift_mask_containment.py` covers the on arm.
+    g_sex = mvq_gate_string(ckpt, step=None, exist_thresh=0.5, identity="sex",
+                            containment="off")
+    g_mask = mvq_gate_string(ckpt, step=None, exist_thresh=0.5, identity="mask",
+                             containment="off")
     assert res["gates"] == g_sex                       # stamped as what it RAN
     with np.load(out / "fly0" / "kp3d.npz") as z:
         assert str(z["gates"]) == g_sex
@@ -1081,8 +1087,12 @@ def test_gate_string_distinguishes_the_identity_modes(tmp_path):
     from jarvis_jax.tracking.lift_mvq import (bout_lift_is_current, lift_masked_bout,
                                               mvq_gate_string)
     ckpt = _fake_checkpoint(tmp_path)
-    g_mask = mvq_gate_string(ckpt, step=None, exist_thresh=0.5, identity="mask")
-    g_sex = mvq_gate_string(ckpt, step=None, exist_thresh=0.5, identity="sex")
+    # containment="off": this lift passes no `mask_store`, so the filter
+    # cannot run and the bout is gated as off (see the note above).
+    g_mask = mvq_gate_string(ckpt, step=None, exist_thresh=0.5, identity="mask",
+                             containment="off")
+    g_sex = mvq_gate_string(ckpt, step=None, exist_thresh=0.5, identity="sex",
+                            containment="off")
     assert g_mask != g_sex
     assert json.loads(g_mask)["identity"] == "mask"
     assert json.loads(g_sex)["identity"] == "sex"
@@ -1122,11 +1132,18 @@ def test_gate_string_with_identity_is_what_run_bout_stage_b_expects(tmp_path):
     cfg = OmegaConf.create({"detector": {"conf_thresh": 0.3},
                             "pipeline": {"lifter": "mvq"},
                             "mvq": {"checkpoint": ckpt, "step": None,
-                                    "exist_thresh": 0.55, "identity": "mask"}})
+                                    "exist_thresh": 0.55, "identity": "mask",
+                                    "containment": "off"}})
     with np.load(out / "fly0" / "kp3d.npz") as z:
         assert str(z["gates"]) == g["stage_b_gate_signature"](cfg)
+    # `containment` moves the string too, so a run that turns the filter on
+    # does NOT accept a bout lifted without it (and vice versa)
+    cfg_on = OmegaConf.merge(cfg, {"mvq": {"containment": "on"}})
+    assert g["stage_b_gate_signature"](cfg_on) != g["stage_b_gate_signature"](cfg)
     # and the shipped config carries the mode this campaign runs
-    assert str(OmegaConf.load(REPO / "configs" / "mvq" / "p3a.yaml").identity) == "mask"
+    _p3a = OmegaConf.load(REPO / "configs" / "mvq" / "p3a.yaml")
+    assert str(_p3a.identity) == "mask"
+    assert str(_p3a.containment) == "on"
 
 
 def test_canonicalize_bout_treats_mask_human_id_review_as_authoritative(tmp_path):

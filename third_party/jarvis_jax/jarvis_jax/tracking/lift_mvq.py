@@ -261,7 +261,8 @@ def resolve_mask_identity(identity, mask_sex_meta, *, where=""):
     return "mask", None
 
 
-def mvq_gate_signature(checkpoint, *, step=None, exist_thresh=None, identity=None):
+def mvq_gate_signature(checkpoint, *, step=None, exist_thresh=None, identity=None,
+                       containment=None):
     """The Stage-B `gates` payload for an mvq-lifted kp3d.npz.
 
     With `pipeline.lifter: mvq` the DLT gates (view-conf, mask-agreement,
@@ -289,6 +290,20 @@ def mvq_gate_signature(checkpoint, *, step=None, exist_thresh=None, identity=Non
     Stage B rather than silently accepted. The fix for such a bout is to give
     its masks the human review, or to run that recording with
     `mvq.identity=sex`.
+
+    `containment` is the per-keypoint mask-containment filter
+    (`mask_containment_filter`), which DELETES keypoints from kp3d.npz -- so
+    it changes the file's contents and belongs here for the same reason
+    `exist_thresh` does. It is reported as the EFFECTIVE bool: the filter
+    needs both flies' masks and the human id review those masks carry, so it
+    can only run under `identity="mask"` and is False otherwise regardless of
+    what was asked for. Its THRESHOLDS (`min_views`, `own_margin`,
+    `max_step_units`) are recorded in `mvq_meta.json` rather than enrolled
+    here -- the same choice already made for `collapse_dist_units` and the
+    mask-assignment margins, and for the same reason: re-tuning a threshold
+    must not charge a 12-minute STAC re-solve per bout-fly on every sweep
+    point, while a lift that ran the filter and one that did not are
+    genuinely different files.
     """
     if not checkpoint:
         raise ValueError("pipeline.lifter=mvq needs mvq.checkpoint set -- the Stage-B gate "
@@ -299,13 +314,16 @@ def mvq_gate_signature(checkpoint, *, step=None, exist_thresh=None, identity=Non
             "step": "final" if step is None else step,
             "sha256": checkpoint_sha256(checkpoint, step),
             "exist_thresh": float(EXIST_THRESH if exist_thresh is None else exist_thresh),
-            "identity": resolved_identity(identity)}
+            "identity": resolved_identity(identity),
+            "containment": bool(resolved_containment(containment)
+                                and resolved_identity(identity) == "mask")}
 
 
-def mvq_gate_string(checkpoint, *, step=None, exist_thresh=None, identity=None):
+def mvq_gate_string(checkpoint, *, step=None, exist_thresh=None, identity=None,
+                    containment=None):
     """`mvq_gate_signature` as the stable string stored inside kp3d.npz."""
     return json.dumps(mvq_gate_signature(checkpoint, step=step, exist_thresh=exist_thresh,
-                                         identity=identity),
+                                         identity=identity, containment=containment),
                       sort_keys=True)
 
 
@@ -344,7 +362,8 @@ class MVQRunner:
     """
 
     def __init__(self, run_dir_or_final, *, step=None, attn_impl=None, calib_dir, cameras,
-                 batch=32, exist_thresh=EXIST_THRESH, identity=None):
+                 batch=32, exist_thresh=EXIST_THRESH, identity=None,
+                 containment=None):
         self.checkpoint = os.path.abspath(str(run_dir_or_final))
         # Which rule the caller will use to name the written flies. The runner
         # does not apply it (that is `lift_masked_bout`'s job); it is carried
@@ -352,6 +371,11 @@ class MVQRunner:
         # the mode, and so a runner cannot be shared between two callers that
         # disagree about it.
         self.identity = resolved_identity(identity)
+        # Only so `gates_string()` (which the CLI prints and
+        # `slurm_bout_array` compares) names the same filter the lift will
+        # run; `lift_masked_bout` resolves its own, per bout, against that
+        # bout's masks and its own `mask_store`.
+        self.containment = resolved_containment(containment)
         if step == "latest":
             import orbax.checkpoint as ocp
             mgr = ocp.CheckpointManager(os.path.abspath(os.path.join(self.checkpoint, "ckpt")),
@@ -586,7 +610,8 @@ class MVQRunner:
         if self._gates is None:
             self._gates = mvq_gate_signature(self.checkpoint, step=self.step,
                                              exist_thresh=self.exist_thresh,
-                                             identity=self.identity)
+                                             identity=self.identity,
+                                             containment=getattr(self, "containment", False))
         return dict(self._gates)
 
     def gates_string(self):
@@ -948,6 +973,287 @@ def bout_centres_3d(store, cam_mats, n_frames, t0=0):
     return xyz.reshape(A, n_frames, 3), ok.reshape(A, n_frames)
 
 
+# =============================================================================
+# Per-keypoint mask-containment filter (Task 9)
+# =============================================================================
+# WHAT THIS FIXES, measured on the 30-bout r2 lift of 2025_10_20_13_20_04.
+# Identity is decided per FRAME (`pick_mask_pair`) and the collapse guard is a
+# per-FRAME test, so both are blind to the failure that is left: in contact
+# frames -- especially the 264 of 391 pose-jump frames where the female's slot
+# is EMPTY -- the male instance absorbs PART of her body. 1.4% of frames have
+# >= 5 male keypoints stepping > 0.5 mm in one frame; 1.7% have >= 5 male
+# keypoints nearer her centroid than his; bout 1 frame 364 puts 17 male
+# keypoints (T1 legs, trochanters) on the female and bout 3 frame 56 puts 26
+# (WingL_base, Antenna_Base, EyeL, T1 legs). The whole instance is not wrong,
+# so NaN-ing the frame would throw away a mostly-correct male; only those
+# keypoints are.
+#
+# The test is the masks themselves, which carry the HUMAN id review: a male
+# keypoint that reprojects INSIDE the female's mask and OUTSIDE his own, in
+# `min_views` of the cameras where BOTH masks are valid, is on the wrong fly.
+#
+# WHY THE OWN-MASK TEST ALONE IS NOT USED. Legs routinely extend past a SAM
+# mask and an occluded keypoint projects outside it too, so "outside its own
+# mask" is common and benign -- dropping on that alone would delete real
+# tarsi. The filter fires only on the CONJUNCTION (inside the other, outside
+# its own), and the own mask is DILATED by `own_margin` px first, which makes
+# "outside its own" harder to satisfy and so makes the drop conservative in
+# the same direction.
+CONTAINMENT_MIN_VIEWS = 3          # cameras that must agree before a keypoint
+                                   # is called "on the other fly". 7 cameras,
+                                   # of which typically 3-5 have BOTH masks
+                                   # valid on 20_04; 3 is a majority of that
+                                   # and no single bad SAM mask can reach it.
+CONTAINMENT_OWN_MARGIN_PX = 6.0    # dilation of the OWN mask, px. SAM's fly
+                                   # masks sit ~2-5 px inside the silhouette
+                                   # at these scales, and a tarsus one leg
+                                   # segment past the mask edge must NOT read
+                                   # as "outside its own mask".
+CONTAINMENT_MAX_STEP_UNITS = 5.0   # 0.5 mm in 1/800 s -- 400 mm/s for a
+                                   # single landmark, which no fly part does.
+                                   # A step above this is SUSPECT, not proof
+                                   # (see `mask_containment_filter`).
+
+CONTAINMENT_MODES = ("on", "off")
+DEFAULT_CONTAINMENT = "on"
+
+
+def resolved_containment(containment):
+    """`containment` as a bool. None -> `DEFAULT_CONTAINMENT`.
+
+    Accepts the CLI's strings ("on"/"off") and plain bools, because a YAML
+    `containment: on` is parsed by PyYAML 1.1 rules as the BOOLEAN True, not
+    the string "on" -- a config written the obvious way must not be refused.
+    """
+    if containment is None:
+        containment = DEFAULT_CONTAINMENT
+    if isinstance(containment, bool):
+        return containment
+    c = str(containment).strip().lower()
+    if c not in CONTAINMENT_MODES:
+        raise ValueError(f"mvq containment must be one of {list(CONTAINMENT_MODES)} "
+                         f"(or a bool), got {containment!r}")
+    return c == "on"
+
+
+def _disk_offsets(radius):
+    """(dy, dx) integer offsets of the pixels within `radius` of the origin."""
+    r = int(np.ceil(float(radius)))
+    dy, dx = np.mgrid[-r:r + 1, -r:r + 1]
+    sel = (dx.astype(np.float64) ** 2 + dy.astype(np.float64) ** 2) <= float(radius) ** 2
+    return dy[sel].ravel().astype(np.int64), dx[sel].ravel().astype(np.int64)
+
+
+def project_points(cam_mats, xyz):
+    """(K,3) world points -> (C,K,2) full-frame px, `p_h @ M` + perspective divide.
+
+    The SAME convention as `ReprojectionTool.reproject_point` and
+    `tests/test_coarse_centres._project_all`, and `cam_mats` is
+    `ReprojectionTool.camera_matrices`, whose camera axis IS the canonical
+    order (`MVQRunner` asserts that). Non-finite inputs and points behind the
+    camera come back NaN rather than a huge finite number that would land
+    inside some mask by accident.
+    """
+    cam_mats = np.asarray(cam_mats, np.float64)
+    xyz = np.asarray(xyz, np.float64)
+    h = np.concatenate([xyz, np.ones(xyz.shape[:-1] + (1,), np.float64)], axis=-1)
+    p = np.einsum("kj,cjm->ckm", h, cam_mats)                    # (C,K,3)
+    w = p[..., 2]
+    with np.errstate(invalid="ignore", divide="ignore"):
+        uv = p[..., :2] / w[..., None]
+    return np.where(np.isfinite(uv) & (np.abs(w)[..., None] > 1e-9), uv, np.nan)
+
+
+def _inside_mask(mask, uv, ok):
+    """(K,) bool: the rounded pixel of `uv` is inside `mask`, for keypoints `ok`."""
+    H, W = mask.shape
+    out = np.zeros(uv.shape[0], bool)
+    with np.errstate(invalid="ignore"):
+        x = np.where(ok, np.rint(uv[:, 0]), 0).astype(np.int64)
+        y = np.where(ok, np.rint(uv[:, 1]), 0).astype(np.int64)
+    good = ok & (x >= 0) & (x < W) & (y >= 0) & (y < H)
+    if good.any():
+        out[good] = mask[y[good], x[good]]
+    return out
+
+
+def _inside_mask_dilated(mask, uv, ok, dy, dx):
+    """(K,) bool: any mask pixel within the disk (`dy`,`dx`) of `uv`'s pixel.
+
+    Equivalent to testing membership in the mask DILATED by that disk, but
+    without materialising the dilated (448,1936) mask: 50 keypoints x ~113
+    offsets is ~5.6k lookups, against ~867k pixels for a real dilation.
+    Out-of-image offsets are CLIPPED to the border, which can only ever say
+    "inside" for a point already at the border -- conservative in the
+    drop-nothing direction, which is the direction this filter errs in.
+    """
+    H, W = mask.shape
+    out = np.zeros(uv.shape[0], bool)
+    if not ok.any():
+        return out
+    with np.errstate(invalid="ignore"):
+        x = np.where(ok, np.rint(uv[:, 0]), 0).astype(np.int64)
+        y = np.where(ok, np.rint(uv[:, 1]), 0).astype(np.int64)
+    ys = np.clip(y[ok, None] + dy[None, :], 0, H - 1)
+    xs = np.clip(x[ok, None] + dx[None, :], 0, W - 1)
+    out[ok] = mask[ys, xs].any(axis=1)
+    return out
+
+
+def mask_containment_filter(kp3d_by_fly, kp2d_by_fly, store, cam_mats, *,
+                            min_views=CONTAINMENT_MIN_VIEWS,
+                            own_margin=CONTAINMENT_OWN_MARGIN_PX,
+                            max_step_units=CONTAINMENT_MAX_STEP_UNITS,
+                            conf_by_fly=None, t0=0, image_margin_px=0.0):
+    """Drop the keypoints of one fly that are sitting on the OTHER fly.
+
+    Pure: the inputs are not modified, copies come back.
+
+    Args:
+        kp3d_by_fly: (2,T,K,3) world units, row 0 the FEMALE (mask fly 0) and
+            row 1 the MALE, exactly as `lift_masked_bout` holds them.
+        kp2d_by_fly: (2,T,C,K,2) full-frame px on the CANONICAL camera axis.
+        store: a `BoutMaskStore` (anything with `valid_at`, `mask_at`, whose
+            camera axis is that same canonical order).
+        cam_mats: (C,4,3) `ReprojectionTool.camera_matrices`.
+        min_views: cameras that must agree (`CONTAINMENT_MIN_VIEWS`).
+        own_margin: px the OWN mask is dilated by (`CONTAINMENT_OWN_MARGIN_PX`).
+        max_step_units: the temporal gate's suspicion threshold
+            (`CONTAINMENT_MAX_STEP_UNITS`).
+        conf_by_fly: (2,T,C,K) per-view visibility; NaN'd alongside kp2d.
+        t0: the store frame index of `kp3d_by_fly[:, 0]`.
+        image_margin_px: how far outside the image a reprojection may fall and
+            still be tested (0 = must be in-image).
+
+    KEYPOINT ORDER. Nothing here indexes a keypoint by integer -- every test
+    is per-keypoint and order-agnostic -- so this runs equally on the model's
+    own order (where `lift_masked_bout` calls it, BEFORE `to_pipeline`) and on
+    `cfg.model.KP_NAMES` (where the offline before/after check calls it).
+
+    THE TWO RULES.
+
+    1. CONTAINMENT. In every camera where BOTH flies' masks are valid, the
+       keypoint's reprojection is tested against the other fly's mask (as-is)
+       and its own (dilated by `own_margin`). "On the other fly" = inside the
+       other AND outside its own, in >= `min_views` of those cameras. Being
+       outside its OWN mask is never on its own a reason to drop: legs extend
+       past the mask and occluded parts project outside it.
+    2. TEMPORAL. A frame-to-frame step > `max_step_units` makes the keypoint
+       SUSPECT in BOTH frames of the pair; it is dropped only if it also
+       fails rule 1 in either frame (so the frame a keypoint jumped OFF is
+       cleaned too, not just the frame it landed on) or the step exceeds
+       `2 * max_step_units`, which is a pure spike no landmark can be. Steps
+       are measured on the INPUT track, before rule 1 NaNs anything -- gating
+       on the already-cleaned track would silently disable the pair test
+       wherever rule 1 fired.
+
+    Never NaNs a whole fly: frame-level identity belongs to `pick_mask_pair`
+    and the collapse guard.
+
+    Returns:
+        (kp3d, kp2d, conf, report). `conf` is None when `conf_by_fly` is.
+        A dropped keypoint is NaN in kp3d, in kp2d in EVERY view, and in conf
+        (every `conf` consumer in the pipeline gates with `conf > thresh`,
+        which NaN fails, so a NaN reads as "no measurement" exactly like the
+        NaN coordinates beside it).
+    """
+    kp3d = np.array(kp3d_by_fly, np.float32, copy=True)
+    kp2d = np.array(kp2d_by_fly, np.float32, copy=True)
+    conf = None if conf_by_fly is None else np.array(conf_by_fly, np.float32, copy=True)
+    if kp3d.ndim != 4 or kp3d.shape[0] != 2 or kp3d.shape[-1] != 3:
+        raise ValueError(f"kp3d_by_fly must be (2,T,K,3), got {kp3d.shape}")
+    A, T, K = kp3d.shape[:3]
+    cam_mats = np.asarray(cam_mats, np.float64)
+    C = cam_mats.shape[0]
+    if kp2d.shape != (A, T, C, K, 2):
+        raise ValueError(f"kp2d_by_fly must be (2,T,C,K,2) = {(A, T, C, K, 2)}, got "
+                         f"{kp2d.shape}; kp2d's camera axis and `cam_mats` must be the "
+                         f"SAME canonical order or this tests one camera's mask against "
+                         f"another camera's reprojection")
+    if conf is not None and conf.shape != (A, T, C, K):
+        raise ValueError(f"conf_by_fly must be (2,T,C,K) = {(A, T, C, K)}, got {conf.shape}")
+
+    dy, dx = _disk_offsets(own_margin)
+    on_other = np.zeros((A, T, K), bool)
+    n_views_tested = np.zeros((A, T, K), np.int16)
+    n_frames_testable = 0
+    n_unpacks = 0
+
+    for t in range(T):
+        both_valid = store.valid_at(0, t0 + t) & store.valid_at(1, t0 + t)
+        cams = np.flatnonzero(np.asarray(both_valid, bool))
+        if cams.size < min_views:
+            continue
+        n_frames_testable += 1
+        fin = np.isfinite(kp3d[:, t]).all(-1)                       # (A,K)
+        if not fin.any():
+            continue
+        uv = {f: project_points(cam_mats, np.nan_to_num(kp3d[f, t], nan=0.0))
+              for f in range(A) if fin[f].any()}
+        cache = {}
+        for f in uv:
+            inside_other = np.zeros((cams.size, K), bool)
+            outside_own = np.zeros((cams.size, K), bool)
+            for j, c in enumerate(cams):
+                u = uv[f][c]
+                ok = fin[f] & np.isfinite(u).all(-1)
+                ok &= ((u[:, 0] >= -image_margin_px) & (u[:, 0] <= store.W - 1 + image_margin_px)
+                       & (u[:, 1] >= -image_margin_px) & (u[:, 1] <= store.H - 1 + image_margin_px))
+                if not ok.any():
+                    continue          # nothing of this fly lands in this camera
+                for g in (f, 1 - f):
+                    if (g, c) not in cache:
+                        cache[(g, c)] = store.mask_at(g, int(c), t0 + t)
+                        n_unpacks += 1
+                inside_other[j] = _inside_mask(cache[(1 - f, c)], u, ok)
+                outside_own[j] = ok & ~_inside_mask_dilated(cache[(f, c)], u, ok, dy, dx)
+                n_views_tested[f, t] += ok
+            on_other[f, t] = fin[f] & ((inside_other & outside_own).sum(axis=0) >= min_views)
+
+    # ---- rule 2, on the INPUT track (see the docstring)
+    step = np.linalg.norm(np.diff(kp3d, axis=1), axis=-1)            # (A,T-1,K)
+    with np.errstate(invalid="ignore"):
+        suspect = step > float(max_step_units)
+        pure_spike = step > 2.0 * float(max_step_units)
+    fails_either = on_other[:, :-1] | on_other[:, 1:]
+    pair_drop = suspect & (fails_either | pure_spike)
+    spike = np.zeros((A, T, K), bool)
+    if T > 1:
+        spike[:, :-1] |= pair_drop
+        spike[:, 1:] |= pair_drop
+    spike &= np.isfinite(kp3d).all(-1) & ~on_other
+
+    drop = on_other | spike
+    kp3d[drop] = np.nan
+    m = drop[:, :, None, :]                                          # (A,T,1,K)
+    kp2d = np.where(m[..., None], np.float32(np.nan), kp2d)
+    if conf is not None:
+        conf = np.where(m, np.float32(np.nan), conf)
+
+    finite_before = np.isfinite(np.asarray(kp3d_by_fly, np.float64)).all(-1)
+    report = {
+        "enabled": True,
+        "min_views": int(min_views),
+        "own_margin_px": float(own_margin),
+        "max_step_units": float(max_step_units),
+        "n_frames": int(T),
+        "n_frames_testable": int(n_frames_testable),
+        "n_mask_unpacks": int(n_unpacks),
+        "n_kp_dropped_other_mask": {f"fly{f}": int(on_other[f].sum()) for f in range(A)},
+        "n_kp_dropped_spike": {f"fly{f}": int(spike[f].sum()) for f in range(A)},
+        "n_kp_finite_before": {f"fly{f}": int(finite_before[f].sum()) for f in range(A)},
+        "frac_kp_dropped": {
+            f"fly{f}": (float(drop[f].sum() / finite_before[f].sum())
+                        if finite_before[f].any() else 0.0) for f in range(A)},
+        "per_frame": {
+            "n_other_mask": on_other.sum(axis=-1).astype(int).tolist(),   # (A,T)
+            "n_spike": spike.sum(axis=-1).astype(int).tolist(),
+            "n_views_tested_max": n_views_tested.max(axis=-1).astype(int).tolist(),
+        },
+    }
+    return kp3d, kp2d, conf, report
+
+
 def resolve_bout_frames(session_dir, bout_idx, bouts_csv=None):
     """(start_frame, end_frame, n_frames) for `bout_idx` from the session's bouts CSVs.
 
@@ -1035,6 +1341,11 @@ def lift_masked_bout(runner, frames_iter, centres, ok, *, out_dir, model_names,
                      identity=None,
                      mask_assign_margin_units=MASK_ASSIGN_MARGIN_UNITS,
                      mask_assign_max_units=MASK_ASSIGN_MAX_UNITS,
+                     mask_store=None, containment=None,
+                     containment_min_views=CONTAINMENT_MIN_VIEWS,
+                     containment_own_margin_px=CONTAINMENT_OWN_MARGIN_PX,
+                     containment_max_step_units=CONTAINMENT_MAX_STEP_UNITS,
+                     mask_frame_offset=0,
                      force=False, progress_every=0,
                      meta_extra=None, mask_sex_meta=None, review_male_fly=None,
                      verbose=True):
@@ -1068,6 +1379,22 @@ def lift_masked_bout(runner, frames_iter, centres, ok, *, out_dir, model_names,
             distance (`MASK_ASSIGN_MARGIN_UNITS` / `MASK_ASSIGN_MAX_UNITS`;
             see `pick_mask_pair`). Recorded in `mvq_meta.json` rather than
             enrolled in the gate signature, like `collapse_dist_units`.
+        mask_store: the bout's `BoutMaskStore`. Required by the containment
+            filter -- it is the only thing that can say whose body a keypoint
+            is sitting on. A caller that builds `centres`/`ok` by hand and
+            passes no store runs with containment OFF and is gated as such.
+        containment: `"on"` (default) / `"off"` / a bool -- the per-keypoint
+            mask-containment filter (`mask_containment_filter`), which NaNs
+            the keypoints of one fly that reproject onto the OTHER fly.
+            Effective only under `identity="mask"` (it needs the masks' human
+            id review to know whose body is whose) and only with a
+            `mask_store`; the EFFECTIVE bool is what the gate string names.
+        containment_min_views / containment_own_margin_px /
+        containment_max_step_units: that filter's thresholds
+            (`CONTAINMENT_MIN_VIEWS` / `_OWN_MARGIN_PX` / `_MAX_STEP_UNITS`).
+            Recorded in `mvq_meta.json`, not in the gate signature.
+        mask_frame_offset: store frame index of bout frame 0 (0 in
+            production; non-zero only when lifting a slice of a bout).
         force: re-run a bout whose kp3d.npz already carries this gates string.
         mask_sex_meta / review_male_fly: what the SAM3 masks / the id-review
             manifest believe about identity. Under `identity="mask"` the
@@ -1113,9 +1440,26 @@ def lift_masked_bout(runner, frames_iter, centres, ok, *, out_dir, model_names,
                                                          where=out_dir)
     if _fallback:
         warnings.warn(_fallback, RuntimeWarning, stacklevel=2)
+    # Same resolve-before-gating discipline as `identity`: the gate must name
+    # the filter this bout ACTUALLY RAN. The filter needs the masks
+    # themselves, so a bout that fell back to the sex head -- or a caller with
+    # no `mask_store` -- runs with it off and is gated off, and a later re-lift
+    # (once the masks carry a human review) is correctly seen as not-current.
+    containment_want = resolved_containment(containment)
+    containment_on = bool(containment_want and identity_resolved == "mask"
+                          and mask_store is not None)
+    if containment_want and containment is not None and not containment_on:
+        warnings.warn(
+            f"{out_dir}: containment={containment!r} was asked for but the filter is "
+            f"OFF for this bout (identity_resolved={identity_resolved!r}, mask_store="
+            f"{'absent' if mask_store is None else 'present'}); it needs both flies' "
+            f"masks and the human id review those masks carry. The bout is GATED as "
+            f"containment=false, so a re-lift once those exist is not skipped.",
+            RuntimeWarning, stacklevel=2)
     gates_string = mvq_gate_string(runner.checkpoint, step=runner.step,
                                    exist_thresh=runner.exist_thresh,
-                                   identity=identity_resolved)
+                                   identity=identity_resolved,
+                                   containment=containment_on)
     if not force and bout_lift_is_current(out_dir, gates_string):
         if verbose:
             print(f"[mvq-lift] skip {out_dir}: kp3d.npz already carries these gates "
@@ -1253,6 +1597,36 @@ def lift_masked_bout(runner, frames_iter, centres, ok, *, out_dir, model_names,
                          f"{T}; kp3d.npz must have exactly the masks' T or every "
                          f"downstream stage silently mis-indexes time")
 
+    # ---- per-keypoint mask containment (Task 9), AFTER identity assignment
+    # and BEFORE the write. Order matters both ways: run before the assignment
+    # and there is no "own" fly to test against; run after `to_pipeline` and it
+    # would have to be repeated per fly on permuted arrays. `kp3d`/`kp2d`/`vis`
+    # are still in the model's own keypoint order here, which this filter is
+    # agnostic to (it indexes no keypoint by name or by integer).
+    containment_report = {"enabled": False, "reason": (
+        "identity_resolved != mask" if identity_resolved != "mask" else
+        "no mask_store" if mask_store is None else "asked off")}
+    if containment_on:
+        t_cont = time.time()
+        kp3d, kp2d, vis, containment_report = mask_containment_filter(
+            kp3d, kp2d, mask_store, runner.cam_mats,
+            min_views=int(containment_min_views),
+            own_margin=float(containment_own_margin_px),
+            max_step_units=float(containment_max_step_units),
+            conf_by_fly=vis, t0=int(mask_frame_offset))
+        containment_report["seconds"] = round(time.time() - t_cont, 2)
+        if verbose:
+            d_o = containment_report["n_kp_dropped_other_mask"]
+            d_s = containment_report["n_kp_dropped_spike"]
+            fr = containment_report["frac_kp_dropped"]
+            print(f"[mvq-lift] containment: dropped on-other-mask "
+                  f"fly0 {d_o['fly0']} / fly1 {d_o['fly1']}, spike "
+                  f"fly0 {d_s['fly0']} / fly1 {d_s['fly1']} keypoint-frames "
+                  f"({100 * fr['fly0']:.2f}% / {100 * fr['fly1']:.2f}% of the finite "
+                  f"ones), {containment_report['n_frames_testable']}/{T} frames "
+                  f"testable, {containment_report['n_mask_unpacks']} mask unpacks, "
+                  f"{containment_report['seconds']:.1f}s", flush=True)
+
     # ---- write the pipeline artifacts, keypoint axis permuted BY NAME
     from jarvis_jax.tracking.resume import atomic_save_json, atomic_save_npz
     os.makedirs(out_dir, exist_ok=True)
@@ -1319,6 +1693,11 @@ def lift_masked_bout(runner, frames_iter, centres, ok, *, out_dir, model_names,
         "mask_assign_margin_units": float(mask_assign_margin_units),
         "mask_assign_max_units": float(mask_assign_max_units),
         "assign_reason_counts": reason_counts,
+        "containment": containment_on,
+        "containment_min_views": int(containment_min_views),
+        "containment_own_margin_px": float(containment_own_margin_px),
+        "containment_max_step_units": float(containment_max_step_units),
+        "containment_report": containment_report,
         "sex_head_disagree_frac": disagree_frac,
         "fly_slots": {"fly0": int(SLOT_FEMALE), "fly1": int(SLOT_MALE)},
         "fly_sex": {"fly0": "female", "fly1": "male"},
@@ -1372,6 +1751,8 @@ def lift_masked_bout(runner, frames_iter, centres, ok, *, out_dir, model_names,
             "sex_head_disagree_frac": disagree_frac,
             "assign_reason": assign_reason,
             "assign_reason_counts": reason_counts,
+            "containment": containment_on,
+            "containment_report": containment_report,
             "mask_dist": mask_dist,
             "n_collapsed": {"fly0": int(n_collapsed[0]), "fly1": int(n_collapsed[1])},
             "n_missing": n_missing, "sex": sex, "meta": meta}

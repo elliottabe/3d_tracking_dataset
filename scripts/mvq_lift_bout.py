@@ -39,6 +39,17 @@ let the male track jump onto her body on 2.5% of frames (see
 Either way `sexing.canonicalize_bout` treats the written sex.json as
 authoritative instead of re-deciding the bout from a wing-song CV.
 
+The masks do one more job under `--identity mask`: `--containment on` (the
+default) runs the per-keypoint MASK-CONTAINMENT FILTER after the identity
+assignment, which NaNs the individual keypoints of one fly that reproject
+inside the OTHER fly's mask (and outside their own, dilated) in at least
+`--containment-min-views` of the cameras where both masks are valid. Identity
+is decided per FRAME, so it cannot see the residual failure it fixes: in
+contact frames -- especially where the female's slot is empty -- the male
+instance absorbs PART of her body (bout 1 frame 364: 17 male keypoints on the
+female). The instance is mostly right, so the frame must not be dropped; only
+those keypoints are. It is part of the gate string.
+
 ORDER DISCIPLINE (CLAUDE.md). The written keypoint axis is
 `cfg.model.KP_NAMES` (`--anatomy`), permuted from the model's own detector
 order BY NAME, and asserted plus checked against the rigid EyeL-EyeR spacing.
@@ -138,6 +149,28 @@ def build_parser():
                         "mask's to be assigned by geometry (world units, 8 == 0.8 mm). "
                         "Below the margin the frame is ambiguous and geometry abstains "
                         "(the typed slot may then be used -- see assign_reason)")
+    p.add_argument("--containment", choices=("on", "off"), default="on",
+                   help="per-keypoint mask-containment filter (default on). NaNs a "
+                        "keypoint that reprojects INSIDE the other fly's mask and "
+                        "OUTSIDE its own (dilated) in --containment-min-views of the "
+                        "cameras where both masks are valid, plus a conservative "
+                        "temporal spike rule. Needs the masks' human id review, so it "
+                        "is a no-op (and gated off) wherever --identity resolves to "
+                        "'sex'. Part of the gate string")
+    p.add_argument("--containment-min-views", dest="containment_min_views", type=int,
+                   default=3,
+                   help="cameras that must agree before a keypoint is called 'on the "
+                        "other fly'. Recorded in mvq_meta.json, NOT in the gate string")
+    p.add_argument("--containment-own-margin-px", dest="containment_own_margin_px",
+                   type=float, default=6.0,
+                   help="dilation of the OWN mask before the outside-own test, px. "
+                        "Legs extend past a SAM mask, so this errs toward keeping")
+    p.add_argument("--containment-max-step-units", dest="containment_max_step_units",
+                   type=float, default=5.0,
+                   help="per-keypoint frame-to-frame 3D step (world units; 5 == 0.5 mm "
+                        "in 1/800 s) above which the keypoint is SUSPECT in both "
+                        "frames -- dropped only if it also fails containment in "
+                        "either, or the step is above twice this (a pure spike)")
     p.add_argument("--mask-assign-max-units", dest="mask_assign_max_units",
                    type=float, default=60.0,
                    help="--identity mask only: garbage cap on that distance (world "
@@ -195,13 +228,14 @@ def main(argv=None):
     # would dominate the runtime of a --all pass.
     runner = MVQRunner(args.run, step=args.step, attn_impl=args.attn_impl,
                        calib_dir=calib_dir, cameras=cameras, batch=int(args.batch),
-                       exist_thresh=float(args.exist_thresh), identity=args.identity)
+                       exist_thresh=float(args.exist_thresh), identity=args.identity,
+                       containment=args.containment)
     print(f"[mvq-lift] checkpoint {runner.checkpoint} step {runner.step_label}; "
           f"K={runner.K} slots={runner.I} exist_thresh={runner.exist_thresh} "
           f"identity={runner.identity}; "
           f"unrestored={runner.meta.get('_unrestored_leaves', [])}", flush=True)
-    print(f"[mvq-lift] gates (identity={runner.identity}) {runner.gates_string()}",
-          flush=True)
+    print(f"[mvq-lift] gates (identity={runner.identity}, "
+          f"containment={runner.containment}) {runner.gates_string()}", flush=True)
     print(f"[mvq-lift] {len(bouts)} bout(s): {bouts}", flush=True)
 
     review = load_review(args.review) if args.review else {}
@@ -221,7 +255,8 @@ def main(argv=None):
             print(f"[mvq-lift] WARNING {fallback}", flush=True)
         gates_string = mvq_gate_string(runner.checkpoint, step=runner.step,
                                        exist_thresh=runner.exist_thresh,
-                                       identity=identity)
+                                       identity=identity,
+                                       containment=args.containment)
         if not args.force and bout_lift_is_current(out_dir, gates_string):
             print(f"[mvq-lift] bout {bout}: skip (kp3d.npz already carries these gates, "
                   f"identity {identity})", flush=True)
@@ -251,7 +286,12 @@ def main(argv=None):
             merge_dist_units=float(args.merge_dist_units),
             identity=args.identity,
             mask_assign_margin_units=float(args.mask_assign_margin_units),
-            mask_assign_max_units=float(args.mask_assign_max_units), force=args.force,
+            mask_assign_max_units=float(args.mask_assign_max_units),
+            mask_store=store, containment=args.containment,
+            containment_min_views=int(args.containment_min_views),
+            containment_own_margin_px=float(args.containment_own_margin_px),
+            containment_max_step_units=float(args.containment_max_step_units),
+            force=args.force,
             progress_every=int(args.progress_every),
             mask_sex_meta=mask_sex_meta, review_male_fly=review_male,
             meta_extra={"bout": int(bout), "session_dir": str(args.session_dir),
