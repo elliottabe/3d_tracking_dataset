@@ -180,6 +180,7 @@ for rec in "${RECORDINGS[@]}"; do
                 | sed -E 's#.*/bout_0*([0-9]+)/sam3_masks.npz#\1#' | sort -n)
         if [ -z "$DRY" ]; then
             w=0
+            PIDS=()
             for g in $(seq 0 $((LOCAL_GPUS - 1))); do
                 # round-robin slice, so a long bout does not land every time on
                 # the same worker
@@ -207,10 +208,37 @@ for rec in "${RECORDINGS[@]}"; do
                     --anatomy configs/anatomy/v1.yaml \
                     --recording-cfg "configs/recording/$(echo "$SESSION" | tr 'A-Z' 'a-z').yaml" \
                     ${CSV:+--bouts-csv "$CSV"} > "$LOG" 2>&1 &
+                PIDS+=("$!")
                 w=$((w + 1))
             done
             echo "  waiting for $w local lift worker(s)..."
-            wait
+            # `wait` with no args always returns 0, so a crashed worker went
+            # undetected and the recording's precompute/IK chain got queued
+            # anyway (the on-disk kp3d.npz gate then refused it one step
+            # later, after other recordings had already been submitted).
+            # wait on each PID individually and check its own exit status.
+            LIFT_FAILED=0
+            for pid in "${PIDS[@]}"; do
+                if ! wait "$pid"; then
+                    echo "  ERROR: local lift worker pid $pid ($SESSION/$TS) exited non-zero" >&2
+                    LIFT_FAILED=1
+                fi
+            done
+            N_BOUTS_ATTEMPTED=$(echo "$BOUTS" | wc -w)
+            N_EXPECTED_KP3D=$((N_BOUTS_ATTEMPTED * 2))   # fly0 + fly1 per bout
+            # `|| true`: under `set -o pipefail`, a glob that matches nothing
+            # makes `ls` exit non-zero even though `wc -l` correctly reports 0,
+            # which would otherwise abort the script here (via `set -e`)
+            # instead of falling through to the error message below.
+            N_LIFTED_KP3D=$(ls "$OUT"/bouts/bout_*/fly*/kp3d.npz 2>/dev/null | wc -l) || true
+            if [ "$LIFT_FAILED" -ne 0 ] || [ "$N_LIFTED_KP3D" -lt "$N_EXPECTED_KP3D" ]; then
+                echo "ERROR: local lift for $SESSION/$TS incomplete (worker failure=$LIFT_FAILED," \
+                     "kp3d.npz written=$N_LIFTED_KP3D/$N_EXPECTED_KP3D expected) --" \
+                     "skipping this recording's chain submission" >&2
+                ANY_LIFT_FAILED=1
+                unset CSV
+                continue
+            fi
         else
             echo "  (dry-run) would lift locally on $LOCAL_GPUS GPU(s): $(echo $BOUTS | tr '\n' ' ')"
         fi
@@ -225,3 +253,8 @@ for rec in "${RECORDINGS[@]}"; do
     unset CSV
 done
 echo "submitted $n recording chain(s) ($RUN_NAME, mvq=$MVQ_CONFIG)"
+if [ "${ANY_LIFT_FAILED:-0}" -ne 0 ]; then
+    echo "FAILED: one or more recordings' local lift crashed or under-produced" \
+         "kp3d.npz -- see ERROR lines above; that recording's chain was NOT submitted" >&2
+    exit 1
+fi

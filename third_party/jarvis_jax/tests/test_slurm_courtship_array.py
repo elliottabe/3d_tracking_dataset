@@ -25,6 +25,11 @@ def test_build_array_script_has_requeue_and_bout_id():
                                                         # `+bout_ids=` would raise Hydra's
                                                         # ConfigCompositionException
     assert "unset LD_LIBRARY_PATH" in s        # JAX env
+    # per-bout hydra.run.dir: without this, all array tasks in a recording
+    # wrote into one shared <run_dir>/hydra/analysis/ (last-writer-wins
+    # config snapshot, interleaved log).
+    assert "printf '%05d'" in s
+    assert "hydra.run.dir=/tmp/rd/hydra/bout_${BOUT_PADDED}" in s
 
 
 def test_sam3_script_uses_pytorch_env():
@@ -69,3 +74,6 @@ def test_precompute_script_uses_real_bout_id():
                                   config_name="pipeline", overrides="")
     assert "++bout_ids=1" in s
     assert "++bout_ids=0" not in s
+    # per-bout hydra.run.dir, zero-padded to match the bout_<idx:05d>
+    # convention used everywhere else (e.g. run_bout.py's bout_dir).
+    assert "hydra.run.dir=/tmp/rd/hydra/bout_00001" in s

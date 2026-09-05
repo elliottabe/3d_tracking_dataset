@@ -329,7 +329,7 @@ cd {PROJECT_DIR}
 # DIFFERENT checkout of jarvis_jax than the tree this job was submitted from
 # (this repo is routinely worked on in git worktrees), and the job would then
 # run code the submitter never saw.
-PYTHONPATH=third_party/jarvis_jax:. python -u scripts/run_bout.py --config-name={config_name} ++bout_ids={bout_id}{overrides}
+PYTHONPATH=third_party/jarvis_jax:. python -u scripts/run_bout.py --config-name={config_name} ++bout_ids={bout_id} hydra.run.dir={run_dir}/hydra/bout_{bout_id:05d}{overrides}
 """
 
 
@@ -394,7 +394,12 @@ echo "Node: $SLURMD_NODENAME  job: $SLURM_JOB_ID  task: $SLURM_ARRAY_TASK_ID"
 nvidia-smi -L
 cd {PROJECT_DIR}
 # see build_precompute_script on why PYTHONPATH precedes the editable install
-PYTHONPATH=third_party/jarvis_jax:. python -u scripts/run_bout.py --config-name={config_name} ++bout_ids=${{SLURM_ARRAY_TASK_ID}}{overrides}
+# Zero-padded per-bout hydra.run.dir (matches the bout_<idx:05d> convention
+# used everywhere else, e.g. run_bout.py's bout_dir): without it, all 31
+# array tasks per recording wrote into one shared `hydra/analysis/` dir --
+# a last-writer-wins config snapshot and an interleaved log across every task.
+BOUT_PADDED=$(printf '%05d' ${{SLURM_ARRAY_TASK_ID}})
+PYTHONPATH=third_party/jarvis_jax:. python -u scripts/run_bout.py --config-name={config_name} ++bout_ids=${{SLURM_ARRAY_TASK_ID}} hydra.run.dir={run_dir}/hydra/bout_${{BOUT_PADDED}}{overrides}
 """
 
 

@@ -5,8 +5,21 @@ import numpy as np
 
 
 def _parse_name(p):
-    m = re.search(r"bout_(\d+)_fly(\d)", os.path.basename(p))
+    """Bout/fly ids come from the PATH components
+    (.../bouts/bout_00008/fly1/qc.json), not the basename -- every qc.json
+    is named identically ("qc.json"), so matching against
+    os.path.basename(p) always returned bout -1 / fly -1."""
+    m = re.search(r"bout_(\d+)/fly(\d)", p.replace(os.sep, "/"))
     return (int(m.group(1)), int(m.group(2))) if m else (-1, -1)
+
+
+def _iou_block(d):
+    """qc.json's mesh-vs-mask IoU block, under either key name (renamed
+    silhouette_iou -> mesh_mask_iou 2026-09-01, see qc.py:177-182). Without
+    the fallback, the session IoU has been NaN for every run since the
+    rename. Same pattern as scripts/benchmark/metrics.py::_iou and
+    scripts/benchmark/select_bouts.py::scan_bout_fly."""
+    return d.get("mesh_mask_iou") or d.get("silhouette_iou") or {}
 
 
 def aggregate_session_qc(bout_qc_paths, out_json, *, plot_dir=None) -> dict:
@@ -19,9 +32,10 @@ def aggregate_session_qc(bout_qc_paths, out_json, *, plot_dir=None) -> dict:
         except Exception:
             continue
         b, f = _parse_name(p)
+        iou = _iou_block(d)
         rows.append(dict(bout=b, fly=f,
-                         iou_hard=d.get("silhouette_iou", {}).get("hard_median", float("nan")),
-                         iou_soft=d.get("silhouette_iou", {}).get("soft_median", float("nan")),
+                         iou_hard=iou.get("hard_median", float("nan")),
+                         iou_soft=iou.get("soft_median", float("nan")),
                          reproj_px=d.get("per_camera_reproj_px", {}).get("median", float("nan")),
                          loo_px=d.get("loo_reproj_px", {}).get("median", float("nan")),
                          n_frames=d.get("n_frames", 0)))

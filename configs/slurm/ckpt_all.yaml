@@ -15,7 +15,12 @@ constraint: 'h200|a100|l40s|l40|a40'
 account: portia
 gpus_per_task: 1
 cpus: 8
-mem: 48
+# 48 -> 64: v1's three >= 2100-frame bouts peaked at 50.3 GB (MaxRSS =
+# 0.0197*T + 7.9 GB) against a 48 GB request, and only survived because this
+# cluster does not hard-enforce the cgroup limit. build_precompute_script /
+# build_jax_array_script / build_aggregate_script (scripts/slurm_bout_array.py)
+# all read this SAME `slurm.mem` field -- one value, no separate precompute knob.
+mem: 64
 time: '12:00:00'
 requeue: true
 conda_env: 3d_tracking
