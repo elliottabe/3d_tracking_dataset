@@ -157,6 +157,7 @@ if _PKG not in sys.path:
 from jarvis_jax.data.build_v5 import (                 # noqa: E402
     MIN_CAMS, _canonical_keypoint_names, _keypoint_remap, _pad_keypoints)
 from jarvis_jax.data.calib_groups import CAM_GLOB, group_calibrations   # noqa: E402
+from jarvis_jax.data import label_qc                   # noqa: E402
 from jarvis_jax.data.content_index import (            # noqa: E402
     alias_components, content_groups, hash_paths)
 from jarvis_jax.data.split_v5 import (                 # noqa: E402
@@ -696,6 +697,15 @@ def main() -> None:
     ap.add_argument("--workers", type=int, default=192)
     ap.add_argument("--female-val-frac", type=float, default=0.10)
     ap.add_argument("--guard", type=int, default=200)
+    ap.add_argument("--raw", nargs="*", default=[],
+                    help="raw red export roots (dirs of <stamp>_<sex>/ with "
+                         "keypoints3d.csv). Every recording found there is "
+                         "checked: its exported 3D must reproject onto its 2D "
+                         "through the calibration group this build ASSIGNS it "
+                         "(<= 0.5 px median). A mismatch is fatal.")
+    ap.add_argument("--allow-calib-mismatch", action="store_true",
+                    help="record a calibration mismatch in build_report.json "
+                         "instead of refusing to build")
     args = ap.parse_args()
 
     records, subsets, ann_paths = load_general_model(args.gm)
@@ -860,6 +870,13 @@ def main() -> None:
     used_recs = sorted({im["recording"] for im in out_images})
     groups = group_calibrations({r: calib_of[r] for r in used_recs})
     calib_out = os.path.join(args.out, "calibrations")
+    # Group letters are assigned by group SIZE, so a change in any subset's
+    # calibration can relabel every group. calibrations/ is wholly derived
+    # from this run: rewrite it, never merge into a stale one (the first
+    # version skipped existing group dirs, which would have shipped the old
+    # matrices under the new letters).
+    if os.path.isdir(calib_out):
+        shutil.rmtree(calib_out)
     for rec, grp in groups.items():
         dst = os.path.join(calib_out, grp)
         if os.path.isdir(dst):
@@ -867,6 +884,52 @@ def main() -> None:
         os.makedirs(dst, exist_ok=True)
         for f in sorted(glob.glob(os.path.join(calib_of[rec], CAM_GLOB))):
             shutil.copy2(f, os.path.join(dst, os.path.basename(f)))
+
+    # ---- label QC 1/2: is each recording's ASSIGNED calibration the one its
+    # labels were triangulated with? The 3D trainer (v5_3d.py) triangulates
+    # the 2D labels with the assigned group, so a wrong group silently trains
+    # on wrong 3D. Only the raw export holds the 3D labels, hence --raw.
+    raw_reports, calib_mismatches = {}, []
+    for d in label_qc.raw_export_dirs(args.raw):
+        rec = label_qc.recording_id_of(d)
+        if rec not in groups:
+            print(f"label QC: {os.path.basename(d)} -> {rec} is not a recording "
+                  f"of this build; skipped")
+            continue
+        raw = label_qc.read_raw_labels(d)
+        best, per = label_qc.best_calibration_group(
+            raw, {g: os.path.join(calib_out, g) for g in sorted(set(groups.values()))})
+        assigned = groups[rec]
+        ok = label_qc.calibration_consistent(per[assigned])
+        entry = {"recording": rec, "assigned_group": assigned,
+                 "best_fit_group": best, "assigned_consistent": ok,
+                 "per_group": {g: {k: r[k] for k in
+                                   ("median_px", "p95_px", "median_of_frame_medians_px",
+                                    "n_points", "n_frames", "per_camera_median_px")}
+                               for g, r in per.items()},
+                 "inconsistent_frames": per[best]["inconsistent_frames"]}
+        raw_reports[os.path.basename(d)] = entry
+        print(f"label QC: {os.path.basename(d)}: assigned {assigned} "
+              f"({per[assigned]['median_of_frame_medians_px']:.3f} px), best {best}"
+              + (f"; {len(entry['inconsistent_frames'])} frame(s) with 3D "
+                 f"inconsistent with their own 2D" if entry["inconsistent_frames"] else ""))
+        if not ok:
+            calib_mismatches.append({
+                "raw_dir": os.path.basename(d), "recording": rec,
+                "assigned_group": assigned, "best_fit_group": best,
+                "assigned_px": per[assigned]["median_of_frame_medians_px"],
+                "best_px": per[best]["median_of_frame_medians_px"]})
+    if calib_mismatches:
+        msg = ("CALIBRATION MISMATCH: the calibration group assigned to these "
+               "recordings does not reproduce their own 3D labels:\n" +
+               "\n".join(f"  {m['raw_dir']}: assigned {m['assigned_group']} "
+                         f"({m['assigned_px']:.2f} px) vs best {m['best_fit_group']} "
+                         f"({m['best_px']:.3f} px)" for m in calib_mismatches) +
+               "\nFix the source subset's calib_params (stage_export_corrections.py "
+               "--calib-from) rather than the assignment.")
+        print(msg, file=sys.stderr)
+        if not args.allow_calib_mismatch:
+            raise SystemExit("REFUSING to build: " + msg)
 
     man = {"version": os.path.basename(args.out.rstrip("/")),
            "source_root": args.gm,
@@ -1000,6 +1063,25 @@ def main() -> None:
     # defect in this dataset survived because a build reported its plan.
     comp = composition(args.out, out_images, groups)
     print_composition(comp)
+    # ---- label QC 2/2: keypoint completeness of the SHIPPED annotations ----
+    shipped_imgs, shipped_anns = [], []
+    for side in ("train", "val"):
+        blob = json.load(open(os.path.join(args.out, "annotations",
+                                           f"instances_{side}.json")))
+        shipped_imgs += blob["images"]
+        shipped_anns += blob["annotations"]
+    kp_qc = label_qc.completeness(shipped_imgs, shipped_anns, kp_names)
+    t = kp_qc["totals"]
+    print(f"label QC: {t['missing_keypoints']} of {t['keypoint_slots']} keypoint "
+          f"slots missing ({100 * t['missing_fraction']:.2f}%), "
+          f"{t['fully_labelled_annotations']}/{t['annotations']} annotations fully "
+          f"labelled, {t['images_without_annotation']} images without annotation, "
+          f"{t['num_keypoints_field_mismatches']} num_keypoints mismatches")
+    for rec, r in kp_qc["per_recording"].items():
+        if r["missing_keypoints"]:
+            print(f"   {rec}: {r['missing_keypoints']} missing "
+                  f"({100 * r['missing_fraction']:.2f}%), "
+                  f"{r['images_without_annotation']} unannotated images")
     with open(os.path.join(args.out, "content_index.json"), "w") as f:
         json.dump({"n_image_refs": len(records), "n_unique_content": len(contents),
                    "duplicate_groups": {h: sorted(v) for h, v in groups_c.items()
@@ -1037,6 +1119,20 @@ def main() -> None:
                             "name-parsing fallback. Nothing is inferred from "
                             "an image; body size is explicitly NOT used."},
             "composition": comp,
+            "label_qc": {
+                "completeness": kp_qc,
+                "raw_reprojection": raw_reports,
+                "calibration_mismatches": calib_mismatches,
+                "raw_roots": list(args.raw),
+                "note": "completeness: v==0 slots in the SHIPPED annotations "
+                        "(unlabelled, out of view, or structurally absent after "
+                        "schema padding). raw_reprojection: exported 3D vs "
+                        "exported 2D through every calibration group; the "
+                        "assigned group must be consistent (<= 0.5 px median "
+                        "over frames) or the build refuses. inconsistent_frames "
+                        "are frames whose 3D does not match their own 2D "
+                        "(scale_ratio 10 = the export's units slip); their 2D "
+                        "ships, 3D is triangulated at load time anyway."},
             "split_policy": {
                 "ignored_general_model_own_splits": True,
                 "holdout_unit": "alias component (byte-identity), atom = whole "

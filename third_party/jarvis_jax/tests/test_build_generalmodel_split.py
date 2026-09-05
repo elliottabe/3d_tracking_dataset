@@ -162,8 +162,9 @@ def _write_subset(gm, subset, rec, frames, x_of_ann, split_of_frame,
         json.dump(blob, open(os.path.join(ad, f"instances_{sp}.json"), "w"))
 
 
-@pytest.fixture
-def built(tmp_path, monkeypatch):
+def _setup(tmp_path, monkeypatch, extra_argv=()):
+    """The standard three-subset general_model fixture; returns (gm, out)
+    with sys.argv set for bgs.main()."""
     gm, out = str(tmp_path / "general_model"), str(tmp_path / "out")
     frames = list(range(1000, 1040))
     sp = lambda fr: "train" if fr < 1030 else "val"
@@ -191,9 +192,116 @@ def built(tmp_path, monkeypatch):
                                           "courtship_x_male": "courtship",
                                           "solo_male": "general"})
     monkeypatch.setattr(sys, "argv", ["build", "--gm", gm, "--out", out,
-                                      "--guard", "2"])
+                                      "--guard", "2"] + list(extra_argv))
+    return gm, out
+
+
+@pytest.fixture
+def built(tmp_path, monkeypatch):
+    _, out = _setup(tmp_path, monkeypatch)
     bgs.main()
     return out
+
+
+# The fixture yaml is `data: [0..11]`, i.e. this projective matrix.
+_P_FIX = np.arange(12, dtype=float).reshape(3, 4)
+_RAW_H = 32          # the fixture images are 64x32
+
+
+def _write_raw_export(root, name, frames, P_of_cam, n_kp=N_KP):
+    """A raw red export dir whose 2D is the projection of its 3D through
+    `P_of_cam(cam)`, v written bottom-origin. Returns the dir."""
+    rec = os.path.join(root, name)
+    cal = os.path.join(rec, "calibration")
+    os.makedirs(cal, exist_ok=True)
+    rng = np.random.default_rng(7)
+    X = {fr: rng.uniform(1.0, 3.0, (n_kp, 3)) for fr in frames}
+
+    def _rows(path, ndim, rows):
+        with open(path, "w") as f:
+            f.write("/skeletons/fly50.json\n")
+            for fr, arr in rows.items():
+                parts = [str(fr)]
+                for k, v in enumerate(arr):
+                    parts += [str(k)] + [repr(float(x)) for x in v]
+                f.write(",".join(parts) + "\n")
+
+    for c in CAMS:
+        P = P_of_cam(c)
+        uv = {}
+        for fr in frames:
+            p = (P @ np.c_[X[fr], np.ones(n_kp)].T).T
+            u = p[:, :2] / p[:, 2:3]
+            u[:, 1] = _RAW_H - u[:, 1]
+            uv[fr] = u
+        _rows(os.path.join(rec, f"{c}.csv"), 2, uv)
+        open(os.path.join(cal, f"{c}.yaml"), "w").write(
+            f"%YAML:1.0\n---\nimage_width: 64\nimage_height: {_RAW_H}\n")
+        np.savetxt(os.path.join(cal, f"{c}_dlt.csv"), P.ravel()[:11] / P[2, 3])
+    _rows(os.path.join(rec, "keypoints3d.csv"), 3, X)
+    return rec
+
+
+def test_raw_reprojection_qc_and_completeness_land_in_the_report(tmp_path, monkeypatch):
+    raw_root = str(tmp_path / "raw")
+    # the export dir carries the sex suffix; the recording is the stamp
+    _write_raw_export(raw_root, "2026_01_01_00_00_01_female", [1000, 1001, 1002],
+                      lambda c: _P_FIX)
+    _write_raw_export(raw_root, "2077_07_07_07_07_07_male", [5], lambda c: _P_FIX)  # not in build
+    _, out = _setup(tmp_path, monkeypatch, ["--raw", raw_root])
+    bgs.main()
+    r = json.load(open(os.path.join(out, "build_report.json")))["label_qc"]
+    rep = r["raw_reprojection"]
+    assert list(rep) == ["2026_01_01_00_00_01_female"]
+    e = rep["2026_01_01_00_00_01_female"]
+    assert e["recording"] == "2026_01_01_00_00_01"
+    assert e["assigned_group"] == e["best_fit_group"] == "A"
+    assert e["assigned_consistent"] is True
+    assert e["per_group"]["A"]["median_px"] < 1e-6
+    assert e["inconsistent_frames"] == []
+    assert r["calibration_mismatches"] == []
+    # completeness is computed from what was SHIPPED
+    c = r["completeness"]
+    n_anns = sum(len(_load(out, s)["annotations"]) for s in ("train", "val"))
+    assert c["totals"]["annotations"] == n_anns
+    assert c["totals"]["keypoint_slots"] == n_anns * N_KP
+    assert c["totals"]["missing_keypoints"] == 0
+    assert set(c["per_recording"]) == {"2026_01_01_00_00_01", "2026_02_02_00_00_00"}
+    assert "CAM" not in c["per_recording_camera"]["2026_01_01_00_00_01"]
+    assert set(c["per_recording_camera"]["2026_01_01_00_00_01"]) == set(CAMS)
+
+
+def test_a_recording_whose_assigned_calibration_did_not_make_its_labels_is_fatal(
+        tmp_path, monkeypatch):
+    """The 2026-09-02 defect: the labels fit ANOTHER calibration than the one
+    the source subset ships. Refuse by default; record under a flag."""
+    raw_root = str(tmp_path / "raw")
+    P_other = _P_FIX.copy()
+    P_other[0, 3] += 40.0                 # a horizontal shift of a few px
+    _write_raw_export(raw_root, "2026_01_01_00_00_01_female", [1000, 1001],
+                      lambda c: P_other)
+    _setup(tmp_path, monkeypatch, ["--raw", raw_root])
+    with pytest.raises(SystemExit, match="CALIBRATION MISMATCH"):
+        bgs.main()
+    _, out = _setup(tmp_path, monkeypatch, ["--raw", raw_root, "--allow-calib-mismatch"])
+    bgs.main()
+    r = json.load(open(os.path.join(out, "build_report.json")))["label_qc"]
+    m = r["calibration_mismatches"]
+    assert len(m) == 1 and m[0]["recording"] == "2026_01_01_00_00_01"
+    assert m[0]["assigned_px"] > 0.5
+    assert r["raw_reprojection"]["2026_01_01_00_00_01_female"]["assigned_consistent"] is False
+
+
+def test_calibrations_dir_is_rewritten_not_merged(tmp_path, monkeypatch):
+    """Group letters follow group size, so a stale calibrations/ from an
+    earlier build must never survive into a new one."""
+    _, out = _setup(tmp_path, monkeypatch)
+    stale = os.path.join(out, "calibrations", "Z")
+    os.makedirs(stale)
+    open(os.path.join(stale, "Cam2012600.yaml"), "w").write("stale")
+    bgs.main()
+    assert not os.path.exists(stale)
+    assert sorted(os.listdir(os.path.join(out, "calibrations"))) == ["A"]
 
 
 def _load(out, name):

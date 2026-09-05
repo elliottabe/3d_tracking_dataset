@@ -2100,14 +2100,66 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
             seg_entries = json.load(_f)
         apply_segment_scales(cfg, seg_entries)
 
-    # -- offsets.h5: fit ONCE (shared across all bouts/flies) on a
-    #    high-confidence kp3d sample from whichever bout gets there first --
+    # -- offsets_fly<f>.h5: marker offsets are a per-INDIVIDUAL constant, like
+    #    scale. They used to be fit ONCE per run root on whichever bout-fly got
+    #    here first and shared: on Session0/2025_10_20_13_20_04 bout 28 that
+    #    sample was fly0 (the female) frames 0..499, so the male ran IK with her
+    #    offsets -- abdomen fitted 1.10x too long, wings 1.01-1.06x (2026-09-04).
+    #    Now: per fly, pooled over EVERY triangulated bout of this fly in the
+    #    recording, high-confidence + physically-plausible frames only,
+    #    stratified across bouts, and fit with temporal smoothing OFF because
+    #    the sample is not a time series. Per-fly needs canonical identity
+    #    (sex.json everywhere); otherwise refuse unless stac.allow_shared_offsets.
+    #    See scripts/offsets_sample.py.
+    try:
+        from scripts.offsets_sample import (
+            aligned_per_frame_scales, load_fly_bouts, offsets_fit_cfg,
+            resolve_offsets_path, select_offsets_sample)
+        from scripts.estimate_recording_scale import _determine_identity, per_frame_scales
+    except ModuleNotFoundError:  # direct invocation: sys.path[0] is scripts/
+        from offsets_sample import (
+            aligned_per_frame_scales, load_fly_bouts, offsets_fit_cfg,
+            resolve_offsets_path, select_offsets_sample)
+        from estimate_recording_scale import _determine_identity, per_frame_scales
+    _off_ident, _off_reason = _determine_identity(Path(run_root))
+    offsets_path, _off_mode = resolve_offsets_path(
+        run_root, fly, _off_ident,
+        allow_shared=bool(cfg.stac.get("allow_shared_offsets", False)),
+        reason=_off_reason)
+    if _off_mode == "shared":
+        print(f"[offsets] WARNING bout {bout_idx} fly{fly}: SHARED marker offsets "
+              f"({_off_reason}) -- both flies fitted with one anatomy, allowed by "
+              f"stac.allow_shared_offsets", flush=True)
     if not stage_done(offsets_path):
-        sample_idx = high_confidence_sample(kp3d)
-        fit_offsets_once(cfg, kp3d[sample_idx], kp_names,
-                         offsets_path="offsets.h5.tmp", save_path=run_root, scale=scale)
-        os.replace(os.path.join(run_root, "offsets.h5.tmp"),
-                  os.path.join(run_root, "offsets.h5"))
+        _min_conf = float(cfg.stac.get("offsets_min_conf", 0.7))
+        _bouts = load_fly_bouts(run_root, fly) if _off_mode == "per_fly" else {}
+        if not _bouts:            # shared mode, or nothing on disk yet: this bout
+            _conf3d = None
+            if os.path.exists(kp3d_path):
+                with np.load(kp3d_path) as _z:
+                    _conf3d = np.asarray(_z["conf3d"]) if "conf3d" in _z.files else None
+            _bouts = {int(bout_idx): (np.asarray(kp3d), _conf3d)}
+        _scales = {b: aligned_per_frame_scales(
+                       k, lambda kk: per_frame_scales(kk, kp_names, cfg.ik.xml))
+                   for b, (k, _) in _bouts.items()}
+        _sample = select_offsets_sample(
+            {b: k for b, (k, _) in _bouts.items()},
+            {b: c for b, (_, c) in _bouts.items()},
+            n_frames=int(cfg.stac.get("n_fit_frames", 500)), min_conf=_min_conf,
+            scale_by_bout=_scales)
+        print(f"[offsets] bout {bout_idx} fly{fly}: {_off_mode} fit on "
+              f"{_sample.provenance['n_selected']} frames pooled from "
+              f"{_sample.provenance['n_bouts']} bout(s) (min_conf {_min_conf}, "
+              f"scale gate {_sample.provenance['scale_gate']}); per bout: "
+              f"{_sample.provenance['bouts']}", flush=True)
+        _tmp_name = os.path.basename(offsets_path) + ".tmp"
+        fit_offsets_once(offsets_fit_cfg(cfg), _sample.kp3d, kp_names,
+                         offsets_path=_tmp_name, save_path=run_root, scale=scale)
+        _sample.provenance.update({"fly": int(fly), "mode": _off_mode,
+                                   "identity": _off_ident, "identity_reason": _off_reason,
+                                   "scale": float(scale), "smoothing": "off"})
+        atomic_save_json(os.path.splitext(offsets_path)[0] + ".json", _sample.provenance)
+        os.replace(os.path.join(run_root, _tmp_name), offsets_path)
 
 # -- Stage C: STAC ik_only ----------------------------------------------------
     if not stage_done(stac_h5_path):

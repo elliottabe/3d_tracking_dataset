@@ -30,6 +30,18 @@ frame (the two flies of one capture are filed under two FABRICATED recording
 ids a minute apart, e.g. 2026_05_27_11_56_05 and _11_57_05) the two copies are
 byte-identical.
 
+CALIBRATION COMES FROM general_model, NOT FROM THE EXPORT (2026-09-03). All six
+`2026_04_02_*` export dirs ship ONE byte-identical `calibration/` -- the
+12_11_50 one. For 15_25_51 and 17_28_34 the exported 3D reprojects 4-15 px off
+the exported 2D through it, and 0.002 px through the calibration the
+same-named general_model subset carries (checked for all seven recordings
+here; 11_50 and 20_04 agree either way). The 3D trainer triangulates the 2D
+labels with the shipped calibration, so the v12 root built from the export's
+calibration trained on wrong 3D for those two recordings. Each conversion is
+therefore given `--calib-from <gm>/<subset>/calib_params/<rec>` and the
+converter PROVES the shipped calibration against the recording's own labels
+before writing it (see red3d2jarvis.py).
+
 RECORDING IDS ARE THE TRUE CAPTURE TIMESTAMPS, taken from the export directory
 names, not general_model's fabricated ones. That is not cosmetic: filing both
 flies of a capture under ONE id makes them one capture to the split builder by
@@ -224,11 +236,19 @@ def main():
     report = []
     for exp, subset, rec_id, sex, gm_subs in RECORDINGS:
         out = Path(a.stage) / subset
+        # the SAME-NAMED general_model subset's calibration (see module doc)
+        cal_root = Path(a.gm) / subset / "calib_params"
+        cal_dirs = sorted(p for p in cal_root.iterdir() if p.is_dir()) \
+            if cal_root.is_dir() else []
+        if len(cal_dirs) != 1:
+            raise SystemExit(f"FATAL: {cal_root}: expected exactly one "
+                             f"recording dir of Cam*.yaml, found {cal_dirs}")
         cmd = [sys.executable, str(CONVERTER),
                "-i", str(Path(a.raw) / exp), "-o", str(out),
                "--subset-name", subset, "--recording-id", rec_id,
                "--sex", sex, "--sex-source", "dirname",
                "--citation", CITATION.format(exp=exp, subs="+".join(gm_subs)),
+               "--calib-from", str(cal_dirs[0]),
                "--link-images-from"] + [str(Path(a.gm) / s) for s in gm_subs]
         print("\n$", " ".join(cmd), flush=True)
         if a.dry_run:

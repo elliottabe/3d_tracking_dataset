@@ -122,12 +122,28 @@ be for a projective DLT.  TRUE is the value that matches this corpus: with it,
 the emitted yaml is byte-identical to the calibration already shipped in
 `general_model` for the same recording, `scale: 10` and all.  Default True;
 `--no-scale-10x` exists but should not be used with this corpus.
+
+THE SHIPPED CALIBRATION IS VERIFIED AGAINST THE LABELS (added 2026-09-03)
+-------------------------------------------------------------------------
+The raw export's `calibration/` is NOT trusted to be the calibration the
+labels were triangulated with. All six `2026_04_02_*` export dirs shipped one
+byte-identical calibration (the 12_11_50 one); for 15_25_51 and 17_28_34 the
+exported 3D reprojects 4-15 px off the exported 2D through it and 0.00 px
+through the calibration `general_model` held for those recordings. The 3D
+trainer triangulates the 2D labels with whatever calibration the root ships,
+so this converter now refuses to write a calibration unless the recording's
+own 3D reprojects onto its 2D at <= 0.5 px median (`jarvis_jax.data.label_qc`).
+`--calib-from DIR` ships DIR's `Cam*.yaml` instead of the raw DLT, subject to
+the same proof. Frames whose 3D is inconsistent with their own 2D (the
+export carries five whose 3D is exactly 10x) are reported in the stats and
+KEPT: their 2D is fine and 3D is never shipped from here.
 """
 from __future__ import annotations
 
 import argparse
 import json
 import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -135,6 +151,10 @@ import numpy as np
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 FLY50_PATH = REPO_ROOT / "data" / "fly50.json"
+_JJ = REPO_ROOT / "third_party" / "jarvis_jax"
+if str(_JJ) not in sys.path:
+    sys.path.insert(0, str(_JJ))
+from jarvis_jax.data import label_qc  # noqa: E402
 
 # |coord| at or above this is the raw format's not-labelled sentinel (1e+07).
 MISSING = 1e6
@@ -234,7 +254,8 @@ def write_calib_yaml(dst: Path, cam: str, dlt_csv: Path,
 # --------------------------------------------------------------------------
 def convert(rec_dir: Path, out_dir: Path, subset: str, recording_id: str,
             sex: str, sex_source: str, citation: str | None,
-            scale_10x: bool, link_from: list[Path], video_dir: Path | None) -> dict:
+            scale_10x: bool, link_from: list[Path], video_dir: Path | None,
+            calib_from: Path | None = None) -> dict:
     names, edges = load_fly50()
     n_kp = len(names)
     cams = sorted(p.stem for p in rec_dir.glob("Cam*.csv"))
@@ -269,6 +290,40 @@ def convert(rec_dir: Path, out_dir: Path, subset: str, recording_id: str,
             if (vw, vh) != dims[cam]:
                 raise SystemExit(f"{cam}: video is {vw}x{vh} but calibration "
                                  f"says {dims[cam][0]}x{dims[cam][1]}")
+
+    # ---- PROVE the calibration we are about to ship made these labels ------
+    raw = label_qc.read_raw_labels(rec_dir)
+    if calib_from is not None:
+        for cam in cams:
+            if not (calib_from / f"{cam}.yaml").exists():
+                raise SystemExit(f"--calib-from {calib_from}: no {cam}.yaml")
+            if read_calib_yaml_dims(calib_from, cam) != dims[cam]:
+                raise SystemExit(f"--calib-from {calib_from}/{cam}.yaml: image "
+                                 f"size differs from the raw calibration")
+        proj = label_qc.yaml_projection(calib_from, cams)
+        calib_source = str(calib_from)
+    else:
+        proj = label_qc.dlt_projection(cal_dir, cams)
+        calib_source = str(cal_dir)
+    rep = label_qc.reprojection_report(raw, proj)
+    if not label_qc.calibration_consistent(rep):
+        raise SystemExit(
+            f"{rec_dir}: the calibration at {calib_source} does NOT reproduce "
+            f"this recording's own 3D labels: median "
+            f"{rep['median_of_frame_medians_px']:.2f} px over {rep['n_frames']} "
+            f"frames (per camera: "
+            + ", ".join(f"{c}={v:.1f}" for c, v in rep["per_camera_median_px"].items())
+            + f"). Labels are triangulated to ~0.003 px by the calibration that "
+            f"made them, so this is a different calibration. Pass --calib-from "
+            f"<dir of Cam*.yaml> holding the right one (e.g. the same-named "
+            f"general_model subset's calib_params/<rec>/).")
+    if rep["inconsistent_frames"]:
+        print(f"WARNING: {len(rep['inconsistent_frames'])} frames whose exported "
+              f"3D does not match their own 2D (scale_ratio 10 = the export's "
+              f"known 10x units slip); 2D is shipped, 3D never is:",
+              file=sys.stderr)
+        for row in rep["inconsistent_frames"]:
+            print(f"   {row}", file=sys.stderr)
 
     frames = sorted(set(kp3d) | {f for d in per_cam.values() for f in d})
     images, annotations, framesets = [], [], {}
@@ -321,7 +376,8 @@ def convert(rec_dir: Path, out_dir: Path, subset: str, recording_id: str,
                 "bbox": [float(xs.min()), float(ys.min()),
                          float(xs.max() - xs.min()), float(ys.max() - ys.min())],
                 "category_id": 1, "id": n_ann, "image_id": img_id, "iscrowd": 0,
-                "keypoints": kps, "num_keypoints": n_kp, "segmentation": []})
+                "keypoints": kps, "num_keypoints": int(vis.sum()),
+                "segmentation": []})
             n_ann += 1
             stats["annotated"] += 1
             stats["labelled_points"] += int(vis.sum())
@@ -348,8 +404,18 @@ def convert(rec_dir: Path, out_dir: Path, subset: str, recording_id: str,
     cal_out = out_dir / "calib_params" / recording_id
     cal_out.mkdir(parents=True, exist_ok=True)
     for cam in cams:
-        write_calib_yaml(cal_out, cam, cal_dir / f"{cam}_dlt.csv",
-                         *dims[cam], scale_10x=scale_10x)
+        if calib_from is not None:
+            shutil.copy2(calib_from / f"{cam}.yaml", cal_out / f"{cam}.yaml")
+        else:
+            write_calib_yaml(cal_out, cam, cal_dir / f"{cam}_dlt.csv",
+                             *dims[cam], scale_10x=scale_10x)
+    stats["calibration_check"] = {
+        "source": calib_source,
+        "median_px": rep["median_px"], "p95_px": rep["p95_px"],
+        "median_of_frame_medians_px": rep["median_of_frame_medians_px"],
+        "n_points": rep["n_points"], "n_frames": rep["n_frames"],
+        "per_camera_median_px": rep["per_camera_median_px"]}
+    stats["frames_3d_inconsistent"] = rep["inconsistent_frames"]
 
     with open(out_dir / "sex.json", "w") as f:
         json.dump({"subset": subset, "sex": sex, "sex_source": sex_source,
@@ -455,13 +521,19 @@ def main() -> None:
     ap.add_argument("--video-dir", type=Path, default=None,
                     help="DEFECT 3: the video dir has NO sex suffix while the "
                          "label dir does, so it is named explicitly")
+    ap.add_argument("--calib-from", type=Path, default=None,
+                    help="dir of Cam*.yaml to ship INSTEAD of the raw export's "
+                         "calibration/ (e.g. general_model/<subset>/calib_params/"
+                         "<rec>). Either way the shipped calibration must "
+                         "reproduce the recording's own 3D labels.")
     args = ap.parse_args()
 
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     stats = convert(Path(args.recording), out, args.subset_name,
                     args.recording_id, args.sex, args.sex_source, args.citation,
-                    args.scale_10x, list(args.link_images_from), args.video_dir)
+                    args.scale_10x, list(args.link_images_from), args.video_dir,
+                    calib_from=args.calib_from)
     print(json.dumps(stats, indent=2))
     print(f"wrote {out}")
 

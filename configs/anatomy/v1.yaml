@@ -230,7 +230,7 @@ model:
   #
   # 2026-08-31: THAT VERDICT IS VOID -- do not cite it. The benchmark scores
   # outputs.h5's kp3d_mm (scripts/benchmark/metrics.py), which comes from
-  # Stage-E FK via silhouette_ik_solve.build_solver_inputs -- and until
+  # Stage-E FK via ik_solve.build_solver_inputs -- and until
   # commit 6044d28 that rebuilt the FK model from the XML alone, never
   # applying SEGMENT_SCALES. So the ON arm solved qpos against the MORPHED
   # skeleton and was then scored on the UNMORPHED one. The ON arm was
@@ -239,8 +239,8 @@ model:
   # before drawing any conclusion.
   #
   # STILL BROKEN for a segment-calibrated run: outputs.h5's mesh_mm (and
-  # every mesh render / silhouette-polish cost built on it) comes from
-  # silhouette_ik.load_anatomy, which does MjModel.from_xml_path + the mesh
+  # every mesh render built on it) comes from
+  # fk.load_anatomy, which does MjModel.from_xml_path + the mesh
   # npz's vertices_local -- neither morphed. So kp3d_mm is now morphed while
   # mesh_mm is not, and a sidebyside of a segment-calibrated run will show
   # fitted markers detaching from the mesh as an ARTIFACT. Fix that before
@@ -576,11 +576,19 @@ model:
   # docs/benchmark/2026-08-13-stac-weak-dof-convergence/notes.md.
   JAXLS_GRADIENT_TOLERANCE: 1.0e-8
   JAXLS_PARAMETER_TOLERANCE: 1.0e-10
-  # jaxls cost tolerance. Left at jaxls' own default -- FTOL is NOT mapped here:
-  # FTOL is 5.0e-03, which would be 500x looser than this and would make the cost
-  # criterion fire before the gradient criterion, silently disabling
-  # JAXLS_GRADIENT_TOLERANCE. FTOL governs the ProjectedGradient path only.
-  JAXLS_COST_TOLERANCE: 1.0e-5
+  # jaxls cost tolerance (relative |cost change| / cost per LM iteration).
+  # TIGHTENED 2026-09-05 from jaxls' default 1e-5: the cost criterion was the
+  # one firing in every instrumented solve, and it stopped the batch solve
+  # while the weakly-observed wing-pitch DOF was still 30 deg from its marker
+  # optimum (Session0/2025_10_20_13_20_04 bout 28 fly1: folded wing rendered
+  # edge-on at -19 deg where the marker cost minimum is -50 deg). With cost
+  # 1e-12 / grad 1e-14 / param 1e-16 the 300-frame window reached -49 deg and
+  # 0.41 -> 0.36 mm all-keypoint residual at ~6x solve time; this setting
+  # tightens ONLY the cost criterion and keeps N_ITER_Q, as the cheaper
+  # first step -- see docs/benchmark/2026-09-04-wing-ik-spike/notes.md.
+  # FTOL is NOT mapped here: it is 5.0e-03 and governs the ProjectedGradient
+  # path only.
+  JAXLS_COST_TOLERANCE: 1.0e-10
   JAXLS_SMOOTH_WEIGHT: 0.005
   JAXLS_LINEAR_SOLVER: "auto"
   JAXLS_USE_SE3_ROOT: true
@@ -647,5 +655,5 @@ model:
     # T3R_TaT3: 0.5
     # T3R_TaTip: 0.5
 
-# CSE visual mesh used by the silhouette/FK path.
+# CSE visual mesh used by the FK/render path.
 cse_mesh_npz: "${paths.body_model_dir}/fruitfly_cse/fly_v1_visual_canonical_wings.npz"

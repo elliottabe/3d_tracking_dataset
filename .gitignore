@@ -237,3 +237,5 @@ docs/benchmark/
 docs/qc/
 
 slurm_logs/
+logs/
+papers/
