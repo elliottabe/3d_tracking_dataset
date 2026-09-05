@@ -41,7 +41,9 @@ import time
 BOUT_ARTIFACTS = ["DONE", "kp3d.npz", "kp3d_filt.npz", "stac_ik.h5", "outputs.h5",
                   "qpos_refined.npz", "qpos_wingfit.npz", "qc.json",
                   "qc_perframe.npz", "unsolvable.json", "track_qc.json"]
-RECORDING_ARTIFACTS = ["offsets.h5", "scale.json", "segment_scales.json"]
+RECORDING_ARTIFACTS = ["offsets.h5", "offsets_fly0.h5", "offsets_fly0.json",
+                       "offsets_fly1.h5", "offsets_fly1.json",
+                       "scale.json", "segment_scales.json"]
 # Commit c4bdaa8 ("consensus outlier-view rejection in triangulation, on by
 # default"). Derived from git rather than hardcoded -- a hand-typed epoch here
 # was off by a YEAR (2025 not 2026), which silently matched nothing.

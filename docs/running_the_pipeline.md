@@ -58,7 +58,7 @@ if you want the wider pool there too.
 `ckpt*` partitions are preemptible. Jobs are submitted with `--requeue`, each
 array task writes to a fixed per-task directory, and
 `jarvis_jax.tracking.resume` skips stages whose artifact already exists
-(`kp2d.npz`, `kp3d.npz`, `kp3d_filt.npz`, `scale.json`, `offsets.h5`,
+(`kp2d.npz`, `kp3d.npz`, `kp3d_filt.npz`, `scale.json`, `offsets_fly<f>.h5`,
 `stac_ik.h5`, `outputs.h5`, plus a `DONE` marker per bout). So a
 preempt+requeue resumes at the last completed stage rather than restarting.
 There is no mid-stage checkpoint, so an interrupted stage restarts from its
@@ -67,8 +67,13 @@ own beginning — minutes, for per-bout IK.
 Note the flip side: those same markers mean a re-run **skips completed work**.
 To genuinely refit (e.g. after a `scale.json` change) the downstream
 artifacts must be removed first — `DONE`, `stac_ik.h5`, `outputs.h5`,
-`qpos_refined.npz`, `qc*.{json,npz}`, and the recording-level `offsets.h5`,
-which is scale-dependent. Keep `kp2d/kp3d/kp3d_filt.npz` (triangulation does
+`qpos_refined.npz`, `qc*.{json,npz}`, and the recording-level
+`offsets_fly0.h5`/`offsets_fly1.h5` (+ their `.json` provenance), which are
+scale-dependent. Offsets are per fly, pooled over every triangulated bout of
+that fly on high-confidence frames only (`stac.offsets_min_conf`, default 0.7)
+and fit with temporal smoothing off; a run with an early, few-bout offsets file
+can be refit the same way once more bouts are triangulated (the `.json` says
+how many bouts backed it). Keep `kp2d/kp3d/kp3d_filt.npz` (triangulation does
 not depend on scale).
 
 ## Prerequisites (per recording)

@@ -26,6 +26,19 @@ skip_fit_offsets: False
 skip_ik_only: False
 infer_qvels: True
 
+# Marker offsets are fit PER FLY (run_root/offsets_fly<f>.h5), pooled over every
+# triangulated bout of that fly in the recording, on frames whose every keypoint
+# is finite, whose per-frame MINIMUM conf3d is >= offsets_min_conf, and whose
+# implied body scale is within 3 MAD of the fly's pooled median; stratified
+# across bouts; temporal smoothing OFF for that fit (the sample is not a time
+# series). Per-fly needs canonical identity (every bout has sex.json). Otherwise
+# run_bout REFUSES a shared offsets.h5 -- both flies fitted with one anatomy
+# (measured 2026-09-04: the shared file was fit on the female, and the male's
+# abdomen came out 1.10x too long) -- unless allow_shared_offsets is set.
+# See scripts/offsets_sample.py.
+offsets_min_conf: 0.7
+allow_shared_offsets: false
+
 fit_offsets_path: "Fruitfly_fit_${anatomy.name}_${dataset.name}.h5"
 ik_only_path: "Fruitfly_ik_${anatomy.name}_${dataset.name}.h5"
 
