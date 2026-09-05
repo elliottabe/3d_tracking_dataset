@@ -285,6 +285,62 @@ def test_run_bout_refuses_a_kp3d_written_under_other_gates():
 
 
 # ---------------------------------------------------------------------------
+# Final fix wave (2026-09-05): mvq lifter guards -- Stage A/B must never
+# silently run ViTPose+DLT under pipeline.lifter=mvq, and a loaded kp3d.npz's
+# keypoint order must be checked against cfg.model.KP_NAMES.
+# ---------------------------------------------------------------------------
+def test_mvq_lifter_refuses_a_bout_whose_lift_files_are_missing():
+    """Under `pipeline.lifter=mvq`, Stage A (ViTPose) and Stage B (DLT) are
+    gated ONLY by `stage_done(kp2d_path)`/`stage_done(kp3d_path)` -- file
+    existence, not who produced the file. Without this guard, a bout whose
+    mvq lift never ran (or was interrupted) would silently fall through to
+    ViTPose+DLT and get its DLT-triangulated kp3d.npz stamped with the mvq
+    `gates` string (`stage_b_gate_signature` returns the mvq signature
+    unconditionally under this lifter) -- indistinguishable on disk from a
+    real mvq lift."""
+    src = RUN_BOUT.read_text()
+    i = src.index('centroids = masks_dict["centroids"]')
+    j = src.index("# -- Stage A: ViTPose 2-D", i)
+    blk = src[i:j]
+    assert 'lifter", "dlt")) == "mvq"' in blk, \
+        "the guard must dispatch on pipeline.lifter=mvq, the same way stage_b_gate_signature does"
+    assert "raise RuntimeError" in blk, "a missing mvq lift must refuse, not warn or compute one"
+    assert "kp2d_path" in blk and "kp3d_path" in blk, \
+        "the refusal must name which file(s) are missing"
+    assert "mvq_lift_bout.py" in blk, "the refusal must name the lift command to run"
+    # it must not itself run ViTPose/DLT as a fallback
+    assert "predict_bout_2d" not in blk and "triangulate_keypoints" not in blk
+
+
+def test_mvq_lift_guard_runs_before_stage_a_reads_kp2d():
+    """The guard must sit BEFORE `if not stage_done(kp2d_path):` (Stage A) --
+    placed after would let Stage A run first and defeat the whole point."""
+    src = RUN_BOUT.read_text()
+    i = src.index('lifter", "dlt")) == "mvq":\n        _missing_mvq')
+    j = src.index("if not stage_done(kp2d_path):", i)
+    assert j > i, "the mvq lift-file guard must run before Stage A's kp2d.npz check"
+
+
+def test_kp3d_kp_names_are_checked_against_cfg_model_kp_names():
+    """`lift_mvq.lift_masked_bout` stamps kp3d.npz with its own `kp_names`
+    array, and `scripts/viz/mvq_bout_video.py` writes mvq-order files under
+    `pose_mvq/` with the SAME `gates` string the staleness check accepts --
+    this assertion is the ONLY defence against a kp3d.npz whose keypoint axis
+    silently disagrees with cfg.model.KP_NAMES (the CLAUDE.md keypoint-order
+    trap: a wrong index space reads a real body part, just the wrong one,
+    with every metric still confident)."""
+    src = RUN_BOUT.read_text()
+    i = src.index("with np.load(kp3d_path) as z:\n        kp3d, conf3d = z[\"kp3d\"], z[\"conf3d\"]\n        _kp3d_kp_names")
+    j = src.index("# -- Stage B2:", i)
+    blk = src[i:j]
+    assert '"kp_names" in z.files' in blk, \
+        "must tolerate a DLT-written kp3d.npz, which carries no kp_names array"
+    assert "raise RuntimeError" in blk, "a kp_names mismatch must refuse, not warn"
+    assert "cfg.model.KP_NAMES" in blk
+    assert "first mismatch" in blk, "the refusal must name the first mismatching index"
+
+
+# ---------------------------------------------------------------------------
 # Task 6: the opt-in post-STAC wing-pitch refinement against the SAM masks
 # ---------------------------------------------------------------------------
 

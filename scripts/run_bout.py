@@ -1533,6 +1533,37 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
     # Stage-A-local binding raised UnboundLocalError.
     centroids = masks_dict["centroids"]
 
+    # `pipeline.lifter: mvq` (spec 2026-09-04-mvq-maskfree-frontend-design
+    # §4.5) means Stages A (ViTPose) and B (DLT) are REPLACED entirely by
+    # `jarvis_jax.tracking.lift_mvq` / `scripts/mvq_lift_bout.py`, which write
+    # kp2d.npz/kp3d.npz BEFORE run_bout.py ever runs. Stage A/B below are
+    # gated ONLY by `stage_done(kp2d_path)`/`stage_done(kp3d_path)` -- file
+    # existence, not who produced the file -- so a bout whose mvq lift never
+    # ran (or was interrupted before writing these files) would silently fall
+    # through to ViTPose+DLT here and get its DLT-triangulated kp3d.npz
+    # stamped with the mvq `gates` string (`stage_b_gate_signature` returns
+    # the mvq checkpoint's signature under this lifter, unconditionally) --
+    # indistinguishable on disk from a real mvq lift, and never re-triangulated
+    # correctly by a later run (the gate signature would MATCH). Refuse
+    # instead of computing anything.
+    if str((cfg.get("pipeline") or {}).get("lifter", "dlt")) == "mvq":
+        _missing_mvq = []
+        if not stage_done(kp2d_path):
+            _missing_mvq.append(kp2d_path)
+        if not stage_done(kp3d_path):
+            _missing_mvq.append(kp3d_path)
+        if _missing_mvq:
+            raise RuntimeError(
+                f"bout {bout_idx} fly{fly}: pipeline.lifter=mvq requires kp2d.npz and "
+                f"kp3d.npz to already exist (written by the mvq lift), but missing: "
+                f"{_missing_mvq}. Stage A (ViTPose) / Stage B (DLT) must NEVER run under "
+                f"pipeline.lifter=mvq -- doing so would stamp DLT-triangulated keypoints "
+                f"with the mvq gate signature, indistinguishable on disk from a real mvq "
+                f"lift. Run the lift first, e.g.:\n"
+                f"    PYTHONPATH=third_party/jarvis_jax:. python scripts/mvq_lift_bout.py "
+                f"--session-dir <session_dir> --predictions-dir <sam3_masks_dir> "
+                f"--out {run_root} --run <mvq_checkpoint_dir> --bout {bout_idx}")
+
     # -- Stage A: ViTPose 2-D ---------------------------------------------------
     if not stage_done(kp2d_path):
         start = bout_start_frame(cfg, bout_idx)
@@ -1796,8 +1827,36 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
                         gates=np.asarray(_gate_sig))
     with np.load(kp3d_path) as z:
         kp3d, conf3d = z["kp3d"], z["conf3d"]
+        _kp3d_kp_names = [str(n) for n in z["kp_names"]] if "kp_names" in z.files else None
 
     kp_names = list(cfg.model.KP_NAMES)
+
+    # `jarvis_jax.tracking.lift_mvq.lift_masked_bout` stamps kp3d.npz with its
+    # own `kp_names` array (permuted BY NAME into cfg.model.KP_NAMES already
+    # -- see that function's docstring), and `scripts/viz/mvq_bout_video.py`
+    # writes mvq-order files under `pose_mvq/` with the SAME `gates` string
+    # this stage's staleness check accepts. Neither of those write paths is
+    # re-checked by anything else in run_bout.py, so this assertion is the
+    # ONLY defence against a kp3d.npz whose keypoint axis silently disagrees
+    # with cfg.model.KP_NAMES -- exactly the CLAUDE.md trap (a wrong index
+    # space reads a real body part, just the WRONG one, with every metric
+    # still confident). A DLT-written kp3d.npz has no `kp_names` array at all
+    # (it is implicitly cfg.model.KP_NAMES by construction), so this is a
+    # strict no-op there.
+    if _kp3d_kp_names is not None and _kp3d_kp_names != kp_names:
+        _i = next((i for i, (a, b) in enumerate(zip(_kp3d_kp_names, kp_names)) if a != b),
+                  min(len(_kp3d_kp_names), len(kp_names)))
+        _a = _kp3d_kp_names[_i] if _i < len(_kp3d_kp_names) else "<missing>"
+        _b = kp_names[_i] if _i < len(kp_names) else "<missing>"
+        raise RuntimeError(
+            f"bout {bout_idx} fly{fly}: {kp3d_path} carries kp_names that do not match "
+            f"cfg.model.KP_NAMES -- first mismatch at index {_i}: stored={_a!r} vs "
+            f"cfg={_b!r}.\n"
+            f"  stored ({len(_kp3d_kp_names)}): {_kp3d_kp_names}\n"
+            f"  cfg    ({len(kp_names)}): {kp_names}\n"
+            f"Reading this file with the wrong keypoint order measures a real body part, "
+            f"just the WRONG one, with every downstream metric still confident -- refusing "
+            f"rather than silently mis-indexing every keypoint from here on.")
 
     # -- Stage B2: temporal smoothing / outlier rejection of the triangulated
     #    kp3d BEFORE scale/offsets/STAC. Distal leg tips occasionally

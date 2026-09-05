@@ -351,6 +351,31 @@ def test_lift_is_idempotent_and_force_reruns(tmp_path):
     assert res["skipped"] is False
 
 
+def test_lift_is_not_current_without_sex_json(tmp_path):
+    """`lift_masked_bout` writes every fly's kp3d.npz BEFORE sex.json, so a
+    requeued task killed in that window leaves both npz files complete and
+    gated but no sex.json. That bout must NOT read as current -- otherwise a
+    re-submitted array skips it forever and the recording falls back to one
+    shared body scale instead of a per-fly one."""
+    from jarvis_jax.tracking.lift_mvq import bout_lift_is_current, lift_masked_bout
+    r = FakeRunner(_fake_checkpoint(tmp_path), kp_names=_mvq_names())
+    centres = np.zeros((2, 1, 3), np.float32)
+    centres[1, :, 0] = 200.0
+    out = tmp_path / "bout"
+    lift_masked_bout(r, _frames(1), centres, np.ones((2, 1), bool),
+                     out_dir=str(out), model_names=_model_names())
+    assert bout_lift_is_current(str(out), r.gates_string())
+
+    # simulate the kill: both npz are complete and gated, sex.json is gone
+    os.remove(out / "sex.json")
+    assert not bout_lift_is_current(str(out), r.gates_string())
+
+    # a sex.json that exists but was NOT written by the mvq sex head (e.g. a
+    # stale file from a different lifter/heuristic) must not count either
+    (out / "sex.json").write_text(json.dumps({"male_fly": 1, "method": "wing_song_cv"}))
+    assert not bout_lift_is_current(str(out), r.gates_string())
+
+
 # --------------------------------------------------------------- canonicalize
 def test_canonicalize_bout_treats_mvq_sex_head_as_authoritative(tmp_path):
     """A bout whose sex.json says `mvq_sex_head` was typed by the model's own

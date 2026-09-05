@@ -609,12 +609,22 @@ def resolve_bout_frames(session_dir, bout_idx, bouts_csv=None):
 
 
 def bout_lift_is_current(out_dir, gates_string, n_flies=2):
-    """True when every `<out_dir>/fly*/kp3d.npz` exists and carries `gates_string`.
+    """True when every `<out_dir>/fly*/kp3d.npz` exists and carries `gates_string`
+    AND `<out_dir>/sex.json` exists with `method == MVQ_SEX_METHOD`.
 
     The gates string names the checkpoint and the existence threshold, so this
     is the same staleness contract `run_bout.py`'s Stage B enforces: a bout
     lifted by different weights is NOT current and gets re-run, while a
     re-submitted array skips the work it already did.
+
+    `sex.json` is REQUIRED too, not just the per-fly npz files:
+    `lift_masked_bout` writes every fly's `kp3d.npz` BEFORE `sex.json` (it
+    needs the per-fly `n_missing` counts collected during that loop to build
+    the sex payload), so a requeued task killed between those writes leaves a
+    bout with two complete-looking `kp3d.npz` files and no `sex.json`. Without
+    this check that bout reads as "current" forever -- a re-submitted array
+    skips it -- and the recording falls back to ONE shared body scale instead
+    of a per-fly one (see MEMORY scale-from-first-bout-defect).
     """
     for fly in range(int(n_flies)):
         p = os.path.join(str(out_dir), f"fly{fly}", "kp3d.npz")
@@ -626,6 +636,16 @@ def bout_lift_is_current(out_dir, gates_string, n_flies=2):
                     return False
         except (OSError, ValueError):
             return False
+    sex_path = os.path.join(str(out_dir), "sex.json")
+    if not (os.path.exists(sex_path) and os.path.getsize(sex_path) > 0):
+        return False
+    try:
+        with open(sex_path) as f:
+            sex = json.load(f)
+    except (OSError, ValueError):
+        return False
+    if sex.get("method") != MVQ_SEX_METHOD:
+        return False
     return True
 
 
