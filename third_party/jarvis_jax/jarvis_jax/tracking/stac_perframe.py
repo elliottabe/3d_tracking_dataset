@@ -91,6 +91,39 @@ def wing_dof_weights(names_qpos: Sequence[str], wing_weight: float) -> np.ndarra
     return w
 
 
+def qvel_from_qpos(q: np.ndarray, dt: float, freejoint: bool = True, max_qvel: float = 20.0) -> np.ndarray:
+    """Vectorised numpy twin of stac_mjx.utils.compute_velocity_from_kinematics
+    (same convention: forward difference with the last frame repeated,
+    free-joint angular velocity as the axis-angle of q_t^-1 q_{t+1} over dt,
+    joint velocities clipped to +-max_qvel). The original loops over frames in
+    Python with small JAX ops -- 118 s for 1500 frames (profiled 2026-09-05).
+    NaN frames propagate NaN."""
+    q = np.asarray(q, np.float64)
+    qp = np.concatenate([q, q[-1:]], axis=0)
+    if not freejoint:
+        return np.clip((qp[1:] - qp[:-1]) / dt, -max_qvel, max_qvel)
+    v_joint = (qp[1:, 7:] - qp[:-1, 7:]) / dt
+    v_trans = (qp[1:, :3] - qp[:-1, :3]) / dt
+    a, b = qp[:-1, 3:7], qp[1:, 3:7]
+    # conj(a) * b, quaternions as [w, x, y, z]
+    aw, ax, ay, az = a[:, 0], -a[:, 1], -a[:, 2], -a[:, 3]
+    bw, bx, by, bz = b[:, 0], b[:, 1], b[:, 2], b[:, 3]
+    dq = np.stack([aw * bw - ax * bx - ay * by - az * bz,
+                   aw * bx + ax * bw + ay * bz - az * by,
+                   aw * by - ax * bz + ay * bw + az * bx,
+                   aw * bz + ax * by - ay * bx + az * bw], axis=1)
+    dq = dq / np.linalg.norm(dq, axis=1, keepdims=True)
+    ang = 2.0 * np.arccos(np.clip(dq[:, 0], -1.0, 1.0))
+    sin_half = np.sqrt(np.maximum(1.0 - dq[:, 0] ** 2, 0.0))
+    ang = (ang + np.pi) % (2 * np.pi) - np.pi                   # wrap to (-pi, pi], as the original does
+    with np.errstate(invalid="ignore", divide="ignore"):
+        axis = np.where(sin_half[:, None] > 1e-7, dq[:, 1:] / sin_half[:, None], 0.0)
+    v_gyro = axis * ang[:, None] / dt
+    out = np.concatenate([v_trans, v_gyro, v_joint], axis=1)
+    out[:, 6:] = np.clip(out[:, 6:], -max_qvel, max_qvel)
+    return out
+
+
 def write_stac_h5(path: str, *, cfg, kp_names, names_qpos, names_xpos, kp_data, marker_sites,
                   offsets, qpos, xpos, xquat, qvel, extra: dict | None = None, attrs: dict | None = None):
     """stac_ik.h5 with the schema stac_mjx.io.save_data_to_h5 produces (float32
@@ -124,6 +157,11 @@ def solve_per_frame_ik(cfg, kp3d_scaled: np.ndarray, kp_names: List[str], *, xml
     from stac_mjx.stac_core_jaxls import JaxlsBatchSolver
     from mujoco import mjx
 
+    import os as _os
+    _prof = _os.environ.get("STAC_PERFRAME_PROFILE") == "1"
+    _marks = [("start", time.time())]
+    def _mark(name):
+        if _prof: _marks.append((name, time.time()))
     pc = cfg.stac.per_frame
     kp = np.asarray(kp3d_scaled, np.float64)
     T = kp.shape[0]
@@ -147,6 +185,7 @@ def solve_per_frame_ik(cfg, kp3d_scaled: np.ndarray, kp_names: List[str], *, xml
     names_qpos = list(stac._part_names)                 # per-qpos joint names, as stac_mjx writes them
     assert len(names_qpos) == nq
     kp_w = np.asarray(stac._kp_weights, np.float64)
+    _mark("model+mjx setup")
 
     # which frames can be started: all warm-start keypoints finite (+ caller's mask)
     M = cfg.model
@@ -180,26 +219,32 @@ def solve_per_frame_ik(cfg, kp3d_scaled: np.ndarray, kp_names: List[str], *, xml
         ts = time.time()
         cand_q.append(np.asarray(solver.solve_trajectory(q_init=jnp.asarray(q0), **common), np.float64))
         cand_names.append(name); cand_it.append(np.asarray(solver.last_iterations)); t_solve[name] = round(time.time() - ts, 1)
+    _mark("solves")
     costs = np.stack([frame_costs_np(mj, site_idxs, q, kp_s, kp_w) for q in cand_q])        # (S, Ts)
+    _mark("candidate costs (CPU FK)")
     mask_all = np.ones(nq, bool)
     choice = viterbi_select(costs, cand_q, mask_all, float(pc.switch_weight),
                             dof_weights=wing_dof_weights(names_qpos, float(pc.get("switch_wing_weight", 1.0))))
     q_sel = np.stack([cand_q[choice[t]][t] for t in range(len(idx))])
     it_sel = np.stack([cand_it[choice[t]][t] for t in range(len(idx))])
+    _mark("viterbi")
 
     # full-length arrays (unsolved frames NaN), FK-derived outputs, qvel
     q_full = np.full((T, nq), np.nan); q_full[idx] = q_sel
-    def fk(q):
-        data = mjx_data.replace(qpos=q)
-        data = utils.kinematics(mjx_model, data)
-        data = utils.com_pos(mjx_model, data)
-        return data.xpos, data.xquat, utils.get_site_xpos(data, jnp.asarray(site_idxs))
-    xpos, xquat, msites = (np.array(a, np.float64) for a in jax.vmap(fk)(jnp.asarray(np.nan_to_num(q_full))))
-    for a in (xpos, xquat, msites):
-        a[~solvable] = np.nan
-    qvel = np.array(utils.compute_velocity_from_kinematics(
-        jnp.asarray(np.nan_to_num(q_full)), dt=mj.opt.timestep, freejoint=stac._freejoint), np.float64)
+    # Output FK on the CPU: a jax.vmap of mjx kinematics over T frames spent
+    # 128 s in XLA compilation for 1500 frames (profiled 2026-09-05) where
+    # MuJoCo's C kinematics does the same in ~0.1 s.
+    import mujoco
+    dcpu = mujoco.MjData(mj)
+    xpos = np.full((T, mj.nbody, 3), np.nan); xquat = np.full((T, mj.nbody, 4), np.nan); msites = np.full((T, len(site_idxs), 3), np.nan)
+    for t in idx:
+        dcpu.qpos[:] = q_full[t]
+        mujoco.mj_kinematics(mj, dcpu)
+        xpos[t] = dcpu.xpos; xquat[t] = dcpu.xquat; msites[t] = dcpu.site_xpos[site_idxs]
+    _mark("FK (CPU)")
+    qvel = qvel_from_qpos(np.nan_to_num(q_full), dt=mj.opt.timestep, freejoint=stac._freejoint)
     qvel[~solvable] = np.nan
+    _mark("qvel")
     names_xpos = list(stac._body_names)
     start_idx = np.full(T, -1, np.int32); start_idx[idx] = choice
     iters = np.full(T, -1, np.int32); iters[idx] = it_sel
@@ -213,6 +258,9 @@ def solve_per_frame_ik(cfg, kp3d_scaled: np.ndarray, kp_names: List[str], *, xml
                   extra=extra, attrs={"ik_solver": "per_frame", "ik_candidates": json.dumps(cand_names),
                                        "ik_switch_weight": float(pc.switch_weight),
                                        "ik_switch_wing_weight": float(pc.get("switch_wing_weight", 1.0))})
+    _mark("h5 write")
+    if _prof:
+        print(f"{log_prefix} profile: " + ", ".join(f"{n} {t1 - t0:.1f}s" for (n0, t0), (n, t1) in zip(_marks[:-1], _marks[1:])), flush=True)
     n_cap = int(np.sum(it_sel >= int(pc.n_iter)))
     frac = {n: round(float(np.mean(choice == i)), 3) for i, n in enumerate(cand_names)}
     summary = dict(seconds=round(time.time() - t0, 1), solve_seconds=t_solve, n_frames=int(T), n_solved=int(idx.size),

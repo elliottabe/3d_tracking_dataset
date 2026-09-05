@@ -11,6 +11,7 @@ from omegaconf import OmegaConf
 from jarvis_jax.tracking.stac_perframe import (
     STAC_H5_KEYS,
     chained_starts,
+    qvel_from_qpos,
     warm_start,
     wing_dof_weights,
     write_stac_h5,
@@ -88,3 +89,17 @@ def test_write_stac_h5_matches_the_pipeline_schema(tmp_path):
         assert f["qpos"].dtype == np.float32 and f["kp_names"].dtype.kind == "S"
         assert [n.decode() for n in f["names_qpos"][:]] == NQ_NAMES
         assert f.attrs["ik_solver"] == "per_frame" and "ik_iterations" in f
+
+
+def test_qvel_from_qpos_matches_stac_mjx_reference():
+    """The numpy twin must reproduce stac_mjx.utils.compute_velocity_from_kinematics
+    (which loops per frame in JAX; 118 s for 1500 frames) to float32 precision."""
+    import jax.numpy as jnp
+    from stac_mjx import utils
+    rng = np.random.default_rng(0); T, nq = 40, 15
+    q = rng.normal(scale=0.3, size=(T, nq)).cumsum(0); q[:, 3:7] /= np.linalg.norm(q[:, 3:7], axis=1, keepdims=True)
+    ref = np.asarray(utils.compute_velocity_from_kinematics(jnp.asarray(q), dt=0.00125, freejoint=True))
+    mine = qvel_from_qpos(q, 0.00125, True)
+    assert mine.shape == ref.shape == (T, nq - 1)
+    np.testing.assert_allclose(mine, ref, rtol=1e-4, atol=2e-3)
+    np.testing.assert_allclose(qvel_from_qpos(q, 0.00125, False), np.clip(np.diff(np.vstack([q, q[-1:]]), axis=0) / 0.00125, -20, 20), atol=1e-9)

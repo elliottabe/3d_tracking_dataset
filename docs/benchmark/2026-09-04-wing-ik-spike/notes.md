@@ -227,3 +227,20 @@ song-safe temporal prior stays an opt-in follow-up. Renders:
 Also: `outputs.overlay` defaults to false (7 per-camera videos cost 171-288 s
 per fly, as much as the solve); `stac.polish` remains for `solver: batch`.
 The earlier `JAXLS_COST_TOLERANCE` 1e-10 change is moot under per_frame.
+
+### Profile of the per-frame Stage C (female, 1500 frames), 2026-09-05
+
+`STAC_PERFRAME_PROFILE=1` prints per-stage times. Before: 475 s = solves 165 +
+model/mjx setup 20 + **output FK 128 (a jax.vmap of mjx kinematics over all
+frames: XLA compile)** + qvel 118 (`stac_mjx.utils.compute_velocity_from_kinematics`
+loops over frames in Python with small JAX ops). After: FK on CPU MuJoCo (0.1 s),
+qvel as a vectorised numpy twin (`qvel_from_qpos`, verified against the
+original to float32 precision): **158 s**, of which 138 s are the four solves
+(zero 73 s incl. compile; chained rest starts 17-24 s each). Remaining levers:
+the iteration cap (median 68, p95 129, cap 500 -- check on other bouts first)
+and batch size. The abdomen "tip higher than the mesh tip" observation was
+the camera view: the fitted tip is on the measured one to 0.2-0.3 mm and the
+abdomen direction matches the keypoints (130 deg off the thorax axis, both
+flies); the S-kink (+12.7 deg at segment 4, -10 at 6/7) comes from the model
+abdomen being 6-13% longer than these flies -- an abdomen-only segment scale
+would be the fix if it ever matters.
