@@ -882,3 +882,171 @@ lives in `OutFiles/mvq_task7_smoke/` on shared storage.
 `--only <timestamp>` restricts it to one recording. The lift is idempotent on the gates string, so a
 re-run costs nothing for bouts already done, and `--local-gpus` refuses to start while a training
 process matching `--guard-pattern` is alive.
+
+## Mask-identity assignment (2026-09-05)
+
+The campaign's `identity="sex"` lifter took `fly0` from the model's FEMALE typed slot and `fly1` from
+its MALE one, each out of whichever window read that slot most confidently. On
+`Session0/2025_10_20_13_20_04` (20_04) the sex head types that female as a MALE, so
+(`.superpowers/sdd/2026-09-04-mvq-maskfree-p4a-p4b/female-miss-diagnosis.md`):
+
+- her own mask window's male slot fires 0.87-1.00 **on her body** while the female slot reads
+  0.01-0.46, which NaN'd `fly0` on 40 % of the recording (97.7 % of bout 25);
+- whenever that read beat the male window's, `pick_typed_pair` handed the male track **her body** --
+  2.5 % of 20_04 frames, 21 % in bout 25, 19 % in bout 5, and 0-2 % in every Session1 recording. The
+  collapse guard cannot see it: the two written flies are different bodies, just the wrong way round.
+
+### Design
+
+`lift_masked_bout(..., identity=)` now has two modes, and `--identity {mask,sex}` on
+`scripts/mvq_lift_bout.py` selects them (`mask` is the default; `configs/mvq/p3a.yaml` sets
+`identity: mask`).
+
+- **`sex`** -- unchanged: `pick_typed_pair`, the model's typed slots, `sex.json` method
+  `mvq_sex_head`.
+- **`mask`** -- the SAM3 masks carry a **human id review** (`sex_meta.method ==
+  "human_id_review"`, `male_slot: 1` on all 160 campaign bouts), which is the top of this
+  pipeline's identity precedence (`sexing.canonicalize_bout`: human > mvq > wing-song CV). So
+  `fly{f}` IS mask fly `f`, and the model is asked only *which instance is on this mask?*
+  Per frame, per mask fly `f`, in the window `frame_windows` put that mask's centre in
+  (`pick_mask_pair`): among the 4 slots with `exist >= exist_thresh`, keep those whose keypoint
+  centroid is within `--mask-assign-units` (default **10 units = 1 mm**) of that mask's
+  triangulated centre and take the nearest; the typed slot for that fly's sex wins when it also
+  qualifies (ties by existence). Nothing inside the radius -> **NaN**, never "the nearest thing in
+  the crop". A bout whose masks carry no human review falls back to `sex` **with a warning** and
+  records it. `male_slot != 1` under `mask` is **refused** -- `fly{f}` IS mask fly `f` there, so
+  writing `male_fly: 1` would name the wrong fly.
+
+Collapse guard kept, and it is what protects the merged-window case (both masks resolving to the
+same instance): two written flies within `COLLAPSE_DIST_UNITS` (3 u median per keypoint) keep the
+one **nearer its own mask** and NaN the other (tie keeps fly0).
+
+`sex.json` keeps `male_fly: 1` but `method`/`authority` become `mask_human_id_review`, with
+`confidence: "user"` (a human decided, not the sex head). `sexing.LIFTER_SEX_METHODS` puts that
+method in `canonicalize_bout`'s authoritative no-swap set beside `mvq_sex_head`, and
+`bout_lift_is_current` accepts either. `mvq_meta.json` gains `identity` (requested),
+`identity_resolved`, `mask_assign_units`, `sex_head_disagree_frac` per fly, and per frame
+`identity_source`, `slot_used`, `sex_head_agrees`, `mask_dist_units`.
+
+`identity` is in `mvq_gate_signature`/`mvq_gate_string` and `run_bout.stage_b_gate_signature`
+passes `cfg.mvq.identity`, so a run switched between the modes refuses the other's bouts instead of
+reusing them -- **every existing `pose_mvq_p3a` lift is now stale by design** (its gates string has
+no `identity` key). The gate names the REQUESTED mode, not a per-bout fallback: run_bout never
+opens the mask npz, and `identity_resolved` in `mvq_meta.json` is where the fallback is visible.
+`mask_assign_units` is deliberately NOT in the signature, for the same reason as
+`collapse_dist_units` -- recorded in `mvq_meta.json` instead.
+
+### Smoke: 20_04 bouts 25 and 5 re-lifted with `--identity mask`
+
+    OUT=OutFiles/mvq_identity_smoke
+    PYTHONPATH=third_party/jarvis_jax:. python -u scripts/mvq_lift_bout.py \
+        --session-dir  $VID/courtship/Session0/2025_10_20_13_20_04 \
+        --predictions-dir $PROC/courtship/Session0/2025_10_20_13_20_04/sam3_masks \
+        --out $OUT --bout 25 --bout 5 \
+        --run $RUNS/mvq_t1_b16_p3a_20260904/final \
+        --exist-thresh 0.5 --batch 8 --merge-dist-units 30.0 \
+        --identity mask --mask-assign-units 10.0 \
+        --anatomy configs/anatomy/v1.yaml --recording-cfg configs/recording/session0.yaml \
+        --bouts-csv $PROC/.../pose_mvq_p3a/bouts_unified_summary.csv
+
+Audit (`figures/2026-09-mvq/p3a_campaign_female_misses/identity_mask_smoke.json`; the method is
+`scratchpad/identity_check.py`'s -- written fly centroid vs the two mask centres, "swapped" = > 8 u
+closer to the OTHER mask):
+
+| bout | metric | before (`identity=sex`, `pose_mvq_p3a`) | after (`identity=mask`) |
+|---|---|---|---|
+| 25 | fly0 (female) NaN | **0.977** (419/429) | **0.210** (90/429) |
+| 25 | fly1 (male) NaN | 0.000 | 0.000 |
+| 25 | fly1 swapped onto her | **0.214** | **0.000** |
+| 25 | fly0 swapped | 0.000 | 0.000 |
+| 25 | median dist to OWN mask, fly0 / fly1 | 4.25 / 5.37 u | 4.46 / 4.98 u |
+| 25 | `sex_head_disagree_frac` fly0 / fly1 | -- | 0.982 / 0.000 |
+| 5 | fly0 (female) NaN | **0.659** (520/789) | **0.070** (55/789) |
+| 5 | fly1 (male) NaN | 0.010 (8/789) | 0.199 (157/789) |
+| 5 | fly1 swapped onto her | **0.188** | **0.000** |
+| 5 | fly0 swapped | 0.026 | 0.000 |
+| 5 | median dist to OWN mask, fly0 / fly1 | 5.61 / 6.37 u | 4.54 / 6.21 u |
+| 5 | `sex_head_disagree_frac` fly0 / fly1 | -- | 0.778 / 0.000 |
+
+Both swap fractions go to **zero** and the female's NaN fraction drops 4.7x (bout 25) and 9.4x
+(bout 5), with the median distance to her own mask **unchanged at ~4.5 u** -- the radius is not
+letting a different instance in.
+
+**Where the two residual numbers come from** (`scratchpad/why_missing.py`, `merged_detail.py`):
+
+- bout 25's remaining 90 fly0 NaNs are **all** in the 98 MERGED frames (both flies in one crop). On
+  90 of them exactly ONE slot is above threshold, slot 2 at exist ~0.95, sitting 6.4 u from the
+  MALE's mask and 24.3 u (median) from hers -- the model simply does not emit an instance on her in
+  a merged crop. On the other 8, slot 3 ("other") fires on her and she IS written from it
+  (`slot_used[fly0] == 3`). So this is a model limitation, not an assignment one, and the expected
+  "fly0 NaN falls to near the male's 0.000" is only partly met: it falls to 0.210, and the rest is
+  contact frames.
+- bout 5's fly1 NaN rise 0.010 -> 0.199 is the SWAP being converted into an honest NaN, not new
+  loss. All 157 misses are merged frames; of the 149 frames that were written before and are NaN
+  now, **98 were flagged swapped** by the > 8 u criterion and the remainder are the same merged
+  frames with the two mask centres 24.5-30.0 u apart (right at the 30 u merge boundary), where the
+  live instances all sit on her side.
+
+**Radius A/B** (`OutFiles/mvq_identity_smoke_r15`, `--mask-assign-units 15`): bout 25 is
+**identical** (90/0), confirming her merged-frame misses are not a radius artefact; bout 5 recovers
+a little (fly0 55 -> 28, fly1 157 -> 127) but **81 frames (10.3 %) start hitting the collapse
+guard** -- the wider radius lets both masks claim the same instance -- against **0 collapses at
+10 u** in either bout. 10 units stays the default. (Calibration on the sex-head lifts, over frames
+where identity was right: distance from a written fly's keypoint centroid to its own mask centre is
+median 5.4 u / p95 8.0 u / p99 12.5 u for the male, so 10 u costs ~3 % of good male frames in the
+worst case -- `scratchpad/radius_calib.py`.)
+
+### Figure
+
+`figures/2026-09-mvq/p3a_campaign_female_misses/identity_mask_bout25.png`, regenerated by
+
+    PYTHONPATH=third_party/jarvis_jax:. python scripts/viz/mvq_identity_overlay.py \
+        --session-dir $VID/courtship/Session0/2025_10_20_13_20_04 \
+        --masks-dir   $PROC/courtship/Session0/2025_10_20_13_20_04/sam3_masks \
+        --compare before_sex_head=$PROC/.../pose_mvq_p3a \
+        --run     after_mask_identity=OutFiles/mvq_identity_smoke \
+        --bout 25 --frame 149 --cameras Cam2012630,Cam2012861 \
+        --out figures/2026-09-mvq/p3a_campaign_female_misses/identity_mask_bout25.png
+
+Frame 149 was chosen (`scratchpad/pick_frame.py`) as a HARD frame, not a flattering one: one of the
+89 bout-25 frames where the old run both NaN'd the female AND put the male on her body, with the two
+mask centres 45.8 u apart so the bodies read unambiguously.
+
+**Expectation stated before rendering:** cyan written keypoints inside the cyan (human-reviewed
+FEMALE) mask outline and orange inside the orange (MALE) one, in both the overhead Cam2012630 and
+the side Cam2012861.
+
+**Read back (Read tool, both rows):** met. Top row (`identity=sex`): the orange-outlined fly --
+left, darker, wings folded -- carries NO keypoints at all in either camera, while every orange dot
+("written fly1 = male") sits on the CYAN-outlined fly, and there are no cyan dots anywhere
+(fly0 NaN). That is the swap, visible. Bottom row (`identity=mask`): orange dots follow the
+orange-outlined fly's head, thorax, abdomen and leg tips in both cameras, cyan dots follow the
+cyan-outlined fly, and neither fly's dots appear on the other's outline.
+
+### Tests
+
+`third_party/jarvis_jax/tests/test_lift_masked_bout.py`: **30 passed** (19 pre-existing + 11 new),
+`JAX_PLATFORMS=cpu`. The new ones cover the female-mask window whose typed slot is dead
+(`slot_used[fly0] == 2`, `sex_head_agrees[fly0] == False`), byte-identical output between the modes
+when the sex head is right, the no-swap-vs-swap contrast with the OLD behaviour pinned, the
+10-unit-radius NaN, the merged-window collapse guard keeping the nearer mask, the no-review
+fallback, the `male_slot != 1` refusal, the gate string differing between modes (and
+`bout_lift_is_current` rejecting the other mode's string) against run_bout's REAL
+`stage_b_gate_signature`, `canonicalize_bout`'s no-swap for `mask_human_id_review`, and the
+CLI/slurm plumbing. Also green: `test_lift_mvq`, `test_sexing`, `test_run_bout_sexing`,
+`test_sam3_sexing`, `test_recanonicalize_masks`, `test_slurm_courtship_array`,
+`test_coarse_pass_gates`, `test_coarse_pass_timeline_mvq_refusal` (61 passed),
+`test_coarse_track`/`test_coarse_centres`/`test_coarse_figure_gates` (37), repo
+`tests/test_run_bout_pipeline_structure.py` (40). `test_run_bout_no_autosex` fails on an
+unrelated pre-existing drift (`main_from_cfg` reads `cfg.outputs.out`, added 2026-08-27, and the
+test's cfg has no `outputs`); nothing in this change touches `main_from_cfg`.
+
+### Follow-ups
+
+1. **Re-lift the whole campaign.** Every existing `pose_mvq_p3a` bout is stale on the new gate
+   string, and the 0-2 % male swaps exist in every recording, not only 20_04.
+2. The 20_04 female is still lost on contact frames (bout 25: 0.210, all merged). That needs the
+   model to emit an instance on her in a merged crop -- the P3b sex-label fine-tune, or the
+   prompted branch with her mask as the prompt.
+3. `mask_assign_units` is CLI/meta-only, not gated. If it is ever tuned per recording, that choice
+   will not invalidate a kp3d.npz -- deliberate, but worth revisiting if it stops being a constant.
