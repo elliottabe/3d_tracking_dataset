@@ -192,7 +192,8 @@ def build_mvq_lift_array_script(
     batch: int = 8,
     merge_dist_units: float = 30.0,
     identity: str = "mask",
-    mask_assign_units: float = 10.0,
+    mask_assign_margin_units: float = 8.0,
+    mask_assign_max_units: float = 60.0,
     anatomy_cfg: str = "configs/anatomy/v1.yaml",
     recording_cfg: str = "configs/recording/session0.yaml",
     bouts_csv: str = "",
@@ -255,7 +256,8 @@ PYTHONPATH=third_party/jarvis_jax:. python -u scripts/mvq_lift_bout.py \\
     --out {run_dir} --bout ${{SLURM_ARRAY_TASK_ID}} \\
     --run {checkpoint}{step_arg} --exist-thresh {exist_thresh} --batch {batch} \\
     --merge-dist-units {merge_dist_units} \\
-    --identity {identity} --mask-assign-units {mask_assign_units} \\
+    --identity {identity} --mask-assign-margin-units {mask_assign_margin_units} \\
+    --mask-assign-max-units {mask_assign_max_units} \\
     --anatomy {anatomy_cfg} --recording-cfg {recording_cfg}{csv_arg}
 """
 
@@ -715,7 +717,8 @@ def main():
             batch=int(mv.get("batch", 8)),
             merge_dist_units=float(mv.get("merge_dist_units", 30.0)),
             identity=str(mv.get("identity", "mask")),
-            mask_assign_units=float(mv.get("mask_assign_units", 10.0)),
+            mask_assign_margin_units=float(mv.get("mask_assign_margin_units", 8.0)),
+            mask_assign_max_units=float(mv.get("mask_assign_max_units", 60.0)),
             anatomy_cfg=f"configs/anatomy/{cfg.anatomy.name}.yaml",
             recording_cfg=f"configs/recording/{str(name).lower()}.yaml",
             bouts_csv=str(cfg.recording.get("bouts_csv", "") or ""),

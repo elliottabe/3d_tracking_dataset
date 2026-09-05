@@ -95,13 +95,25 @@ DEFAULT_IDENTITY = "mask"
 # no import of sexing).
 HUMAN_REVIEW_METHOD = "human_id_review"
 
-# World units (10 == 1 mm): how far an instance's keypoint centroid may sit
-# from a mask's triangulated centre and still be judged to BE that mask's fly.
-# A fly is ~25 units long and the two flies' mask centres are typically >30
-# apart, so 10 accepts the same animal seen slightly off-centre and refuses the
-# other animal in the crop. Measured on the 20_04 bout-25 diagnosis frames the
-# correct instance sat 3.8-4.5 units from its mask centre.
-MASK_ASSIGN_UNITS = 10.0
+# Mask assignment is RELATIVE ("which mask is this instance nearest?"), not an
+# absolute radius around each mask centre. An absolute radius assumes the mask
+# centre is a good estimate of the animal's centre, and on 20_04 the FEMALE's
+# SAM mask is not: over the 30-bout re-lift her mask's DLT centre sits 13-35
+# units (median) from her body as located by the model, on only 3-4 valid mask
+# cameras, while the male's is 5-6 units off on all 7. A 10-unit radius
+# therefore threw away instances that were correctly detected -- fly0 went to
+# 1.00 NaN in bout 8, 0.99 in bout 19, 0.95 in bout 26 -- even though those
+# same instances were ~50 units from the OTHER mask and so never ambiguous.
+#
+# So: an instance belongs to the mask it is nearer, provided it wins by
+# `MASK_ASSIGN_MARGIN_UNITS` (below that the frame is ambiguous and geometry
+# abstains) and is not absurdly far from it (`MASK_ASSIGN_MAX_UNITS`).
+MASK_ASSIGN_MARGIN_UNITS = 8.0     # 0.8 mm; how much nearer its own mask an
+                                   # instance must be than the other mask
+MASK_ASSIGN_MAX_UNITS = 60.0       # 6 mm; a garbage cap only -- the 448-px
+                                   # window's half-width is ~28 units, so an
+                                   # instance beyond this is not in the crop
+                                   # either mask placed
 
 
 def _sigmoid(x):
@@ -698,67 +710,82 @@ def instance_centroid(kp3d):
     return kp[m].mean(axis=0) if m.any() else None
 
 
-def pick_mask_pair(out, off, nb, runner, mask_centres, assign, *,
-                   mask_assign_units=MASK_ASSIGN_UNITS,
+ASSIGN_REASONS = ("nearest", "typed_preferred", "typed_fallback", "none")
+
+
+def pick_mask_pair(out, off, nb, runner, mask_centres, *,
+                   margin_units=MASK_ASSIGN_MARGIN_UNITS,
+                   max_units=MASK_ASSIGN_MAX_UNITS,
                    collapse_dist_units=COLLAPSE_DIST_UNITS):
-    """`identity="mask"`: assign each MASK fly the instance that is ON it.
+    """`identity="mask"`: give each MASK fly the instance that is NEAREST it.
 
     The masks carry a human id review of which animal is the female (mask fly
     0) and which the male (mask fly 1). That decision is authoritative in this
     pipeline (`sexing`: human > mvq), so it -- not the model's sex head --
     says which written fly is which, and the model is asked only the question
-    it is good at: which of the four instances in this crop is the animal
-    under this mask?
+    it is good at: which of the instances in this frame is the animal under
+    this mask?
 
-    Per mask fly `f`, in the window `assign[f]` its own mask centre placed:
-    among the slots whose existence clears `runner.exist_thresh`, keep those
-    whose keypoint centroid is within `mask_assign_units` of that mask centre,
-    and take the nearest -- except that the TYPED slot for that fly's sex
-    wins whenever it also qualifies (ties on distance broken by existence).
-    The typed preference matters when both flies are in ONE merged window and
-    two instances are plausibly near both mask centres; the nearest-instance
-    rule is what rescues the female on 20_04, where her typed slot is dead and
-    the male-typed slot is the one localising her body.
+    RELATIVE, NOT ABSOLUTE (see `MASK_ASSIGN_MARGIN_UNITS`). Every instance of
+    every window of the frame with `exist >= runner.exist_thresh` is a
+    candidate. An instance belongs to mask `f` when it is nearer that mask's
+    triangulated centre than the other's by at least `margin_units`, and
+    within `max_units` of it. Requiring an absolute radius instead assumes the
+    mask centre IS the animal's centre; on 20_04 the female's mask is poor
+    enough (3-4 valid cameras, centre 13-35 units off her body) that a
+    10-unit radius discarded instances that were correctly detected and were
+    ~50 units from the OTHER mask -- never ambiguous, merely off-centre.
 
-    Nothing within the radius means NaN for that fly: an instance 5 mm from
-    the mask is not that animal, and "the nearest thing in the crop" is how a
-    lifter ends up confidently tracking the other fly.
+    Among the instances that qualify for one mask, that fly's TYPED slot wins
+    if it is among them (`assign_reason` "typed_preferred"), else the nearest
+    does ("nearest"); ties break on existence.
 
-    COLLAPSE GUARD. Both masks can still resolve to the SAME instance (one
-    merged window, one live slot). Two real flies are never within
-    `collapse_dist_units` over most of their 50 keypoints; the same instance
-    read twice is 0. Such a frame keeps the fly whose own mask the instance is
-    NEARER and NaNs the other, rather than shipping a duplicated fly that
-    every jitter, confidence and residual metric rates as excellent. Ties keep
-    fly0 (the female -- the fly this pipeline loses frames on).
+    TYPED FALLBACK. When no instance qualifies for a mask -- the usual cause
+    is the two flies being nearly equidistant, i.e. geometry ABSTAINING rather
+    than nothing being there -- but that mask's typed slot DID fire somewhere
+    in the frame, the typed slot is used ("typed_fallback"), taken from its
+    highest-existence window. It is refused when geometry positively assigned
+    that instance to the OTHER mask (nearer the other mask by the margin): the
+    fallback exists for "geometry could not decide", never to overrule a
+    decision against this fly, which is exactly how a lifter ends up putting
+    one fly's track on the other's body. Otherwise NaN ("none").
+
+    A mask with no finite centre this frame gets nothing: its identity cannot
+    be verified, and a guess would be indistinguishable from a swap.
+
+    COLLAPSE GUARD. Geometry alone cannot give one instance to both masks (the
+    margin test is exclusive), but a typed fallback can collide with a
+    geometric pick. Two real flies are never within `collapse_dist_units` over
+    most of their 50 keypoints; the same instance read twice is 0. Such a
+    frame keeps the fly whose own mask the instance is NEARER and NaNs the
+    other, rather than shipping a duplicated fly that every jitter, confidence
+    and residual metric rates as excellent. Ties keep fly0 (the female -- the
+    fly this pipeline loses frames on).
 
     Args:
         out: an `MVQRunner.infer` output.
         off, nb: this frame's window rows, `[off, off + nb)`.
         runner: for `I`, `exist_thresh`.
         mask_centres: (2,3) each mask fly's triangulated centre, world units.
-        assign: (2,) window index per mask fly within this frame (-1 = none),
-            from `frame_windows`.
 
     Returns:
         picks: {fi: (slot_read result, absolute window index)}.
-        dists: {fi: distance (world units) from the chosen instance's
-            centroid to fly fi's own mask centre} -- recorded in mvq_meta.
+        dists: {fi: distance (world units) from the chosen instance's centroid
+            to fly fi's OWN mask centre} -- recorded in mvq_meta.
+        reasons: {fi: one of ASSIGN_REASONS} for both 0 and 1 (a fly with no
+            pick reads "none").
         collapsed: bool, whether the guard fired.
         dropped_fi: the fi it NaN'd, or None.
     """
     typed = (SLOT_FEMALE, SLOT_MALE)
     mask_centres = np.asarray(mask_centres, np.float64)
-    picks, dists = {}, {}
-    for fi in (0, 1):
-        w = int(assign[fi])
-        if w < 0 or w >= int(nb):
-            continue                                  # this fly has no window
-        centre = mask_centres[fi]
-        if not np.isfinite(centre).all():
-            continue
-        b = int(off) + w
-        cands = []
+    have = [bool(np.isfinite(mask_centres[f]).all()) for f in (0, 1)]
+    margin, cap = float(margin_units), float(max_units)
+
+    # every live instance of every window of this frame, with its distance to
+    # each mask centre (inf where that mask has no centre this frame)
+    cands = []                          # (b, slot, exist, [d0, d1])
+    for b in range(int(off), int(off) + int(nb)):
         for s in range(int(runner.I)):
             e = float(out["exist"][b, s])
             if e < float(runner.exist_thresh):
@@ -766,16 +793,39 @@ def pick_mask_pair(out, off, nb, runner, mask_centres, assign, *,
             c = instance_centroid(out["kp3d"][b, s])
             if c is None:
                 continue
-            d = float(np.linalg.norm(c - centre))
-            if d > float(mask_assign_units):
-                continue
-            # sort key: the typed slot first, then nearest, then most confident
-            cands.append((s != typed[fi], d, -e, s))
-        if not cands:
+            d = [float(np.linalg.norm(c - mask_centres[f])) if have[f] else np.inf
+                 for f in (0, 1)]
+            cands.append((b, s, e, d))
+
+    picks, dists, reasons = {}, {}, {0: "none", 1: "none"}
+
+    def _belongs(d, fi):
+        """Is this instance the mask-`fi` animal? Nearer that mask than the
+        other by the margin, and not absurdly far from it."""
+        return d[fi] <= cap and d[fi] + margin <= d[1 - fi]
+
+    for fi in (0, 1):
+        if not have[fi]:
             continue
-        _typed_miss, d, _ne, s = min(cands)
-        picks[fi] = (slot_read(out, b, s), b)
-        dists[fi] = d
+        mine = [(s != typed[fi], d[fi], -e, b, s) for b, s, e, d in cands
+                if _belongs(d, fi)]
+        if mine:
+            not_typed, dd, _ne, b, s = min(mine)
+            picks[fi] = (slot_read(out, b, s), b)
+            dists[fi] = dd
+            reasons[fi] = "nearest" if not_typed else "typed_preferred"
+
+    for fi in (0, 1):                   # typed fallback where geometry abstained
+        if fi in picks or not have[fi]:
+            continue
+        live = [(-e, d[fi], b) for b, s, e, d in cands
+                if s == typed[fi] and d[fi] <= cap and not _belongs(d, 1 - fi)]
+        if not live:
+            continue
+        _ne, dd, b = min(live)                       # highest existence wins
+        picks[fi] = (slot_read(out, b, typed[fi]), b)
+        dists[fi] = dd
+        reasons[fi] = "typed_fallback"
 
     collapsed, dropped_fi = False, None
     if len(picks) == 2:
@@ -788,7 +838,8 @@ def pick_mask_pair(out, off, nb, runner, mask_centres, assign, *,
             dropped_fi = 1 if dists[1] >= dists[0] else 0     # keep the nearer own-mask
             picks.pop(dropped_fi)
             dists.pop(dropped_fi)
-    return picks, dists, collapsed, dropped_fi
+            reasons[dropped_fi] = "none"
+    return picks, dists, reasons, collapsed, dropped_fi
 
 
 def frame_windows(centres, ok=None, *, merge_dist_units=30.0):
@@ -981,7 +1032,9 @@ def _mean_or_none(a):
 
 def lift_masked_bout(runner, frames_iter, centres, ok, *, out_dir, model_names,
                      merge_dist_units=30.0, collapse_dist_units=COLLAPSE_DIST_UNITS,
-                     identity=None, mask_assign_units=MASK_ASSIGN_UNITS,
+                     identity=None,
+                     mask_assign_margin_units=MASK_ASSIGN_MARGIN_UNITS,
+                     mask_assign_max_units=MASK_ASSIGN_MAX_UNITS,
                      force=False, progress_every=0,
                      meta_extra=None, mask_sex_meta=None, review_male_fly=None,
                      verbose=True):
@@ -1009,11 +1062,12 @@ def lift_masked_bout(runner, frames_iter, centres, ok, *, out_dir, model_names,
             so in `mvq_meta.json`. The RESOLVED mode is what the gates string
             names and what the skip check compares, so a fallback bout is not
             mistaken for a mask-identity one (see `resolve_mask_identity`).
-        mask_assign_units: `identity="mask"` only -- how far an instance's
-            keypoint centroid may sit from a mask's triangulated centre and
-            still be that mask's fly (`MASK_ASSIGN_UNITS`). Recorded in
-            `mvq_meta.json` rather than enrolled in the gate signature, for
-            the same reason as `collapse_dist_units`.
+        mask_assign_margin_units / mask_assign_max_units: `identity="mask"`
+            only -- how much NEARER its own mask an instance must be than the
+            other mask to be assigned by geometry, and the garbage cap on that
+            distance (`MASK_ASSIGN_MARGIN_UNITS` / `MASK_ASSIGN_MAX_UNITS`;
+            see `pick_mask_pair`). Recorded in `mvq_meta.json` rather than
+            enrolled in the gate signature, like `collapse_dist_units`.
         force: re-run a bout whose kp3d.npz already carries this gates string.
         mask_sex_meta / review_male_fly: what the SAM3 masks / the id-review
             manifest believe about identity. Under `identity="mask"` the
@@ -1105,6 +1159,10 @@ def lift_masked_bout(runner, frames_iter, centres, ok, *, out_dir, model_names,
     # identity="mask" only: how far the chosen instance's keypoint centroid sat
     # from that fly's own mask centre (world units). The audit quantity.
     mask_dist = np.full((2, T), np.nan, np.float32)
+    # ... and WHY that instance was chosen (ASSIGN_REASONS). "typed_fallback"
+    # is the row to watch: it means geometry abstained and the sex head, not
+    # the human review, named that fly for that frame.
+    assign_reason = [["none"] * T, ["none"] * T]
 
     pend, batch, rows = [], [], 0
     warned_drop = False
@@ -1116,18 +1174,21 @@ def lift_masked_bout(runner, frames_iter, centres, ok, *, out_dir, model_names,
         if not pend:
             return
         out = runner.infer(concat_windows(batch))
-        for t, off, nb, assign in pend:
+        for t, off, nb in pend:
             all_exist[t] = out["exist"][off]
             if identity_resolved == "mask":
                 # The masks' human id review decides which written fly is
-                # which; the model only says which instance is on which mask.
-                # See `pick_mask_pair`.
-                picks, dists, collapsed[t], drop = pick_mask_pair(
-                    out, off, nb, runner, centres[:, t], assign,
-                    mask_assign_units=mask_assign_units,
+                # which; the model only says which instance is nearest which
+                # mask. See `pick_mask_pair`.
+                picks, dists, reasons, collapsed[t], drop = pick_mask_pair(
+                    out, off, nb, runner, centres[:, t],
+                    margin_units=mask_assign_margin_units,
+                    max_units=mask_assign_max_units,
                     collapse_dist_units=collapse_dist_units)
                 for fi, d in dists.items():
                     mask_dist[fi, t] = d
+                for fi, r in reasons.items():
+                    assign_reason[fi][t] = r
             else:
                 # Typed-slot read + collapse guard: see `pick_typed_pair`'s
                 # docstring for the full rationale (measured on Session0 bout
@@ -1155,11 +1216,13 @@ def lift_masked_bout(runner, frames_iter, centres, ok, *, out_dir, model_names,
             raise ValueError(f"frames_iter yielded more than the {T} frames the centres "
                              f"describe -- the mask npz and the video read must cover "
                              f"the SAME bout frames")
-        # `assign` (which window each MASK fly went into) is what makes
-        # identity="mask" possible at all -- it is the only link back from a
-        # window to the human-reviewed mask that placed it.
-        wc, assign = frame_windows(centres[:, t], ok[:, t],
-                                   merge_dist_units=merge_dist_units)
+        # `frame_windows`' per-fly window assignment is deliberately NOT used
+        # by identity="mask": an instance is matched to a mask by DISTANCE
+        # over every window of the frame, so a fly that the model localises in
+        # the OTHER fly's crop (routine when they are close) is still
+        # available to its own mask.
+        wc, _assign = frame_windows(centres[:, t], ok[:, t],
+                                    merge_dist_units=merge_dist_units)
         n_seen = t + 1
         if wc.shape[0] == 0:
             no_centre[t] = True
@@ -1176,7 +1239,7 @@ def lift_masked_bout(runner, frames_iter, centres, ok, *, out_dir, model_names,
         if rows + wc.shape[0] > runner.batch:
             _flush()
         batch.append(runner.windows(frames, present, wc))
-        pend.append((t, rows, int(wc.shape[0]), np.asarray(assign, int).copy()))
+        pend.append((t, rows, int(wc.shape[0])))
         rows += int(wc.shape[0])
         n_windows[t] = int(wc.shape[0])
         if progress_every and (t + 1) % int(progress_every) == 0:
@@ -1219,6 +1282,12 @@ def lift_masked_bout(runner, frames_iter, centres, ok, *, out_dir, model_names,
     typed_slot = (int(SLOT_FEMALE), int(SLOT_MALE))
     sex_head_agrees = np.full((2, T), -1, np.int8)
     disagree_frac = {}
+    # Only identity="mask" assigns instances to masks, so under "sex" these
+    # would be a column of "none" that reads like a failure. None says "this
+    # rule did not run" instead.
+    reason_counts = ({f"fly{f}": {r: int(assign_reason[f].count(r))
+                                  for r in ASSIGN_REASONS} for f in (0, 1)}
+                     if identity_resolved == "mask" else None)
     for fly in (0, 1):
         wrote = slot[fly] >= 0
         sex_head_agrees[fly, wrote] = (slot[fly][wrote] == typed_slot[fly]).astype(np.int8)
@@ -1247,7 +1316,9 @@ def lift_masked_bout(runner, frames_iter, centres, ok, *, out_dir, model_names,
         # they differ only when masks with no human review forced a fallback.
         "identity": identity,
         "identity_resolved": identity_resolved,
-        "mask_assign_units": float(mask_assign_units),
+        "mask_assign_margin_units": float(mask_assign_margin_units),
+        "mask_assign_max_units": float(mask_assign_max_units),
+        "assign_reason_counts": reason_counts,
         "sex_head_disagree_frac": disagree_frac,
         "fly_slots": {"fly0": int(SLOT_FEMALE), "fly1": int(SLOT_MALE)},
         "fly_sex": {"fly0": "female", "fly1": "male"},
@@ -1268,6 +1339,8 @@ def lift_masked_bout(runner, frames_iter, centres, ok, *, out_dir, model_names,
             "slot": slot.astype(int).tolist(),
             "slot_used": slot.astype(int).tolist(),   # the brief's name for `slot`
             "sex_head_agrees": sex_head_agrees.astype(int).tolist(),
+            "assign_reason": ([list(assign_reason[0]), list(assign_reason[1])]
+                              if identity_resolved == "mask" else None),
             "mask_dist_units": np.round(np.nan_to_num(mask_dist, nan=-1.0), 3).tolist(),
             "window": window.astype(int).tolist(),
             "exist": np.round(np.nan_to_num(exist, nan=-1.0), 4).tolist(),
@@ -1282,6 +1355,7 @@ def lift_masked_bout(runner, frames_iter, centres, ok, *, out_dir, model_names,
         print(f"[mvq-lift] {out_dir}: {T} frames, identity {identity_resolved}, "
               f"missing {n_missing}, "
               f"sex-head disagree {disagree_frac}, "
+              f"assign {reason_counts or 'n/a'}, "
               f"{int(no_centre.sum())} with no mask centre, "
               f"{int(collapsed.sum())} collapsed "
               f"({100 * (collapsed.mean() if T else 0):.1f}%, dropped "
@@ -1296,6 +1370,8 @@ def lift_masked_bout(runner, frames_iter, centres, ok, *, out_dir, model_names,
             "identity_source": [identity_resolved] * int(T),
             "sex_head_agrees": sex_head_agrees,
             "sex_head_disagree_frac": disagree_frac,
+            "assign_reason": assign_reason,
+            "assign_reason_counts": reason_counts,
             "mask_dist": mask_dist,
             "n_collapsed": {"fly0": int(n_collapsed[0]), "fly1": int(n_collapsed[1])},
             "n_missing": n_missing, "sex": sex, "meta": meta}

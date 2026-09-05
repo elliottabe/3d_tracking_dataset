@@ -879,52 +879,106 @@ def test_mask_identity_keeps_the_male_off_the_female_body(tmp_path):
     np.testing.assert_allclose(new["kp3d_mvq"][0, 0, :, 0], 0.0, atol=1e-4)
 
 
-def test_mask_identity_nans_a_fly_with_no_instance_on_its_mask(tmp_path):
-    """Case (4). An instance that exists but sits 50 units (5 mm) from the mask
-    it would be assigned to is not that fly -- it is the model localising
-    something else in the crop. Outside `mask_assign_units` the fly must be
-    NaN, never "the nearest thing in the window"."""
-    from jarvis_jax.tracking.lift_mvq import lift_masked_bout
-    centres, ok = _two_mask_windows()
-    # slot 1 sits 50 units off its window centre; slot 2 sits on it
-    place = lambda cx, s: (float(cx) + (50.0 if s == 1 else 0.0), 0.0, 0.0)
-    exist_fn = lambda c: (np.array([0.0, 0.9, 0.0, 0.0], np.float32) if c[0] < 100
-                          else np.array([0.0, 0.0, 0.9, 0.0], np.float32))
+def test_mask_identity_assigns_by_RELATIVE_distance_not_an_absolute_radius(tmp_path):
+    """Case (4a), the round-2 fix. The female's SAM mask on 20_04 is poor: over
+    the 30-bout re-lift her mask's DLT centre sits 13-35 units from her body
+    (3-4 valid cameras) while the male's is 5-6 units off on all 7. An
+    ABSOLUTE radius of 10 units therefore threw away instances that were
+    correctly detected -- fly0 went to 1.00 NaN in bout 8, 0.99 in bout 19,
+    0.95 in bout 26 -- even though they were nowhere near the other mask.
 
+    Here the one live instance sits 30 units from the FEMALE mask and 50 from
+    the MALE's. It is unambiguously hers (nearer by 20 > the 8-unit margin) and
+    must be written as fly0, even though 30 > any sane absolute radius.
+    """
+    from jarvis_jax.tracking.lift_mvq import lift_masked_bout
+    # masks 80 units apart -> two windows; the instance sits at x = 30
+    centres = np.zeros((2, 1, 3), np.float32)
+    centres[1, :, 0] = 80.0
+    ok = np.ones((2, 1), bool)
     r = PlacedFake(_fake_checkpoint(tmp_path), kp_names=_mvq_names(),
-                   exist_fn=exist_fn, place=place)
-    res = lift_masked_bout(r, _frames(1), centres, ok, out_dir=str(tmp_path / "mask"),
+                   # only the MALE-typed slot fires, and only in her window --
+                   # the 20_04 failure mode
+                   exist_fn=lambda c: (np.array([0.0, 0.0, 0.95, 0.0], np.float32)
+                                       if c[0] < 40 else np.zeros(4, np.float32)),
+                   place=lambda cx, s: (30.0, 0.0, 0.0))
+    out = tmp_path / "bout"
+    res = lift_masked_bout(r, _frames(1), centres, ok, out_dir=str(out),
                            model_names=_model_names(), identity="mask",
                            mask_sex_meta=HUMAN_MASKS)
-    assert res["slot"][0, 0] == -1 and np.isnan(res["kp3d_mvq"][0]).all()
-    assert res["slot"][1, 0] == 2 and np.isfinite(res["kp3d_mvq"][1]).all()
-    assert res["n_missing"]["fly0"] == 1
-    assert json.load(open(tmp_path / "mask" / "mvq_meta.json"))["mask_assign_units"] == 10.0
+    assert res["slot"][0, 0] == 2                       # her body, male-typed slot
+    assert res["assign_reason"][0][0] == "nearest"
+    np.testing.assert_allclose(res["kp3d_mvq"][0, 0, :, 0], 30.0, atol=1e-4)
+    assert res["mask_dist"][0, 0] == pytest.approx(30.0, abs=1e-3)   # > any 10u radius
+    # and the MALE gets nothing: that instance is HERS by geometry, so the
+    # typed fallback must refuse it rather than put his track on her body
+    assert res["slot"][1, 0] == -1 and res["assign_reason"][1][0] == "none"
+    assert np.isnan(res["kp3d_mvq"][1]).all()
 
-    # ... and it really is the RADIUS that dropped her: identity="sex" happily
-    # writes that same far-away instance as the female.
+    meta = json.load(open(out / "mvq_meta.json"))
+    assert meta["mask_assign_margin_units"] == 8.0
+    assert meta["mask_assign_max_units"] == 60.0
+    assert meta["assign_reason_counts"]["fly0"]["nearest"] == 1
+    assert meta["assign_reason_counts"]["fly1"]["none"] == 1
+    assert meta["per_frame"]["assign_reason"] == [["nearest"], ["none"]]
+
+
+def test_mask_identity_abstains_when_the_masks_are_equidistant(tmp_path):
+    """Case (4b). An instance that is NOT clearly nearer one mask than the
+    other says nothing about identity, and guessing there is how a lifter puts
+    one fly's track on the other's body. Geometry must abstain; the typed slot
+    is then allowed to decide (recorded as "typed_fallback", so a reader can
+    see the human review did not name that frame), and where no typed slot
+    fired the fly is NaN."""
+    from jarvis_jax.tracking.lift_mvq import lift_masked_bout
+    centres = np.zeros((2, 1, 3), np.float32)
+    centres[1, :, 0] = 20.0                # 20 apart -> ONE merged window at x=10
+    ok = np.ones((2, 1), bool)
+
+    # (a) the one live instance sits exactly between the two masks (10 / 10):
+    #     inside the 8-unit margin, so geometry abstains -- but it IS the
+    #     female-typed slot, so she is written from it and the frame says so.
     r = PlacedFake(_fake_checkpoint(tmp_path), kp_names=_mvq_names(),
-                   exist_fn=exist_fn, place=place, identity="sex")
-    old = lift_masked_bout(r, _frames(1), centres, ok, out_dir=str(tmp_path / "sex"),
-                           model_names=_model_names(), identity="sex",
+                   exist_fn=lambda c: np.array([0.0, 0.9, 0.0, 0.0], np.float32),
+                   place=lambda cx, s: (10.0, 0.0, 0.0))
+    res = lift_masked_bout(r, _frames(1), centres, ok, out_dir=str(tmp_path / "typed"),
+                           model_names=_model_names(), identity="mask",
                            mask_sex_meta=HUMAN_MASKS)
-    assert old["slot"][0, 0] == 1 and np.isfinite(old["kp3d_mvq"][0]).all()
+    assert res["slot"][0, 0] == 1 and res["assign_reason"][0][0] == "typed_fallback"
+    assert res["slot"][1, 0] == -1 and res["assign_reason"][1][0] == "none"
+
+    # (b) same geometry, but the live instance is the UNTYPED "other" slot:
+    #     nothing names it, so both flies are NaN rather than guessed.
+    r = PlacedFake(_fake_checkpoint(tmp_path), kp_names=_mvq_names(),
+                   exist_fn=lambda c: np.array([0.0, 0.0, 0.0, 0.9], np.float32),
+                   place=lambda cx, s: (10.0, 0.0, 0.0))
+    res = lift_masked_bout(r, _frames(1), centres, ok, out_dir=str(tmp_path / "none"),
+                           model_names=_model_names(), identity="mask",
+                           mask_sex_meta=HUMAN_MASKS)
+    assert (res["slot"] == -1).all()
+    assert res["assign_reason"] == [["none"], ["none"]]
+    assert np.isnan(res["kp3d_mvq"]).all()
 
 
 def test_mask_identity_collapse_guard_keeps_the_fly_nearer_its_own_mask(tmp_path):
-    """Merged window (the flies are 10 units apart, so ONE crop holds both):
-    both masks resolve to the SAME instance because only one slot is above
-    threshold. Writing it twice would ship a duplicated fly that every jitter,
-    confidence and residual metric rates as excellent, so the guard must keep
-    the mask it is nearer -- here the male's, 2 units away vs the female's 8 --
-    and NaN the other."""
+    """Merged window (the flies are 10 units apart, so ONE crop holds both) and
+    the two masks are equidistant enough that geometry abstains for both, so
+    each fly falls back to its own typed slot -- and the model has put BOTH
+    typed slots on the same body. Writing it twice would ship a duplicated fly
+    that every jitter, confidence and residual metric rates as excellent, so
+    the guard must keep the mask it is nearer -- here the male's, 2 units away
+    vs the female's 8 -- and NaN the other.
+
+    (Geometry alone can never do this: the margin test is exclusive, so one
+    instance cannot belong to both masks. The typed fallback is the only route
+    to a collision, which is why the guard is kept.)"""
     from jarvis_jax.tracking.lift_mvq import lift_masked_bout
     centres = np.zeros((2, 1, 3), np.float32)
     centres[1, :, 0] = 10.0                          # 10 units -> one merged window
-    # the merged window's centre is the midpoint x=5; the one live instance
-    # sits at x=8 -> 8 units from the female mask (x=0), 2 from the male (x=10)
+    # both typed slots fire on ONE body at x=8 -> 8 units from the female mask
+    # (x=0), 2 from the male (x=10); neither wins by the 8-unit margin
     r = PlacedFake(_fake_checkpoint(tmp_path), kp_names=_mvq_names(),
-                   exist_fn=lambda c: np.array([0.0, 0.0, 0.9, 0.0], np.float32),
+                   exist_fn=lambda c: np.array([0.0, 0.7, 0.95, 0.0], np.float32),
                    place=lambda cx, s: (8.0, 0.0, 0.0))
     res = lift_masked_bout(r, _frames(1), centres, np.ones((2, 1), bool),
                            out_dir=str(tmp_path / "bout"), model_names=_model_names(),
@@ -1128,11 +1182,14 @@ def test_mvq_lift_cli_exposes_the_identity_mode():
     spec.loader.exec_module(m)
     a = m.build_parser().parse_args(
         ["--session-dir", "/s", "--out", "/o", "--run", "/r", "--bout", "1"])
-    assert a.identity == "mask" and a.mask_assign_units == 10.0
+    assert a.identity == "mask"
+    assert a.mask_assign_margin_units == 8.0 and a.mask_assign_max_units == 60.0
     a = m.build_parser().parse_args(
         ["--session-dir", "/s", "--out", "/o", "--run", "/r", "--bout", "1",
-         "--identity", "sex", "--mask-assign-units", "6"])
-    assert a.identity == "sex" and a.mask_assign_units == 6.0
+         "--identity", "sex", "--mask-assign-margin-units", "6",
+         "--mask-assign-max-units", "40"])
+    assert a.identity == "sex" and a.mask_assign_margin_units == 6.0
+    assert a.mask_assign_max_units == 40.0
 
     s = _slurm_mod().build_mvq_lift_array_script(
         job_name="mvq", partition="ckpt-all", account="portia", cpus=8, mem=48,
@@ -1142,3 +1199,4 @@ def test_mvq_lift_cli_exposes_the_identity_mode():
         identity="mask", anatomy_cfg="configs/anatomy/v1.yaml",
         recording_cfg="configs/recording/session0.yaml")
     assert "--identity mask" in s
+    assert "--mask-assign-margin-units 8.0" in s and "--mask-assign-max-units 60.0" in s

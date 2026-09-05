@@ -21,9 +21,12 @@ WHAT THE MASKS ARE USED FOR (`--identity`, default `mask`). The masks always
 place the CROP (their per-camera centroids, triangulated). With
 `--identity mask` they also ASSIGN IDENTITY: fly0 is mask fly 0 and fly1 is
 mask fly 1 -- the human id review the canonicalized masks carry, which is the
-top of this pipeline's identity precedence -- and per frame the mvq instance
-whose keypoint centroid is nearest that mask's centre (within
-`--mask-assign-units`) is written as that fly. `sex.json` then says
+top of this pipeline's identity precedence -- and per frame each mvq instance
+is matched to whichever mask centre it is NEARER (by at least
+`--mask-assign-margin-units`, and within `--mask-assign-max-units`), never to
+an absolute radius: the female's SAM mask on 20_04 is poor enough that its
+centre sits 13-35 units off her body while the other mask is ~50 away, so a
+radius rejects a correct, unambiguous detection. `sex.json` then says
 `method = "mask_human_id_review"`.
 
 With `--identity sex` the masks do NOT assign identity: fly0 is the model's
@@ -128,12 +131,18 @@ def build_parser():
                         "fly0/fly1 are the model's female/male typed slots. Part of "
                         "the gate string. A bout whose masks carry no human review "
                         "falls back to 'sex' with a warning")
-    p.add_argument("--mask-assign-units", "--mask_assign_units", dest="mask_assign_units",
-                   type=float, default=10.0,
-                   help="--identity mask only: how far (world units, 10 == 1 mm) an "
-                        "instance's keypoint centroid may sit from a mask's "
-                        "triangulated centre and still be that mask's fly; outside "
-                        "it the fly is NaN rather than 'the nearest thing in the crop'")
+    p.add_argument("--mask-assign-margin-units", dest="mask_assign_margin_units",
+                   type=float, default=8.0,
+                   help="--identity mask only: how much NEARER its own mask's "
+                        "triangulated centre an instance must be than the other "
+                        "mask's to be assigned by geometry (world units, 8 == 0.8 mm). "
+                        "Below the margin the frame is ambiguous and geometry abstains "
+                        "(the typed slot may then be used -- see assign_reason)")
+    p.add_argument("--mask-assign-max-units", dest="mask_assign_max_units",
+                   type=float, default=60.0,
+                   help="--identity mask only: garbage cap on that distance (world "
+                        "units). The 448-px window's half-width is ~28 units, so 60 "
+                        "excludes only instances that are in neither mask's crop")
     p.add_argument("--attn-impl", default=None,
                    help="override the run's attn_impl ('xla' to run cudnn weights on CPU)")
     p.add_argument("--cameras", default=None,
@@ -241,7 +250,8 @@ def main(argv=None):
             centres, ok, out_dir=out_dir, model_names=model_names,
             merge_dist_units=float(args.merge_dist_units),
             identity=args.identity,
-            mask_assign_units=float(args.mask_assign_units), force=args.force,
+            mask_assign_margin_units=float(args.mask_assign_margin_units),
+            mask_assign_max_units=float(args.mask_assign_max_units), force=args.force,
             progress_every=int(args.progress_every),
             mask_sex_meta=mask_sex_meta, review_male_fly=review_male,
             meta_extra={"bout": int(bout), "session_dir": str(args.session_dir),

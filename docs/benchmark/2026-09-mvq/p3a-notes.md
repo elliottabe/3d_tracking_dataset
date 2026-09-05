@@ -1091,3 +1091,106 @@ lands). Four pre-existing tests that exercise the sex-head route with no mask `s
 4 passed; `test_lift_mvq`/`test_sexing`/`test_run_bout_sexing`/`test_sam3_sexing`/
 `test_recanonicalize_masks`/`test_coarse_pass_gates`/`test_coarse_pass_timeline_mvq_refusal`/
 `test_coarse_track` 80 passed.
+
+### Fix round 2 (review): RELATIVE nearest-mask assignment, not an absolute radius
+
+The full 20_04 re-lift with `identity=mask` (run root `pose_mvq_p3a_r2`, 30 bouts) recovered bouts
+5/23/25/6/11 but LOST the female in others -- fly0 NaN v1 -> r2: bout 8 0.88 -> 1.00, bout 19
+0.85 -> 0.99, bout 26 0.41 -> 0.95, bout 4 0.48 -> 0.88, bout 15 0.11 -> 0.52, bout 29 0.20 -> 0.58,
+bout 2 0.09 -> 0.35 -- and pushed fly1 NaN to 0.20-0.36 in bouts 1/4/5/16.
+
+Cause (`scratchpad/mask_centre_probe.py`): the 10-unit ABSOLUTE radius assumed a mask's DLT centre
+IS the animal's centre. On 20_04 the FEMALE's SAM mask is poor -- her mask centre sits 13-35 units
+(median) from her body as located by v1's keypoints, on only 3-4 valid mask cameras, while the male
+mask centre is 5-6 units off on all 7. The instance was DETECTED and was ~50 units from the other
+mask -- never ambiguous, merely off-centre -- and the radius threw it away.
+
+| bout | F -> F-mask med/p90 | F -> M-mask med | M -> M-mask med | valid cams F/M |
+|---|---|---|---|---|
+| 8 | 34.8 / 50.9 | 51.5 | 5.2 | 4.0 / 7.0 |
+| 19 | 29.5 / 31.9 | 48.2 | 5.4 | 4.0 / 7.0 |
+| 26 | 18.3 / 29.6 | 50.8 | 6.3 | 3.1 / 7.0 |
+| 15 | 28.7 / 39.3 | 36.9 | 5.6 | 2.7 / 7.0 |
+| 5 | 5.6 / 13.7 | 34.1 | 6.4 | 7.0 / 7.0 |
+
+**The rule is now relative** (`pick_mask_pair`). Every instance of EVERY window of the frame with
+`exist >= exist_thresh` is a candidate (previously only the instances of that mask's own window).
+An instance belongs to mask `f` when `d_f + margin <= d_other` and `d_f <= cap`, with
+`--mask-assign-margin-units` (default **8**) and `--mask-assign-max-units` (default **60**; the
+448-px window half-width is ~28 units, so 60 excludes only garbage). Among the instances that
+qualify for one mask, that fly's typed slot wins (`assign_reason` `typed_preferred`), else the
+nearest (`nearest`). Where NOTHING qualifies -- geometry ABSTAINING, the usual cause being the two
+flies nearly equidistant -- but that mask's typed slot fired somewhere in the frame, the typed slot
+is used (`typed_fallback`), UNLESS geometry positively assigned that instance to the other mask:
+the fallback exists for "geometry could not decide", never to overrule a decision against this fly,
+which is exactly how a lifter puts one fly's track on the other's body. Otherwise NaN (`none`).
+
+The collapse guard is kept and is now reachable only through a double typed fallback (geometry
+alone cannot give one instance to two masks -- the margin test is exclusive). `mask_assign_units`
+is gone; `mask_assign_margin_units` / `mask_assign_max_units` replace it in the CLI, the slurm array
+text and `mvq_meta.json`, and neither is in the gate signature (`identity` still is).
+`mvq_meta.json` gains per-frame `assign_reason` and an `assign_reason_counts` roll-up.
+
+#### Re-smoke (GPU 4, `OutFiles/mvq_identity_smoke/round2/`)
+
+fly0 / fly1 NaN fraction, v1 (`pose_mvq_p3a`, identity=sex) vs r2 (`pose_mvq_p3a_r2`, 10-unit
+absolute) vs new (relative, margin 8). Swap = written fly > 8 units closer to the OTHER mask.
+
+| bout | fly0 v1 | fly0 r2 | fly0 new | fly1 v1 | fly1 r2 | fly1 new | swap new f0/f1 |
+|---|---|---|---|---|---|---|---|
+| 8  | 0.881 | 1.000 | **0.897** | 0.000 | 0.000 | 0.000 | 0.000 / 0.000 |
+| 19 | 0.851 | 0.987 | **0.838** | 0.000 | 0.000 | 0.000 | 0.000 / 0.000 |
+| 26 | 0.409 | 0.952 | **0.422** | 0.000 | 0.000 | 0.000 | 0.000 / 0.000 |
+| 4  | 0.480 | 0.876 | **0.477** | 0.010 | 0.198 | **0.010** | 0.000 / 0.000 |
+| 2  | 0.088 | 0.352 | **0.134** | 0.000 | 0.000 | 0.000 | 0.000 / 0.000 |
+| 15 | 0.114 | 0.522 | **0.148** | 0.000 | 0.000 | 0.000 | 0.000 / 0.000 |
+| 29 | 0.202 | 0.576 | **0.202** | 0.054 | 0.054 | 0.054 | 0.000 / 0.000 |
+| 25 | 0.977 | 0.210 | **0.210** | 0.000 | 0.000 | 0.000 | 0.000 / 0.000 |
+| 5  | 0.659 | 0.068 | **0.035** | 0.010 | 0.199 | **0.141** | 0.000 / 0.000 |
+
+Every r2 regression is undone and **no swap survives anywhere** (0.000 for both flies in all nine
+bouts, median distance to own mask 4.4-34.6 u for fly0 -- large where her mask is poor, which is the
+point -- and 5.0-6.2 u for fly1). Bouts 19, 4 and 5 are better than BOTH earlier runs; 29 and 25
+equal the better of the two. Two bouts sit slightly above v1: **bout 2 0.134 vs 0.088 (+4.6 pts)**
+and **bout 15 0.148 vs 0.114 (+3.4 pts)** -- both still 22-37 points better than r2, and both are
+frames where geometry abstains (the flies are close) and no typed slot fired, i.e. an honest
+abstention rather than a guess. Bout 5's fly1 0.141 (v1 0.010) is the same trade: those frames are
+merged windows where v1 wrote the male ON HER (v1 swap 0.188), and the new rule writes nothing.
+
+`assign_reason` shows where the human review actually decided: fly1 is `typed_preferred` on
+80-100 % of frames everywhere (the sex head and the review agree about the male), while fly0 runs
+from `typed_preferred` 0.10 (bout 8) to `nearest` 0.76 (bout 25 -- the bout where the sex head calls
+her a male) with `typed_fallback` 0.00-0.27. Collapse fired on 0.6 % of bout 5 and nowhere else.
+
+    PYTHONPATH=third_party/jarvis_jax:. python -u scripts/mvq_lift_bout.py \
+        --session-dir $VID/... --predictions-dir $PROC/.../sam3_masks \
+        --out OutFiles/mvq_identity_smoke/round2 \
+        --bout 8 --bout 19 --bout 26 --bout 4 --bout 2 --bout 15 --bout 29 --bout 25 --bout 5 \
+        --run $RUNS/mvq_t1_b16_p3a_20260904/final --exist-thresh 0.5 --batch 8 \
+        --identity mask --mask-assign-margin-units 8.0 --mask-assign-max-units 60.0 \
+        --anatomy configs/anatomy/v1.yaml --recording-cfg configs/recording/session0.yaml
+
+#### Figure
+
+`figures/2026-09-mvq/p3a_campaign_female_misses/identity_mask_bout8_round2.png` -- bout 8,
+bout-local frame 350 (abs 240697), overhead Cam2012630 + side Cam2012861, three rows: v1
+(identity=sex), r2 (10-unit absolute) and new (relative). Frame chosen (`scratchpad/pick_frame_r2.py`)
+as one of the 77 bout-8 frames the 10-unit radius NaN'd for her while the relative rule writes both
+flies cleanly on their own masks; her written centroid is **33.6 units** from her own mask centre
+there and 45+ from his, which is precisely why the radius rejected her.
+
+**Expectation stated before rendering:** cyan written keypoints inside the cyan (human-reviewed
+FEMALE) outline, orange inside the orange (MALE) one, in both cameras, for the v1 and new rows and
+NOT for r2.
+
+**Read back (Read tool, all three rows, plus 2x crops of the female in the overhead view):** met.
+v1 has cyan on the cyan-outlined female and orange on the orange-outlined male; r2 has NO cyan
+anywhere (she is NaN, legend reads "written fly0 (female): NaN this frame") with the male
+unchanged; new restores cyan on the female with **pixel-identical placement to v1** and leaves the
+male alone. No dots cross to the other outline in any row.
+
+Honest caveat from the same read-back: within her body the keypoints are biased toward the right
+(grey/blurred) half of her mask and a few leg points fall just outside the outline. That is
+identical in v1 and new -- it is this detector's known weakness on the female in an oblique
+wall pose, not something either identity rule changed. Crops kept beside the figure as
+`identity_mask_bout8_round2_zoom_v1.png` / `_zoom_new.png`.
