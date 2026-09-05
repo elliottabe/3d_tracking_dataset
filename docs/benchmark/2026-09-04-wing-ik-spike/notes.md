@@ -159,3 +159,71 @@ Read-back against the expectation:
 
 Regenerate: `python figures/2026-09-04-wing-stop-spike/compare_perfly_offsets.py`
 (run roots `pose_mvq_ik` = shared, `pose_mvq_ik_perfly` = per-fly).
+
+## 2026-09-05: from "fix the wing" to a new Stage C solver
+
+Scripts (gitignored, `figures/2026-09-04-wing-stop-spike/`): `polish_spike*.py`,
+`female_reach_spike.py`, `multistart_spike.py`, `singlepass_spike.py`,
+`render_fullpose.py`, `jitter_video.py`; run roots `pose_mvq_ik_perfly_polish*`,
+`pose_mvq_ik_perframe` beside `pose_mvq_ik_perfly`.
+
+### Why the batch solve stalls (and it is not the tolerances)
+
+On 24 male frames at the yaw stop, from the STAC pose, per-frame LM with the
+configured or tight tolerances stops at pitch -27 deg; jaxls default damping
+-30; **yaw stop relaxed +50 deg: -40; started with pitch at REST: -54**
+(residual 1.15 -> 0.56 mm). The LM is not weak, it starts on the wrong side
+of a barrier: from hinge 0 it descends to ~-20 where the wing yaw sits on its
+joint stop and the constrained step cannot follow the curved valley. With the
+stop relaxed the yaw settles at 90-93 deg, i.e. this male folds 4-7 deg past
+the model's 85.9 deg limit (body-model note, not changed). But re-starting an
+EXTENDED wing at rest drops it into a wrong basin (frame 721 render), so the
+start has to be chosen per frame by marker cost.
+
+### Grafting is wrong; the batch is under-converged everywhere
+
+A polish that re-solved per frame from the rest start but wrote back only
+wing/abdomen DOFs made the female WORSE on 92% of frames -- while the same
+ungrafted per-frame pose beat the batch on 100% of frames with a 74% lower
+cost (wings 1.03 -> 0.34 mm, body 0.78 -> 0.40 mm). The batch solution is
+under-converged on the whole body, not just the wings. Per-frame argmin over
+candidates then flipped the female's wings flat/edge-on frame to frame (94
+basin jumps); a Viterbi switch penalty (1e-3 over all DOFs) cut that to ~30;
+weighting wing DOFs 20x in the penalty cut it to 0-3.
+
+### Multi-start BATCH: right answer, wrong speed
+
+Four whole-clip solves vmapped together: 1341-2141 s vs 99-222 s for one
+(~10x; slower than sequential). Its Viterbi-selected trajectory is the
+smoothest good male result (pitch -50 at the stop, jitter 0.23 deg/frame, 2
+switches) but keeps the batch's under-converged body (0.57 mm). Dropped.
+
+### Result: `stac.solver: per_frame` (default), bout 28
+
+| | male batch | male batch+polish | **male per-frame** | female batch | female batch+polish | **female per-frame** |
+|---|---|---|---|---|---|---|
+| all-kp residual (mm) | 0.414 | 0.237 | **0.201** | 0.726 | 0.234 | **0.235** |
+| wing residual (mm) | 0.501 | 0.375 | **0.327** | 1.053 | 0.330 | **0.344** |
+| pitch_right at yaw stop (deg) | -20 | -54 | **-55** | -10 | -39 | **-39** |
+| pitch jitter (deg/frame) | 0.26 | 1.31 | 0.98 | 0.09 | 1.04 | 1.08 |
+| leg jitter (deg/frame) | 0.08 | 0.28 | 0.34 | 0.10 | 0.45 | 0.51 |
+| pitch jumps >15 deg, R / L | 0 / 0 | 73 / 75 | **1 / 2** | 0 / 0 | 30 / 38 | **3 / 0** |
+| Stage C wall time | 4-7 min | +5 min | **332 s** | | | **475 s** |
+
+`jarvis_jax/tracking/stac_perframe.py`: production warm start (root xyz from
+Scutellum, orientation from the trunk keypoints, hinges 0) solved per frame
+(vmapped LM, per-frame termination), rest-pitch starts CHAINED from that
+solution (30 s each vs 117 s), per-frame Viterbi choice (switch 1e-3, wing DOFs
+x20). LM iterations median ~70, p95 ~130, 0-3 frames at the 500 cap (check on
+other bouts before lowering). Per-frame iterations, chosen start and the
+candidate poses/costs are stored in `stac_ik.h5` for offline tuning.
+
+Jitter is 3-5x the batch's: the batch's smoothness was under-fitting (its
+temporal term at 0.005 is numerically negligible), the per-frame poses track
+the keypoint noise. Judged acceptable on the videos (user, 2026-09-05); a
+song-safe temporal prior stays an opt-in follow-up. Renders:
+`fullpose_render.png`, `jitter_fly{0,1}_Cam2012631_f100-400.mp4`.
+
+Also: `outputs.overlay` defaults to false (7 per-camera videos cost 171-288 s
+per fly, as much as the solve); `stac.polish` remains for `solver: batch`.
+The earlier `JAXLS_COST_TOLERANCE` 1e-10 change is moot under per_frame.

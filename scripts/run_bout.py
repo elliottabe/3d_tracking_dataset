@@ -2087,7 +2087,20 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
                       f"{_mm.shape[1]} markers present) -- these are real but "
                       f"incomplete observations; treat the fitted pose there with "
                       f"suspicion, not as a full measurement.", flush=True)
-        if _ok.all():
+        _solver = str(cfg.stac.get("solver", "per_frame"))
+        if _solver == "per_frame" and _ok.any():
+            # Per-frame multi-start IK (jarvis_jax.tracking.stac_perframe): no
+            # temporal coupling, so NaN gaps need no segmenting -- unsolved
+            # frames simply stay NaN. Frames only "ok" through fill_short_gaps
+            # are re-NaN'd below like the batch path's.
+            from jarvis_jax.tracking.stac_perframe import solve_per_frame_ik
+            solve_per_frame_ik(cfg, np.asarray(_kp_solve) * float(scale), kp_names,
+                               xml_path=str(cfg.ik.xml), offsets_h5=offsets_path,
+                               out_h5=os.path.join(bout_dir, "stac_ik.tmp.h5"), solve_mask=_ok,
+                               log_prefix=f"[ik-perframe] bout {bout_idx} fly{fly}:")
+        elif _solver not in ("per_frame", "batch"):
+            raise ValueError(f"stac.solver must be 'per_frame' or 'batch', got {_solver!r}")
+        elif _ok.all():
             if _filled.any():
                 print(f"[stac] interpolated {_filled.sum()} short-gap frame(s) "
                       f"before the solve", flush=True)
@@ -2162,6 +2175,30 @@ def process_bout_fly(cfg, bout_idx: int, fly: int):
             f"bout {bout_idx} fly{fly}: stac_ik.h5 qpos T={q.shape[0]} != "
             f"masks T={T} ({stac_h5_path} vs {bout_npz}); stale/mismatched "
             f"resumed artifact -- delete it and rerun this bout/fly.")
+
+    # -- Stage C2: per-frame weak-DOF polish (wings, abdomen) ---------------------
+    #    The batch solve stalls the folded wing's pitch against the yaw stop
+    #    (see jarvis_jax.tracking.stac_polish). Runs in place on stac_ik.h5,
+    #    idempotent on its signature; only when no pose-derived artifact exists
+    #    yet, so a resumed run never silently changes a pose that outputs/qc/viz
+    #    were already built from.
+    _pcfg = cfg.stac.get("polish") or {}
+    if bool(_pcfg.get("enabled", False)) and str(cfg.stac.get("solver", "per_frame")) == "per_frame":
+        pass                    # the per-frame solver already multi-starts and selects per frame
+    elif bool(_pcfg.get("enabled", False)):
+        if os.path.exists(qpos_path):
+            import h5py as _h5
+            with _h5.File(stac_h5_path, "r") as _f:
+                _done_sig = _f.attrs.get("polish_sig")
+            if _done_sig is None:
+                print(f"[polish] bout {bout_idx} fly{fly}: stac_ik.h5 is UNPOLISHED but "
+                      f"downstream pose artifacts already exist ({qpos_path}); leaving it. "
+                      f"Delete qpos_refined.npz/outputs.h5/qc*.{{json,npz}}/DONE to polish "
+                      f"on the next run.", flush=True)
+        else:
+            from jarvis_jax.tracking.stac_polish import polish_stac_h5
+            polish_stac_h5(cfg, stac_h5_path, kp_names, xml_path=str(cfg.ik.xml),
+                           log_prefix=f"[polish] bout {bout_idx} fly{fly}:")
 
     # -- Stage D: model->mm bridge --------------------------------------------------
     #    Was "silhouette-containment polish". The polish was dead -- with

@@ -39,6 +39,58 @@ infer_qvels: True
 offsets_min_conf: 0.7
 allow_shared_offsets: false
 
+# Stage C solver. 'per_frame' (default, jarvis_jax.tracking.stac_perframe):
+# production warm start, vmapped single-frame LM with per-frame termination,
+# chained rest-pitch starts for the wings, per-frame Viterbi choice. Measured on
+# bout 28 (2026-09-05) against the jaxls whole-trajectory solve ('batch'):
+# all-keypoint residual 0.41 -> 0.24 mm (male) and 0.73 -> 0.23 mm (female),
+# folded wings in the right basin, ~same or less wall time; joint jitter is
+# 3-5x higher because the batch's smoothness was mostly under-fitting (its
+# temporal term is numerically negligible at 0.005). 'batch' keeps the old
+# solver (+ the polish below) available for comparison.
+solver: per_frame
+per_frame:
+  starts: [wing_rest_left, wing_rest_right, wing_rest_both]   # 'zero' (production warm start) is implicit and solved first
+  lambda_initial: 5.0e-4
+  lambda_min: 1.0e-8
+  cost_tolerance: 1.0e-12
+  gradient_tolerance: 1.0e-14
+  parameter_tolerance: 1.0e-16
+  n_iter: 500                 # per-frame cap; ik_iterations in stac_ik.h5 shows how many frames hit it -- check other bouts before lowering
+  batch: 512
+  switch_weight: 1.0e-3       # Viterbi jump penalty, model-units^2 per rad^2
+  switch_wing_weight: 20.0    # extra multiplier on wing DOFs: a basin flip costs more than leg motion
+  save_candidates: true       # qpos_candidates + candidate_costs in stac_ik.h5 for offline tuning
+
+# Per-frame polish after the batch IK (jarvis_jax.tracking.stac_polish); used only with solver: batch.
+# The batch solve starts every hinge at 0 and stalls the folded wing's blade
+# pitch at ~-20 deg with the wing yaw pinned on its joint stop; the marker
+# optimum is near -45 deg (wing renders edge-on; 2026-09-04 spike). Started
+# from the model's REST pitch the same per-frame solver reaches it, but an
+# EXTENDED wing re-started at rest falls into a wrong basin -- so several
+# starts per frame, chosen per frame by marker cost with a Viterbi switch
+# penalty. The WHOLE chosen pose is written: the batch solve is under-converged
+# on the body too (female bout 28: per-frame pose beats it on 100% of frames,
+# body residual 0.78 -> 0.40 mm), and grafting only wing DOFs onto the batch
+# body produced a worse pose that lost to the batch on cost (2026-09-05).
+# Vmapped per-frame LM, ~5 min per bout-fly. Batch qpos kept as qpos_batch.
+polish:
+  enabled: true
+  dofs: ['*']                 # whole pose; e.g. ['wing_*', 'abdomen*'] to graft only those DOFs
+  starts: [batch, wing_rest_left, wing_rest_right, wing_rest_both]
+  lambda_initial: 5.0e-4      # jaxls default; the batch solve uses 1.0
+  lambda_min: 1.0e-8          # must fall below the weak DOFs' curvature (~1e-3)
+  cost_tolerance: 1.0e-12
+  gradient_tolerance: 1.0e-14
+  parameter_tolerance: 1.0e-16
+  n_iter: 500                 # spike: median ~70, max 191 iterations per frame
+  # Temporal consistency of the per-frame candidate choice (Viterbi): marker
+  # cost + switch_weight * ||dq||^2 over the polished DOFs between consecutive
+  # frames. 0 = independent per-frame argmin, which flipped the female's wings
+  # flat/edge-on frame to frame (2026-09-05). Units: model-units^2 per rad^2.
+  switch_weight: 1.0e-3
+  batch: 512                  # frames per vmapped solve (memory/compile trade-off only)
+
 fit_offsets_path: "Fruitfly_fit_${anatomy.name}_${dataset.name}.h5"
 ik_only_path: "Fruitfly_ik_${anatomy.name}_${dataset.name}.h5"
 

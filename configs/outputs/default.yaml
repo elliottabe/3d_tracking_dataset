@@ -9,7 +9,13 @@
 # both the default recording and the job-array sweep (which overrides
 # recording.session_dir per recording), so the output always tracks the input.
 out: ${paths.processed_root}/${dataset.name}/${recording.name}/${basename:${recording.session_dir}}/pose
-overlay: true
+# Per-camera reprojection overlay videos (7 per fly). OFF by default since
+# 2026-09-05: they are cosmetic QC and cost as much wall time as the whole
+# per-frame IK solve (bout 28, 1500 frames: 288 s female / 171 s male with 4
+# workers). The view-matched sidebyside below stays on as the standard visual
+# check; set overlay=true (or pass outputs.overlay=true) when the per-camera
+# videos are wanted.
+overlay: false
 overlay_fps: 30
 # How many per-camera reprojection overlay videos to render at once. Each one is
 # an isolated subprocess (jarvis_jax.tracking.reproj_video.render_camera_overlays)
