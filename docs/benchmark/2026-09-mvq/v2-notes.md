@@ -647,3 +647,144 @@ differs 4x between T=1 (4.27) and T=2 (10.7), i.e. the real root's T=2 pairs are
 more male-host-skewed than its T=1 singles — informational, not a blocker, since
 `female_host_target` re-solves per T already. The 40k launch itself is still NOT
 started (out of scope for this check).
+
+---
+
+## Calibration: ViTPose LOO + affine bundle adjustment (2026-09-06)
+
+**Question.** Two calibrations disagree for the 2026-04-02 (Session1) courtship
+recordings: **A** = human root group A
+(`red_data_3d_v12_export0902/calibrations/A`, assigned to `15_25_51` and
+`17_28_34` by the 2026-09-03 export fix) and **C** = the video-folder
+calibration (byte-identical in every Session1 recording dir, and identical to
+human-root group C, which the export assigns to `12_11_50`). Every existing
+proof is circular: the human 2-D are reprojections of the labelled 3-D through
+the labels' own DLT. Control, run here: the human 2-D reproduce **their own**
+group and no other — `12_11_50` fit 0.389 px under C vs 3.49 (A) / 1.89 (B);
+`15_25_51` and `17_28_34` fit 0.394/0.397 px under A vs ~2.6 under B and C
+(0.4 px, not 0.001, because COCO keypoints are integer-rounded). A bundle
+adjustment on those 2-D returns the calibration that made them. Hence an
+independent observation was needed: the **ViTPose detector's per-view heatmap
+peaks**.
+
+**Method.** `scripts/run_bout.py … pipeline.stop_after=triangulate` (Stage A +
+B only) on 11 bouts across the three recordings, both flies, all 7 cameras
+(`OutFiles/calib_ba/<rec>/cal{A,C}/`), plus a mask-free run on the **exact
+human-labelled frames** (`detect_human_frames.py`: crop centred on the human
+2-D centroid per view, mask channel zeroed — the checkpoint is
+`zero_mask_channel: true` and provably invariant to it — distractor gray-filled
+from the other fly's body-landmark hull; detector lands 2.8-3.6 px from the
+human labels, conf 0.96). Points enter with conf ≥ 0.5 in ≥ 5 views that pass
+the pipeline's own gates (SAM mask valid, view median conf ≥ 0.6,
+`view_mask_agreement` ≤ 3 fly-lengths); ungated, a bout whose female has 3/7
+usable cameras contributes 140 px "residuals" that say nothing about geometry.
+Cameras and keypoints indexed **by name** throughout (the mask npz's camera
+order is not the canonical one).
+
+### LOO table (leave-one-camera-out reprojection, px)
+
+| recording (source) | n pts | A med / p90 | C med / p90 | paired A−C [95 % CI] | BA med | worst camera |
+|---|---|---|---|---|---|---|
+| `12_11_50` bouts | 31 896 | 5.39 / 28.7 | **4.90** / 28.3 | **+0.19** [+0.16,+0.22] → C | 3.65 | A: Cam2012861 6.6 |
+| `12_11_50` human | 1 499 | 4.58 / 11.4 | **3.45** / 10.7 | **+0.75** [+0.54,+0.97] → C | 2.68 | A: Cam2012861 6.1 |
+| `15_25_51` bouts | 66 657 | **3.44** / 10.3 | 5.06 / 11.6 | **−1.49** [−1.51,−1.46] → A | 2.76 | C: Cam2012855 6.5 |
+| `15_25_51` human | 2 200 | **2.32** / 11.9 | 4.19 / 12.6 | **−1.41** [−1.55,−1.27] → A | 2.15 | C: Cam2012855 5.8 |
+| `17_28_34` bouts | 42 627 | **3.31** / 12.0 | 4.73 / 12.8 | **−1.17** [−1.20,−1.14] → A | 2.93 | C: Cam2012855 6.2 |
+| `17_28_34` human | 4 391 | **2.66** / 8.9 | 4.46 / 10.3 | **−1.53** [−1.63,−1.43] → A | 2.43 | C: Cam2012855 6.3 |
+
+Figure `figures/2026-09-mvq/v2_train/calib_ba/loo_by_camera.png` (read back):
+the C boxes sit visibly above the A boxes in Cam2012853/855/857/862 for both
+afternoon recordings — largest at **Cam2012855**, the predicted worst camera —
+and the ordering **reverses** on `12_11_50`, where C is at or below A in
+Cam2012631/857/861. Cam2012630 separates least, as predicted (A and C differ
+by only 0.8-1.7 px there over the real fly volume). Both BA arms are visually
+identical in every panel and at or below both shipped calibrations everywhere.
+
+**Not an artefact of the crop placement.** Stage A places its crop by
+triangulating the mask centroids, the one path by which the calibration could
+leak into the "independent" 2-D. Matched control on bouts 6+12 of `15_25_51`:
+crops placed by A → paired A−C = −1.455 px; crops placed by C → −1.459 px.
+No effect.
+
+**Per-bout, across each recording's whole frame axis** (rig-move test): the
+winner never flips *within* a recording — `15_25_51` bouts 1/6/12/26/30
+(frames 60 k → 791 k) all → A (−0.63 to −1.65 px); `17_28_34` bouts 1/6/10
+(465 k → 723 k) all → A; `12_11_50` bouts 2/3/10 (181 k → 526 k) all → C.
+
+### Bundle adjustment
+
+Alternating affine DLT / robust (Huber + 3× median trim) per-camera 2×4
+resection, gauge pinned by re-aligning the refined cloud to the initialisation
+with a 12-dof affine each iteration. Converges in 5-10 iterations. **Both
+initialisations reach the same cameras**: after gauge alignment the max
+per-camera reprojection difference between BA(init A) and BA(init C) is
+**0.0008-0.006 px** in every recording — the data fully constrain the affine
+cameras. Distance of the converged solution: 0.4-2.5 px per camera from **A**
+and 1.2-4.7 px from **C** on the afternoon recordings; 0.9-4.0 px from A and
+1.2-2.4 px from C on `12_11_50`. Held-out (BA fitted on half the bouts, scored
+on the other half): `15_25_51` A 3.51 / C 4.96 / **BA 2.88**; `17_28_34`
+A 6.10 / C 6.85 / **BA 5.76** — the gain is not an overfit. Refined YAMLs (input
+format, one `Cam*.yaml` per camera) at
+`OutFiles/calib_ba/<rec>/calibration_ba/`.
+
+**Cross-recording transfer** (LOO median px on the row's data) is the decisive
+result:
+
+| evaluated on | A | C | BA:12_11_50 | BA:15_25_51 | BA:17_28_34 |
+|---|---|---|---|---|---|
+| `12_11_50` | 5.39 | 4.90 | **3.65** | 4.50 | 4.54 |
+| `15_25_51` | 3.44 | 5.06 | 3.83 | **2.76** | 2.98 |
+| `17_28_34` | 3.31 | 4.73 | 4.15 | 3.20 | **2.93** |
+
+The two afternoon solutions transfer to each other (2.98 / 3.20 px, better than
+either shipped calibration) and agree to ≤ 1.31 px per camera; the morning
+solution does not transfer to them (4.50 / 4.54) and differs from both by
+2.15-2.54 px — against an A-vs-C reference difference of 4.45 px.
+
+### Verdict
+
+**The rig moved between 12:11:50 and 15:25:51, and neither shipped calibration
+is exactly right for either side.** A is the better of the two for `15_25_51`
+and `17_28_34`; C is the better of the two for `12_11_50`. That reproduces the
+2026-09-03 export's per-recording assignment from data it never saw, so the
+export fix is confirmed and **the video-folder calibration C is wrong for every
+afternoon Session1 recording**. But BA beats A by 0.4-0.7 px and C by
+1.2-2.4 px on their own recordings, so both are ~1-3 px off the geometry the
+images actually show.
+
+### Practical consequence
+
+Smaller than the pixel numbers suggest, and worth stating precisely. Triangulating
+the *same* 2-D under A and under C moves the 3-D by 1.10-1.45 world units
+(3.1-4.3 % of the fly's body extent), but **after the best similarity that
+collapses to 0.018-0.045 u (0.05-0.13 % of body)**: the A↔C difference is
+almost purely a world-frame rigid motion plus a uniform scale of
+**0.47-0.58 %** (C reconstructs everything ~0.5 % larger). A rigid-invariant
+check (14 thorax/leg segments, CV of length) is consistent with this and
+**cannot discriminate** the two: CVs agree to the third digit because the
+5-20 % detector-noise CV swamps a 0.5 % scale — recorded as an honest negative.
+
+So the p3b lifts of `15_25_51` and `17_28_34` (and every other afternoon
+Session1 recording, all lifted with C) are **not shape-scrambled**; they carry a
+~0.5 % body-scale error, a small world-frame rotation/translation, and ~1.5 px
+more multi-view inconsistency, which is what the STAC/IK residuals and
+reprojection overlays see. Anything comparing 3-D across the morning/afternoon
+boundary, or reusing `scale.json` across it, is affected at the 0.5 % level;
+per-recording IK is affected mainly through the extra 1.5 px.
+
+### For a proper fix: the wand recordings exist
+
+`Video_recordings/courtship/NewCalibration/` holds six 7-camera wand/checkerboard
+captures from that same day — **2026_04_02_11_39_34, _11_39_57, _11_40_21,
+_11_42_59** (morning, before the 11:52 first recording) and **2026_04_02_18_15_05,
+_18_15_22** (evening, after the 17:52 last one). They bracket the day on both
+sides of the move. Every one of them ships calibration **C** in its own
+`calibration/` dir (byte-identical to human-root C), i.e. only one calibration
+was ever derived from that session and copied everywhere — which is exactly how
+the afternoon recordings ended up with the morning geometry. These videos are
+the bias-free source for a proper recalibration of both sides; **not** done here.
+
+Scripts + JSON artifacts: `figures/2026-09-mvq/v2_train/calib_ba/`
+(`analyse.py`, `calib_core.py`, `detect_human_frames.py`, `plot_loo.py`,
+`consequence.py`, `rigid_invariant.py`, `human2d_selfcheck.py`,
+`ac_over_real_volume.py`, `loo_ba_results.json`, `consequence.json`).
