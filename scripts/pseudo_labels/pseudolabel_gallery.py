@@ -91,12 +91,20 @@ def _cell_of(stratum):
     return f"{host_sex}/{contact}/{wall}"
 
 
-def _iter_reviewable(coco):
-    """Every frameset with a real host fly -- existence negatives (`role ==
-    "negative"`, `fly_id is None`) carry no keypoints and are not reviewed
-    here."""
+def _iter_reviewable(coco, include_partners=False):
+    """Every frameset worth spending review budget on.
+
+    Existence negatives (`role == "negative"`, `fly_id is None`) carry no
+    keypoints and are never reviewed. By default only `role == "anchor"`
+    framesets are sampled: a `role == "partner"` frameset is the SAME fly a
+    few frames away (its T=2 pairing partner), and reviewing both would
+    double-spend a fixed review budget on near-duplicate frames rather than
+    covering more of the stratified space. Pass `include_partners=True`
+    (CLI `--include-partners`) to opt into reviewing partner framesets too."""
     for key, fsv in coco["framesets"].items():
         if fsv.get("role") == "negative" or fsv.get("fly_id") is None:
+            continue
+        if not include_partners and fsv.get("role") != "anchor":
             continue
         yield key, fsv
 
@@ -209,6 +217,28 @@ def _fmt_sep(row):
     return f"{sep:.1f}" if sep is not None else "nan"
 
 
+def _label_prefix(row):
+    """`"<rec> [b<bout>] f<frame> fly<fly> <sex>"` -- `bout` is OMITTED
+    (never rendered as a bare 'b') when the frameset carries no bout number,
+    which real single-fly/free-running pseudo-labels won't."""
+    parts = [row["recording"]]
+    if row["bout"] is not None:
+        parts.append(f"b{row['bout']}")
+    parts += [f"f{row['frame']}", f"fly{row['host_fly']}", row["host_sex"]]
+    return " ".join(parts)
+
+
+def _placeholder_panel(row, cam_name, reason):
+    """A missing/unreadable camera still carries the row's own identity --
+    the reviewer needs to know WHICH frameset a placeholder belongs to, not
+    just which camera failed."""
+    canvas = np.full((PANEL_H, PANEL_W, 3), 40, np.uint8)
+    cv2.rectangle(canvas, (0, PANEL_H - 18), (PANEL_W, PANEL_H), (0, 0, 0), -1)
+    cv2.putText(canvas, f"{_label_prefix(row)} {cam_name}: {reason}", (4, PANEL_H - 5),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.38, (255, 255, 255), 1, cv2.LINE_AA)
+    return canvas
+
+
 def _panel(export_root, coco, idx2group, images_by_id, anns_by_id, row, cam_name):
     fsv = coco["framesets"][row["frameset"]]
     img_path, ann, ann_id_found = None, None, None
@@ -225,17 +255,11 @@ def _panel(export_root, coco, idx2group, images_by_id, anns_by_id, row, cam_name
             break
 
     if img_path is None or not os.path.exists(img_path):
-        canvas = np.full((PANEL_H, PANEL_W, 3), 40, np.uint8)
-        cv2.putText(canvas, f"{cam_name}: missing", (8, PANEL_H // 2),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
-        return canvas
+        return _placeholder_panel(row, cam_name, "missing")
 
     img = cv2.imread(img_path)
     if img is None:
-        canvas = np.full((PANEL_H, PANEL_W, 3), 40, np.uint8)
-        cv2.putText(canvas, f"{cam_name}: unreadable", (8, PANEL_H // 2),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
-        return canvas
+        return _placeholder_panel(row, cam_name, "unreadable")
     h, w = img.shape[:2]
     canvas = cv2.resize(img, (PANEL_W, PANEL_H))
     sx, sy = PANEL_W / w, PANEL_H / h
@@ -255,9 +279,7 @@ def _panel(export_root, coco, idx2group, images_by_id, anns_by_id, row, cam_name
             cv2.circle(canvas, (int(round(u * sx)), int(round(v * sy))), 3, color, -1, cv2.LINE_AA)
 
     host_color = PALETTE["fly1"] if row["host_sex"] == "male" else PALETTE["fly0"]
-    bout = "" if row["bout"] is None else row["bout"]
-    label = (f"{row['recording']} b{bout} f{row['frame']} fly{row['host_fly']} "
-             f"{row['host_sex']} sep={_fmt_sep(row)}u {cam_name}")
+    label = f"{_label_prefix(row)} sep={_fmt_sep(row)}u {cam_name}"
     cv2.rectangle(canvas, (0, PANEL_H - 18), (PANEL_W, PANEL_H), (0, 0, 0), -1)
     cv2.putText(canvas, label, (4, PANEL_H - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.38,
                 host_color, 1, cv2.LINE_AA)
@@ -294,11 +316,12 @@ def write_review_csv(rows, csv_path):
             })
 
 
-def generate(export_root, out_dir, n, seed):
+def generate(export_root, out_dir, n, seed, include_partners=False):
     coco, kp_names, images_by_id, anns_by_id = _load_export(export_root)
-    rows = [_row_info(k, v) for k, v in _iter_reviewable(coco)]
+    rows = [_row_info(k, v) for k, v in _iter_reviewable(coco, include_partners=include_partners)]
     if not rows:
-        raise ValueError(f"{export_root}: no reviewable (non-negative) framesets")
+        raise ValueError(f"{export_root}: no reviewable "
+                         f"({'non-negative' if include_partners else 'anchor'}) framesets")
     picked, counts = _draw(rows, n, seed)
     for i, r in enumerate(picked):
         r["page"] = i // PER_PAGE
@@ -329,10 +352,18 @@ def _print_gate_breakdown(rejected_rows):
 
 def _cascade_partner_drop(fs, drop_keys):
     """Partners of a dropped anchor are dropped too, UNLESS another kept
-    (non-dropped) frameset still references that same partner frame."""
+    (non-dropped) ANCHOR still references that same partner frame.
+
+    `referenced` is deliberately restricted to `role == "anchor"` framesets:
+    only an anchor's own `partners` dict expresses a real T=2 pairing need. A
+    `role == "partner"` frameset's own `partners` field is not expected to be
+    populated by the writer, but even if it were, a kept partner must not be
+    able to keep ANOTHER partner alive -- that would let a chain of
+    partner-referencing-partner survive a dropped anchor with nothing left
+    that actually needs it."""
     referenced = set()
     for key, v in fs.items():
-        if key in drop_keys:
+        if key in drop_keys or v.get("role") != "anchor":
             continue
         rec, fly = v.get("recording"), v.get("fly_id")
         if fly is None:
@@ -455,6 +486,11 @@ def main(argv=None):
                     help="gallery output dir (pages + review.csv); required unless --apply-review")
     ap.add_argument("--n", type=int, default=300, help="stratified sample size")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--include-partners", action="store_true",
+                    help="also sample role=='partner' framesets (the same fly a few "
+                         "frames later) into the review; default is anchors only, since "
+                         "a partner would double-spend the reviewer's budget on a "
+                         "near-duplicate of its own anchor")
     ap.add_argument("--apply-review", default=None, metavar="CSV",
                     help="apply a filled-in review.csv (spec SS3.3): overall reject "
                          "fraction > 3%% aborts and writes nothing; else drop rejected "
@@ -465,7 +501,8 @@ def main(argv=None):
         return apply_review(args.export, args.apply_review)
     if not args.out:
         ap.error("--out is required to generate a gallery")
-    summary = generate(args.export, args.out, args.n, args.seed)
+    summary = generate(args.export, args.out, args.n, args.seed,
+                       include_partners=args.include_partners)
     print(f"[pseudolabel_gallery] wrote {summary['n']} framesets over {summary['n_pages']} "
           f"page(s) to {args.out} (cells: {summary['cells']})")
     return 0
