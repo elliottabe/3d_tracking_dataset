@@ -1865,9 +1865,11 @@ def lift_masked_bout(runner, frames_iter, centres, ok, *, out_dir, model_names,
         "identity": identity,
         "identity_resolved": identity_resolved,
         # which window each fly was read from, and how often the preference
-        # had to fall back (both None under identity="sex", where the mask
-        # assignment -- and so the preference -- does not run at all)
-        "window_pref": window_pref,
+        # had to fall back. Both take the EFFECTIVE value, like the gates dict:
+        # under identity="sex" the mask assignment -- and so the preference --
+        # does not run at all, so `window_pref` reads "any" (never the
+        # requested mode) and the fallback counts are None.
+        "window_pref": (window_pref if identity_resolved == "mask" else "any"),
         "n_from_other_window": ({"fly0": int(n_from_other_window[0]),
                                  "fly1": int(n_from_other_window[1])}
                                 if identity_resolved == "mask" else None),

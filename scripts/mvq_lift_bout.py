@@ -179,8 +179,8 @@ def build_parser():
                         "when it has no candidate -- the partner's crop puts half the "
                         "fly at the edge and drives its conf3d to ~0.1, which gates "
                         "it out of the offsets sampler, the rigid repair and the "
-                        "display. 'any' is the pre-2026-09-05 rule. In the gate "
-                        "signature")
+                        "display. 'any' is the pre-2026-09-05 rule. Enrolled in the "
+                        "gate signature, so switching it re-lifts every bout")
     p.add_argument("--mask-assign-max-units", dest="mask_assign_max_units",
                    type=float, default=60.0,
                    help="--identity mask only: garbage cap on that distance (world "
