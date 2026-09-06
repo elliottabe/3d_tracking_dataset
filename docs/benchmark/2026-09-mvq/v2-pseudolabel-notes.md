@@ -272,3 +272,146 @@ Two writer changes came out of this round:
   frame's: the loader slices a mask with the image's crop origin, so a
   differently-sized mask is not a smaller mask, it is a mask of somewhere
   else.
+
+## Task 5: empty-window negatives (2026-09-06)
+
+`scripts/pseudo_labels/extract_empty_windows.py` (+ `tests/test_empty_windows.py`),
+spec §3.5. Two centroid sources per recording (controller ruling 2026-09-05,
+extended by a coordinator ruling 2026-09-06 for T=2 partners):
+
+- **(a) `--tracks` (mask-free coarse pass)**: only Session0/2025_10_20_13_20_04
+  has a `coarse_tracks.npz`. Arena-edge candidates are CenterDetect reads with
+  `exist < 0.2` near the tracked-centroid convex hull -- the real file has
+  **zero** such reads (`exist` ranges 0.500-1.000, never below): `MVQRunner.
+  read_typed`/`coarse_pass` treat a below-threshold read as "no read" and never
+  write it, so the file this pipeline produces cannot carry the low-confidence
+  "false peak" rows the spec's edge stratum was written against. This is
+  reported as a CONCERN below, not silently worked around; the edge_frac
+  machinery is intact and will populate itself the moment a source ever
+  carries such rows (verified with a synthetic file in
+  `test_edge_frac_draws_from_the_false_peak_band`).
+- **(b) `--lift-root` (masked p3b bout lifts)**: per-frame centroid = nanmean
+  over keypoints of `kp3d.npz`, placed at the bout's `frame_start`, only
+  inside bouts. Adjacent campaign bouts can overlap by a handful of frames at
+  their boundary (measured: `2026_04_02_15_25_51` bout_00013/14 share 6
+  frames, `2026_04_02_16_21_32` bout_00011/12 share 8) -- kept the FIRST
+  bout's read for the shared frames and counted them, rather than aborting
+  the recording.
+- Newer `pose_mvq_p3b` used where its bout count matched or exceeded the
+  `pose_mvq_p3b.pre_ownwindow_0905` sibling (Session0 + the first 3 Session1
+  recordings, all fully re-lifted); the `pre_ownwindow_0905` root used
+  otherwise (Session1 lifts still re-running at run time; 3D is identical
+  between the two, only confidences differ).
+
+### T=2 partners (coordinator ruling 2026-09-06)
+
+Every drawn negative ("anchor") also gets partner framesets at Delta in
+{1, 4, 16} video frames FORWARD (`f0 + delta`), same world centre, written
+only where the SAME clearance gates (>= 60 units from every tracked centroid,
+>= 6 units above the floor, inside >= 5 cameras) hold AT THE PARTNER'S OWN
+FRAME -- never assumed from the anchor. A delta that fails is omitted, never
+guessed; `_link_partners` also refuses a partner frame already claimed by
+another negative or partner (`collision`). The anchor's frameset carries
+`partners: {"1": frame, "4": frame, "16": frame}` for whichever deltas
+cleared (`pseudo_export`'s existing convention, unmodified); partners are
+written as independent framesets with `role: "partner"`, so
+`write_pseudo_export`'s own `per_role`/`partner_availability` summaries
+separate anchors from partners with no changes to that module.
+
+**Stride-16 gap on source (a).** `2025_10_20_13_20_04`'s tracked-centroid
+coverage (`frame_to_cent`) only exists at the coarse-pass's own stride-16
+samples, so `f0+1` and `f0+4` are NEVER a known frame there --
+`_clears_gates` returns `no_coverage` for both, every time (201/201 anchors,
+both deltas). Only `f0+16` lands exactly on the next coarse sample and
+resolves (195/201, the rest lost to `dist`/one `collision`). This is a
+genuine data-coverage limit of the mask-free coarse pass, not a bug --
+confirmed both by the real run's numbers and by a dedicated unit test
+(`test_partners_resolve_and_share_the_anchor_centre`) that asserts delta=16
+is exactly the one that resolves on a stride-16 synthetic source. Every
+`--lift-root` recording has PER-FRAME coverage inside its bouts, so all
+three deltas mostly resolve there (65-99 % taken per delta; `collision` --
+two negatives landing within 16 frames of each other -- is the next largest
+loss, `no_coverage` mostly means "delta lands outside every bout").
+
+### Real run (2026-09-06)
+
+```
+python scripts/pseudo_labels/extract_empty_windows.py \
+  --tracks 2025_10_20_13_20_04=.../coarse_mvq_p3b/coarse_tracks.npz \
+  --lift-root <rec>=.../pose_mvq_p3b[.pre_ownwindow_0905] (x10) \
+  --out /gscratch/portia/eabe/data/Johnson_lab/red_data_3d_v12_pseudo_negatives_20260905 \
+  --n 2000
+```
+
+11 recordings, ~97 min wall time (video-seek-bound: a random frame across a
+~500k-frame recording costs ~0.4-2.5 s per camera under this run's I/O
+contention with a concurrent campaign export). **2,000 anchor negatives +
+5,312 T=2 partners = 7,312 framesets, 51,184 images.** `per_role`:
+`{"negative": 2000, "partner": 5312}`. `partner_availability`:
+`{"1": 1729, "4": 1721, "16": 1862}` (out of a 6,000-delta ceiling, 3 per
+anchor -- the stride-16 recording's 402 structural `no_coverage` losses on
+deltas 1/4 account for most of the gap from ceiling).
+
+| recording | source | anchors | partners | shortfall | dominant rejection |
+|---|---|---:|---:|---:|---|
+| 2025_10_20_13_20_04 | tracks | 201 | 195 | 0 | dist/height/cams even |
+| 2026_04_02_12_11_50 | lift_root | 200 | 544 | 0 | dist |
+| 2026_04_02_14_54_28 | lift_root | 200 | 582 | 0 | dist |
+| 2026_04_02_15_25_51 | lift_root | 200 | 585 | 0 | dist |
+| 2026_04_02_15_44_42 | lift_root | 200 | 557 | 0 | dist |
+| 2026_04_02_16_03_48 | lift_root | 200 | 566 | 0 | dist |
+| 2026_04_02_16_21_32 | lift_root | 200 | 583 | 0 | dist |
+| 2026_04_02_16_39_56 | lift_root | 200 | 584 | 0 | dist |
+| 2026_04_02_16_56_37 | lift_root | 200 | 549 | 0 | dist |
+| 2026_04_02_17_28_34 | lift_root | 199 | 567 | 0 | dist |
+| 2026_04_02_17_52_50 | lift_root | **0** | 0 | 181 | dist+height (see below) |
+
+**2026_04_02_17_52_50 legitimately yields zero.** Its own tracked-centroid
+bounding box is only 5.6 units TALL (z: 8.58-14.17), below `--min-height-units`
+(6) by itself -- a real property of this recording (3 short bouts, the fly
+never climbed), not a bug: confirmed by inspecting `RecData.bbox_hi -
+bbox_lo` directly (`[164.7, 36.8, 5.58]` vs 60-90 units tall for every other
+recording). Its 181-anchor shortfall was redistributed to the 10 recordings
+that hit their own quota with room to spare (one bumped-quota re-draw per
+donor, `bonus = shortfall // n_donors`), landing the total exactly at the
+requested 2,000.
+
+**Verify** (`verify_negative_export`, the negative-specific round trip --
+`extract_p3b_pseudolabels.verify_export` asserts a real host's triangulated
+3D, which is false by construction for every window here): 20/7312 windows
+sampled, `is_negative` True, `fly_valid` all-False, finite `center3D`, mean
+7.0/7 valid cameras, non-black crops -- `{"all_negative": true}`.
+
+**Figure** (`figures/2026-09-mvq/v2_pseudo/negatives_check.png`, read back
+with the Read tool): 12 panels, all "interior" stratum (the edge stratum's
+pool is 0 -- see the exist<0.2 finding above), spanning 6 different
+recordings and both cameras per negative. Every panel shows bare textured
+arena floor or the dark arena-wall/edge band; NO fly body, wing, or leg is
+visible in any panel. Matches the stated expectation cleanly.
+
+### Concerns / deviations
+
+1. **Edge stratum never populated from a real `coarse_tracks.npz`.** The
+   file's `exist` field never goes below `TRACKABLE_EXIST` (0.5) because
+   `MVQRunner.read_typed` treats a sub-threshold read as "no read" and never
+   writes it -- there is no low-confidence row LEFT to mine for false peaks.
+   The `--edge-frac`/`--exist-edge-thresh`/`--edge-units` machinery is
+   implemented and tested against a synthetic file that DOES carry such
+   rows, but produced 0 edge windows on the real run. A real edge/false-peak
+   stratum needs either a lowered existence-write threshold in the coarse
+   pass itself, or a separate CenterDetect-peaks-only source -- out of this
+   task's scope.
+2. **T=2 partners are forward-only** (`f0+delta`), unlike the positive
+   pseudo-labels' bidirectional endpoint search -- a coordinator
+   simplification (an empty window has no motion to prefer a direction
+   from), not an oversight.
+3. **`pseudo_export.write_pseudo_export` always keys a negative frameset
+   `<rec>/Frame_<n>/neg0`** (not `neg<k>`, despite the brief's illustrative
+   `neg<k>` wording) -- harmless here because every negative (anchor or
+   partner) this script emits already has a UNIQUE frame per recording
+   (enforced by `used_frames`), so no two ever collide on one key; flagged
+   in case a future caller assumes `neg<k>` numbering.
+4. Wall time (~97 min for 51,184 images) was video-seek-bound under I/O
+   contention from a concurrent campaign export on the same filesystem; a
+   quieter node should be substantially faster (uncontended single-seek cost
+   measured at ~0.4 s/frame/camera on this recording's own mp4s).
