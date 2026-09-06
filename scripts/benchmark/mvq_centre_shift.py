@@ -46,16 +46,13 @@ from jarvis_jax.train.train_mvq import MM_PER_UNIT, normalize_crops
 SHIFTS_MM = [0.0, 0.5, 1.0, 2.0, 3.0]
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--run", required=True,
-                    help="a final/ dir (default), or (with --step) the RUN dir (parent of final/ and ckpt/)")
-    ap.add_argument("--step", default=None, help="load ckpt/<step> (or 'latest') instead of final/")
-    ap.add_argument("--attn_impl", default=None, help="override the run's own attn_impl (e.g. 'xla' on CPU)")
-    ap.add_argument("--root", default="/gscratch/portia/eabe/data/Johnson_lab/red_data/red_data_3d_v12_export0902")
-    ap.add_argument("--out", default="figures/2026-09-mvq/p4_maskfree")
-    ap.add_argument("--batch", type=int, default=16)
-    a = ap.parse_args()
+def run(a):
+    """Run the centre-shift spike for parsed args `a` (the same fields
+    `build_arg_parser()` below defines: `run`, `step`, `attn_impl`, `root`,
+    `out`, `batch`). Writes `centre_shift.{png,json}` under `a.out` (same as
+    always) and returns the JSON dict (`{"rows": [...], ...}`) directly, so
+    a caller (`scripts/benchmark/mvq_v2_acceptance.py`'s "centre shift"
+    acceptance row) can read `rows` without re-parsing the written JSON."""
     step = int(a.step) if (a.step is not None and a.step != "latest") else a.step
     model, meta = load_mvq_model(a.run, step=step, attn_impl=a.attn_impl)
     run_name = os.path.basename(os.path.dirname(a.run.rstrip("/")))
@@ -104,11 +101,29 @@ def main():
     fig.savefig(png_path, dpi=130); plt.close(fig)
     print("wrote", png_path)
 
+    result = {"run": a.run, "step": a.step, "run_name": run_name,
+             "err_decision_line_mm": err_line, "miss_decision_line": miss_line,
+             "rows": rows}
     json_path = os.path.join(a.out, "centre_shift.json")
-    json.dump({"run": a.run, "step": a.step, "run_name": run_name,
-              "err_decision_line_mm": err_line, "miss_decision_line": miss_line,
-              "rows": rows}, open(json_path, "w"), indent=1)
+    json.dump(result, open(json_path, "w"), indent=1)
     print("wrote", json_path)
+    return result
+
+
+def build_arg_parser():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--run", required=True,
+                    help="a final/ dir (default), or (with --step) the RUN dir (parent of final/ and ckpt/)")
+    ap.add_argument("--step", default=None, help="load ckpt/<step> (or 'latest') instead of final/")
+    ap.add_argument("--attn_impl", default=None, help="override the run's own attn_impl (e.g. 'xla' on CPU)")
+    ap.add_argument("--root", default="/gscratch/portia/eabe/data/Johnson_lab/red_data/red_data_3d_v12_export0902")
+    ap.add_argument("--out", default="figures/2026-09-mvq/p4_maskfree")
+    ap.add_argument("--batch", type=int, default=16)
+    return ap
+
+
+def main():
+    run(build_arg_parser().parse_args())
 
 
 if __name__ == "__main__":
