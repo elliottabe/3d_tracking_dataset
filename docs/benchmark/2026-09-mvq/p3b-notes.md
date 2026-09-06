@@ -505,3 +505,148 @@ before drawing conclusions about P3b's OOD generalization from it.
 Scripts (scratch, not committed):
 `single_fly_slot_probe.py`, `make_contact_sheet.py` in
 `/tmp/claude-398823/.../scratchpad/` (session-local).
+
+## P3b on the mask-free route (2026-09-05)
+
+Re-evaluates the mask-free front end (`scripts/coarse_pass_mvq.py`,
+`jarvis_jax.tracking.coarse_track`) on Session0/2025_10_20_13_20_04 with the
+P3b contact-heavy checkpoint (`mvq_t1_b16_p3b_contact_20260905/final`),
+against the jitter-10 checkpoint results recorded in `p4-maskfree-notes.md`
+and `gate-bouts-probe-2026-09-05.md`. GPU gate observed: waited for the
+8 concurrent `mvq_lift_bout.py` campaign workers (Session1) to clear and
+both GPUs to read 0 MiB before starting; coarse pass ran on GPU0, the bout-117
+fine pass on GPU1, in parallel, both uncontended thereafter.
+
+### Coarse pass (stride 16, 31125 coarse frames)
+
+Wall clock **98.2 min** (5.28 frames/s end-to-end, uncontended) vs
+jitter-10's recorded 221.2 min (2.35 frames/s) -- **not a fair speed
+comparison**, since the jitter-10 number was measured under a concurrent
+4-worker GPU-lift campaign and this run was not; the reader/compute path is
+unchanged between checkpoints.
+
+**Floor-block defect found and fixed.** The on-disk `.meta.json` first wrote
+`orientation: "skew"`, `skew: 0.144` -- ABOVE the 0.1 marginal threshold,
+and unlike jitter-10 (whose skew=0.077 heuristic pick was independently
+confirmed correct in the earlier real-run wave) **the automatic sign here
+was WRONG**: as-is, median trackable height was -53.4 units with 100% of
+trackable frames negative -- physically impossible for a floor-anchored
+height. Checked both signs directly (`fit_floor` with `up_hint=+/-normal`
+on the run's own `X3d`/`exist`): the flipped sign exactly matches jitter-10's
+independently-confirmed floor normal and gives median height 5.8, p5 -7.7,
+p95 23.7, only 28.7% negative -- physically sane. Fixed by rerunning
+`coarse_pass_mvq.py --resume --up-hint <jitter-10's confirmed normal>`
+(a ~0 s recompute-only pass, no re-inference needed); corrected meta now
+reads `orientation: "hint"`, median trackable height **17.13** units (p5
+3.62, p95 35.04, 1.2% negative) -- comparable to jitter-10's 11.29 but on the
+high side, both dragged up by the same wall-climbing tail. This is a new
+operational hazard of this checkpoint's centroid distribution, not evidence
+about mask-free tracking quality itself, but confirms the CLAUDE.md rule
+("do not trust the sign silently") caught a real flip.
+
+### Comparison table (jitter-10 vs P3b, mask-free route, Session0 20_04)
+
+| metric | jitter-10 | P3b | verdict |
+|---|---:|---:|---|
+| female frac_trackable (exist>=0.5) | 47.8% | 45.4% | unchanged (~2pp worse) |
+| male frac_trackable | 98.1% | 98.4% | unchanged |
+| collapsed coarse frames | 0 | 748 (2.4%) | **regression** |
+| floor orientation / skew | hint / 0.077 (confirmed) | skew / 0.144 (wrong sign; fixed w/ hint) | new hazard, fixed |
+| gate bouts, DEFAULT thresholds | 542 windows, recall 0.90, precision 0.083 | 521 windows, recall 0.967 (29/30), precision 0.083 (43/521) | recall improved, precision flat |
+| gate bouts, CALIBRATED (max_gap=100, min_dur=25) | 32 windows, recall 0.967, precision 0.531 (17/32) | 28 windows, recall 0.967 (29/30), precision 0.643 (18/28) | **precision improved** |
+| male wing angle >=30deg frac / median | 91.3% / 40.4deg | 91.6% / 40.0deg | **unchanged -- feature-definition problem, not model** |
+| bout117 (frames 111488-114688) female missing (per-kp NaN) | 4.81% | 9.34% | **regression** |
+| bout117 male missing (per-kp NaN) | 2.16% | 1.41% | improved |
+| bout117 collapsed (female/male) | 0/0 | 0/0 | unchanged |
+| bout117 straddle frac (>=5 male kp closer to female centroid than own) | 0.2269 | 0.2334 | **unchanged** (contact-frame tangling persists) |
+
+The unmatched GT bout is the same one in both runs (bout_idx 8, per
+`coarse_pass_gates.py`'s `--ground-truth` validation), not a new gap.
+
+### Figures
+
+Neither `coarse_tracks_check.png` nor `coarse_centres_check.png` had been
+generated yet for the real jitter-10 run (the earlier SDD wave deferred that
+step); both were generated fresh here from the existing jitter-10
+`coarse_tracks.npz` so the comparison below is a real image diff, not just
+numbers.
+
+- `figures/2026-09-mvq/p4_maskfree_p3b/coarse_tracks_check.png` (+.json) vs
+  `figures/2026-09-mvq/p4_maskfree/coarse_tracks_check.png` (+.json, newly
+  generated jitter-10 counterpart). **Read back:** the existence panel looks
+  visually near-identical between the two -- cyan (female) flickers rapidly
+  above/below the 0.5 line throughout the whole 10.4-minute recording in
+  BOTH checkpoints; **her trace is NOT continuous in either**, answering the
+  task's stated question directly. Male wing-angle panels are
+  near-identical (baseline ~30-50deg, frequent spikes to 150-170deg) in
+  both. The gate-bout row is marginally sparser for P3b (521 vs 542
+  windows, one more visible gap around minute 3-4) but still very dense in
+  both. Both report **0/30 reviewed bouts unexplained** by the tracks
+  (bout-28 zoom panel: distance/wing-angle both step cleanly at the
+  reviewed-bout boundary in both checkpoints).
+- `figures/2026-09-mvq/p4_maskfree_p3b/coarse_centres_check.png` vs
+  `figures/2026-09-mvq/p4_maskfree/coarse_centres_check.png` (same 12
+  frames, deterministic by bout index). **Read back:** centres land
+  correctly inside each fly's own body in both cameras, in both
+  checkpoints, at every frame where a fly is present (e.g. frames 13648,
+  252176, 373760, 475984) -- no centre on a wall or reflection in either.
+  This gate is dominated by shared CenterDetect + 3D-centroid merge logic
+  (unaffected by which mvq checkpoint lifts keypoints), so near-identical
+  results are expected; only frame 497984's side camera shows a cyan
+  (female) circle in P3b that jitter-10 lacks, a single-frame difference,
+  not a pattern.
+- `figures/2026-09-mvq/p4_maskfree_p3b/fine_bout117/bout117_maskfree_contact_sheet.png`
+  (6-frame overhead+side sheet, gate-bout-117 candidate, frames
+  111488-114687). **Read back:** in "apart" frames (112768, 113408, 114048)
+  identity is correctly separated -- orange (male) and cyan (female)
+  skeletons sit on two distinct, separate fly bodies in both cameras. In the
+  two contact/mounting frames (112128, 114687) the orange and cyan skeletons
+  overlap and tangle on what looks like a single fused body in both
+  cameras -- the same qualitative failure the straddle metric measures,
+  present at essentially the same rate as jitter-10.
+
+### Verdict
+
+**Improved on gate quality, unchanged on the two core mask-free blockers.**
+P3b's contact-heavy retrain measurably helps the *gate* layer built on top of
+the mask-free tracks -- default-threshold recall rose from 0.90 to 0.967
+(27/30 -> 29/30 reviewed bouts matched) and, more importantly, the
+calibrated-threshold operating point's precision rose from 0.531 to 0.643
+at equal recall and fewer windows (32 -> 28) -- a real, if modest, gain for
+the gate-bouts-probe's recommended `max_gap=100` setting. But the two
+failures that actually drive the mask-free front end's poor recall/precision
+in the first place are **unchanged**: female trackability stays at ~45-48%
+(the root cause the gate probe traced 81% of inter-bout gaps to), and the
+male wing-angle gate stays saturated at ~91% regardless of checkpoint,
+confirming this is a **feature-definition problem** (the rest baseline
+sits at 27-40deg, already close to/above the 30deg threshold) and not
+something a lifter retrain can fix. On the one bout where P3b's contact
+training should show up most directly (gate-bout 117, a sustained
+close-proximity + wing-extension candidate), cross-fly tangling is
+**unchanged** (straddle 0.2269 -> 0.2334) and female per-keypoint
+missingness got **worse** (4.8% -> 9.3%), and the full coarse pass now
+produces 748 collapsed frames where jitter-10 had zero. **What remains for
+Plan 2**: the mask-free front end needs (1) an independent fix for female
+localizability (CenterDetect or the merge/typed-slot assignment, not the
+mvq keypoint lifter -- P3b already targeted the lifter and moved neither
+number), and (2) the wing-angle behaviour gate redefined against a
+per-recording or per-fly rest baseline rather than a fixed 30deg threshold,
+since it is saturated at ~91% under BOTH checkpoints.
+
+### Timings
+
+| stage | wall clock | rate |
+|---|---:|---:|
+| coarse pass, P3b, stride 16, 31125 frames, GPU0 | 98.2 min | 5.28 frames/s |
+| fine pass, P3b, bout 117, stride 1, 3200 frames, GPU1 (parallel w/ coarse) | 11.6 min | 4.59 frames/s |
+| floor-sign fix (--resume --up-hint, recompute only) | <1 s | n/a |
+
+### Files
+
+- `/gscratch/portia/eabe/data/Johnson_lab/processed/courtship/Session0/2025_10_20_13_20_04/coarse_mvq_p3b/coarse_tracks.npz` (+`.meta.json`)
+- `/gscratch/portia/eabe/data/Johnson_lab/processed/courtship/Session0/2025_10_20_13_20_04/coarse_mvq_p3b/bouts_mvq_gates.csv` (default thresholds), `bouts_mvq_gates_calibrated.csv` (max_gap=100, min_duration=25)
+- `/gscratch/portia/eabe/data/Johnson_lab/processed/courtship/Session0/2025_10_20_13_20_04/coarse_mvq_p3b/fine_bout117/fine_tracks.npz` (+`.meta.json`), converted bout at `.../fine_bout117/bouts/bout_00117/fly{0,1}/{kp2d,kp3d}.npz`
+- `figures/2026-09-mvq/p4_maskfree_p3b/{coarse_tracks_check,coarse_centres_check}.{png,json}`
+- `figures/2026-09-mvq/p4_maskfree_p3b/fine_bout117/bout117_maskfree_{preview,preview_small}.mp4`, `bout117_maskfree_preview_header.json`, `bout117_maskfree_contact_sheet.png`
+- `figures/2026-09-mvq/p4_maskfree/{coarse_tracks_check,coarse_centres_check}.{png,json}` (jitter-10 counterparts, newly generated this session for a real image comparison)
+- Generating scripts, kept in the session scratchpad per CLAUDE.md (one-off diagnostics, not promoted): `step2_convert_fine_bout_p3b.py`, `step3_render_bout117_p3b.py` (copies of the prior agent's bout-117 scripts repointed at the P3b paths), `straddle_compare.py` (jitter-10 vs P3b straddle/missing-fraction metric, both variants).
