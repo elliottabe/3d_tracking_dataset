@@ -214,6 +214,93 @@ helper (idempotent, so it skips the already-done one).
 
 ---
 
+## Session pipeline (mvq route)
+
+`scripts/slurm/mvq_session_pipeline.sh` is the whole-session driver for the
+**mvq** route (typed-slot mvq lift instead of ViTPose+DLT). It composes
+`scripts/slurm_bout_array.py` once per recording — it does not reimplement any
+stage — and adds one session-level `collect` job at the end:
+
+```
+lift[ts] -> precompute[ts] -> ik[ts] -> aggregate[ts]     (one chain per recording)
+                                           aggregate[*] -> collect
+```
+
+```bash
+# Session0 (one recording, 30 bouts)
+scripts/slurm/mvq_session_pipeline.sh \
+    --session /gscratch/portia/eabe/data/Johnson_lab/Video_recordings/courtship/Session0
+
+# Session1 (10 of 14 recordings have masks; 130 bouts)
+scripts/slurm/mvq_session_pipeline.sh \
+    --session /gscratch/portia/eabe/data/Johnson_lab/Video_recordings/courtship/Session1
+```
+
+Options: `--processed <root>` (default
+`/gscratch/portia/eabe/data/Johnson_lab/processed/courtship`), `--recording
+<cfg>` (default: the session folder name lowercased — `Session0` → `session0`),
+`--run-name` (default `pose_mvq_p3b`), `--mvq-config` (default `p3b`),
+`--slurm` (default `ckpt_all`), `--only <ts>`, `--local-gpus N
+[--max-local-gpus N]`, `--no-collect`, `--dry-run`. Exit status is non-zero if
+any recording's chain failed to submit; the others are still submitted.
+
+**What each stage depends on**
+
+| stage | job | gated on | what it does |
+|---|---|---|---|
+| lift | `mvqlift_<Session>` array, one task per bout | — (or SAM3) | `scripts/mvq_lift_bout.py` → `bouts/bout_*/fly*/{kp2d,kp3d}.npz` + `sex.json`, `mvq_meta.json` |
+| precompute | `ctprecomp_<Session>` | `afterok:<the WHOLE lift array>` | per-fly body scale (`scale.json`) + per-fly marker offsets (`offsets_fly<f>.h5`) from a **recording-wide** sample — this is why the lift array runs first: pooling one bout gave a 15.5 %-low scale (the scale-from-first-bout defect) |
+| ik | `ctjax_<Session>` array, one task per bout | `afterok:precompute` | `scripts/run_bout.py` — filter → STAC IK → bridge → outputs/QC |
+| aggregate | `ctagg_<Session>` | `afterok:<the WHOLE ik array>` | `bouts/*/fly*/qc.json` → `<run>/qc/session_qc.json` + dashboard |
+| collect | `mvqcollect_<Session>` (CPU, `--gpus=0`) | `afterok:<every recording's aggregate>` | `scripts/session_collect.py` → `<processed>/<Session>/<run-name>_session_summary.{json,md}` |
+
+**Inputs required** (per recording, all pre-existing — this route creates none
+of them):
+
+1. **SAM3 masks** at
+   `<processed>/<Session>/<ts>/sam3_masks/bout_*/sam3_masks.npz`. On the mvq
+   route the masks are an *input* (the lift places its crops from their
+   centroids and never re-segments), so recording discovery is exactly "has
+   masks"; a recording without them is skipped with a message.
+2. **ID review** in those masks — the human fly0/fly1 assignment. Without it
+   `mvq.identity: mask` falls back to the model's sex head for that bout, which
+   is recorded in `mvq_meta.json: identity_resolved` and shows up in the collect
+   summary.
+3. **Bouts CSV** in the video recording dir. When
+   `courtship_bouts_unified_summary.csv` is missing or a broken symlink
+   (Session0's points into a deleted `Predictions_3D_*`), the driver writes a
+   `fly_id`-less copy of `courtship_bouts_fly0_summary.csv` into the run root
+   and passes it as `recording.bouts_csv` — the per-fly CSVs carry
+   `fly_id = "<Session>/<ts>_fly0"`, which `bout_start_frame` (matching the bare
+   `<Session>/<ts>` tag) would never find.
+
+`--local-gpus N` runs the lift as N local workers on the current GPU node (one
+GPU each, bouts split round-robin) and then submits the chain with
+`--mvq-lift skip`, which *verifies* the on-disk lift (gate string + `sex.json`)
+rather than trusting it. N is capped at 4 (`--max-local-gpus` to raise
+deliberately): 8 concurrent JAX pipelines took a 128 GB-cgroup node to
+`CUDA_ERROR_UNKNOWN`. The worker loop lives in `scripts/slurm/mvq_local_lift.sh`,
+shared with `scripts/slurm/mvq_p3a_campaign.sh`. It refuses to start while a
+training process matching `--guard-pattern` is alive.
+
+`--dry-run` prints every sbatch script (per-recording ones via the submitter's
+own `--dry-run`) plus the dependency graph and submits nothing.
+
+**Session summary.** The collect job writes
+`<processed>/<Session>/<run-name>_session_summary.json` and `.md`: one row per
+recording plus a TOTAL, with bouts, bout-flies solved, frames, LOO median/p90
+px, reproj median px, IoU hard median, female/male missing %,
+containment-dropped %, and bouts with unsolvable flies — plus the list of
+bout-flies with no `stac_ik.h5`. It can be run by hand at any time:
+
+```bash
+python scripts/session_collect.py --session-name Session1 \
+    --processed /gscratch/portia/eabe/data/Johnson_lab/processed/courtship \
+    --run-name pose_mvq_p3b
+```
+
+---
+
 ## NewBouts curated bout set (free-running, batch IK route)
 
 `processed/free_running/NewBouts/<ts>/` holds, per recording, the
