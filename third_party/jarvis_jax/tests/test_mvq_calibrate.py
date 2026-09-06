@@ -145,6 +145,51 @@ def test_reliability_empty_bins_do_not_count_toward_max_gap():
     assert np.isfinite(r["max_gap"]) and np.isfinite(r["ece"])
 
 
+def test_reliability_min_n_excludes_a_1_sample_outlier_bin():
+    """EXPECTATION: raw `max_gap` can be pinned anywhere in [0,1] by a
+    single val sample landing in an otherwise-empty bin -- exactly the
+    failure mode measured on the real P3b proof run (an n=1 bin drove
+    max_gap to 0.28 while every well-populated bin was near-perfect).
+    `max_gap_min_n` (default `min_n=20`) must ignore that one bin and read
+    the well-populated bins' true (tiny) gap instead; the raw `max_gap`
+    must still be reported unchanged, for reference."""
+    rng = np.random.default_rng(5)
+    n = 4000
+    # `n` well-calibrated samples in bin [0.4, 0.5) (n well over min_n)...
+    p_main = np.full(n, 0.45)
+    y_main = rng.uniform(size=n) < 0.45
+    # ...plus ONE adversarial sample in a different, otherwise-empty bin
+    # (n=1 there), with a label that maximises its own gap.
+    p = np.concatenate([p_main, [0.85]])
+    y = np.concatenate([y_main, [True]])
+    r = mc.reliability(p, y, np.ones_like(y, bool), min_n=20)
+    ns = r["n"]
+    outlier_bin = int(0.85 * 10)          # bin index conf=0.85 falls into
+    assert ns[outlier_bin] == 1
+    main_bin = int(0.45 * 10)
+    assert ns[main_bin] >= 20
+    # the raw max_gap is dominated by the n=1 bin (gap ~0.15, |1-0.85|)
+    assert r["max_gap"] == pytest.approx(abs(1.0 - 0.85), abs=1e-9)
+    # max_gap_min_n ignores it and reads off the well-populated bin instead
+    assert r["max_gap_min_n"] is not None
+    assert r["max_gap_min_n"] < r["max_gap"]
+    assert r["max_gap_min_n"] == pytest.approx(
+        abs(r["acc"][main_bin] - r["conf"][main_bin]), abs=1e-9)
+
+
+def test_reliability_max_gap_min_n_is_none_when_no_bin_qualifies():
+    """EXPECTATION: every bin below `min_n` samples means there is nothing
+    reliable to gate an acceptance decision on -- `max_gap_min_n` must be
+    `None` (never a number computed from sparse bins, never crash), while
+    `max_gap`/`ece` (which have no such floor) still report a real number."""
+    rng = np.random.default_rng(6)
+    p = rng.uniform(size=50)              # 50 samples spread over 10 bins -- a handful each
+    y = rng.uniform(size=p.shape) < p
+    r = mc.reliability(p, y, np.ones_like(y, bool), min_n=20)
+    assert r["max_gap_min_n"] is None
+    assert np.isfinite(r["max_gap"])
+
+
 # --------------------------------------------------------------------------
 # MVQRunner applies the stored temperature
 # --------------------------------------------------------------------------

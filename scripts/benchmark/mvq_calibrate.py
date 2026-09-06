@@ -17,24 +17,29 @@ the SAME slot they always did (see `tests/test_mvq_calibrate.py`'s
 `test_runner_applies_the_stored_temperature`).
 
 EXPECTATION (write before running, CLAUDE.md): the pre-scaling existence
-curve departs from the diagonal -- read the SIGN off the figure rather than
-assuming it (a mid-2026 note on this same head reported ~0.45 sigmoid on
-PRESENT flies, i.e. UNDER-confidence: 0.5-ish-conf bins right closer to
-100% of the time, curve above the diagonal there -- the opposite of a head
-that is over-confident). After fitting one temperature per head, EVERY
-POPULATED bin of both curves should move measurably closer to the diagonal
-and the ECE should drop; the +-0.05 max_gap band is the spec's PASS/FAIL
-line for a checkpoint meant to ship (Task 7's acceptance suite), but a
-single scalar temperature cannot fix a curve that is under-confident in one
-region and roughly correct or over-confident in another (its own shape is
-non-monotonic in a way one multiplicative constant cannot undo), and
-max_gap specifically -- unlike the bin-size-weighted ECE -- can be pinned
-to a single near-empty bin (n=1) that one val fresh sample dominates. A
-run that does not clear 0.05 is not necessarily a script bug: read the
-per-bin `n` before concluding one either way. A curve that is ALREADY on
-the diagonal (T ~ 1, max_gap small before scaling too) means there is
-nothing to fix -- record that as the finding, do not force a temperature
-away from 1 just because the script ran.
+curve departs from the diagonal in BOTH directions at once, at different
+confidence levels -- read the SIGN off the per-bin table/figure rather than
+assuming one global direction (a mid-2026 note on this same head reported
+~0.45 sigmoid on PRESENT flies, i.e. UNDER-confidence in the region that
+covers present flies -- but low-confidence bins, which mostly cover ABSENT
+flies, can just as well sit BELOW the diagonal, i.e. over-confident, at the
+very same run). After fitting one temperature per head, the WELL-POPULATED
+bins of both curves should move measurably closer to the diagonal and the
+ECE should drop; the +-0.05 band on `max_gap_min_n` (bins with n >= min_n
+only) is the spec's PASS/FAIL line for a checkpoint meant to ship (Task 7's
+acceptance suite) -- NOT the raw `max_gap`, which unlike the bin-size-
+weighted ECE can be pinned entirely to a single near-empty bin (n=1) that
+one val fresh sample dominates; the raw number is still reported (and
+plotted) for reference. A single scalar temperature also cannot fix a curve
+that is under-confident in one region and roughly correct or over-confident
+in another (its own shape is non-monotonic in a way one multiplicative
+constant cannot undo) -- expect SOME bins to get closer and others to get
+further from the diagonal after scaling; read the per-bin table, not just
+the two summary numbers, before concluding calibration helped or hurt. A
+curve that is ALREADY on the diagonal (T ~ 1, max_gap/max_gap_min_n small
+before scaling too) means there is nothing to fix -- record that as the
+finding, do not force a temperature away from 1 just because the script
+ran.
 
 WHAT THIS SCRIPT DOES. One UNPROMPTED forward pass over the val split
 (`V12WindowDataset(root, "val", T=1, train=False)`, the same forward
@@ -57,8 +62,10 @@ collecting:
 `fit_temperature` finds T by bisection on d(NLL)/dT (no scipy, 1e-4
 tolerance, clamped to [0.25, 10]) and `reliability` bins probs into 10
 equal-width [0,1) bins (last bin closed on 1.0), reporting per-bin
-edges/acc/conf/n plus `max_gap` (over POPULATED bins only) and `ece`
-(bin-size-weighted mean gap). The script then reads `<run>/final/
+edges/acc/conf/n plus `max_gap` (over POPULATED bins only), `max_gap_min_n`
+(over bins with `n >= min_n`, default 20 -- None if none qualify; THIS is
+what the acceptance suite gates on) and `ece` (bin-size-weighted mean gap,
+over populated bins). The script then reads `<run>/final/
 mvq_run.json` (or, with `--stage-out`, a separate copy -- production runs
 must never be overwritten by a checkpoint run this script is only proving
 end-to-end), adds a `"calibration"` block, atomic-writes it back, and saves
@@ -161,9 +168,9 @@ def fit_temperature(logits, targets, mask, *, lo=0.25, hi=10.0, tol=1e-4, max_it
     return float(0.5 * (a + b))
 
 
-def reliability(probs, targets, mask, bins=10):
+def reliability(probs, targets, mask, bins=10, min_n=20):
     """10 (default) equal-width bins over [0,1]; returns
-    `{"edges", "acc", "conf", "n", "max_gap", "ece"}`.
+    `{"edges", "acc", "conf", "n", "max_gap", "max_gap_min_n", "ece"}`.
 
     `edges` (bins+1,) the bin boundaries; `acc`/`conf`/`n` (bins,) the
     empirical frequency, mean predicted prob, and count per bin (NaN
@@ -171,6 +178,16 @@ def reliability(probs, targets, mask, bins=10):
     `max_gap` is `max(|acc-conf|)` over POPULATED bins only (an empty bin
     must not silently read as a perfect bin); `ece` is the bin-size-weighted
     mean of the same gaps (also over populated bins only).
+
+    `max_gap` and `ece` both have a blind spot a real val split hits: a bin
+    with only 1-2 samples can sit anywhere in [0,1] by pure chance, so one
+    val fresh sample can single-handedly set `max_gap` (ECE is somewhat
+    protected -- it is WEIGHTED by `n`, so a tiny bin barely moves it -- but
+    is then too lenient to catch a real, broad miscalibration spread evenly
+    over well-populated bins). `max_gap_min_n` is `max(|acc-conf|)` over only
+    the bins with `n >= min_n` (None if no bin qualifies) -- the acceptance
+    metric a single sparse bin cannot dominate, and the one
+    `scripts/benchmark/mvq_v2_acceptance.py::check_calibration` gates on.
     """
     probs = np.asarray(probs, np.float64).reshape(-1)
     targets = np.asarray(targets, bool).reshape(-1)
@@ -193,8 +210,11 @@ def reliability(probs, targets, mask, bins=10):
     max_gap = float(gaps.max()) if gaps.size else float("nan")
     ece = (float(np.sum(gaps * n[populated]) / n[populated].sum())
            if populated.any() else float("nan"))
+    big = n >= min_n
+    gaps_big = np.abs(acc[big] - conf[big]) if big.any() else np.zeros(0)
+    max_gap_min_n = float(gaps_big.max()) if gaps_big.size else None
     return {"edges": edges.tolist(), "acc": acc.tolist(), "conf": conf.tolist(),
-            "n": n.tolist(), "max_gap": max_gap, "ece": ece}
+            "n": n.tolist(), "max_gap": max_gap, "max_gap_min_n": max_gap_min_n, "ece": ece}
 
 
 # --------------------------------------------------------------------------
@@ -364,10 +384,18 @@ def run(a):
 
     result = {"run": a.run, "run_name": run_name, "n_val": collected["n_val"],
              "exist_temperature": t_exist, "vis_temperature": t_vis,
-             "before": {"exist_max_gap": before["exist"]["max_gap"], "exist_ece": before["exist"]["ece"],
-                       "vis_max_gap": before["vis"]["max_gap"], "vis_ece": before["vis"]["ece"]},
-             "after": {"exist_max_gap": after["exist"]["max_gap"], "exist_ece": after["exist"]["ece"],
-                      "vis_max_gap": after["vis"]["max_gap"], "vis_ece": after["vis"]["ece"]},
+             "before": {"exist_max_gap": before["exist"]["max_gap"],
+                       "exist_max_gap_min_n": before["exist"]["max_gap_min_n"],
+                       "exist_ece": before["exist"]["ece"],
+                       "vis_max_gap": before["vis"]["max_gap"],
+                       "vis_max_gap_min_n": before["vis"]["max_gap_min_n"],
+                       "vis_ece": before["vis"]["ece"]},
+             "after": {"exist_max_gap": after["exist"]["max_gap"],
+                      "exist_max_gap_min_n": after["exist"]["max_gap_min_n"],
+                      "exist_ece": after["exist"]["ece"],
+                      "vis_max_gap": after["vis"]["max_gap"],
+                      "vis_max_gap_min_n": after["vis"]["max_gap_min_n"],
+                      "vis_ece": after["vis"]["ece"]},
              "mvq_run_json": dest, "figure": png_path}
     json_path = os.path.join(a.out, fig_name.replace(".png", ".json"))
     with open(json_path, "w") as f:

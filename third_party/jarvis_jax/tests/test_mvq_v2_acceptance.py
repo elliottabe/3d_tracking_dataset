@@ -82,7 +82,7 @@ def test_scorecard_markdown_contains_every_row_and_the_accepted_line():
     rows = [
         acc.make_row("val", "mpjpe", "mpjpe3d_mm", 0.0812, 0.085, "le", "train_mvq.evaluate(...)"),
         acc.make_row("val", "policy_miss", "policy_miss_frac", 0.02, 0.0, "eq", "train_mvq.evaluate(...)"),
-        acc.skip_row("calibration", "existence_reliability", "reliability_exist.max_gap",
+        acc.skip_row("calibration", "existence_reliability", "reliability_exist.max_gap_min_n",
                     0.05, "le", "mvq_run.json#calibration", "no calibration block yet"),
     ]
     sc = acc.build_scorecard(rows, run="/some/run/final", generated_at="2026-09-05T00:00:00")
@@ -167,20 +167,44 @@ def test_check_calibration_missing_block_is_skip(tmp_path):
     assert "calibration" in rows[0]["note"]
 
 
-def test_check_calibration_reads_max_gap_and_grades_it(tmp_path):
+def test_check_calibration_reads_max_gap_min_n_and_grades_it(tmp_path):
+    """EXPECTATION: the row grades on `max_gap_min_n`, not the raw
+    `max_gap` -- a checkpoint whose raw max_gap looks terrible (0.9, driven
+    by a sparse bin) must still PASS when its `max_gap_min_n` clears 0.05,
+    and the raw number must appear in the row's note for reference."""
     final = tmp_path / "run" / "final"
     final.mkdir(parents=True)
     (final / "mvq_run.json").write_text(json.dumps(
-        {"calibration": {"reliability_exist": {"max_gap": 0.03}}}))
+        {"calibration": {"reliability_exist": {"max_gap": 0.9, "max_gap_min_n": 0.03}}}))
     rows = acc.check_calibration(str(final))
     assert len(rows) == 1
     assert rows[0]["status"] == "PASS"
     assert rows[0]["value"] == 0.03
+    assert rows[0]["metric"] == "reliability_exist.max_gap_min_n"
+    assert "0.9" in rows[0]["note"] and "NOT" in rows[0]["note"]        # raw surfaced, not gated
 
     (final / "mvq_run.json").write_text(json.dumps(
-        {"calibration": {"reliability_exist": {"max_gap": 0.09}}}))
+        {"calibration": {"reliability_exist": {"max_gap": 0.03, "max_gap_min_n": 0.09}}}))
     rows2 = acc.check_calibration(str(final))
+    # the reverse also holds: a good-looking raw max_gap does not save a
+    # FAILing max_gap_min_n.
     assert rows2[0]["status"] == "FAIL"
+    assert rows2[0]["value"] == 0.09
+
+
+def test_check_calibration_none_max_gap_min_n_is_skip(tmp_path):
+    """EXPECTATION: a `"calibration"` block that exists but has no bin with
+    >= min_n samples (`max_gap_min_n` is `None` -- `reliability`'s own
+    contract) reports SKIP, never FAIL/PASS -- nothing to gate on yet, not a
+    regression, even if the raw `max_gap` happens to look bad."""
+    final = tmp_path / "run" / "final"
+    final.mkdir(parents=True)
+    (final / "mvq_run.json").write_text(json.dumps(
+        {"calibration": {"reliability_exist": {"max_gap": 0.9, "max_gap_min_n": None}}}))
+    rows = acc.check_calibration(str(final))
+    assert len(rows) == 1
+    assert rows[0]["status"] == "SKIP"
+    assert rows[0]["value"] is None
 
 
 def test_check_calibration_accepts_a_run_dir_not_just_final(tmp_path):
@@ -189,7 +213,7 @@ def test_check_calibration_accepts_a_run_dir_not_just_final(tmp_path):
     final = tmp_path / "run" / "final"
     final.mkdir(parents=True)
     (final / "mvq_run.json").write_text(json.dumps(
-        {"calibration": {"reliability_exist": {"max_gap": 0.01}}}))
+        {"calibration": {"reliability_exist": {"max_gap": 0.01, "max_gap_min_n": 0.01}}}))
     rows = acc.check_calibration(str(tmp_path / "run"))
     assert rows[0]["status"] == "PASS"
 
@@ -262,7 +286,7 @@ def test_cli_calibration_group_writes_and_merges_scorecard(tmp_path):
     script = os.path.join(REPO, "scripts", "benchmark", "mvq_v2_acceptance.py")
 
     (final / "mvq_run.json").write_text(json.dumps(
-        {"calibration": {"reliability_exist": {"max_gap": 0.09}}}))
+        {"calibration": {"reliability_exist": {"max_gap": 0.01, "max_gap_min_n": 0.09}}}))
     proc1 = subprocess.run(
         [sys.executable, script, "--run", str(final), "--calibration", "--out", str(out)],
         cwd=REPO, capture_output=True, text=True, timeout=60)
@@ -270,7 +294,7 @@ def test_cli_calibration_group_writes_and_merges_scorecard(tmp_path):
     assert "accepted=False" in proc1.stdout
 
     (final / "mvq_run.json").write_text(json.dumps(
-        {"calibration": {"reliability_exist": {"max_gap": 0.01}}}))
+        {"calibration": {"reliability_exist": {"max_gap": 0.09, "max_gap_min_n": 0.01}}}))
     proc2 = subprocess.run(
         [sys.executable, script, "--run", str(final), "--calibration", "--out", str(out)],
         cwd=REPO, capture_output=True, text=True, timeout=60)

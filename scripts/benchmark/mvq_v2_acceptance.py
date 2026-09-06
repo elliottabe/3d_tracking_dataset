@@ -44,10 +44,18 @@ recommendation section) -- see the P3B_* constants.
 CALIBRATION. Reads `<run>/mvq_run.json`'s `"calibration"` block, which Task
 6's `scripts/benchmark/mvq_calibrate.py` writes:
 `{"exist_temperature", "vis_temperature", "reliability_exist": {"edges",
-"acc", "conf", "n", "max_gap", "ece"}, "reliability_vis": {...}, "n_val"}`.
-A missing block (or missing file) is SKIPPED, never FAILED -- a checkpoint
-that has not been calibrated yet is not a calibration FAILURE, it is a step
-not yet run.
+"acc", "conf", "n", "max_gap", "max_gap_min_n", "ece"}, "reliability_vis":
+{...}, "n_val"}`. The gate reads `reliability_exist.max_gap_min_n` (the
+max |acc-conf| gap restricted to bins with `n >= min_n`, default 20), NOT
+the raw `reliability_exist.max_gap` -- a single near-empty val bin (n=1)
+can pin the raw number anywhere in [0,1] by chance, which is not what a
+"reliability curve within 0.05 of the diagonal" acceptance line is meant to
+catch. The raw `max_gap` is still surfaced in the row's evidence note, for
+reference, but never gates PASS/FAIL. A missing block (or missing file) is
+SKIPPED, never FAILED -- a checkpoint that has not been calibrated yet is
+not a calibration FAILURE, it is a step not yet run; `max_gap_min_n` being
+`None` (no bin ever reached `min_n` samples) is likewise SKIPPED, not
+FAILED -- there is nothing to gate on yet.
 """
 from __future__ import annotations
 
@@ -499,20 +507,31 @@ def check_calibration(run):
     group = "calibration"
     final = _final_dir(run)
     meta_path = os.path.join(final, "mvq_run.json")
-    evidence = f"{meta_path}#calibration.reliability_exist.max_gap"
+    metric = "reliability_exist.max_gap_min_n"
+    evidence = f"{meta_path}#calibration.{metric}"
     if not os.path.isfile(meta_path):
-        return [skip_row(group, "existence_reliability", "reliability_exist.max_gap", 0.05, "le", evidence,
+        return [skip_row(group, "existence_reliability", metric, 0.05, "le", evidence,
                          f"{meta_path} does not exist")]
     with open(meta_path) as f:
         meta = json.load(f)
     calib = meta.get("calibration")
     if not calib:
-        return [skip_row(group, "existence_reliability", "reliability_exist.max_gap", 0.05, "le", evidence,
+        return [skip_row(group, "existence_reliability", metric, 0.05, "le", evidence,
                          "no 'calibration' block yet (Task 6's mvq_calibrate.py has not run on this "
                          "checkpoint) -- SKIPPED, not FAILED: an uncalibrated checkpoint is a step not "
                          "yet run, not a regression")]
-    max_gap = calib.get("reliability_exist", {}).get("max_gap")
-    return [make_row(group, "existence_reliability", "reliability_exist.max_gap", max_gap, 0.05, "le", evidence)]
+    rel = calib.get("reliability_exist", {})
+    raw_max_gap = rel.get("max_gap")
+    max_gap_min_n = rel.get("max_gap_min_n")
+    note = (f"raw reliability_exist.max_gap={raw_max_gap} is reported for reference but NOT "
+           f"gated -- a single near-empty bin (n=1) can pin it anywhere in [0,1]; this row "
+           f"gates on {metric} (bins with n >= min_n only, default min_n=20)")
+    if max_gap_min_n is None:
+        return [skip_row(group, "existence_reliability", metric, 0.05, "le", evidence,
+                         "no bin reached min_n samples yet -- SKIPPED, not FAILED: nothing to "
+                         "gate on. " + note)]
+    return [make_row(group, "existence_reliability", metric, max_gap_min_n, 0.05, "le", evidence,
+                     note=note)]
 
 
 GROUPS = ("val", "shift", "masked_bouts", "maskfree_bout117", "coarse_20_04", "single_fly", "calibration")
