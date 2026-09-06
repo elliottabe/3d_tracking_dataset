@@ -363,3 +363,34 @@ def test_sex_label_overrides_reject_a_typo(tmp_path):
     root = make_v12_root(tmp_path)
     with pytest.raises(ValueError, match="expected 'female' or 'male'"):
         V12WindowDataset(root, "train", T=1, train=False, sex_overrides={REC: {"fly0": "F"}})
+
+
+def test_source_and_weight_default_to_real_on_the_human_export(tmp_path):
+    from jarvis_jax.data.v12_windows import V12WindowDataset, WINDOW_KEYS
+    ds = V12WindowDataset(make_v12_root(tmp_path), "train", T=1, train=False)
+    assert "sample_weight" in WINDOW_KEYS
+    assert ds.source(0) == "real" and ds.weight(0) == 1.0 and ds.role(0) == "anchor"
+    assert float(ds[0]["sample_weight"]) == 1.0
+
+
+def test_pseudo_manifest_and_frameset_fields_override(tmp_path):
+    import json, os
+    from jarvis_jax.data.v12_windows import V12WindowDataset
+    root = make_v12_root(tmp_path)
+    man = json.load(open(os.path.join(root, "manifest.json")))
+    man["source"] = "pseudo"; man["weight"] = 0.3
+    json.dump(man, open(os.path.join(root, "manifest.json"), "w"))
+    p = os.path.join(root, "annotations", "instances_train.json")
+    coco = json.load(open(p))
+    k = sorted(coco["framesets"])[0]
+    coco["framesets"][k].update({"source": "pseudo", "weight": 0.1, "role": "partner"})
+    json.dump(coco, open(p, "w"))
+    ds = V12WindowDataset(root, "train", T=1, train=False)
+    i = [j for j, w in enumerate(ds.windows) if f"{w[0]}/Frame_{w[2]}/fly{w[1]}" == k][0]
+    assert ds.source(i) == "pseudo" and ds.weight(i) == 0.1 and ds.role(i) == "partner"
+    # sample_weight is stored float32 (WINDOW_KEYS interface): 0.1 does not
+    # round-trip exactly through float32, so this compares with a tolerance
+    # rather than the exact python float weight() itself returns.
+    assert float(ds[i]["sample_weight"]) == pytest.approx(0.1)
+    other = [j for j in range(len(ds)) if j != i][0]
+    assert ds.weight(other) == 0.3            # manifest default for the rest of the root

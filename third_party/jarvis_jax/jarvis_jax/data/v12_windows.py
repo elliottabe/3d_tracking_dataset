@@ -65,7 +65,7 @@ from jarvis_jax.train.matching import SEX_FEMALE, SEX_MALE, SEX_UNKNOWN, SEX_PRE
 CROP = 448
 WINDOW_KEYS = ("crops", "cam_valid", "M", "t_local", "center3D", "kp3d_local", "has3d",
                "kp2d", "vis2d", "fly_valid", "px_scale", "is_female", "prompt_mask", "crop_origin",
-               "fly_sex", "unlabelled_sex")
+               "fly_sex", "unlabelled_sex", "sample_weight")
 
 _SEX_CODE = {"female": SEX_FEMALE, "male": SEX_MALE}
 
@@ -113,7 +113,8 @@ class V12WindowDataset:
         self.epoch = 0
         self.copy_paste = copy_paste
         coco = json.load(open(os.path.join(root, "annotations", f"instances_{split}.json")))
-        self.manifest = json.load(open(os.path.join(root, "manifest.json")))["recordings"]
+        self.manifest_root = json.load(open(os.path.join(root, "manifest.json")))
+        self.manifest = self.manifest_root["recordings"]
         self.keypoint_names = list(coco["keypoint_names"])
         canon = json.load(open(os.path.join(root, "annotations", "keypoint_names.json")))
         if self.keypoint_names != canon:
@@ -180,6 +181,37 @@ class V12WindowDataset:
 
     def calib_group(self, i):
         return self.manifest[self.windows[i][0]]["calib_group"]
+
+    def _fs_field(self, i, key, default):
+        """Value of `key` for window i, frameset-first: this window's OWN
+        frameset (pseudo-label per-frameset `source`/`weight`/`role`), else
+        the recording's manifest entry, else the manifest's own top-level
+        default (the pseudo export's whole-root default), else `default` --
+        the chain a human v12 export (no such fields anywhere) falls all the
+        way through to get "real"/1.0/"anchor"."""
+        rec, fly, f0 = self.windows[i]
+        v = (self._fs.get((rec, f0, fly)) or {}).get(key)
+        if v is None:
+            v = self.manifest.get(rec, {}).get(key, self.manifest_root.get(key, default))
+        return v
+
+    def source(self, i):
+        """`"real"` | `"pseudo"`: this window's provenance (frameset ->
+        per-recording manifest -> whole-manifest default -> `"real"`)."""
+        return str(self._fs_field(i, "source", "real"))
+
+    def weight(self, i):
+        """Loss weight for this window (frameset -> per-recording manifest ->
+        whole-manifest default -> `1.0`); also written into the sample as
+        `sample_weight` for `losses.py` to multiply every per-sample term by."""
+        return float(self._fs_field(i, "weight", 1.0))
+
+    def role(self, i):
+        """`"anchor"` | `"partner"` | `"negative"`: the pseudo export's Delta-
+        pairing role for this window (frameset -> per-recording manifest ->
+        whole-manifest default -> `"anchor"`, the only role a human export
+        ever needs)."""
+        return str(self._fs_field(i, "role", "anchor"))
 
     def is_female(self, i):
         """Host sex of THIS window (`_resolve_fs_sex`: this frameset's own
@@ -443,6 +475,7 @@ class V12WindowDataset:
             "fly_sex": np.array([self.fly_sex_code(rec, flies[fi], f0) if fi < len(flies) else SEX_UNKNOWN
                                  for fi in range(F)], np.int8),
             "unlabelled_sex": np.int8(self.unlabelled_sex(i)),
+            "sample_weight": np.float32(self.weight(i)),
         }
 
     def paste_window(self, i, rng):
