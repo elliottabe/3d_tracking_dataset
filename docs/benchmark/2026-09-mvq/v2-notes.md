@@ -516,3 +516,134 @@ plus a 20k-draw realised check within 0.02, both one-sided cases, and the no-tar
 pinned bit-identical; `test_female_host_target_on_a_root_that_is_all_female_by_a_float_hair`;
 `test_negatives_train_at_sample_weight_one`) and one new config test. The 20-step Hydra CPU
 run was re-run after the fixes and exits 0 with the corrected log lines quoted above.
+
+### Share check (2026-09-06, 6 GPUs)
+
+Plan B Task 5 Step 6, run on the REAL data roots (not the CPU fixture), against
+`f395ec2` (`allow_calib_mismatch: true` in `mvq_v2.yaml` + the concat's
+mismatch/disagreement recording). Node g3102, GPUs 0,1,2,3,6,7 (6 devices;
+4,5 held by other agents), `train.batch_size=24` (4/device):
+
+```bash
+cd third_party/jarvis_jax
+module load cuda/12.9.1
+export LD_PRELOAD=$CONDA_PREFIX/lib/libstdc++.so.6
+unset LD_LIBRARY_PATH JAX_PLATFORMS
+export XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 TF_GPU_ALLOCATOR=cuda_malloc_async
+export HF_HOME=/gscratch/portia/eabe/data/Johnson_lab/sam3 HF_TOKEN=
+export CUDA_VISIBLE_DEVICES=0,1,2,3,6,7
+python -u -m jarvis_jax.scripts.train_mvq model=mvq train=mvq_v2 paths=hyak \
+  run_id=mvq_t2_v2_sharecheck train.batch_size=24 \
+  "paths.runs_root=\${paths.mvq_runs_root}" +share_check_steps=200 \
+  2>&1 | tee ../../slurm_logs/mvq_t2_v2_sharecheck_6gpu.out
+```
+
+Exit code 0. Full log: `slurm_logs/mvq_t2_v2_sharecheck_6gpu.out` (63 lines).
+
+**1. Composes and loaders build.** Window counts per root, T=1 and T=2:
+
+```
+[mvq] T=1 sampler mix: real 2661 windows -> mass 0.0861  pseudo 24805 windows -> mass 0.8022  singlefly 1909 windows -> mass 0.0617  negatives 7302 windows -> mass 0.0500
+[mvq] T=2 sampler mix: real 2543 windows -> mass 0.0594  pseudo 35099 windows -> mass 0.8192  singlefly 3059 windows -> mass 0.0714  negatives 5302 windows -> mass 0.0500
+```
+
+Calibration mismatch/disagreement lines (`allow_calib_mismatch: true` let the run
+proceed on both, per root, each printed once for T=1 and once for T=2):
+
+```
+WARNING: recording '2026_04_02_15_25_51': manifest field 'calib_group' is 'A' in root real (.../red_data_3d_v12_export0902) and '2026_04_02_15_25_51' in root pseudo (.../red_data_3d_v12_pseudo_p3b_20260905). The calibration CONTENT differs by max |diff| 15.2278 (not a serialisation rounding difference) -- which one is right is undetermined here, so this refuses to silently pick one. Pass allow_calib_mismatch=True to proceed with each root using its OWN calibration per sample.
+WARNING: recording '2026_04_02_17_28_34': manifest field 'calib_group' is 'A' in root real (.../red_data_3d_v12_export0902) and '2026_04_02_17_28_34' in root pseudo (.../red_data_3d_v12_pseudo_p3b_20260905). The calibration CONTENT differs by max |diff| 15.2278 (not a serialisation rounding difference) -- which one is right is undetermined here, so this refuses to silently pick one. Pass allow_calib_mismatch=True to proceed with each root using its OWN calibration per sample.
+```
+
+`2025_10_20_13_20_04` (the identical-content alias between real's calib-group letter
+and pseudo's recording-id naming) printed no mismatch warning, matching the yaml
+comment (max |diff| 1e-15, a serialisation difference — silently accepted either
+way). Only these two recordings (`2026_04_02_15_25_51`, `2026_04_02_17_28_34`)
+disagree in content and were let through under the override; that disagreement is
+still under investigation per "Calibration witness test" and is unchanged by this
+run. Other non-fatal warnings seen: the negatives-root sample-weight override
+(`export sample_weight 1 OVERRIDDEN to 1.0`, T=1 and T=2) and a `[v12_windows]`
+annotation-vs-manifest sex disagreement on `2025_10_20_13_20_04 fly0`
+(`{'female': 15, 'male': 677}`, annotation wins per window, printed twice — once
+per window_length pass). No other warnings, no load errors.
+
+**2. Realised mix and per-root host-sex.**
+
+```
+[mvq] T=1 root 'real': female_host_target=0.500, post-balance female mass 0.1897 -> solved female-host multiplier 4.2705
+[mvq] T=1 root 'pseudo': female_host_target=0.500, post-balance female mass 0.5006 -> solved female-host multiplier 0.9975
+[mvq] T=1 root 'singlefly': female_host_target=0.500 UNATTAINABLE -- this root has no male/other-host window (post-balance female mass 1.0000); multiplier left at 1.0
+[mvq] T=1 root 'negatives': female_host_target=0.500 UNATTAINABLE -- this root has no female-host window (post-balance female mass 0.0000); multiplier left at 1.0
+[mvq] T=1 sampler: 14545/36677 female-host windows, female_host_target=0.5 -> weight mass female 0.5059 male/other 0.4941 (F/M 1.024)
+[mvq] T=2 root 'real': female_host_target=0.500, post-balance female mass 0.0854 -> solved female-host multiplier 10.7069
+[mvq] T=2 root 'pseudo': female_host_target=0.500, post-balance female mass 0.5256 -> solved female-host multiplier 0.9025
+[mvq] T=2 root 'singlefly': female_host_target=0.500 UNATTAINABLE -- this root has no male/other-host window (post-balance female mass 1.0000); multiplier left at 1.0
+[mvq] T=2 root 'negatives': female_host_target=0.500 UNATTAINABLE -- this root has no female-host window (post-balance female mass 0.0000); multiplier left at 1.0
+[mvq] T=2 sampler: 22442/46003 female-host windows, female_host_target=0.5 -> weight mass female 0.5107 male/other 0.4893 (F/M 1.044)
+[mvq] realised host-sex ratio over the first 200 batches: female 2385/4800 = 0.497 (of the 4548 non-negative windows: 0.524); negatives 252/4800 = 0.052
+[mvq] T=1 realised mix over 2472 windows drawn: real=0.086 pseudo=0.803 singlefly=0.057 negatives=0.053
+[mvq] T=2 realised mix over 2424 windows drawn: real=0.057 pseudo=0.817 singlefly=0.076 negatives=0.050
+```
+
+Confirms on the REAL exports: the single-fly root is all-female
+(`post-balance female mass 1.0000`, UNATTAINABLE) exactly as the negatives root
+has no host sex at all (`0.0000`, UNATTAINABLE) — both left at multiplier 1.0 by
+design. `real`'s own female-host mass differs sharply between T=1 (0.1897, solved
+multiplier 4.2705 — matches the yaml's recorded P3b value) and T=2 (0.0854, solved
+multiplier 10.7069 — pairs skew more male-host at this delta set). The aggregate
+realised negative fraction reads 0.052-0.053, matching the configured
+`negatives_frac=0.05` to within sampling noise; per Task 5's "reading the ratio
+back" guidance, the per-root lines are the ones to trust, and every one is close
+to or an expected one-sided extreme of its target.
+
+**3. Per-term loss shares at step ~200 (200 steps, real backbone, real data):**
+
+```
+[mvq] loss shares over 200 steps (mean total 2618.2531):
+[mvq]   deep_supervision  w=0.5    mean=nan        weighted=1443       share= 55.12%
+[mvq]   reproj            w=1      mean=604.2      weighted=604.2      share= 23.08%
+[mvq]   uv2d              w=0.5    mean=629.2      weighted=314.6      share= 12.02%
+[mvq]   other_rep         w=20     mean=10.26      weighted=205.2      share=  7.84%
+[mvq]   l3d               w=0.5    mean=92.62      weighted=46.31      share=  1.77%
+[mvq]   conf              w=1      mean=3.321      weighted=3.321      share=  0.13%
+[mvq]   exist             w=1      mean=0.793      weighted=0.793      share=  0.03%
+[mvq]   sex               w=0.5    mean=0.932      weighted=0.466      share=  0.02%
+[mvq]   rep               w=0.5    mean=0.1981     weighted=0.09905    share=  0.00%
+[mvq]   vis               w=0.1    mean=0.8819     weighted=0.08819    share=  0.00%
+[mvq]   persist           w=0.5    mean=0          weighted=0          share=  0.00%
+[mvq] other_fly_repulsion (weight 20) share = 7.84% -- in the 5-30 % launch band
+```
+
+`other_fly_repulsion` (weight 20) is a clearly visible 7.84 % of total — well above
+the P3b (weight 0.5) reading of ~0.6 % / inert, and inside the launch decision
+band (5-30 % -> launch as configured; the printed verdict says exactly that).
+`persist=0` is the expected fresh-model reading (Task 5: the hinge needs the
+model to predict real inter-frame motion first). `deep_supervision`'s `mean=nan`
+is the known logging artifact (only the weighted total is accumulated for that
+term, not a raw per-step mean; matches the CPU-fixture reading) — every OTHER
+term has a finite mean, and the eleven shares sum to 100.00 % (rounding), so no
+part of `total` (mean 2618.25) is unexplained by a real NaN.
+
+**4. Throughput and memory.** Steps 50->200 (post-warmup/compile): 632s-316s =
+316s over 150 steps = **2.11 s/step** steady state at T=2 (per the per-step log
+timestamps: step 50 @316s, 100 @415s, 150 @519s, 200 @632s — 99s, 104s, 113s per
+50-step block, i.e. 1.98-2.26 s/step). `nvidia-smi` sampled 3x during the run on
+GPUs 0,1,2,3,6,7 (never touched 4,5): all six pinned at **~41.85 GB/GPU**
+(41843-41859 MiB of 46068 MiB, ~91 %) and **100 % utilization** throughout the
+step-50..200 window; all six released back to 0 MiB immediately on exit.
+
+**5. NaN/inf/crash.** None. `grep -inE "nan|inf|error|traceback|oom"` over the
+full log matches only the expected `deep_supervision mean=nan` line (item 3
+above) and benign startup INFO lines (TPU backend absent, checkpoint handler
+config) — no exception, no OOM, no crash. Process exited 0.
+
+**Verdict:** other_fly_repulsion share 7.84 % is in the 5-30 % launch band ->
+launch `mvq_v2.yaml` as configured (no reweighting needed). Concerns: (a) the
+two calibration-content disagreements (`2026_04_02_15_25_51`,
+`2026_04_02_17_28_34`) are let through by `allow_calib_mismatch: true` but remain
+UNRESOLVED as to which root is right — this check does not settle that, only
+confirms the loader no longer dies on it; (b) `real`'s female-host multiplier
+differs 4x between T=1 (4.27) and T=2 (10.7), i.e. the real root's T=2 pairs are
+more male-host-skewed than its T=1 singles — informational, not a blocker, since
+`female_host_target` re-solves per T already. The 40k launch itself is still NOT
+started (out of scope for this check).
