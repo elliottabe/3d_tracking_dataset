@@ -67,6 +67,8 @@ import numpy as np
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__)))), "third_party", "jarvis_jax"))
 
+from jarvis_jax.data.pseudo_export import stratum_cell  # noqa: E402  (needs the path insert above)
+
 DEFAULT_ROOTS = "/gscratch/portia/eabe/data/Johnson_lab/processed/courtship/*/*/pose_mvq_p3b"
 DEFAULT_EXPORT_NAMES = "/gscratch/portia/eabe/data/Johnson_lab/red_data/red_data_3d_v12_export0902"
 TARGET = 10000
@@ -283,7 +285,7 @@ def add_wall_flags(rows, wall_height_units, *, also=()):
 
 
 def _cell(r):
-    return "contact" if r.contact else ("apart" if r.apart else "mid")
+    return stratum_cell({"contact": r.contact, "apart": r.apart})
 
 
 def _cell_centroid(r):
@@ -804,7 +806,13 @@ def main(argv=None):
         weight=a.weight, frame_reader=frames, mask_reader=masks,
         write_images=not a.no_images,
         extra_manifest={"balance": balance,
-                        "contact_definition": cen["contact_definition"]})
+                        "contact_definition": cen["contact_definition"],
+                        # the exact run roots this export was extracted from:
+                        # the campaign is a moving target (a re-lift renames
+                        # `pose_mvq_p3b` aside), so the manifest names the tree,
+                        # not just the checkpoint.
+                        "source_roots": sorted({ref.run_root for ref in refs}),
+                        "n_source_bouts": len(refs)})
     frames.close()
 
     # ---- reports

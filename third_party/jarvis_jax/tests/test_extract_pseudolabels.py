@@ -118,6 +118,19 @@ def test_cli_writes_a_stratified_export_with_a_balance_block(run_root, tmp_path)
     assert s["kp3d_local"].shape[-2] == len(ds.keypoint_names)
 
 
+def test_the_balance_weight_is_male_over_female_not_the_reverse(run_root, tmp_path):
+    """`female_host_weight` must be `male_n / female_n`. The equal-N case above
+    (weight 1.0) cannot tell that ratio apart from its reciprocal; drawing an
+    unequal side (female-n 2, male-n 6, both within the fixture's pool of 6
+    per host sex) pins the direction: 6 / 2 == 3.0, not 2 / 6."""
+    m, runs, names, cm = run_root
+    out = str(tmp_path / "pseudo")
+    _run(m, runs, names, out, "--no-masks", "--female-n", "2", "--male-n", "6")
+    man = json.load(open(f"{out}/manifest.json"))
+    assert man["balance"]["female_n"] == 2 and man["balance"]["male_n"] == 6
+    assert man["balance"]["female_host_weight"] == 3.0
+
+
 def test_contact_is_the_min_keypoint_distance_not_the_centroid_separation(run_root, tmp_path):
     """Ruling 2026-09-05 #1. The contact bout's flies are 10 units apart by
     CENTROID -- above the spec's 15-unit cut only in the sense that no frame
@@ -214,6 +227,52 @@ def test_the_caps_bound_a_drawn_side(tmp_path, monkeypatch):
     assert len(anchors) == 4 and set(per_rec) == {"recA", "recB"}
     assert max(per_rec.values()) <= 2                     # 0.5 of a 4-row side
     assert max(per_bout.values()) <= 1                    # --per-bout-cap 1
+
+
+def test_the_uncapped_female_side_draws_every_admissible_row(tmp_path, monkeypatch):
+    """Ruling #2: `--female-n` unset means the female-host side takes EVERY
+    admissible row, caps and all -- the per-bout/per-recording caps below are
+    real (the capped MALE side still obeys them) but must never reach the
+    female side. Same two-recording, two-bout-per-recording fixture as
+    `test_the_caps_bound_a_drawn_side` above: 3 admissible anchors per
+    (host_fly, bout) x 4 bout instances = a female pool of 12. A per_bout_cap
+    of 1 would bound a CAPPED side at 4 total (1 per bout instance), so
+    drawing all 12 -- 3 per bout, 3x the cap -- is unambiguous proof the cap
+    did not apply to the female side, and `sides.female.mode == "all"` names
+    the reason why."""
+    cm = None
+    for rec in ("recA", "recB"):
+        for i, fs in ((1, 1000), (2, 9000)):
+            _, _, cm = make_bout(tmp_path, T=40, sep_units=40.0, name=f"bout_{i:05d}",
+                                 frame_start=fs, rec=rec, hw=FRAME_HW,
+                                 masks_path=str(tmp_path / f"m{rec}{i}" / "sam3_masks.npz"))
+    make_calib(tmp_path / "video" / "calibration", cm)
+    from pseudo_fixtures import KP_NAMES
+    (tmp_path / "names" / "annotations").mkdir(parents=True)
+    (tmp_path / "names" / "annotations" / "keypoint_names.json").write_text(json.dumps(KP_NAMES))
+    m = _load_cli()
+    monkeypatch.setattr(m, "SessionFrames", FakeFrames)
+    out = str(tmp_path / "pseudo")
+    rep = m.main(["--runs", str(tmp_path / "*" / "pose_mvq_p3b"), "--out", out,
+                  "--export-names-from", str(tmp_path / "names"), "--male-n", "4",
+                  "--per-rec-frac", "0.5", "--per-bout-cap", "1", "--min-female", "1",
+                  "--no-masks", "--figures-dir", os.path.join(out, "fig")])
+    assert rep["sides"]["female"]["mode"] == "all"
+
+    cen = json.load(open(f"{out}/census.json"))
+    n_female_pool = cen["by_host_sex"]["female"]
+    assert n_female_pool == 12 > 4          # 4 = what a per_bout_cap=1 side would be bounded to
+
+    coco = json.load(open(f"{out}/annotations/instances_train.json"))
+    anchors = [(k.split("/")[0], v["bout"], v["stratum"]["host_sex"])
+               for k, v in coco["framesets"].items() if v["role"] == "anchor"]
+    female = [(r, b) for r, b, s in anchors if s == "female"]
+    male = [(r, b) for r, b, s in anchors if s == "male"]
+    assert len(female) == n_female_pool == 12                      # every admissible row drawn
+    assert max(collections.Counter(female).values()) == 3          # 3x --per-bout-cap 1: uncapped
+    assert len(male) == 4                                          # the male side stayed capped
+    assert max(collections.Counter(male).values()) <= 1            # --per-bout-cap 1
+    assert max(collections.Counter(r for r, _ in male).values()) <= 2   # 0.5 of a 4-row side
 
 
 def test_a_female_poor_campaign_stops_at_the_census(run_root, tmp_path, capsys):

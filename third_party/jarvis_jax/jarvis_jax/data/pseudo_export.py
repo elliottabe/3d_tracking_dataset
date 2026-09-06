@@ -154,6 +154,15 @@ def bbox_from_visible(uv, vis):
     return [float(x0), float(y0), float(x1 - x0), float(y1 - y0)]
 
 
+def stratum_cell(stratum: dict) -> str:
+    """The stratification cell name for one `PseudoRecord.stratum` dict (or
+    any dict with the same `contact`/`apart` keys): "contact" wins over
+    "apart", else "mid". The ONE definition of that ternary, shared by this
+    module's `per_stratum` summary and the census/report cells in
+    `extract_p3b_pseudolabels.py` (`_cell`), so the two can never drift apart."""
+    return "contact" if stratum.get("contact") else ("apart" if stratum.get("apart") else "mid")
+
+
 def _empty_coco(export_names, skeleton=None):
     return {"keypoint_names": list(export_names), "skeleton": list(skeleton or []),
             "categories": [{"id": 1, "name": "fly", "num_keypoints": len(export_names)}],
@@ -363,9 +372,7 @@ def write_pseudo_export(out_root, records, *, export_names, cameras, recordings,
             per_role[str(r.role)] += 1
             per_bout[(rec, r.bout)] += 1
             st = fsv["stratum"]
-            per_stratum[(st.get("host_sex", "unknown"),
-                         "contact" if st.get("contact") else
-                         ("apart" if st.get("apart") else "mid"))] += 1
+            per_stratum[(st.get("host_sex", "unknown"), stratum_cell(st))] += 1
             for d in fsv["partners"]:
                 partner_avail[d] += 1
 
