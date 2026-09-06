@@ -573,3 +573,143 @@ python scripts/viz/pseudo_export_check.py \
 4. **Wall frames remain vanishingly rare** (6 anchors campaign-wide, 0.07 % of
    the export). Wall/OOD diversity has to keep coming from the real v12 wall
    subsets -- the pseudo set does not supply it.
+
+## Review gallery (2026-09-06)
+
+Generated the real human-review gallery from the P3b export (spec §3.3 /
+§6 item 2), per task-3 brief Step 4.
+
+```bash
+JAX_PLATFORMS=cpu PYTHONPATH=. python scripts/pseudo_labels/pseudolabel_gallery.py \
+    --export /gscratch/portia/eabe/data/Johnson_lab/red_data_3d_v12_pseudo_p3b_20260905 \
+    --n 300 --out figures/2026-09-mvq/v2_pseudo/gallery
+```
+
+Wrote 30 pages (`page_00.png`..`page_29.png`, 10 framesets/page, overhead
+`Cam2012630` left / side `Cam2012855` right) and `gallery/review.csv` (300
+rows, header as spec'd, every `verdict` blank). Draw is anchors only
+(`--include-partners` not passed), stratified over
+`(host_sex, contact, wall)` with the script's default seed.
+
+### Draw composition
+
+Population (anchors, from the run's own per-cell pool sizes) vs. what the
+n=300 stratified draw actually pulled (from `review.csv`):
+
+| cell | pool | drawn |
+|---|---:|---:|
+| female/apart/floor | 3,094 | 113 |
+| male/apart/floor | 2,828 | 103 |
+| female/contact/floor | 1,107 | 40 |
+| male/contact/floor | 1,172 | 43 |
+| female/apart/wall | 6 | 1 |
+| **total** | **8,207** | **300** |
+
+**The wall cell is under-represented relative to the brief's stated
+expectation.** The brief text said "the 6 wall anchors should all be in";
+`stratified_alloc`'s actual guarantee (per its own docstring) is only a
+proportional floor share plus a minimum of 1 per non-empty cell when there is
+room, clipped to the cell's own pool -- not full inclusion of a small pool.
+With `wall` pool = 6 out of 8,207 anchors and `n = 300`, the proportional
+share floors to 0, the minimum-1 rule bumps it to 1, and the remainder-round
+that fills out the rest of the 300 goes to cells with far larger raw
+remainders (the four floor/contact cells, each in the hundreds to
+low-thousands). So only 1 of the 6 wall anchors landed in this sample
+(`2025_10_20_13_20_04/Frame_392159/fly0`, page 11) -- this is a gap between
+the task's framing and the implemented allocator, not a bug in the draw
+itself; flagging it rather than silently treating "1 of 6" as satisfying
+the brief.
+
+### Page-by-page read-back
+
+Six pages read with the Read tool: two contact/female, one contact/male, one
+apart/female, one apart/male, and the page holding the one wall anchor drawn
+(no page in this 300-sample holds more than one wall anchor). Expectation
+(from the script's docstring / CLAUDE.md): every panel shows ONE fly's
+keypoints on that fly's own body inside its own grey mask outline in both
+cameras; head red at the antennae, abdomen magenta at the tail, leg chains
+not crossing to the partner fly; a straddling skeleton or one on the arena
+floor is a reject.
+
+- **page_05 (female/apart/floor, pure, 10/10 panels)** -- recordings
+  `2026_04_02_15_44_42` / `2026_04_02_16_03_48`. Every panel: the female host
+  (cyan label) sits fully inside her own white mask outline in both cameras,
+  red head-cluster at the antennae end, magenta abdomen at the tail, yellow
+  thorax/wing points, blue leg rays radiating outward without reaching the
+  separate unlabeled partner fly a body-length or more away. 0/10 suspicious.
+- **page_18 (male/apart/floor, pure, 10/10 panels)** -- recordings
+  `2026_04_02_15_25_51` / `2026_04_02_15_44_42`. Same pattern with the male
+  host correctly in orange text; keypoints and mask contour track only the
+  host in every panel, partner fly clearly separate. 0/10 suspicious.
+- **page_12 (female/contact/floor, pure, 10/10 panels)** -- recordings
+  `2026_04_02_14_54_28` / `2026_04_02_15_25_51`. Keypoints/mask stay on the
+  host only in all 10 panels, correct head/abdomen colors, no crossing to the
+  partner. Worth flagging for interpretation, not as a reject: despite the
+  `contact` label, the two flies in these panels sit with a visible ~1
+  body-length gap in most frames (`sep` 28-32u) rather than touching bodies
+  -- "contact" here reads as a proximity/pose-similarity threshold, not
+  literal body contact. 0/10 suspicious.
+- **page_27 (male/contact/floor, pure, 10/10 panels)** -- recordings
+  `2026_04_02_15_25_51` / `2026_04_02_15_44_42` / `2026_04_02_16_03_48`. Same
+  containment pattern as page_12 (its male counterpart): host-only
+  keypoints/mask, correct anatomy colors, partner separate. 0/10 suspicious.
+- **page_13 (female/contact/floor, pure, continuation of page_12's cell,
+  10/10 panels)** -- recordings `2026_04_02_16_03_48` / `2026_04_02_16_21_32`.
+  Re-examined at 2x zoom (rows 6-10, including the closest-proximity frames
+  on the page) specifically because two flies overlap in several of these
+  frames; in every case the host mask/keypoints stay bounded to the host's
+  own dark body and the partner fly (visible, unlabeled, semi-transparent
+  wings) remains outside the mask outline even where the two bodies nearly
+  touch on screen. 0/10 suspicious.
+- **page_11 (the wall page: mixed female/apart/floor + the one drawn
+  female/apart/wall anchor + female/contact/floor, 10/10 panels)** --
+  recordings `2026_04_02_17_52_50` (3 apart/floor), `2025_10_20_13_20_04` (the
+  1 wall anchor + 2 contact/floor), `2026_04_02_12_11_50` (2 contact/floor),
+  `2026_04_02_14_54_28` (1 contact/floor). The 9 non-wall panels match every
+  other page (host-only containment, correct anatomy colors). The wall panel
+  (row 4, `2025_10_20_13_20_04/Frame_392159/fly0`, sep=107.7u) is SUSPICIOUS:
+  in the overhead camera (`Cam2012630`) the keypoints/mask sit correctly on
+  the host's own body against the wall; but in the side camera
+  (`Cam2012855`) the keypoint cluster renders cut off in the bottom-right
+  corner of the panel, disconnected from the only visible fly body in that
+  frame (which itself carries no keypoints). Flagging as a likely reject --
+  either the side-camera projection places the host's own keypoints off the
+  visible body for this steep wall geometry, or the visible fly in that view
+  is not actually the host frame's fly.
+
+### Suspicious panels (pre-screen only, no verdicts written)
+
+1. `2025_10_20_13_20_04/Frame_392159/fly0` (female/apart/wall, page 11,
+   row 4) -- side camera (`Cam2012855`) keypoints render disconnected from
+   the visible fly body, cut off in the panel's bottom-right corner. Likely
+   reject candidate; the overhead camera for the same frameset looks correct.
+
+That is 1 suspicious panel out of the 60 framesets / 120 camera panels read
+back across the 6 pages above. No verdicts were filled into `review.csv` --
+per task instruction, that pass is Elliott's.
+
+### Handoff
+
+`review.csv` (300 rows, `verdict` blank) is versioned at
+`docs/benchmark/2026-09-mvq/v2-review/review.csv`, byte-identical to the
+generated
+`figures/2026-09-mvq/v2_pseudo/gallery/review.csv` (gitignored, regenerate
+with the command above). Pages are under
+`figures/2026-09-mvq/v2_pseudo/gallery/page_00.png`..`page_29.png` (not
+committed). After Elliott fills in `verdict` (`accept`/`reject`) --
+including a decision on the one suspicious wall panel above -- apply with:
+
+```bash
+python scripts/pseudo_labels/pseudolabel_gallery.py \
+    --export /gscratch/portia/eabe/data/Johnson_lab/red_data_3d_v12_pseudo_p3b_20260905 \
+    --apply-review figures/2026-09-mvq/v2_pseudo/gallery/review.csv
+```
+
+(point it at the reviewed copy of the CSV -- either the gallery-dir original
+once edited in place, or a copy of `docs/benchmark/2026-09-mvq/v2-review/review.csv`
+with verdicts filled in, so long as the header/row order from generation is
+preserved). Per spec §3.3: overall reject fraction > 3% aborts and writes
+nothing (exit 2, with a per-gate breakdown of the rejected rows printed for
+tightening); otherwise it drops rejected framesets plus any whole stratum
+whose own reject rate exceeds 3%, and gates training on the resulting
+`review_summary.json`.
