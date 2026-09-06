@@ -51,13 +51,24 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__f
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
-from viz.core.colors import PALETTE, keypoint_groups  # noqa: E402
+from viz.core.colors import PALETTE, keypoint_groups, leg_chains  # noqa: E402
 
 OVERHEAD_CAM = "Cam2012630"
 SIDE_CAM = "Cam2012855"
 PANEL_W, PANEL_H = 420, 260
-PER_PAGE = 10                       # framesets per page (brief: 10 rows x 2 cam columns)
+PER_PAGE = 10                       # framesets per page (brief: 10 rows x 4 columns:
+                                     # [overhead full][overhead zoom][side full][side zoom])
 REJECT_THRESHOLD = 0.03             # spec SS3.3
+
+# ---- v2 render knobs (user feedback 2026-09-06): small dots, drawn skeleton,
+# a zoomed crop per camera. None of this touches the stratified draw below --
+# see the CSV-identity test and the docstring's INVARIANT.
+MARKER_RADIUS_FULL = 1              # was 3; big dots were obscuring the skeleton
+MARKER_RADIUS_ZOOM = 2              # slightly larger in the upsampled zoom crop
+ZOOM_PAD_FRAC = 0.4                 # grow the visible-keypoint bbox by 40% (x1.4) per side
+ZOOM_MIN_SIDE = 160                 # floor crop side (native px, before the x2 upsample)
+ZOOM_UPSAMPLE = 2                   # cv2.INTER_CUBIC upsample factor applied to the crop
+CROP_RECT_COLOR = (255, 255, 255)   # thin rectangle on the full panel marking the zoom crop
 GATE_NAMES = ("exist", "step_units", "reproj_px", "contain_frac")
 CSV_FIELDS = ["frameset", "recording", "bout", "frame", "host_fly", "host_sex", "contact",
               "wall", "page", "cell", "exist", "step_units", "reproj_px", "contain_frac",
@@ -239,7 +250,63 @@ def _placeholder_panel(row, cam_name, reason):
     return canvas
 
 
-def _panel(export_root, coco, idx2group, images_by_id, anns_by_id, row, cam_name):
+def _body_wing_edges(kp_names):
+    """Head/wing/abdomen chain edges, ported from viz/views/sidebyside.py's
+    `_skeleton_edges` -- the repo's only other place that names a body/wing
+    topology (viz/core/colors.py itself defines no body-chain helper, only
+    `leg_chains`/`keypoint_groups`) -- so this is REUSED, not invented. Its
+    per-leg "root each chain at Scutellum" connectors are deliberately
+    dropped: those are that view's own decoration, not part of this
+    head/wing/abdomen chain, and leg topology here comes from `leg_chains`
+    alone (see `_skeleton_edges_colored`)."""
+    idx = {n: i for i, n in enumerate(kp_names)}
+
+    def E(a, b):
+        return (idx[a], idx[b]) if a in idx and b in idx else None
+
+    edges = [E("EyeL", "Antenna_Base"), E("EyeR", "Antenna_Base"),
+             E("Antenna_Base", "Scutellum"),
+             E("Scutellum", "WingL_base"), E("WingL_base", "WingL_V12"), E("WingL_V12", "WingL_V13"),
+             E("Scutellum", "WingR_base"), E("WingR_base", "WingR_V12"), E("WingR_V12", "WingR_V13"),
+             E("Scutellum", "Abd_A4"), E("Abd_A4", "Abd_tip")]
+    return [e for e in edges if e is not None]
+
+
+def _skeleton_edges_colored(kp_names, idx2group):
+    """Every skeleton line segment to draw: the six `leg_chains` (proximal ->
+    distal) plus `_body_wing_edges`, each pre-coloured by its DISTAL
+    endpoint's `keypoint_groups` colour (viz.core.colors.PALETTE). A leg-chain
+    edge has both endpoints in the "legs" group so this is unambiguous there;
+    a body/wing edge that crosses a group boundary (e.g. Antenna_Base(head)
+    -> Scutellum(thorax)) takes the colour of the group the line enters."""
+    edges = []
+    for chain in leg_chains(kp_names).values():
+        edges += list(zip(chain[:-1], chain[1:]))
+    edges += _body_wing_edges(kp_names)
+    white = (255, 255, 255)
+    return [(a, b, PALETTE.get(idx2group.get(b, idx2group.get(a)), white)) for a, b in edges]
+
+
+def _draw_skeleton(canvas, uv, vis, edges_colored, idx2group, radius):
+    """Lines BEFORE markers (so a marker never gets painted over by a line),
+    each line only between two keypoints both visible in THIS camera."""
+    shown = {i: (int(round(uv[i, 0])), int(round(uv[i, 1])))
+             for i in range(len(vis)) if vis[i]}
+    for a, b, color in edges_colored:
+        if a in shown and b in shown:
+            cv2.line(canvas, shown[a], shown[b], color, 1, cv2.LINE_AA)
+    for i, pt in shown.items():
+        color = PALETTE.get(idx2group.get(i), (255, 255, 255))
+        cv2.circle(canvas, pt, radius, color, -1, cv2.LINE_AA)
+
+
+def _load_frame(export_root, coco, images_by_id, anns_by_id, row, cam_name):
+    """Locate + read the native BGR frame and its keypoint annotation (if
+    any) for one (frameset, camera) BY the export's own `file_name`/`ann_ids`
+    -- never a positional camera guess (module docstring). Returns
+    `(img, ann, ann_id, reason)`: `img` is None with a `reason`
+    ("missing"/"unreadable") exactly when `_placeholder_panel` is the right
+    render for both the full and the zoom slot."""
     fsv = coco["framesets"][row["frameset"]]
     img_path, ann, ann_id_found = None, None, None
     for img_id, ann_id in zip(fsv.get("frames", []), fsv.get("ann_ids", [])):
@@ -255,16 +322,45 @@ def _panel(export_root, coco, idx2group, images_by_id, anns_by_id, row, cam_name
             break
 
     if img_path is None or not os.path.exists(img_path):
-        return _placeholder_panel(row, cam_name, "missing")
-
+        return None, None, None, "missing"
     img = cv2.imread(img_path)
     if img is None:
-        return _placeholder_panel(row, cam_name, "unreadable")
+        return None, None, None, "unreadable"
+    return img, ann, ann_id_found, None
+
+
+def _zoom_crop_box(ann, img_w, img_h):
+    """Square crop window (native px, NOT yet clamped to the frame) around
+    the host's VISIBLE 2D keypoints: bbox padded 40% per side (x1.4), floored
+    at ZOOM_MIN_SIDE so a tightly folded pose still gets a legible zoom. No
+    visible keypoints (or no ann at all) falls back to the image centre at
+    the floor size -- the same "nothing to centre on" fallback
+    singlefly_p3b_pass.py's contact_sheet uses for an all-invisible frame."""
+    cx = cy = None
+    side = float(ZOOM_MIN_SIDE)
+    if ann is not None:
+        kp = np.asarray(ann["keypoints"], np.float32).reshape(-1, 3)
+        vis = kp[:, 2] > 0
+        if vis.any():
+            xs, ys = kp[vis, 0], kp[vis, 1]
+            w = max(float(xs.max() - xs.min()), 1.0)
+            h = max(float(ys.max() - ys.min()), 1.0)
+            cx, cy = float((xs.min() + xs.max()) / 2), float((ys.min() + ys.max()) / 2)
+            side = max(w * (1 + ZOOM_PAD_FRAC), h * (1 + ZOOM_PAD_FRAC), float(ZOOM_MIN_SIDE))
+    if cx is None:
+        cx, cy = img_w / 2, img_h / 2
+    side = int(round(side))
+    half = side / 2
+    x0 = int(np.clip(cx - half, 0, max(img_w - side, 0)))
+    y0 = int(np.clip(cy - half, 0, max(img_h - side, 0)))
+    return x0, y0, side
+
+
+def _full_panel(img, mask, ann, edges_colored, idx2group, row, cam_name, crop_box=None):
     h, w = img.shape[:2]
     canvas = cv2.resize(img, (PANEL_W, PANEL_H))
     sx, sy = PANEL_W / w, PANEL_H / h
 
-    mask = _mask_outline(export_root, row["recording"], cam_name, row["frame"], ann_id_found)
     if mask is not None:
         mr = cv2.resize(mask * np.uint8(255), (PANEL_W, PANEL_H), interpolation=cv2.INTER_NEAREST)
         contours, _ = cv2.findContours(mr, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -272,11 +368,15 @@ def _panel(export_root, coco, idx2group, images_by_id, anns_by_id, row, cam_name
 
     if ann is not None:
         kp = np.asarray(ann["keypoints"], np.float32).reshape(-1, 3)
-        for i, (u, v, vflag) in enumerate(kp):
-            if vflag <= 0:
-                continue
-            color = PALETTE.get(idx2group.get(i), (255, 255, 255))
-            cv2.circle(canvas, (int(round(u * sx)), int(round(v * sy))), 3, color, -1, cv2.LINE_AA)
+        uv = kp[:, :2] * np.array([sx, sy], np.float32)
+        vis = kp[:, 2] > 0
+        _draw_skeleton(canvas, uv, vis, edges_colored, idx2group, MARKER_RADIUS_FULL)
+
+    if crop_box is not None:
+        x0, y0, side = crop_box
+        p0 = (int(round(x0 * sx)), int(round(y0 * sy)))
+        p1 = (int(round((x0 + side) * sx)), int(round((y0 + side) * sy)))
+        cv2.rectangle(canvas, p0, p1, CROP_RECT_COLOR, 1)
 
     host_color = PALETTE["fly1"] if row["host_sex"] == "male" else PALETTE["fly0"]
     label = f"{_label_prefix(row)} sep={_fmt_sep(row)}u {cam_name}"
@@ -286,16 +386,87 @@ def _panel(export_root, coco, idx2group, images_by_id, anns_by_id, row, cam_name
     return canvas
 
 
+def _zoom_panel(img, mask, ann, edges_colored, idx2group, crop_box):
+    """Crop (padded, floored, clamped+letterboxed like contact_sheet's own
+    crop-around-the-fly), upsample x2 with INTER_CUBIC, draw the skeleton +
+    markers (radius MARKER_RADIUS_ZOOM) and mask outline at THAT resolution
+    -- then, only at the very end, resize into the fixed PANEL_W x PANEL_H
+    montage cell (same "any native size -> the fixed cell" convention
+    `_full_panel` already uses for the whole camera frame). No label text
+    here -- it stays on the adjacent full panel per the brief."""
+    img_h, img_w = img.shape[:2]
+    x0, y0, side = crop_box
+    cw, ch = min(side, img_w - x0), min(side, img_h - y0)
+    pad = np.full((side, side, 3), 20, np.uint8)
+    pad[:ch, :cw] = img[y0:y0 + ch, x0:x0 + cw]
+    up = cv2.resize(pad, (side * ZOOM_UPSAMPLE, side * ZOOM_UPSAMPLE), interpolation=cv2.INTER_CUBIC)
+
+    if mask is not None:
+        mcrop = np.zeros((side, side), np.uint8)
+        mcrop[:ch, :cw] = mask[y0:y0 + ch, x0:x0 + cw]
+        mup = cv2.resize(mcrop * np.uint8(255), (side * ZOOM_UPSAMPLE, side * ZOOM_UPSAMPLE),
+                         interpolation=cv2.INTER_NEAREST)
+        contours, _ = cv2.findContours(mup, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        cv2.drawContours(up, contours, -1, PALETTE["mask"], 1)
+
+    if ann is not None:
+        kp = np.asarray(ann["keypoints"], np.float32).reshape(-1, 3)
+        uv = (kp[:, :2] - np.array([x0, y0], np.float32)) * ZOOM_UPSAMPLE
+        vis = kp[:, 2] > 0
+        _draw_skeleton(up, uv, vis, edges_colored, idx2group, MARKER_RADIUS_ZOOM)
+
+    return cv2.resize(up, (PANEL_W, PANEL_H))
+
+
+def _panel(export_root, coco, idx2group, edges_colored, images_by_id, anns_by_id, row, cam_name,
+           crop_box=None):
+    """The full-frame panel alone (no zoom) -- kept as its own entry point
+    (used directly by tests) on top of the same `_load_frame`/`_full_panel`
+    building blocks `_panel_pair` composes for the real gallery render."""
+    img, ann, ann_id_found, reason = _load_frame(export_root, coco, images_by_id, anns_by_id,
+                                                  row, cam_name)
+    if img is None:
+        return _placeholder_panel(row, cam_name, reason)
+    mask = _mask_outline(export_root, row["recording"], cam_name, row["frame"], ann_id_found)
+    return _full_panel(img, mask, ann, edges_colored, idx2group, row, cam_name, crop_box)
+
+
+def _panel_pair(export_root, coco, idx2group, edges_colored, images_by_id, anns_by_id, row, cam_name):
+    """(full panel, zoom panel) for one (frameset, camera) -- a single
+    `_load_frame` read is shared by both so a missing/unreadable camera loads
+    once and both slots get the identical placeholder."""
+    img, ann, ann_id_found, reason = _load_frame(export_root, coco, images_by_id, anns_by_id,
+                                                  row, cam_name)
+    if img is None:
+        ph = _placeholder_panel(row, cam_name, reason)
+        return ph, ph.copy()
+    mask = _mask_outline(export_root, row["recording"], cam_name, row["frame"], ann_id_found)
+    crop_box = _zoom_crop_box(ann, img.shape[1], img.shape[0])
+    full = _full_panel(img, mask, ann, edges_colored, idx2group, row, cam_name, crop_box)
+    zoom = _zoom_panel(img, mask, ann, edges_colored, idx2group, crop_box)
+    return full, zoom
+
+
 def render_page(export_root, coco, kp_names, images_by_id, anns_by_id, rows, out_path):
+    """Per frameset row: [overhead full (+ crop rect)][overhead zoom]
+    [side full (+ crop rect)][side zoom] -- page width is 4 panels wide
+    (was 2), i.e. doubled, so a 10-row page's canvas is
+    `(PANEL_H * n, PANEL_W * 4, 3)`."""
     groups = keypoint_groups(kp_names)
     idx2group = {i: g for g, idxs in groups.items() for i in idxs}
+    edges_colored = _skeleton_edges_colored(kp_names, idx2group)
     n = max(len(rows), 1)
-    canvas = np.full((PANEL_H * n, PANEL_W * 2, 3), 20, np.uint8)
+    canvas = np.full((PANEL_H * n, PANEL_W * 4, 3), 20, np.uint8)
     for i, row in enumerate(rows):
-        left = _panel(export_root, coco, idx2group, images_by_id, anns_by_id, row, OVERHEAD_CAM)
-        right = _panel(export_root, coco, idx2group, images_by_id, anns_by_id, row, SIDE_CAM)
-        canvas[i * PANEL_H:(i + 1) * PANEL_H, 0:PANEL_W] = left
-        canvas[i * PANEL_H:(i + 1) * PANEL_H, PANEL_W:2 * PANEL_W] = right
+        oh_full, oh_zoom = _panel_pair(export_root, coco, idx2group, edges_colored,
+                                       images_by_id, anns_by_id, row, OVERHEAD_CAM)
+        sd_full, sd_zoom = _panel_pair(export_root, coco, idx2group, edges_colored,
+                                       images_by_id, anns_by_id, row, SIDE_CAM)
+        r0, r1 = i * PANEL_H, (i + 1) * PANEL_H
+        canvas[r0:r1, 0 * PANEL_W:1 * PANEL_W] = oh_full
+        canvas[r0:r1, 1 * PANEL_W:2 * PANEL_W] = oh_zoom
+        canvas[r0:r1, 2 * PANEL_W:3 * PANEL_W] = sd_full
+        canvas[r0:r1, 3 * PANEL_W:4 * PANEL_W] = sd_zoom
     cv2.imwrite(out_path, canvas)
 
 

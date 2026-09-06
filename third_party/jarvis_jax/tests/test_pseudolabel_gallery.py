@@ -106,14 +106,103 @@ def _rewrite_csv(m, csv_path, rows):
         w.writerows(rows)
 
 
+# ------------------------------------------ v2 render: skeleton edge topology
+def test_skeleton_edges_reuse_body_wing_topology_and_colour_by_distal_group():
+    """`_skeleton_edges_colored` must reuse the exact head/wing/abdomen name
+    pairs (never invent new ones) and colour each edge by its DISTAL
+    endpoint's `keypoint_groups` group -- checked against the fixture's own
+    small `KP_NAMES` (no leg names, so `leg_chains` contributes nothing
+    here, isolating the body/wing half)."""
+    m = _load_cli()
+    from viz.core.colors import PALETTE, keypoint_groups
+    idx = {n: i for i, n in enumerate(KP_NAMES)}
+    groups = keypoint_groups(KP_NAMES)
+    idx2group = {i: g for g, idxs in groups.items() for i in idxs}
+
+    edges = m._skeleton_edges_colored(KP_NAMES, idx2group)
+
+    pairs = {(a, b) for a, b, _ in edges}
+    assert pairs == {
+        (idx["EyeL"], idx["Antenna_Base"]),
+        (idx["EyeR"], idx["Antenna_Base"]),
+        (idx["Antenna_Base"], idx["Scutellum"]),
+        (idx["Scutellum"], idx["WingL_base"]),
+    }
+    color_by_pair = {(a, b): c for a, b, c in edges}
+    assert color_by_pair[(idx["EyeL"], idx["Antenna_Base"])] == PALETTE["head"]
+    # Antenna_Base(head) -> Scutellum(thorax): coloured by the DISTAL
+    # (thorax) endpoint, not the proximal (head) one.
+    assert color_by_pair[(idx["Antenna_Base"], idx["Scutellum"])] == PALETTE["thorax"]
+    assert color_by_pair[(idx["Scutellum"], idx["WingL_base"])] == PALETTE["thorax"]
+
+
+# ------------------------------------------- v2 render: zoom crop geometry
+def test_zoom_crop_box_pads_bbox_40_percent_and_floors_at_min_side():
+    m = _load_cli()
+    kp = np.zeros((6, 3), np.float32)
+    kp[0] = [100, 200, 1]
+    kp[1] = [200, 205, 1]           # bbox 100x5 -> padded 140x7, floored at 160
+    ann = {"keypoints": kp.reshape(-1).tolist()}
+
+    x0, y0, side = m._zoom_crop_box(ann, img_w=1000, img_h=1000)
+
+    assert side == m.ZOOM_MIN_SIDE
+    assert (x0, y0) == (70, 122)    # centre (150, 202.5) minus half the (160) side
+
+
+def test_zoom_crop_box_grows_past_the_floor_for_a_spread_out_pose():
+    m = _load_cli()
+    kp = np.zeros((6, 3), np.float32)
+    kp[0] = [0, 0, 1]
+    kp[1] = [300, 0, 1]             # bbox 300 wide -> padded 420, past the 160 floor
+    ann = {"keypoints": kp.reshape(-1).tolist()}
+
+    _, _, side = m._zoom_crop_box(ann, img_w=1000, img_h=1000)
+
+    assert side == 420
+
+
+def test_zoom_crop_box_falls_back_to_image_centre_with_no_ann():
+    m = _load_cli()
+    x0, y0, side = m._zoom_crop_box(None, img_w=800, img_h=600)
+    assert side == m.ZOOM_MIN_SIDE
+    assert (x0, y0) == (800 // 2 - 80, 600 // 2 - 80)
+
+
+def test_draw_skeleton_only_connects_keypoints_both_visible_in_this_camera():
+    """A line must not be drawn to/through an invisible keypoint even when an
+    edge names it -- checked on a blank canvas: the pixel at the midpoint of
+    an edge whose far end is invisible must stay the background colour."""
+    m = _load_cli()
+    canvas = np.zeros((50, 50, 3), np.uint8)
+    uv = np.array([[10.0, 25.0], [40.0, 25.0], [10.0, 10.0]], np.float32)
+    vis_both = np.array([True, True, False])
+    edges = [(0, 1, (0, 255, 0)), (0, 2, (255, 0, 0))]     # 2nd edge's far end (2) is invisible
+
+    m._draw_skeleton(canvas, uv, vis_both, edges, {}, radius=1)
+
+    # LINE_AA anti-aliasing softens the exact pixel value, so check the
+    # dominant channel rather than an exact (0, 255, 0) match.
+    px = canvas[25, 25]
+    assert px[1] > 200 and px[0] == 0 and px[2] == 0               # drawn edge 0-1 (green)
+    assert tuple(int(c) for c in canvas[10, 10]) == (0, 0, 0)      # edge 0-2 skipped (kp 2 invisible)
+
+
 # --------------------------------------------------------------------- (a)
 def test_gallery_writes_one_page_and_a_six_row_csv_with_blank_verdicts(tmp_path):
     m = _load_cli()
     root = _fixture_12(tmp_path)
     out = str(tmp_path / "gallery")
     assert m.main(["--export", root, "--n", "6", "--out", out]) == 0
-    assert os.path.exists(os.path.join(out, "page_00.png"))
+    page_path = os.path.join(out, "page_00.png")
+    assert os.path.exists(page_path)
     assert not os.path.exists(os.path.join(out, "page_01.png"))       # exactly one page for 6 rows
+    # panel geometry (2026-09-06 gallery-v2 render): 4 columns per frameset
+    # row -- [overhead full][overhead zoom][side full][side zoom] -- so the
+    # page is now PANEL_W * 4 wide (was PANEL_W * 2 before the zoom columns).
+    import cv2
+    page = cv2.imread(page_path)
+    assert page.shape == (m.PANEL_H * 6, m.PANEL_W * 4, 3)
     with open(os.path.join(out, "review.csv"), newline="") as f:
         rows = list(csv.DictReader(f))
     assert list(rows[0].keys()) == m.CSV_FIELDS
@@ -132,6 +221,32 @@ def test_sampling_is_stratified_three_contact_three_apart(tmp_path):
     contact = sum(1 for r in rows if r["contact"] == "True")
     apart = sum(1 for r in rows if r["contact"] == "False")
     assert (contact, apart) == (3, 3)
+
+
+# --------------------------------------------------------------------- (b2)
+def test_review_csv_unchanged_by_a_rendering_flag(tmp_path, monkeypatch):
+    """INVARIANT (2026-09-06 gallery-v2 render, CLAUDE.md's own gate for a
+    rendering-only change): the draw -- frameset order, page, cell -- must
+    not move no matter what rendering does. Toggle rendering itself off
+    (monkeypatch `render_page` to a no-op, standing in for "a rendering
+    flag") and check the resulting review.csv is byte-identical to a normal
+    run's: the stratified draw/CSV path must be fully decoupled from
+    render_page's pixels."""
+    m = _load_cli()
+    root = _fixture_40(tmp_path)
+
+    out_rendered = str(tmp_path / "gallery_rendered")
+    assert m.main(["--export", root, "--n", "40", "--out", out_rendered]) == 0
+    assert os.path.exists(os.path.join(out_rendered, "page_00.png"))
+    rendered_csv = open(os.path.join(out_rendered, "review.csv"), "rb").read()
+
+    monkeypatch.setattr(m, "render_page", lambda *a, **k: None)
+    out_norender = str(tmp_path / "gallery_norender")
+    assert m.main(["--export", root, "--n", "40", "--out", out_norender]) == 0
+    assert not os.path.exists(os.path.join(out_norender, "page_00.png"))   # rendering really skipped
+    norender_csv = open(os.path.join(out_norender, "review.csv"), "rb").read()
+
+    assert norender_csv == rendered_csv
 
 
 # --------------------------------------------------------------------- (c)
@@ -377,7 +492,9 @@ def test_placeholder_panel_for_a_missing_camera_carries_the_full_row_identity(tm
     groups = m.keypoint_groups(kp_names)
     idx2group = {i: g for g, idxs in groups.items() for i in idxs}
 
-    panel = m._panel(root, coco, idx2group, images_by_id, anns_by_id, row, "Cam_does_not_exist")
+    # edges_colored is irrelevant here -- the missing-camera branch returns
+    # a placeholder before it is ever consulted -- so an empty list stands in.
+    panel = m._panel(root, coco, idx2group, [], images_by_id, anns_by_id, row, "Cam_does_not_exist")
 
     assert panel.shape == (m.PANEL_H, m.PANEL_W, 3)
     # a real frame is the fixture's flat 200-grey; the placeholder must NOT be

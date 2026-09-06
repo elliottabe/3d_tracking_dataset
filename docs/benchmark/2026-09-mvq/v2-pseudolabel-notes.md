@@ -866,3 +866,67 @@ against it: 38-81 % of interior anchors per recording sit OUTSIDE that hull
 (median signed distance -2.2 to +9.4 units), i.e. at the chamber periphery --
 which is why most figure panels show the wall band. What the edge stratum adds
 is the "CenterDetect fired here" provenance, not the appearance.
+
+### Gallery render v2 (2026-09-06): skeleton chains, small markers, zoom crops
+
+User feedback on the gallery pages: dots too big, no visible connectivity,
+no zoomed view. Rendering-only change in `scripts/pseudo_labels/
+pseudolabel_gallery.py`; the stratified draw itself (`_iter_reviewable`,
+`stratified_alloc`, `_draw`, page/cell assignment, `write_review_csv`) is
+byte-for-byte untouched.
+
+- **Markers**: circle radius 3 -> 1 on the full/overhead-and-side panels, 2
+  on the new zoom panels (small enough that the skeleton lines read through
+  them); same `keypoint_groups` colours as before.
+- **Skeleton**: lines drawn BEFORE markers, 1 px, `cv2.LINE_AA`, only
+  between two keypoints both visible in that camera. Topology is fully
+  reused, not invented: the six `leg_chains(kp_names)` (viz/core/colors.py)
+  for the legs, plus the head/wing/abdomen chain ported from
+  `viz/views/sidebyside.py`'s `_skeleton_edges` (viz/core/colors.py itself
+  defines no body/wing helper -- only `leg_chains`/`keypoint_groups` --  so
+  that view is the only other place in the repo naming this topology;
+  its per-leg "root each chain at Scutellum" connector was dropped since
+  that is sidebyside's own decoration, not part of the head/wing/abdomen
+  chain or of `leg_chains`). Each edge is coloured by its DISTAL endpoint's
+  `keypoint_groups` colour, so a line crossing a group boundary (e.g.
+  Antenna_Base(head) -> Scutellum(thorax)) takes the colour of the group it
+  is entering.
+- **Zoom crops**: for each frameset and each of the two cameras (overhead
+  `Cam2012630`, side `Cam2012855`), a square crop around the host's VISIBLE
+  keypoint bbox, padded 40% per side, floored at 160 px native, upsampled
+  x2 with `cv2.INTER_CUBIC`, skeleton + markers (radius 2) and the host's
+  mask outline drawn at that upsampled resolution, then fit into the same
+  fixed `PANEL_W x PANEL_H` montage cell the full-frame panel already uses
+  (same "any native size -> the fixed cell" convention as the rest of the
+  file). No visible keypoints falls back to the image centre at the 160 px
+  floor (contact_sheet's own fallback). The full panel additionally gets a
+  1 px white rectangle marking exactly the crop window that was zoomed.
+- **Layout**: page width DOUBLED -- 4 columns per frameset row instead of 2
+  (`[overhead full+rect][overhead zoom][side full+rect][side zoom]`), same
+  `PANEL_H` per row, still 10 framesets/page. Label text bar stays only on
+  the two full-frame panels (unchanged position/content); zoom panels carry
+  no separate label.
+
+**Draw unchanged, verified**: regenerated the real gallery with the exact
+original command (`--export
+/gscratch/portia/eabe/data/Johnson_lab/red_data_3d_v12_pseudo_p3b_20260905
+--n 300 --out figures/2026-09-mvq/v2_pseudo/gallery`, default seed) and
+`diff`'d the fresh `review.csv` against the versioned
+`docs/benchmark/2026-09-mvq/v2-review/review.csv`: empty diff, byte-identical
+(same 300 rows, same page/cell assignment). A new test
+(`test_review_csv_unchanged_by_a_rendering_flag`) pins this structurally by
+monkeypatching `render_page` to a no-op and checking the review.csv is
+unaffected; `test_gallery_writes_one_page_and_a_six_row_csv_with_blank_verdicts`
+was updated for the new page geometry (`PANEL_H * n_rows, PANEL_W * 4`).
+
+**Read back `page_11`/`page_12`** (frameset rows from `2026_04_02_17_52_50`,
+`2025_10_20_13_20_04`, `2026_04_02_12_11_50`, `2026_04_02_14_54_28`,
+`2026_04_02_15_25_51`, all female/fly0): skeleton chains are clearly visible
+on every panel -- yellow thorax/wing polygon, red head, magenta abdomen
+line, blue leg lines fanning out from the thorax -- and read as one
+connected body rather than a scatter of dots. Dots are small and no longer
+obscure the anatomy. The white crop rectangle sits tightly over the fly in
+every overhead/side full-frame panel, and the corresponding zoom panel shows
+that fly filling most of the tile with legs/wings resolved at the upsampled
+scale and a light mask-outline contour visible around the body. No skeleton
+crosses onto a neighbouring fly or the arena floor in either page.
