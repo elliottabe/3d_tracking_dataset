@@ -14,17 +14,31 @@ Two phases, and the first one can stop the second:
    `--min-female` (3,000) anchors the run STOPS here rather than quietly
    rebalancing -- a female-poor pseudo set would train exactly the cohort
    this whole effort exists to fix on the male fly's data.
-2. **Stratified draw + export**: 50/50 host sex, >= 25 % contact and >= 25 %
-   apart inside each sex, round-robin over recordings so all 11 appear, no
-   bout above `--per-bout-frac` of the target, wall frames at whatever share
-   they have in the candidate pool (neither boosted nor suppressed). Then the
-   T=2 partners of every picked anchor, then `write_pseudo_export`.
+2. **Per-side draw + export** (rulings 2026-09-05): the FEMALE side takes
+   every admissible anchor (`--female-n` unset), the MALE side is capped
+   (`--male-n 4000`) and drawn round-robin over recordings with a hard
+   per-recording share (`--per-rec-frac 0.20`) and per-bout cap
+   (`--per-bout-cap 200`), keeping >= 25 % contact and >= 25 % apart where the
+   yield allows. The export is therefore deliberately NOT 50/50; the manifest's
+   `balance` block carries `female_host_weight = male_n / female_n`, which
+   restores 50/50 at training time. Wall frames enter at their share of the
+   pool (neither boosted nor suppressed). Then the T=2 partners of every
+   picked anchor, then `write_pseudo_export`, then a loader round trip on the
+   real export.
+
+**`contact` is the minimum inter-fly KEYPOINT distance** (`--contact-kp-units`,
+0.5 mm), NOT the spec's centroid separation: measured over the whole campaign
+on 2026-09-05, no frame anywhere has two fly centroids within 15 units (a fly
+is 2.5-3 mm long), while 33 % of frames have a keypoint pair within 5 units
+and the admitted anchors' distribution matches all frames'. Both quantities
+are recorded per frameset (`stratum.kp_dist_units`, `stratum.sep_units`) and
+both cell censuses are in `census.json`.
 
 EXPECTATION (state it before looking, CLAUDE.md): a pseudo export whose gate
 histograms show every quantity well inside its threshold -- exist mass above
 0.9, step p99 below 3 units, reproj median below 1.5 px, containment above
-0.95 -- and whose sampling report hits 50/50 host sex, >= 25 % contact,
->= 25 % apart, all 11 recordings, no bout above 2 %. A histogram piled
+0.95 -- and whose sampling report hits the two side sizes exactly, >= 25 %
+contact, >= 25 % apart, all 11 recordings, no bout above 2 %. A histogram piled
 against a threshold means the GATE, not the data, is choosing the set: the
 admitted frames would then be the ones that happen to sit at the cut, and
 tightening the gate by a hair would change the whole training set.
@@ -119,7 +133,8 @@ class Row:
     frame: int
     host_fly: int
     host_sex: str
-    sep_units: float | None
+    sep_units: float | None       # inter-fly CENTROID separation (kept for the record)
+    kp_dist_units: float | None   # MINIMUM inter-fly keypoint distance -- what `contact` means
     contact: bool
     apart: bool
     wall: bool
@@ -128,6 +143,7 @@ class Row:
     gates: dict
     partners: dict           # delta -> absolute partner frame
     role: str = "anchor"
+    contact_centroid: bool = False   # the spec's original (unreachable) definition
 
 
 def _hist(x, name):
@@ -137,7 +153,8 @@ def _hist(x, name):
     return np.histogram(np.clip(x, lo, hi), bins=N_BINS, range=(lo, hi))[0]
 
 
-def scan_bout(ref, thr, *, use_identity=True, contact_units=15.0, n_flies=2):
+def scan_bout(ref, thr, *, use_identity=True, contact_units=15.0, contact_kp_units=5.0,
+              n_flies=2):
     """Gate ONE bout; returns (rows, per-gate histogram counts, reject counts).
 
     Rows are per (anchor frame, admitted fly): a v12 frameset -- and therefore
@@ -156,17 +173,32 @@ def scan_bout(ref, thr, *, use_identity=True, contact_units=15.0, n_flies=2):
 
     with np.errstate(invalid="ignore"):
         cent = np.nanmean(a.kp3d, axis=2)                     # (F,T,3) fly centroid
-        sep = np.linalg.norm(cent[0] - cent[1], axis=-1) if a.kp3d.shape[0] == 2 else \
-            np.full(a.kp3d.shape[1], np.nan)
+        if a.kp3d.shape[0] == 2:
+            sep = np.linalg.norm(cent[0] - cent[1], axis=-1)
+            # `contact` is the MINIMUM inter-fly KEYPOINT distance, not the
+            # centroid separation: measured 2026-09-05 over the whole
+            # campaign, NO frame has centroids within 15 units (a fly is
+            # 2.5-3 mm long), while 33 % of frames have a keypoint pair
+            # within 5 units -- the flies really are touching there. The
+            # centroid figure is still recorded as `sep_units`.
+            d = np.linalg.norm(a.kp3d[0][:, :, None, :] - a.kp3d[1][:, None, :, :], axis=-1)
+            kdist = np.nanmin(d.reshape(d.shape[0], -1), axis=1)
+        else:
+            sep = np.full(a.kp3d.shape[1], np.nan)
+            kdist = np.full(a.kp3d.shape[1], np.nan)
         reproj = np.nanmedian(r.quant["reproj_px"], axis=-1)  # (F,T) median over views
 
     def _row(f, t, partners, role):
         s = float(sep[t]) if np.isfinite(sep[t]) else None
+        k = float(kdist[t]) if np.isfinite(kdist[t]) else None
         return Row(
             recording=ref.recording, bout=ref.bout, t=int(t), frame=ref.frame_start + int(t),
             host_fly=int(f), host_sex=ref.fly_sex.get(f"fly{f}", "unknown"),
-            sep_units=s, contact=(s is not None and s < contact_units),
-            apart=(s is not None and s >= contact_units), wall=False, height_units=float("nan"),
+            sep_units=s, kp_dist_units=k,
+            contact=(k is not None and k < contact_kp_units),
+            apart=(k is not None and k >= contact_kp_units),
+            contact_centroid=(s is not None and s < contact_units),
+            wall=False, height_units=float("nan"),
             centroid=tuple(float(v) for v in cent[f, t]),
             gates={"exist": float(r.quant["exist"][f, t]),
                    "step_units": float(r.quant["step_units"][f, t]),
@@ -250,9 +282,21 @@ def add_wall_flags(rows, wall_height_units, *, also=()):
     return planes
 
 
+def _cell(r):
+    return "contact" if r.contact else ("apart" if r.apart else "mid")
+
+
+def _cell_centroid(r):
+    """The spec's ORIGINAL contact definition (centroid separation), kept in
+    the census for the record: it admits nothing anywhere in the campaign."""
+    if r.sep_units is None:
+        return "mid"
+    return "contact" if r.contact_centroid else "apart"
+
+
 def census(rows):
     """Admitted anchors per (host sex, contact/apart/mid, recording) + totals."""
-    cell = lambda r: "contact" if r.contact else ("apart" if r.apart else "mid")
+    cell = _cell
     per = collections.Counter((r.host_sex, cell(r), r.recording) for r in rows)
     by_sex = collections.Counter(r.host_sex for r in rows)
     by_sex_rec = collections.Counter((r.host_sex, r.recording) for r in rows)
@@ -265,6 +309,15 @@ def census(rows):
         "by_host_sex_recording": {f"{s}/{rec}": n for (s, rec), n in sorted(by_sex_rec.items())},
         "by_host_sex_cell": {f"{s}/{c}": n for (s, c), n in sorted(by_sex_cell.items())},
         "by_stratum": {f"{s}/{c}/{rec}": n for (s, c, rec), n in sorted(per.items())},
+        # both contact definitions, per the 2026-09-05 ruling: `contact` above
+        # is the min inter-fly KEYPOINT distance; `*_centroid` is the spec's
+        # original centroid rule, recorded to show it admits nothing.
+        "by_host_sex_cell_centroid": {
+            f"{s}/{c}": n for (s, c), n in sorted(collections.Counter(
+                (r.host_sex, _cell_centroid(r)) for r in rows).items())},
+        "by_stratum_centroid": {
+            f"{s}/{c}/{rec}": n for (s, c, rec), n in sorted(collections.Counter(
+                (r.host_sex, _cell_centroid(r), r.recording) for r in rows).items())},
         "by_bout": {f"{rec}/bout_{b:05d}": n for (rec, b), n in sorted(by_bout.items())},
         "wall_by_recording": dict(by_rec_wall),
         "recordings": sorted({r.recording for r in rows}),
@@ -293,12 +346,14 @@ class QuotaShortfall(RuntimeError):
     pass
 
 
-def round_robin_draw(cand, n, rng, *, key, cap_by, cap, taken, bout_count, strict=True):
+def round_robin_draw(cand, n, rng, *, key, cap_by, cap, taken, bout_count,
+                     rec_count=None, rec_cap=None, strict=True):
     """Draw `n` rows, cycling recordings so every one appears, refusing a bout
-    already at `cap` and any row already `taken`. Raises `QuotaShortfall` when
-    the pool cannot fill the quota (never silently under-fills)."""
+    already at `cap`, a recording already at `rec_cap`, and any row already
+    `taken`. Raises `QuotaShortfall` when the pool cannot fill the quota
+    (never silently under-fills)."""
     pools = collections.defaultdict(list)
-    for i, r in enumerate(cand):
+    for r in cand:
         if id(r) not in taken:
             pools[key(r)].append(r)
     for k in pools:
@@ -316,17 +371,19 @@ def round_robin_draw(cand, n, rng, *, key, cap_by, cap, taken, bout_count, stric
                 r = pool.pop()
                 if id(r) in taken:
                     continue
-                b = cap_by(r)
-                if bout_count[b] >= cap:
+                if bout_count[cap_by(r)] >= cap:
                     continue
+                if rec_cap is not None and rec_count[r.recording] >= rec_cap:
+                    pool.clear()
+                    break
                 taken.add(id(r))
-                bout_count[b] += 1
+                bout_count[cap_by(r)] += 1
+                if rec_count is not None:
+                    rec_count[r.recording] += 1
                 picked.append(r)
                 break
             if pool:
                 nxt.append(k)
-        if len(nxt) == len(order) and not any(pools[k] for k in order):
-            break
         if not nxt:
             break
         order = nxt
@@ -335,54 +392,80 @@ def round_robin_draw(cand, n, rng, *, key, cap_by, cap, taken, bout_count, stric
     return picked
 
 
-def stratified_draw(rows, *, target, per_bout_frac, rng, strict=True):
-    """50/50 host sex; >= 25 % contact and >= 25 % apart inside each sex; the
-    rest free. Returns (picked, report)."""
-    cap = max(1, int(per_bout_frac * target))
-    quota = {"female": target // 2, "male": target - target // 2}
-    taken, bout_count = set(), collections.Counter()
-    picked, shortfalls = [], {}
-    for sex, n_sex in quota.items():
-        pool = [r for r in rows if r.host_sex == sex]
-        n_contact = int(0.25 * n_sex)
-        n_apart = int(0.25 * n_sex)
-        cells = [("contact", n_contact), ("apart", n_apart),
-                 ("free", n_sex - n_contact - n_apart)]
-        for cell, n in cells:
-            cand = [r for r in pool if cell == "free"
-                    or (r.contact if cell == "contact" else r.apart)]
-            try:
-                got = round_robin_draw(cand, n, rng, key=lambda r: r.recording,
-                                       cap_by=lambda r: (r.recording, r.bout), cap=cap,
-                                       taken=taken, bout_count=bout_count, strict=strict)
-            except QuotaShortfall as e:
-                raise QuotaShortfall(f"{sex}/{cell}: {e} (pool {len(cand)}, cap {cap}/bout)")
-            if len(got) < n:
-                shortfalls[f"{sex}/{cell}"] = {"wanted": n, "got": len(got),
-                                               "pool": len(cand)}
-            picked += got
-    return picked, {"cap_per_bout": cap, "quota": quota, "shortfalls": shortfalls}
+def draw_side(rows, n, *, rng, per_rec_frac=0.20, per_bout_cap=200,
+              contact_frac=0.25, apart_frac=0.25, taken=None, bout_count=None):
+    """One host-sex side (ruling 2026-09-05 #2).
+
+    `n is None` (or >= the pool) takes EVERY admissible row of the side, caps
+    and all: that is the female side, where the whole point is to use all
+    1,905 anchors. Otherwise the side is drawn round-robin over recordings
+    with a hard per-recording cap (`per_rec_frac` of the side) and a per-bout
+    cap, filling a >= `contact_frac` / >= `apart_frac` floor first and the
+    rest freely. A cell that its pool cannot fill is reported, not faked.
+    """
+    taken = set() if taken is None else taken
+    bout_count = collections.Counter() if bout_count is None else bout_count
+    if n is None or n >= len(rows):
+        for r in rows:
+            taken.add(id(r))
+            bout_count[(r.recording, r.bout)] += 1
+        return list(rows), {"mode": "all", "n": len(rows), "shortfalls": {},
+                            "per_bout_cap": None, "per_rec_cap": None}
+    rec_cap = max(1, int(np.ceil(per_rec_frac * n)))
+    rec_count = collections.Counter()
+    picked, short = [], {}
+    cells = [("contact", int(contact_frac * n)), ("apart", int(apart_frac * n))]
+    cells.append(("free", n - sum(c for _, c in cells)))
+    for cell, want in cells:
+        cand = [r for r in rows if cell == "free"
+                or (r.contact if cell == "contact" else r.apart)]
+        got = round_robin_draw(cand, want, rng, key=lambda r: r.recording,
+                               cap_by=lambda r: (r.recording, r.bout), cap=per_bout_cap,
+                               taken=taken, bout_count=bout_count, rec_count=rec_count,
+                               rec_cap=rec_cap, strict=False)
+        if len(got) < want:
+            short[cell] = {"wanted": want, "got": len(got), "pool": len(cand)}
+        picked += got
+    # a cell that under-filled leaves room: top up from whatever is left
+    if len(picked) < n:
+        picked += round_robin_draw([r for r in rows if id(r) not in taken], n - len(picked),
+                                   rng, key=lambda r: r.recording,
+                                   cap_by=lambda r: (r.recording, r.bout), cap=per_bout_cap,
+                                   taken=taken, bout_count=bout_count, rec_count=rec_count,
+                                   rec_cap=rec_cap, strict=False)
+    return picked, {"mode": "capped", "n": len(picked), "wanted": n, "shortfalls": short,
+                    "per_bout_cap": per_bout_cap, "per_rec_cap": rec_cap}
 
 
-def rebalance_to_smallest_sex(picked, rng):
-    """Trim the over-represented host sex so the 50/50 invariant survives a
-    shortfall. Loud by construction: the caller prints and records both counts."""
-    by_sex = collections.defaultdict(list)
-    for r in picked:
-        by_sex[r.host_sex].append(r)
-    n = min(len(v) for v in by_sex.values()) if by_sex else 0
-    out = []
-    for sex, v in by_sex.items():
-        if len(v) > n:
-            # drop the FREE-cell rows first so the contact/apart floors survive
-            free = [r for r in v if not (r.contact or r.apart)]
-            rest = [r for r in v if r.contact or r.apart]
-            rng.shuffle(free)
-            keep = (free + rest)[len(v) - n:] if len(free) >= len(v) - n else rest[len(rest) - n:]
-            out += keep
-        else:
-            out += v
-    return out
+def sided_draw(rows, *, female_n, male_n, rng, per_rec_frac=0.20, per_bout_cap=200):
+    """Female side then male side; returns (picked, report). The two sides are
+    deliberately NOT equal in size (ruling #2): the female side is everything
+    admissible and the male side is capped, with 50/50 restored at training
+    time by `female_host_weight = male_n / female_n` (written into the
+    manifest's `balance` block)."""
+    taken = set()
+    out, rep = [], {}
+    for sex, n in (("female", female_n), ("male", male_n)):
+        side = [r for r in rows if r.host_sex == sex]
+        # a FRESH bout counter per side: the cap "applies per side" (ruling
+        # #2), and a shared one would let the uncapped female side -- which
+        # takes every admissible row -- exhaust the male side's per-bout
+        # budget before it is drawn at all.
+        got, r = draw_side(side, n, rng=rng, per_rec_frac=per_rec_frac,
+                           per_bout_cap=per_bout_cap, taken=taken,
+                           bout_count=collections.Counter())
+        r["pool"] = len(side)
+        r["contact"] = int(sum(1 for x in got if x.contact))
+        r["apart"] = int(sum(1 for x in got if x.apart))
+        r["wall"] = int(sum(1 for x in got if x.wall))
+        r["per_recording"] = dict(collections.Counter(x.recording for x in got))
+        r["max_recording_frac"] = round(
+            max(r["per_recording"].values(), default=0) / max(len(got), 1), 4)
+        r["max_bout"] = int(max(collections.Counter(
+            (x.recording, x.bout) for x in got).values())) if got else 0
+        rep[sex] = r
+        out += got
+    return out, rep
 
 
 # --------------------------------------------------------------- io adapters
@@ -505,10 +588,20 @@ def build_parser():
     ap.add_argument("--runs", nargs="*", default=None, help=f"run roots (default glob {DEFAULT_ROOTS})")
     ap.add_argument("--out", required=True)
     ap.add_argument("--export-names-from", default=DEFAULT_EXPORT_NAMES)
-    ap.add_argument("--target", type=int, default=TARGET)
+    ap.add_argument("--female-n", type=int, default=None,
+                    help="female-host anchors to take (default: ALL admissible, ruling #2)")
+    ap.add_argument("--male-n", type=int, default=4000,
+                    help="male-host anchors to take (capped side)")
     ap.add_argument("--weight", type=float, default=0.3)
-    ap.add_argument("--per-bout-frac", type=float, default=0.02)
-    ap.add_argument("--contact-units", type=float, default=15.0)   # 1.5 mm (spec §3.2)
+    ap.add_argument("--per-rec-frac", type=float, default=0.20,
+                    help="max share of a capped side one recording may contribute")
+    ap.add_argument("--per-bout-cap", type=int, default=200,
+                    help="max framesets from one bout on a capped side (the 2 %% rule)")
+    ap.add_argument("--contact-kp-units", type=float, default=5.0,
+                    help="contact := min inter-fly KEYPOINT distance below this (0.5 mm)")
+    ap.add_argument("--contact-units", type=float, default=15.0,
+                    help="the spec's original CENTROID contact rule; recorded, not used "
+                         "for stratification (it admits no frame in the campaign)")
     ap.add_argument("--wall-height-units", type=float, default=30.0)
     ap.add_argument("--no-identity-gate", action="store_true")     # single-fly (Task 4)
     ap.add_argument("--num-animals", type=int, default=2)
@@ -523,9 +616,8 @@ def build_parser():
     ap.add_argument("--no-masks", action="store_true", help="skip masks/<rec>/... (Plan B copy-paste needs them)")
     ap.add_argument("--no-images", action="store_true", help="write the JSON only (schema smoke test)")
     ap.add_argument("--figures-dir", default="figures/2026-09-mvq/v2_pseudo")
-    ap.add_argument("--allow-shortfall", action="store_true",
-                    help="report an unmet cell quota and rebalance to the smaller host "
-                         "sex instead of failing")
+    ap.add_argument("--no-verify", action="store_true",
+                    help="skip the post-write loader round trip on the real export")
     return ap
 
 
@@ -548,7 +640,9 @@ def main(argv=None):
         ts = time.time()
         try:
             rr, pr, hh, rj = scan_bout(ref, thr, use_identity=not a.no_identity_gate,
-                                       contact_units=a.contact_units, n_flies=a.num_animals)
+                                       contact_units=a.contact_units,
+                                       contact_kp_units=a.contact_kp_units,
+                                       n_flies=a.num_animals)
         except Exception as e:                       # a broken bout must not lose the census
             print(f"[extract] {ref.recording}/{ref.bout:05d}: SKIPPED ({type(e).__name__}: {e})",
                   flush=True)
@@ -574,6 +668,11 @@ def main(argv=None):
     cen = census(rows)
     cen.update({"gates": {k: (list(v) if isinstance(v, tuple) else v)
                           for k, v in dataclasses.asdict(thr).items()},
+                "contact_definition": {
+                    "used": "min inter-fly KEYPOINT distance",
+                    "contact_kp_units": a.contact_kp_units,
+                    "recorded_only": "inter-fly CENTROID separation",
+                    "contact_units": a.contact_units},
                 "n_bouts": len(refs), "floor_planes": planes,
                 "reject_counts": {k: dict(v) for k, v in rejects.items()},
                 "scan_seconds": round(time.time() - t0, 1)})
@@ -591,21 +690,28 @@ def main(argv=None):
               f"silent rebalance).", flush=True)
         return cen
 
-    # ---- stratified draw
+    # ---- per-side draw (ruling #2: all of the female side, capped male side)
     rng = np.random.default_rng(a.seed)
-    try:
-        picked, srep = stratified_draw(rows, target=a.target, per_bout_frac=a.per_bout_frac,
-                                       rng=rng, strict=not a.allow_shortfall)
-    except QuotaShortfall as e:
-        raise SystemExit(f"[extract] quota unmet: {e}\nRerun with --allow-shortfall to "
-                         f"report it and rebalance to the smaller host sex, or lower --target.")
-    if srep["shortfalls"]:
-        print(f"[extract] SHORTFALL {json.dumps(srep['shortfalls'])}", flush=True)
-        n_before = len(picked)
-        picked = rebalance_to_smallest_sex(picked, rng)
-        srep["rebalanced"] = {"before": n_before, "after": len(picked)}
-        print(f"[extract] rebalanced to the smaller host sex: {n_before} -> {len(picked)}",
-              flush=True)
+    picked, sides = sided_draw(rows, female_n=a.female_n, male_n=a.male_n, rng=rng,
+                               per_rec_frac=a.per_rec_frac, per_bout_cap=a.per_bout_cap)
+    nf = sides["female"]["n"]
+    nm = sides["male"]["n"]
+    balance = {"female_n": nf, "male_n": nm,
+               "female_host_weight": round(nm / max(nf, 1), 4),
+               "note": "the export is deliberately NOT 50/50 -- the female side is every "
+                       "admissible anchor and the male side is capped; training restores "
+                       "50/50 by weighting female-host windows by female_host_weight "
+                       "(train.female_host_weight)"}
+    srep = {"sides": sides, "balance": balance}
+    for sex in ("female", "male"):
+        s = sides[sex]
+        print(f"[extract] {sex}-host: {s['n']} of {s['pool']} admissible "
+              f"({s['mode']}), contact {s['contact'] / max(s['n'], 1):.1%}, apart "
+              f"{s['apart'] / max(s['n'], 1):.1%}, wall {s['wall']}, max recording share "
+              f"{s['max_recording_frac']:.1%}, max bout {s['max_bout']}", flush=True)
+        if s["shortfalls"]:
+            print(f"[extract] SHORTFALL {sex}: {json.dumps(s['shortfalls'])}", flush=True)
+    print(f"[extract] balance: female_host_weight = {balance['female_host_weight']}", flush=True)
 
     # ---- partners (exempt from the cap and from decorrelation): each carries
     # its OWN frame's gate quantities and stratum, from `pool` (built in
@@ -669,8 +775,11 @@ def main(argv=None):
             recording=r.recording, frame=r.frame, host_fly=r.host_fly,
             kp3d=kp3d[:, r.t], kp2d=kp2d[:, r.t], vis=vis, sex=sexcode,
             stratum={"host_sex": r.host_sex, "contact": bool(r.contact), "apart": bool(r.apart),
-                     "wall": bool(r.wall), "sep_units": None if r.sep_units is None
-                     else round(r.sep_units, 2), "height_units": round(r.height_units, 2)},
+                     "wall": bool(r.wall),
+                     "kp_dist_units": None if r.kp_dist_units is None
+                     else round(r.kp_dist_units, 2),
+                     "sep_units": None if r.sep_units is None else round(r.sep_units, 2),
+                     "height_units": round(r.height_units, 2)},
             gates=r.gates, partners=r.partners, role=r.role, bout=r.bout))
 
     cameras = list(refs[0].cameras)
@@ -693,11 +802,13 @@ def main(argv=None):
         a.out, records, export_names=export_names, cameras=cameras, recordings=recordings,
         checkpoint=sorted(checkpoints)[0] if checkpoints else "unknown", gates=thr,
         weight=a.weight, frame_reader=frames, mask_reader=masks,
-        write_images=not a.no_images)
+        write_images=not a.no_images,
+        extra_manifest={"balance": balance,
+                        "contact_definition": cen["contact_definition"]})
     frames.close()
 
     # ---- reports
-    srep.update({"target": a.target, "realised": summary["n_framesets"],
+    srep.update({"realised": summary["n_framesets"],
                  "per_stratum": summary["per_stratum"], "per_recording": summary["per_recording"],
                  "per_role": summary["per_role"], "per_bout": summary["per_bout"],
                  "partner_availability": summary["partner_availability"],
@@ -717,12 +828,92 @@ def main(argv=None):
     for d in (a.out, a.figures_dir):
         _write_json(os.path.join(d, "sampling_report.json"), srep)
         _write_json(os.path.join(d, "gate_histograms.json"), hist_out)
+    write_summary_md(os.path.join(a.out, "summary.md"), cen, srep, summary, thr, a)
     print(f"[extract] wrote {summary['n_framesets']} framesets / {summary['n_images']} images "
           f"to {a.out} in {time.time() - t0:.0f}s", flush=True)
     print(json.dumps({k: srep[k] for k in ("realised", "female_frac", "contact_frac",
                                            "apart_frac", "wall_frac", "max_bout_frac",
-                                           "n_recordings", "shortfalls")}, indent=1), flush=True)
+                                           "n_recordings")}, indent=1), flush=True)
+    if not a.no_verify:
+        srep["verify"] = verify_export(a.out, n=20)
+        _write_json(os.path.join(a.out, "sampling_report.json"), srep)
     return srep
+
+
+def verify_export(root, n=20, split="train", seed=0):
+    """Open the REAL export with `V12WindowDataset` and read `n` random
+    windows: keypoint-axis order, finite labels, a fly with 3D, and a crop
+    that is not empty. This is the round trip the trainer performs, run on the
+    artefact that was actually written -- not on a fixture."""
+    from jarvis_jax.data.v12_windows import V12WindowDataset
+    canon = json.load(open(os.path.join(root, "annotations", "keypoint_names.json")))
+    ds = V12WindowDataset(root, split, T=1, train=False)
+    if list(ds.keypoint_names) != list(canon):
+        raise AssertionError("instances keypoint_names != annotations/keypoint_names.json")
+    rng = np.random.default_rng(seed)
+    idx = rng.choice(len(ds), size=min(n, len(ds)), replace=False)
+    n_kp, n_cams = 0, 0
+    for i in idx:
+        s = ds[int(i)]
+        rec, fly, frame = ds.windows[int(i)]
+        if not np.isfinite(s["kp3d_local"]).all() or not np.isfinite(s["center3D"]).all():
+            raise AssertionError(f"non-finite 3D in window {rec}/Frame_{frame}/fly{fly}")
+        if not np.isfinite(s["kp2d"]).all():
+            raise AssertionError(f"non-finite 2D in window {rec}/Frame_{frame}/fly{fly}")
+        if not s["has3d"][0, 0].any():
+            raise AssertionError(f"host has no triangulated 3D in {rec}/Frame_{frame}/fly{fly}")
+        if int(s["cam_valid"].sum()) < 2:
+            raise AssertionError(f"< 2 valid cameras in {rec}/Frame_{frame}/fly{fly}")
+        if not s["crops"][0][s["cam_valid"][0]].any():
+            raise AssertionError(f"all-black crops in {rec}/Frame_{frame}/fly{fly}")
+        n_kp += int(s["has3d"][0, 0].sum())
+        n_cams += int(s["cam_valid"].sum())
+    out = {"windows_checked": len(idx), "n_windows": len(ds),
+           "mean_kp_with_3d": round(n_kp / max(len(idx), 1), 2),
+           "mean_valid_cameras": round(n_cams / max(len(idx), 1), 2),
+           "keypoint_names_ok": True}
+    print(f"[verify] {out}", flush=True)
+    return out
+
+
+def write_summary_md(path, cen, srep, summary, thr, a):
+    L = ["# Pseudo-label export summary", "",
+         f"- root: `{a.out}`", f"- checkpoint gates: `{thr}`",
+         f"- contact := min inter-fly KEYPOINT distance < {a.contact_kp_units} units "
+         f"(the spec's centroid rule < {a.contact_units} units admits 0 frames campaign-wide)",
+         f"- weight {a.weight}; balance {json.dumps(srep['balance'])}",
+         f"- framesets {summary['n_framesets']} (anchors "
+         f"{summary['per_role'].get('anchor', 0)}, partners "
+         f"{summary['per_role'].get('partner', 0)}), images {summary['n_images']}, "
+         f"annotations {summary['n_annotations']}, mask rows {summary['n_mask_rows']}",
+         f"- dropped for < 2 cameras: {summary['n_dropped_too_few_cameras']}",
+         f"- elapsed {srep['seconds']} s", "",
+         "## Per side (anchors)", "",
+         "| side | pool | taken | contact | apart | wall | max recording share | max bout |",
+         "|---|---|---|---|---|---|---|---|"]
+    for sex in ("female", "male"):
+        s = srep["sides"][sex]
+        L.append(f"| {sex} | {s['pool']} | {s['n']} | {s['contact']} "
+                 f"({s['contact'] / max(s['n'], 1):.1%}) | {s['apart']} "
+                 f"({s['apart'] / max(s['n'], 1):.1%}) | {s['wall']} | "
+                 f"{s['max_recording_frac']:.1%} | {s['max_bout']} |")
+    L += ["", "## Framesets per stratum (anchors + partners)", "",
+          "| stratum | n |", "|---|---|"]
+    L += [f"| {k} | {v} |" for k, v in sorted(srep["per_stratum"].items())]
+    L += ["", "## Framesets per recording", "", "| recording | n |", "|---|---|"]
+    L += [f"| {k} | {v} |" for k, v in sorted(srep["per_recording"].items())]
+    L += ["", "## Partner availability (framesets carrying a partner at delta)", "",
+          "| delta | n |", "|---|---|"]
+    L += [f"| {k} | {v} |" for k, v in sorted(srep["partner_availability"].items(),
+                                              key=lambda kv: int(kv[0]))]
+    L += ["", f"- realised contact {srep['contact_frac']:.1%}, apart {srep['apart_frac']:.1%}, "
+              f"wall {srep['wall_frac']:.1%}, female-host {srep['female_frac']:.1%}",
+          f"- largest single bout: {srep['max_bout_frac']:.2%} of the export",
+          f"- recordings represented: {srep['n_recordings']}",
+          "", "Census (all admissible anchors, before sampling) is in `census.json`; "
+          "gate histograms in `gate_histograms.json`."]
+    with open(path, "w") as f:
+        f.write("\n".join(L) + "\n")
 
 
 if __name__ == "__main__":

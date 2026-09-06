@@ -5,6 +5,7 @@ so the tests swap it for a stub that hands back blank 448x448 frames. Every
 other step is the real one -- discovery, the gates, the floor fit, the
 stratified draw, the writer, and the loader reading the result back.
 """
+import collections
 import importlib.util
 import sys
 import json
@@ -15,6 +16,7 @@ import numpy as np
 import pytest
 from pseudo_fixtures import CAMS, make_bout, make_calib
 
+FRAME_HW = (448, 448)      # `FakeFrames`' size; masks must match it (real: 448x1936)
 MOD = Path(__file__).resolve().parents[3] / "scripts" / "pseudo_labels" / "extract_p3b_pseudolabels.py"
 
 
@@ -30,14 +32,16 @@ def _load_cli():
 
 
 class FakeFrames:
-    """(C,448,448,3) blanks: >= CROP in both axes so `V12WindowDataset._build`
-    can cut a real 448 crop out of them."""
+    """(C,448,448,3) flat-grey frames: >= CROP in both axes so
+    `V12WindowDataset._build` can cut a real 448 crop, and NON-ZERO so the
+    CLI's own post-write check (`verify_export`, which rejects all-black
+    crops -- an unwritten or misnamed JPEG) is exercised rather than tripped."""
 
     def __init__(self, sessions, cameras):
         self.n = len(cameras)
 
     def __call__(self, rec, frame):
-        return np.zeros((self.n, 448, 448, 3), np.uint8), np.ones(self.n, bool)
+        return np.full((self.n,) + FRAME_HW + (3,), 40, np.uint8), np.ones(self.n, bool)
 
     def close(self):
         pass
@@ -45,11 +49,17 @@ class FakeFrames:
 
 @pytest.fixture
 def run_root(tmp_path, monkeypatch):
-    """One fake recording, two bouts: one CONTACT (sep 10 units) and one APART
-    (sep 40), at different absolute frames with their own mask npz."""
-    d1, npz1, cm = make_bout(tmp_path, T=40, sep_units=10.0, name="bout_00001",
+    """One fake recording, two bouts: one CONTACT and one APART.
+
+    `contact` is the MINIMUM inter-fly KEYPOINT distance (ruling 2026-09-05,
+    the spec's centroid rule is unreachable), so the contact bout puts the two
+    flies `sep_units=10` apart -- with the fixture's ~+-4.5-unit body spread
+    that leaves keypoint pairs well under the 5-unit cut -- and the apart bout
+    at 40 units, where the closest keypoints are ~30 units apart.
+    """
+    d1, npz1, cm = make_bout(tmp_path, T=40, sep_units=10.0, name="bout_00001", hw=FRAME_HW,
                              frame_start=1000, masks_path=str(tmp_path / "m1" / "sam3_masks.npz"))
-    d2, npz2, _ = make_bout(tmp_path, T=40, sep_units=40.0, name="bout_00002",
+    d2, npz2, _ = make_bout(tmp_path, T=40, sep_units=40.0, name="bout_00002", hw=FRAME_HW,
                             frame_start=9000, masks_path=str(tmp_path / "m2" / "sam3_masks.npz"))
     make_calib(tmp_path / "video" / "calibration", cm)
     export_root = tmp_path / "names"
@@ -65,12 +75,16 @@ def run_root(tmp_path, monkeypatch):
 def _run(m, runs, names, out, *extra):
     # --figures-dir under tmp_path: its default is relative to the CWD, and a
     # test must not scribble a figures/ tree into the repo it runs from.
+    # --per-rec-frac 1.0: the 20 % per-recording share is meaningless on a
+    # one-recording fixture (it would cap each side at ceil(0.2*4) = 1);
+    # `test_the_caps_bound_a_drawn_side` exercises it on two recordings.
     return m.main(["--runs", runs, "--out", out, "--export-names-from", names,
-                   "--target", "8", "--per-bout-frac", "0.5", "--min-female", "1",
+                   "--female-n", "4", "--male-n", "4", "--per-bout-cap", "4",
+                   "--per-rec-frac", "1.0", "--min-female", "1",
                    "--figures-dir", os.path.join(out, "fig"), *extra])
 
 
-def test_cli_writes_a_balanced_stratified_export(run_root, tmp_path):
+def test_cli_writes_a_stratified_export_with_a_balance_block(run_root, tmp_path):
     from jarvis_jax.data.v12_windows import V12WindowDataset
     m, runs, names, cm = run_root
     out = str(tmp_path / "pseudo")
@@ -79,6 +93,9 @@ def test_cli_writes_a_balanced_stratified_export(run_root, tmp_path):
     man = json.load(open(f"{out}/manifest.json"))
     assert man["source"] == "pseudo" and man["weight"] == 0.3
     assert man["gates"]["deltas"] == [1, 4, 16]
+    assert man["balance"]["female_n"] == 4 and man["balance"]["male_n"] == 4
+    assert man["balance"]["female_host_weight"] == 1.0
+    assert man["contact_definition"]["contact_kp_units"] == 5.0
     coco = json.load(open(f"{out}/annotations/instances_train.json"))
 
     anchors = {k: v for k, v in coco["framesets"].items() if v["role"] == "anchor"}
@@ -92,11 +109,36 @@ def test_cli_writes_a_balanced_stratified_export(run_root, tmp_path):
         assert set(v["partners"]) <= {"1", "4", "16"}
         assert v["source"] == "pseudo" and v["weight"] == 0.3
     assert set(rep["per_role"]) <= {"anchor", "partner"} and rep["per_role"]["partner"] > 0
+    assert os.path.exists(f"{out}/summary.md")
+    assert rep["verify"]["windows_checked"] > 0        # loader round trip on the REAL export
 
     ds = V12WindowDataset(out, "train", T=1, train=False)
     assert len(ds) == len(coco["framesets"])
     s = ds[0]
     assert s["kp3d_local"].shape[-2] == len(ds.keypoint_names)
+
+
+def test_contact_is_the_min_keypoint_distance_not_the_centroid_separation(run_root, tmp_path):
+    """Ruling 2026-09-05 #1. The contact bout's flies are 10 units apart by
+    CENTROID -- above the spec's 15-unit cut only in the sense that no frame
+    anywhere is below it -- but their nearest keypoints are within 5 units, and
+    that is what `contact` now means. The census keeps both definitions."""
+    m, runs, names, cm = run_root
+    out = str(tmp_path / "pseudo")
+    _run(m, runs, names, out, "--no-masks")
+    coco = json.load(open(f"{out}/annotations/instances_train.json"))
+    b1 = [v["stratum"] for v in coco["framesets"].values() if v["bout"] == 1]
+    b2 = [v["stratum"] for v in coco["framesets"].values() if v["bout"] == 2]
+    assert b1 and b2
+    assert all(s["contact"] and not s["apart"] for s in b1)
+    assert all(s["apart"] and not s["contact"] for s in b2)
+    assert all(s["kp_dist_units"] < 5.0 for s in b1)
+    assert all(s["kp_dist_units"] >= 5.0 for s in b2)
+    cen = json.load(open(f"{out}/census.json"))
+    assert cen["contact_definition"]["used"] == "min inter-fly KEYPOINT distance"
+    # the spec's centroid rule: the 10-unit bout is the ONLY thing it could
+    # ever call contact, and on real data nothing at all
+    assert "by_stratum_centroid" in cen and "by_host_sex_cell_centroid" in cen
 
 
 def test_the_loaders_dlt_reproduces_the_gated_3d_in_EXPORT_keypoint_order(run_root, tmp_path):
@@ -143,13 +185,44 @@ def test_masks_are_written_where_the_loader_looks_for_them(run_root, tmp_path):
     assert hits >= 5, "the fly's own SAM3 mask must come back for most cameras"
 
 
+def test_the_caps_bound_a_drawn_side(tmp_path, monkeypatch):
+    """Ruling #2: a CAPPED side takes no more than `per_rec_frac` of itself
+    from one recording and no more than `per_bout_cap` from one bout. (The
+    female side is uncapped by construction -- it takes everything.)"""
+    cm = None
+    for rec in ("recA", "recB"):
+        for i, fs in ((1, 1000), (2, 9000)):
+            _, _, cm = make_bout(tmp_path, T=40, sep_units=40.0, name=f"bout_{i:05d}",
+                                 frame_start=fs, rec=rec, hw=FRAME_HW,
+                                 masks_path=str(tmp_path / f"m{rec}{i}" / "sam3_masks.npz"))
+    make_calib(tmp_path / "video" / "calibration", cm)
+    from pseudo_fixtures import KP_NAMES
+    (tmp_path / "names" / "annotations").mkdir(parents=True)
+    (tmp_path / "names" / "annotations" / "keypoint_names.json").write_text(json.dumps(KP_NAMES))
+    m = _load_cli()
+    monkeypatch.setattr(m, "SessionFrames", FakeFrames)
+    out = str(tmp_path / "pseudo")
+    m.main(["--runs", str(tmp_path / "*" / "pose_mvq_p3b"), "--out", out,
+            "--export-names-from", str(tmp_path / "names"), "--female-n", "4", "--male-n", "4",
+            "--per-rec-frac", "0.5", "--per-bout-cap", "1", "--min-female", "1", "--no-masks",
+            "--figures-dir", os.path.join(out, "fig")])
+    coco = json.load(open(f"{out}/annotations/instances_train.json"))
+    anchors = [(k.split("/")[0], v["bout"]) for k, v in coco["framesets"].items()
+               if v["role"] == "anchor" and v["stratum"]["host_sex"] == "male"]
+    per_rec = collections.Counter(r for r, _ in anchors)
+    per_bout = collections.Counter(anchors)
+    assert len(anchors) == 4 and set(per_rec) == {"recA", "recB"}
+    assert max(per_rec.values()) <= 2                     # 0.5 of a 4-row side
+    assert max(per_bout.values()) <= 1                    # --per-bout-cap 1
+
+
 def test_a_female_poor_campaign_stops_at_the_census(run_root, tmp_path, capsys):
     """Controller ruling: below `--min-female` the run writes the census and
     stops rather than quietly rebalancing onto the male fly."""
     m, runs, names, cm = run_root
     out = str(tmp_path / "pseudo_stop")
     m.main(["--runs", runs, "--out", out, "--export-names-from", names,
-            "--target", "8", "--per-bout-frac", "0.5", "--min-female", "10000",
+            "--female-n", "4", "--male-n", "4", "--min-female", "10000",
             "--figures-dir", os.path.join(out, "fig")])
     assert "STOP" in capsys.readouterr().out
     cen = json.load(open(f"{out}/census.json"))

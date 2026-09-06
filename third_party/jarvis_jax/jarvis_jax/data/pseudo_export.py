@@ -257,8 +257,42 @@ def write_pseudo_export(out_root, records, *, export_names, cameras, recordings,
         present = np.ones(len(cameras), bool) if present is None else np.asarray(present, bool)
         H, W = int(frames.shape[1]), int(frames.shape[2])
         masks = mask_reader(rec, frame) if mask_reader is not None else None
+        if masks is not None and tuple(np.shape(masks)[-2:]) != (H, W):
+            # The loader slices the mask with the IMAGE's crop origin
+            # (`v12_windows._build`), so a mask of a different size is not a
+            # smaller mask -- it is a mask of somewhere else.
+            raise ValueError(
+                f"{rec} Frame_{frame}: mask_reader returned {np.shape(masks)[-2:]} masks for "
+                f"a {(H, W)} frame -- they must be the same size, by camera and by pixel.")
 
-        # one image entry (and one JPEG) per camera, shared by every fly here
+        # a frameset (== a training window) only for flies that are a record's host
+        hosts = {}
+        for r in group:
+            hosts.setdefault(r.host_fly, r)
+
+        # Labels FIRST, pixels second: a camera no frameset resolves is never
+        # opened by the loader (`_build` only decodes resolved slots), so its
+        # JPEG would be dead weight in a ~150k-file tree.
+        labels, used = {}, np.zeros(len(cameras), bool)
+        for fly in sorted(hosts, key=lambda f: (f is None, f)):
+            r = hosts[fly]
+            if fly is None or r.role == "negative":
+                used[:] = True
+                continue
+            X = to_export_order(np.asarray(r.kp3d, np.float64)[fly], kp_names, export_names)
+            V = to_export_order(np.asarray(r.vis, bool)[fly], kp_names, export_names)
+            uv, vis = reprojected_labels(X, cam_mats[rec], V, (H, W))
+            vis = vis & present[:, None]
+            if int((vis.any(-1)).sum()) < min_cams:
+                # The loader triangulates the written 2D; a fly seen in fewer
+                # than two cameras has no 3D at all and its window would be
+                # centred on the origin. Dropped and counted, never written as
+                # a silently-degenerate frameset.
+                n_dropped_cams += 1
+                continue
+            labels[fly] = (uv, vis)
+            used |= vis.any(-1)
+
         img_ids = []
         for c, cam in enumerate(cameras):
             n_img += 1
@@ -266,19 +300,17 @@ def write_pseudo_export(out_root, records, *, export_names, cameras, recordings,
             coco["images"].append({"id": n_img, "width": W, "height": H,
                                    "recording": rec, "file_name": fn})
             img_ids.append(n_img)
-            if write_images and present[c]:
+            if write_images and present[c] and used[c]:
                 p = os.path.join(out_root, "images", rec, cam)
                 os.makedirs(p, exist_ok=True)
                 _write_jpeg(os.path.join(p, f"Frame_{frame}.jpg"), frames[c])
 
-        # a frameset (== a training window) only for flies that are a record's host
-        hosts = {}
-        for r in group:
-            hosts.setdefault(r.host_fly, r)
         mask_rows = collections.defaultdict(list)
         for fly in sorted(hosts, key=lambda f: (f is None, f)):
             r = hosts[fly]
             negative = fly is None or r.role == "negative"
+            if not negative and fly not in labels:
+                continue
             if negative:
                 ann_ids, num_kp = [], 0
                 for c in range(len(cameras)):
@@ -295,17 +327,7 @@ def write_pseudo_export(out_root, records, *, export_names, cameras, recordings,
                        "center3D": [float(v) for v in np.asarray(r.center3D, np.float64)]
                        if r.center3D is not None else None}
             else:
-                X = to_export_order(np.asarray(r.kp3d, np.float64)[fly], kp_names, export_names)
-                V = to_export_order(np.asarray(r.vis, bool)[fly], kp_names, export_names)
-                uv, vis = reprojected_labels(X, cam_mats[rec], V, (H, W))
-                vis = vis & present[:, None]
-                if int((vis.any(-1)).sum()) < min_cams:
-                    # The loader triangulates the written 2D; a fly seen in
-                    # fewer than two cameras has no 3D at all and its window
-                    # would be centred on the origin. Dropped and counted,
-                    # never written as a silently-degenerate frameset.
-                    n_dropped_cams += 1
-                    continue
+                uv, vis = labels[fly]
                 sex = SEX_NAME.get(int(np.asarray(r.sex).reshape(-1)[fly]), "unknown")
                 if sex == "unknown":
                     sex = fly_sex.get(f"fly{fly}", "unknown")

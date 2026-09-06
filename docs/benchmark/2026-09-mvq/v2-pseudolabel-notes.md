@@ -229,3 +229,46 @@ panels show head points on the head, abdomen points on the abdomen, wing
 points at the wing tips, leg chains running outward from the thorax, the mask
 outline wrapping the same animal, and natural fly colouring (a BGR swap would
 have shown blue flies on an orange floor).
+
+## Round 2: decisions applied (2026-09-05)
+
+User + controller rulings, all implemented in
+`scripts/pseudo_labels/extract_p3b_pseudolabels.py`:
+
+1. **`contact` := minimum inter-fly KEYPOINT distance < 5 units**
+   (`--contact-kp-units`, default 5.0). The spec's centroid rule stays in the
+   code as `--contact-units` and is recorded per frameset
+   (`stratum.sep_units`) and in `census.json`
+   (`by_stratum_centroid`, `by_host_sex_cell_centroid`) so the measurement
+   that retired it stays visible. Guarded by
+   `test_contact_is_the_min_keypoint_distance_not_the_centroid_separation`.
+2. **Gates unchanged; the two sides are drawn separately.** The female side
+   takes EVERY admissible anchor (`--female-n` unset). The male side is capped
+   (`--male-n 4000`) and drawn round-robin over recordings with a hard
+   per-recording share (`--per-rec-frac 0.20`) and per-bout cap
+   (`--per-bout-cap 200`), >= 25 % contact and >= 25 % apart where the yield
+   allows. The bout counter is PER SIDE (the ruling's "the 2 % rule applies
+   per side"): sharing it would let the uncapped female side spend the male
+   side's per-bout budget before the male side is drawn at all.
+   `test_the_caps_bound_a_drawn_side` covers both caps on a two-recording
+   fixture.
+3. **The export is deliberately not 50/50** and says so: `manifest.balance`
+   carries `female_n`, `male_n` and
+   `female_host_weight = male_n / female_n`, the multiplier that restores
+   50/50 at training time (`train.female_host_weight`).
+4. **Post-write verification runs on the REAL export** (`verify_export`,
+   skippable with `--no-verify`): `V12WindowDataset` opens the written root,
+   reads 20 random windows and asserts the keypoint axis matches
+   `annotations/keypoint_names.json`, the 2D/3D are finite, the host has
+   triangulated 3D, >= 2 cameras are valid and the crops are not all black
+   (an unwritten or misnamed JPEG). `summary.md` beside the manifest carries
+   the per-side, per-stratum, per-recording and partner tables.
+
+Two writer changes came out of this round:
+- JPEGs are written only for cameras some frameset actually resolves (the
+  loader never opens the others), which keeps a ~150k-file tree from carrying
+  dead frames.
+- `write_pseudo_export` now REFUSES masks whose (H, W) differs from the
+  frame's: the loader slices a mask with the image's crop origin, so a
+  differently-sized mask is not a smaller mask, it is a mask of somewhere
+  else.

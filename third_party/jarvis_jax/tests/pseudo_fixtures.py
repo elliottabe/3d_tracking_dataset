@@ -61,7 +61,7 @@ def make_calib(calib_dir, cm=None):
 
 def make_bout(tmp_path, *, T=40, sep_units=40.0, name="bout_00004", exist=0.95,
               identity="mask", drop_frames=(), spike_frames=(), frame_start=1000,
-              masks_path=None, rec="rec"):
+              masks_path=None, rec="rec", hw=None):
     """Returns (bout_dir, mask_npz_path, cam_mats). fly0 sits at the origin,
     fly1 `sep_units` away in +x; both drift 0.2 units/frame.
 
@@ -70,6 +70,11 @@ def make_bout(tmp_path, *, T=40, sep_units=40.0, name="bout_00004", exist=0.95,
     frames are `frame_start + t` (frameset keys are absolute, so two bouts
     sharing a frame_start would overwrite each other), and the mask npz
     defaults to ONE path per tmp_path.
+
+    `hw` sizes the MASK canvas (default the module's 80x120). A test that
+    feeds the export writer real-sized frames must pass the frame's own
+    (H, W) here: on real data a SAM3 mask and its camera frame are the same
+    1936x448, and the loader slices the mask with the crop's own origin.
     """
     cm = cam_mats()
     root = tmp_path / rec / "pose_mvq_p3b" / "bouts" / name
@@ -124,27 +129,29 @@ def make_bout(tmp_path, *, T=40, sep_units=40.0, name="bout_00004", exist=0.95,
         np.savez(d / "kp2d.npz", kp2d=kp2d[f], conf=conf[f],
                  cameras=np.array(CAMS), kp_names=np.array(KP_NAMES))
     (root / "mvq_meta.json").write_text(json.dumps(meta))
-    npz = make_masks(tmp_path, kp3d, cm, T, path=masks_path)
+    npz = make_masks(tmp_path, kp3d, cm, T, path=masks_path, hw=hw)
     return str(root), npz, cm
 
 
-def make_masks(tmp_path, kp3d, cm, T, path=None):
+def make_masks(tmp_path, kp3d, cm, T, path=None, hw=None):
     """A `BoutMaskStore`-readable npz: a filled box around each fly's
-    reprojected keypoints in every camera."""
+    reprojected keypoints in every camera. `hw` sizes the canvas (default the
+    module's 80x120) -- see `make_bout`."""
     F, _, K, _ = kp3d.shape; C = len(CAMS)
-    full = np.zeros((F, C, T, H, W), bool)
+    h, w = (H, W) if hw is None else (int(hw[0]), int(hw[1]))
+    full = np.zeros((F, C, T, h, w), bool)
     cent = np.zeros((F, C, T, 2), np.float32)
     for f in range(F):
         for t in range(T):
             uv = project(cm, kp3d[f, t])
             for c in range(C):
                 x0, y0 = np.nanmin(uv[c], 0) - 4; x1, y1 = np.nanmax(uv[c], 0) + 4
-                xs = slice(max(int(x0), 0), min(int(x1) + 1, W))
-                ys = slice(max(int(y0), 0), min(int(y1) + 1, H))
+                xs = slice(max(int(x0), 0), min(int(x1) + 1, w))
+                ys = slice(max(int(y0), 0), min(int(y1) + 1, h))
                 full[f, c, t, ys, xs] = True
                 cent[f, c, t] = np.nanmean(uv[c], 0)
     p = (tmp_path / "sam3_masks.npz") if path is None else path
     os.makedirs(os.path.dirname(str(p)), exist_ok=True)
     np.savez(p, packed=np.packbits(full, axis=-1), valid=np.ones((F, C, T), bool),
-             centroids=cent, shape=np.array([H, W], np.int32), cameras=np.array(CAMS))
+             centroids=cent, shape=np.array([h, w], np.int32), cameras=np.array(CAMS))
     return str(p)

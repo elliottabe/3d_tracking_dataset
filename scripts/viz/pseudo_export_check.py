@@ -79,8 +79,9 @@ def _panel(root, coco, img, ann, fsv, key, cam_row, kp_names, pad=40):
     st = fsv.get("stratum", {})
     label = (f"{key}  {cam}  {a.get('sex', '?')}  {fsv.get('role')}  "
              f"{'contact' if st.get('contact') else ('apart' if st.get('apart') else 'mid')}"
-             f"{' WALL' if st.get('wall') else ''}  sep={st.get('sep_units')}u  "
-             f"nkp={int(vis.sum())}  mask={'yes' if m.any() else 'NO'}")
+             f"{' WALL' if st.get('wall') else ''}  kpdist={st.get('kp_dist_units')}u "
+             f"cent={st.get('sep_units')}u  nkp={int(vis.sum())}  "
+             f"mask={'yes' if m.any() else 'NO'}")
     return crop, label
 
 
