@@ -1332,3 +1332,131 @@ Honest caveats from the same read-back:
   points into empty background, and the pair rule takes the good frame adjacent
   to each garbage one with it. Bouts 22 and 13 are the same story. That pair
   behaviour is the main cost of the temporal rule and is documented as such.
+
+## Own-window preference (2026-09-05)
+
+### Mechanism
+
+A frame whose two SAM3 masks are further apart than `merge_dist_units` plans
+TWO 448-px crops, one centred on each mask, and at courtship distances BOTH
+crops usually contain BOTH animals. `pick_mask_pair` matched instances to masks
+by DISTANCE over every window of the frame and broke ties on existence, so a
+fly was routinely taken from the crop centred on its PARTNER's mask.
+
+The 3D survives that -- same animal, same seven views, the IK fits it. The
+CONFIDENCE does not. A fly at the edge of its partner's crop has half its body
+at or past the crop boundary, so the model's per-view visibility there is ~0
+and `conf3d` (its mean over cameras, the number written into `kp3d.npz`)
+collapses with it. `conf3d` is a GATE downstream -- the offsets sampler needs
+min conf >= 0.7, the rigid-edge repair 0.5, the side-by-side display hides
+low-conf 2D points ("half the fly disappears"), the pseudo-label export
+thresholds on it -- so those frames were being discarded for a cropping
+accident, not for anything wrong with the pose.
+
+The fix (`WINDOW_PREF_MODES` in `jarvis_jax/tracking/lift_mvq.py`): under
+`window_pref: own` (the new default) each fly's OWN window -- the one
+`frame_windows`' per-fly assignment names -- is searched first, both in the
+geometric branch and in the typed fallback; the other windows are consulted
+only when its own offers no candidate passing `exist_thresh` and the same
+relative-nearest mask test. It is a PREFERENCE, not a filter: nothing is NaN'd
+for being in the wrong crop, the collapse guard and the containment filter are
+untouched, and a MERGED window is every fly's own window, so merged frames are
+unchanged by construction. `window_pref: any` reproduces the old rule.
+
+`mvq_meta.json` now records `window_pref`, `per_frame.own_window` (1 own /
+0 another / -1 nothing written) and `n_from_other_window` per fly. The key is
+enrolled in the Stage-B gate signature (`mvq_gate_signature` ->
+`run_bout.stage_b_gate_signature` -> `bout_lift_is_current`), so **every lift
+produced before 2026-09-05 is stale** -- intended, since those lifts carry the
+cross-window confidences. Like `containment`, it is reported as its EFFECTIVE
+value: `"any"` whenever `identity` is not `mask`, where the rule does not run.
+
+### Measured, two bouts, same p3b checkpoint and flags
+
+`BEFORE` = the shipped `pose_mvq_p3b` lift. `AFTER` = re-lift into
+`OutFiles/ownwindow_check/`. A `--window-pref any` CONTROL was also re-lifted
+(`OutFiles/ownwindow_check_any/`) and reproduces BEFORE's per-frame window
+choice **exactly** (identical `per_frame.window` arrays) and its kp3d to
+0.0003 mm median / 0.007 mm max -- pure GPU float noise -- so the delta below
+is the preference and nothing else.
+
+Median `conf3d` by keypoint group:
+
+| bout | fly | own-window frac | group | before | after |
+|---|---|---|---|---|---|
+| 14_54_28 b10 | fly0 female | 0.033 -> **1.000** | head/thorax | 0.001 | **0.993** |
+| | | | T1-T2 legs | 0.008 | **0.993** |
+| | | | T3 legs | 0.692 | 0.996 |
+| | | | wings | 0.989 | 0.994 |
+| | | | abdomen | 0.903 | 0.995 |
+| 14_54_28 b10 | fly1 male | 0.927 -> 1.000 | head/thorax | 0.996 | 0.996 |
+| | | | T1-T2 legs | 0.994 | 0.994 |
+| | | | T3 / wings / abdomen | 0.995 / 0.994 / 0.997 | 0.995 / 0.995 / 0.998 |
+| 20_04 b4 | fly0 female | 0.403 -> 0.403 | head/thorax | 0.022 | 0.022 |
+| | | | T1-T2 legs | 0.024 | 0.024 |
+| | | | T3 / wings / abdomen | 0.056 / 0.430 / 0.366 | unchanged |
+| 20_04 b4 | fly1 male | 0.997 -> 1.000 | all groups | 0.987-0.996 | unchanged |
+
+**20_04 bout 4 is an honest null.** Her own window offers no candidate on all
+175 two-window frames (she is only ever read from her own crop on the 118
+MERGED frames), so the preference never fires and her kp3d is byte-identical
+before and after (max |dkp3d| 0.0000 mm). Her 0.02 confidence there has a
+different cause -- that recording's female SAM mask centre sits 13-35 units off
+her body, so her "own" crop is mis-centred and the model does not fire in it.
+The preference cannot fix a crop that is pointed at the wrong place; the
+fallback correctly keeps her rather than NaN-ing the frame.
+
+3D difference on 14_54_28 b10, frames where both reads are finite:
+
+| fly | median | p90 | p99 | max | frac > 0.05 mm |
+|---|---|---|---|---|---|
+| fly0 female | 0.1116 mm | 0.379 | 0.686 | 1.007 | 0.797 |
+| fly1 male | 0.0003 mm | 0.001 | 0.263 | 0.631 | 0.042 |
+
+This EXCEEDS the < 0.05 mm the task expected for the female, and the reason is
+not a swap -- it is that the own-window read is a genuinely different (and
+better) estimate of the same animal. The motion is concentrated exactly where
+the old confidence had collapsed: split by BEFORE `conf3d`, keypoint-frames
+with conf < 0.5 move a median 0.162 mm and those with conf >= 0.5 move
+0.046 mm; by group, head/thorax 0.150 mm and T1-T2 0.178 mm (before-conf 0.001
+/ 0.008) against abdomen 0.062 mm and T3 0.057 mm (before-conf 0.903 / 0.692).
+
+**Rigid invariant (the check that settles it).** EyeL-EyeR spacing is a rigid
+head pair and must be CONSTANT:
+
+| fly0 female, 14_54_28 b10 | mean | sd | CV |
+|---|---|---|---|
+| EyeL-EyeR before | 0.678 mm | 0.042 | 6.18 % |
+| EyeL-EyeR after | 0.527 mm | 0.013 | **2.38 %** |
+| Antenna_Base-Scutellum before | 1.403 mm | 0.024 | 1.71 % |
+| Antenna_Base-Scutellum after | 1.396 mm | 0.009 | **0.63 %** |
+
+The male's, unchanged: EyeL-EyeR 2.35 % -> 2.39 %, Antenna_Base-Scutellum
+0.85 % -> 0.78 %. So the female's head was both inflated (0.68 mm vs the male's
+0.45 mm) and 2.6x jitterier when read out of his crop; the own-window read is
+tighter on a quantity that physically cannot vary. Per-keypoint jump/straddle
+(the `perkp_all_bouts.py` definitions -- >= 5 keypoints stepping > 0.5 mm in one
+frame / >= 5 nearer the partner's centroid) are unchanged: b10 fly0 jump
+0.0000 -> 0.0000, straddle 0.0132 -> 0.0132; fly1 0/0 both; 20_04 b4 fly0 jump
+0.0254 -> 0.0254. No fly gained NaN frames.
+
+### Figure
+
+`figures/2026-09-mvq/p3b_gates/ownwindow_bout10.png` -- 14_54_28 bout 10,
+frames 5 / 100 / 200 / 287, overhead `Cam2012630` and side `Cam2012861`, the
+FEMALE's keypoints coloured by `conf3d` (0-1 viridis), her SAM3 mask outlined
+white, the male's keypoints in grey. Regenerate with
+`scripts/viz/ownwindow_conf_check.py` (the command is in its docstring); the
+numbers above are in `ownwindow_compare.json` / `ownwindow_bout10_numbers.txt`
+beside it, with the diagnostic scripts that produced them.
+
+**Read back (Read tool). Expectation met.** In every BEFORE panel only part of
+her skeleton is drawn and most of it is dark purple (median conf3d 0.00 / 0.04
+/ 0.06 / 0.15), with the unseen keypoints stacked into a straight vertical line
+through her thorax -- the model's output for landmarks it cannot localise at
+the crop edge. In every AFTER panel the whole fly -- head, thorax, all six
+legs, wings, abdomen -- is bright yellow (median 0.99-1.00) and every point
+sits ON her body inside the white mask outline, in BOTH the overhead and the
+side camera, with the male's grey points untouched beside her. That is the
+"half the fly disappears" failure and its repair, and the points not moving to
+the other animal is what rules out a swap.
