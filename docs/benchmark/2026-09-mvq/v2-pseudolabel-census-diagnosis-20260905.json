@@ -1,0 +1,86 @@
+{
+ "n_bouts": 33,
+ "per_rec": 3,
+ "sep_edges_units": [
+  0.0,
+  5.0,
+  10.0,
+  15.0,
+  20.0,
+  25.0,
+  30.0,
+  40.0,
+  60.0,
+  100.0
+ ],
+ "centroid_sep_all_frames": [
+  0,
+  0,
+  0,
+  0,
+  232,
+  3805,
+  11617,
+  2382,
+  259,
+  0
+ ],
+ "centroid_sep_admitted": [
+  0,
+  0,
+  0,
+  0,
+  11,
+  199,
+  643,
+  153,
+  16,
+  0
+ ],
+ "min_keypoint_dist_all": [
+  6011,
+  8835,
+  2220,
+  563,
+  317,
+  136,
+  119,
+  91,
+  3,
+  0
+ ],
+ "min_keypoint_dist_admitted": [
+  320,
+  490,
+  128,
+  36,
+  23,
+  13,
+  6,
+  6,
+  0,
+  0
+ ],
+ "per_fly_rejects": {
+  "female": {
+   "_n": 18764,
+   "_admitted": 4595,
+   "exist": 1843,
+   "step": 3828,
+   "reproj": 2004,
+   "contain": 13581,
+   "nonfinite": 2243,
+   "identity": 0
+  },
+  "male": {
+   "_n": 18764,
+   "_admitted": 13079,
+   "exist": 6,
+   "step": 2376,
+   "reproj": 72,
+   "contain": 3341,
+   "nonfinite": 1840,
+   "identity": 0
+  }
+ }
+}

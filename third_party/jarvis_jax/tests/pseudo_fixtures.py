@@ -5,6 +5,8 @@ count), T frames, 6 keypoints, an 80x120 frame. Geometry is exact: kp2d is
 the projection of kp3d through `cam_mats`, so the reprojection gate passes
 unless a test perturbs it."""
 import json
+import os
+
 import numpy as np
 
 CAMS = ["Cam2012630", "Cam2012631", "Cam2012853", "Cam2012855",
@@ -36,12 +38,41 @@ def project(cm, xyz):
     return project_points(cm, xyz)                       # (C,K,2)
 
 
+def make_calib(calib_dir, cm=None):
+    """Write `Cam<name>.yaml` for every camera in `CAMS` so that
+    `ReprojectionTool(calib_dir).camera_matrices` reproduces `cam_mats()`.
+
+    The YAML node is the (3,4) `projectionMatrix` -- i.e. the TRANSPOSE of the
+    (4,3) `p_h @ M` matrices this module hands to `project_points` -- which is
+    the convention `geometry/reprojection_tool.Camera` reads. Sorted-glob order
+    of the file names is `CAMS` order (they are already sorted), so the tool's
+    camera axis is the canonical one the rest of the fixture uses BY NAME.
+    """
+    import cv2
+    cm = cam_mats() if cm is None else np.asarray(cm, np.float64)
+    d = str(calib_dir)
+    os.makedirs(d, exist_ok=True)
+    for c, name in enumerate(CAMS):
+        fs = cv2.FileStorage(os.path.join(d, f"{name}.yaml"), cv2.FILE_STORAGE_WRITE)
+        fs.write("projectionMatrix", np.ascontiguousarray(cm[c].T))
+        fs.release()
+    return d
+
+
 def make_bout(tmp_path, *, T=40, sep_units=40.0, name="bout_00004", exist=0.95,
-              identity="mask", drop_frames=(), spike_frames=()):
+              identity="mask", drop_frames=(), spike_frames=(), frame_start=1000,
+              masks_path=None, rec="rec"):
     """Returns (bout_dir, mask_npz_path, cam_mats). fly0 sits at the origin,
-    fly1 `sep_units` away in +x; both drift 0.2 units/frame."""
+    fly1 `sep_units` away in +x; both drift 0.2 units/frame.
+
+    `frame_start`, `masks_path` and `rec` exist so a test can build SEVERAL
+    bouts of the same fake run root without them colliding: absolute video
+    frames are `frame_start + t` (frameset keys are absolute, so two bouts
+    sharing a frame_start would overwrite each other), and the mask npz
+    defaults to ONE path per tmp_path.
+    """
     cm = cam_mats()
-    root = tmp_path / "rec" / "pose_mvq_p3b" / "bouts" / name
+    root = tmp_path / rec / "pose_mvq_p3b" / "bouts" / name
     K, C = len(KP_NAMES), len(CAMS)
     kp3d = np.zeros((2, T, K, 3), np.float32)
     rng = np.random.default_rng(0)
@@ -75,8 +106,10 @@ def make_bout(tmp_path, *, T=40, sep_units=40.0, name="bout_00004", exist=0.95,
         per_frame["exist"][0][t] = 0.2
     meta = {"n_frames": T, "identity_resolved": identity_resolved, "containment": True,
             "keypoint_names_written": KP_NAMES, "cameras": CAMS,
-            "checkpoint": "/fake/final", "step": "final", "frame_start": 1000,
+            "checkpoint": "/fake/final", "step": "final", "frame_start": int(frame_start),
             "bout": int(name.split("_")[-1]), "session_dir": str(tmp_path / "video"),
+            "fly_sex": {"fly0": "female", "fly1": "male"},
+            "masks_npz": str(tmp_path / "sam3_masks.npz" if masks_path is None else masks_path),
             "containment_report": {"enabled": True, "per_frame": {
                 # `drop_frames` simulates an EXISTENCE dip (per_frame["exist"]
                 # above), not a containment drop -- n_dropped stays all-zero
@@ -91,11 +124,11 @@ def make_bout(tmp_path, *, T=40, sep_units=40.0, name="bout_00004", exist=0.95,
         np.savez(d / "kp2d.npz", kp2d=kp2d[f], conf=conf[f],
                  cameras=np.array(CAMS), kp_names=np.array(KP_NAMES))
     (root / "mvq_meta.json").write_text(json.dumps(meta))
-    npz = make_masks(tmp_path, kp3d, cm, T)
+    npz = make_masks(tmp_path, kp3d, cm, T, path=masks_path)
     return str(root), npz, cm
 
 
-def make_masks(tmp_path, kp3d, cm, T):
+def make_masks(tmp_path, kp3d, cm, T, path=None):
     """A `BoutMaskStore`-readable npz: a filled box around each fly's
     reprojected keypoints in every camera."""
     F, _, K, _ = kp3d.shape; C = len(CAMS)
@@ -110,7 +143,8 @@ def make_masks(tmp_path, kp3d, cm, T):
                 ys = slice(max(int(y0), 0), min(int(y1) + 1, H))
                 full[f, c, t, ys, xs] = True
                 cent[f, c, t] = np.nanmean(uv[c], 0)
-    p = tmp_path / "sam3_masks.npz"
+    p = (tmp_path / "sam3_masks.npz") if path is None else path
+    os.makedirs(os.path.dirname(str(p)), exist_ok=True)
     np.savez(p, packed=np.packbits(full, axis=-1), valid=np.ones((F, C, T), bool),
              centroids=cent, shape=np.array([H, W], np.int32), cameras=np.array(CAMS))
     return str(p)
