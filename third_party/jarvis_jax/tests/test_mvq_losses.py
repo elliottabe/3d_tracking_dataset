@@ -21,7 +21,8 @@ def _perfect_batch(B=2, I=4, T=1, C=3, K=5, seed=0):
              "kp2d": kp2d.astype(np.float32), "vis2d": np.ones((B, 2, T, C, K), bool),
              "fly_valid": np.ones((B, 2), bool), "px_scale": np.full((B,), 8.0, np.float32),
              "cam_valid": np.ones((B, T, C), bool), "prompt_on": np.zeros((B,), bool),
-             "fly_sex": np.array([[0, 1]] * B, np.int8), "unlabelled_sex": np.full((B,), -1, np.int8)}
+             "fly_sex": np.array([[0, 1]] * B, np.int8), "unlabelled_sex": np.full((B,), -1, np.int8),
+             "sample_weight": np.ones((B,), np.float32), "is_negative": np.zeros((B,), bool)}
     xyz = np.full((B, I, T, K, 3), 50.0, np.float32); xyz[:, 1] = X[:, 0]; xyz[:, 2] = X[:, 1]
     uv = np.zeros((B, I, T, C, K, 2), np.float32); uv[:, 1] = kp2d[:, 0]; uv[:, 2] = kp2d[:, 1]
     big = np.full((B, I, T, K), 6.0, np.float32)
@@ -294,3 +295,99 @@ def test_other_fly_repulsion_needs_two_labelled_flies():
     batch["fly_valid"] = batch["fly_valid"].at[:, 1].set(False)       # ... which is now unlabelled
     _, m = mvq_loss(out, batch, w_on, np.arange(5, dtype=np.int32))
     assert float(m["other_rep"]) == 0.0
+
+
+def test_new_batch_keys_absent_reproduces_todays_loss_exactly():
+    """Regression: a batch with neither `sample_weight` nor `is_negative` (what
+    today's loader still produces) and default LossWeights (persist=0, no
+    kp_weight) must give the BYTE-IDENTICAL total/metrics as before this change."""
+    from jarvis_jax.train.losses_mvq import mvq_loss, LossWeights
+    pk = np.arange(5, dtype=np.int32)
+    out, batch = _perfect_batch()
+    b = dict(batch); del b["sample_weight"]; del b["is_negative"]
+    total, m = mvq_loss(out, b, LossWeights(), pk)
+    assert float(m["reproj"]) < 1e-3 and float(m["l3d"]) < 1e-3 and float(m["uv2d"]) < 1e-3
+    assert float(m["rep"]) == 0.0 and float(m["exist_acc"]) == 1.0
+    assert float(m["match_reproj_px"]) < 1e-2 and float(m["mpjpe3d_units"]) < 1e-3
+    expected_vis = float(jnp.log1p(jnp.exp(-6.0)))
+    assert abs(float(m["vis"]) - expected_vis) < 1e-5
+    assert float(total) < 0.05
+    assert float(m["persist"]) == 0.0 and int(m["n_negative"]) == 0
+
+
+def test_sample_weight_scales_a_sample_out_of_the_loss():
+    from jarvis_jax.train.losses_mvq import LossWeights, mvq_loss
+    pk = np.arange(5, dtype=np.int32)
+    out, batch = _perfect_batch(B=2)
+    o = dict(out); o["xyz"] = out["xyz"].at[0, 1].add(20.0)        # sample 0 is badly wrong
+    o["aux_pass1"] = {k: o[k] for k in out["aux_pass1"]}
+    _, m_full = mvq_loss(o, batch, LossWeights(), pk)
+    batch_w = dict(batch); batch_w["sample_weight"] = jnp.asarray([0.0, 1.0], jnp.float32)
+    _, m_zero = mvq_loss(o, batch_w, LossWeights(), pk)
+    assert float(m_zero["l3d"]) < 1e-3 < float(m_full["l3d"])       # weight 0 removes it entirely
+    batch_h = dict(batch); batch_h["sample_weight"] = jnp.asarray([0.3, 1.0], jnp.float32)
+    _, m_h = mvq_loss(o, batch_h, LossWeights(), pk)
+    assert 0.0 < float(m_h["l3d"]) < float(m_full["l3d"])
+
+
+def test_negative_window_targets_zero_existence_on_every_slot():
+    from jarvis_jax.train.losses_mvq import LossWeights, mvq_loss
+    pk = np.arange(5, dtype=np.int32)
+    out, batch = _perfect_batch(B=2)
+    b = dict(batch)
+    b["fly_valid"] = jnp.zeros_like(batch["fly_valid"])            # nobody in the window
+    b["has3d"] = jnp.zeros_like(batch["has3d"])
+    b["unlabelled_sex"] = jnp.full((2,), -1, jnp.int8)
+    b["is_negative"] = jnp.ones((2,), bool)
+    o = dict(out); o["exist_logit"] = jnp.full_like(out["exist_logit"], -6.0)
+    o["aux_pass1"] = {k: o[k] for k in out["aux_pass1"]}
+    _, m_ok = mvq_loss(o, b, LossWeights(), pk)
+    assert float(m_ok["exist"]) < 1e-2 and float(m_ok["exist_acc"]) == 1.0
+    o2 = dict(o); o2["exist_logit"] = jnp.full_like(out["exist_logit"], 6.0)   # claims 4 flies
+    o2["aux_pass1"] = {k: o2[k] for k in out["aux_pass1"]}
+    _, m_bad = mvq_loss(o2, b, LossWeights(), pk)
+    assert float(m_bad["exist"]) > 5.0 and float(m_bad["exist_acc"]) == 0.0
+    assert float(m_ok["l3d"]) == 0.0 and float(m_ok["reproj"]) == 0.0          # no geometry to score
+
+
+def test_identity_persistence_penalises_a_slot_that_teleports():
+    from jarvis_jax.train.losses_mvq import LossWeights, mvq_loss
+    pk = np.arange(5, dtype=np.int32)
+    out, batch = _perfect_batch(B=2, T=2)
+    w = LossWeights(persist=1.0)
+    _, m0 = mvq_loss(out, batch, w, pk)
+    assert float(m0["persist"]) < 1e-4                    # GT motion is fully explained
+    o = dict(out); o["xyz"] = out["xyz"].at[:, 1, 1].add(30.0)      # slot 1 jumps on frame 1
+    o["aux_pass1"] = {k: o[k] for k in out["aux_pass1"]}
+    _, m1 = mvq_loss(o, batch, w, pk)
+    assert float(m1["persist"]) > 20.0
+
+
+def test_assignment_uses_frame_0_only():
+    """With T=2 the two flies swap sides between frames; the slot a fly gets
+    must be decided by frame 0, not by a centroid averaged over both."""
+    from jarvis_jax.train.losses_mvq import LossWeights, mvq_loss
+    pk = np.arange(5, dtype=np.int32)
+    out, batch = _perfect_batch(B=1, T=2)
+    b = dict(batch)
+    x = np.asarray(batch["kp3d_local"]).copy()
+    x[0, 0, 1] += 80.0; x[0, 1, 1] -= 80.0                # frame 1 swaps who is nearer the origin
+    b["kp3d_local"] = jnp.asarray(x)
+    _, m = mvq_loss(out, b, LossWeights(), pk)
+    assert float(m["exist_acc"]) == 1.0                   # slots unchanged: female 1, male 2
+
+
+def test_wing_keypoints_carry_double_weight():
+    from jarvis_jax.train.losses_mvq import LossWeights, mvq_loss, wing_kp_weight
+    names = ["EyeL", "EyeR", "Scutellum", "WingL_base", "WingR_base"]
+    kpw = wing_kp_weight(names, 2.0)
+    assert kpw.tolist() == [1.0, 1.0, 1.0, 2.0, 2.0]
+    pk = np.arange(5, dtype=np.int32)
+    out, batch = _perfect_batch()
+    o_wing = dict(out); o_wing["xyz"] = out["xyz"].at[:, 1, 0, 3].add(5.0)     # error on a WING kp
+    o_wing["aux_pass1"] = {k: o_wing[k] for k in out["aux_pass1"]}
+    o_eye = dict(out); o_eye["xyz"] = out["xyz"].at[:, 1, 0, 0].add(5.0)       # same error, EyeL
+    o_eye["aux_pass1"] = {k: o_eye[k] for k in out["aux_pass1"]}
+    _, mw = mvq_loss(o_wing, batch, LossWeights(), pk, kp_weight=kpw)
+    _, me = mvq_loss(o_eye, batch, LossWeights(), pk, kp_weight=kpw)
+    assert float(mw["l3d"]) > 1.9 * float(me["l3d"])
