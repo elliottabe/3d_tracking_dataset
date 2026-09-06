@@ -65,6 +65,14 @@ SEX_UNKNOWN` (nothing is present-but-unlabelled -- that code would tell the
 existence loss to IGNORE the very window it is meant to learn from) and
 `is_negative` True. It is never another window's second instance, never a
 copy-paste target and never a donor.
+
+At T > 1 a negative pairs through its own `partners` map (delta -> the
+partner's ABSOLUTE video frame) exactly like a positive anchor does, and
+yields NO window at a spacing it has no partner for. It cannot be paired by
+"labelled at both frames" -- it has no labels -- and pairing it by frame
+arithmetic alone would produce a FROZEN pair (the same picture twice) whenever
+the partner frameset was never exported, teaching the temporal branch that
+"identical frames" means "no fly".
 """
 from __future__ import annotations
 
@@ -170,20 +178,19 @@ class V12WindowDataset:
             if grp not in self._tools:
                 self._tools[grp] = ReprojectionTool(os.path.join(root, "calibrations", str(grp)))
             self._fs[(rec, frame, fly)] = fsv
-        self.pair_deltas = tuple(int(d) for d in (pair_deltas or (1,)))
-        self.windows, self.win_delta = [], []
+        self.pair_deltas = tuple(dict.fromkeys(int(d) for d in (pair_deltas or (1,))))
+        self.windows, self.win_delta, self._win_index = [], [], {}
         for (rec, frame, fly) in sorted(self._fs):
-            if fly < 0:                                     # negative window: no partner needed
-                self.windows.append((rec, fly, frame)); self.win_delta.append(0)
+            if self.T == 1:                                 # one frame: no spacing to choose
+                self._add_window(rec, fly, frame, 0)
                 continue
-            if self.T == 1:
-                self.windows.append((rec, fly, frame)); self.win_delta.append(0)
+            if fly < 0:
+                for d, start in self._negative_pairs(rec, frame, fly):
+                    self._add_window(rec, fly, start, d)    # both ends may name the same pair
                 continue
             for d in self.pair_deltas:                      # "labelled at both frames, spacing d"
                 if all((rec, frame + k * d, fly) in self._fs for k in range(self.T)):
-                    self.windows.append((rec, fly, frame)); self.win_delta.append(d)
-        self._win_index = {(w[0], w[1], w[2], d): i
-                           for i, (w, d) in enumerate(zip(self.windows, self.win_delta))}
+                    self._add_window(rec, fly, frame, d)
         # Per-WINDOW host sex (the host's own frame-0 frameset annotation first),
         # not one collapsed value per (rec, fly): see the module docstring.
         self._win_sex = [self._resolve_fs_sex(rec, f0, fly) for (rec, fly, f0) in self.windows]
@@ -205,6 +212,49 @@ class V12WindowDataset:
                 self._donors.setdefault((self.manifest[rec]["calib_group"],
                                          _SEX_CODE.get(self._win_sex[i], SEX_UNKNOWN),
                                          self.delta(i)), []).append(i)
+
+    def _add_window(self, rec, fly, f0, d):
+        """Append window (rec, fly, f0) at spacing d, unless that exact key is
+        already built -- a negative pair can be named by BOTH of its framesets
+        (one forward, one backward), and it is one window either way."""
+        key = (rec, int(fly), int(f0), int(d))
+        if key in self._win_index:
+            return
+        self._win_index[key] = len(self.windows)
+        self.windows.append((rec, int(fly), int(f0)))
+        self.win_delta.append(int(d))
+
+    def _negative_pairs(self, rec, frame, fly):
+        """`[(delta, start_frame)]`: the T > 1 windows this NEGATIVE frameset
+        supports, from its own `partners` map (delta -> the partner's ABSOLUTE
+        video frame, `data/pseudo_export.py`).
+
+        The writer may name the partner FORWARD (`f0 + d`) or BACKWARD (`f0 - d`
+        -- `scripts/pseudo_labels/extract_p3b_pseudolabels.py` falls back to the
+        earlier frame when the later one failed the gates), so the window starts
+        at whichever of the two is earlier and `_add_window` drops the duplicate
+        when the partner names the pair back. A spacing with no partner entry
+        yields NO window (never a frozen pair); a partner frameset that is not in
+        this root -- e.g. dropped by the gallery review -- is likewise just "no
+        pair". A partner that is not `d` frames away is a BROKEN LINK and raises:
+        following it would build a window whose second frame is not the partner
+        at all."""
+        partners = (self._fs[(rec, frame, fly)].get("partners") or {})
+        out = []
+        for d in self.pair_deltas:
+            pf = partners.get(str(int(d)), partners.get(int(d)))
+            if pf is None:
+                continue
+            pf = int(pf)
+            if abs(pf - frame) != int(d):
+                raise ValueError(
+                    f"negative frameset {rec}/Frame_{frame} (fly {fly}): partners[{d!r}] = {pf}, "
+                    f"which is {abs(pf - frame)} frames away, not {d}. A partner link must name "
+                    f"the frame the window's second slot reads (f0 +/- delta)")
+            start = min(frame, pf)
+            if all((rec, start + k * int(d), fly) in self._fs for k in range(self.T)):
+                out.append((int(d), start))
+        return out
 
     def _warn_sex_disagreements(self):
         """Print ONE warning per (recording, fly) whose framesets carry more
@@ -612,10 +662,13 @@ class V12WindowDataset:
         per-frame pixels/labels -- so the donor is drawn from the pool of the
         same calibration group AND THE SAME SPACING (`delta`), or its motion
         across the window would cover a different amount of time than the
-        host's. `info["donor_delta"]` reports that spacing."""
+        host's. `info["donor_delta"]` reports that spacing. None for a negative
+        window (it has no host, and its whole content is "there is no fly here")."""
         from jarvis_jax.data.mv_copy_paste import body_plane_axes, composite, sample_offset
         p = self.copy_paste
         rec, host, _ = self.windows[i]
+        if host < 0:
+            return None          # a negative asserts NO fly: pasting one in would invert its label
         grp = self.manifest[rec]["calib_group"]
         d_i = self.delta(i)
         host_sex = _SEX_CODE.get(self._win_sex[i], SEX_UNKNOWN)   # this window's host, not the (rec, fly) pair's

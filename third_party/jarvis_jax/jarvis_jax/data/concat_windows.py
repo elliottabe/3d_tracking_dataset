@@ -17,14 +17,33 @@ sub-dataset, so a pseudo root's 0.3 weight reaches `sample_weight` unchanged.
 What it refuses, rather than silently mixing:
   * different `keypoint_names` (the keypoint axis would mean two different
     things in one batch -- CLAUDE.md's keypoint-order history);
-  * different window lengths T (the `crops` axis would not stack);
-  * the same recording described with two different `calib_group`s by two
-    roots (the same fly would triangulate two ways, and the merged
-    `manifest[rec]` could only hold one of them).
+  * different window lengths T, or different `pair_deltas` (the `crops` axis
+    would not stack, and copy-paste pairs donors by spacing);
+  * a recording that two roots describe DIFFERENTLY in any manifest field a
+    loader or sampler reads (`_MERGE_CHECKED`) -- the merge is per field, so a
+    field only one root defines is simply taken, but a real disagreement would
+    silently change what a window means depending on merge order.
 """
 from __future__ import annotations
 
 import bisect
+
+# manifest[rec] fields some loader/sampler path READS, and its reader. A
+# disagreement between two roots about one of these is a conflict, not a merge:
+# last-one-wins would decide, invisibly, which root's description of the
+# recording every window of BOTH roots is interpreted with. Fields not listed
+# here (bookkeeping like `split`, `sex_source`, `checkpoint`) are not read by
+# any window/sampler code path and merge last-one-wins.
+_MERGE_CHECKED = {
+    "calib_group": "V12WindowDataset.calib_group/_rt -- which calibration triangulates it",
+    "sex": "v5_3d._resolve_sex fallback, and unlabelled_sex's 'mixed' branch",
+    "fly_sex": "v5_3d._resolve_sex per-fly fallback, and unlabelled_sex",
+    "n_flies": "unlabelled_sex -- is an animal present but unlabelled?",
+    "behavior": "train_mvq._balanced_weights -- the sampler's balance category",
+    "source": "V12WindowDataset._fs_field -> source() -- real vs pseudo",
+    "weight": "V12WindowDataset._fs_field -> weight() -> the sample's sample_weight",
+    "role": "V12WindowDataset._fs_field -> role()",
+}
 
 
 class ConcatWindowDataset:
@@ -49,23 +68,33 @@ class ConcatWindowDataset:
             if int(d.T) != int(first.T):
                 raise ValueError(f"window length T differs between roots {first.root!r} (T={first.T}) "
                                  f"and {d.root!r} (T={d.T}): the crops axis would not stack")
+            if tuple(d.pair_deltas) != tuple(first.pair_deltas):
+                raise ValueError(f"pair_deltas differ between roots {first.root!r} "
+                                 f"({tuple(first.pair_deltas)}) and {d.root!r} ({tuple(d.pair_deltas)}): "
+                                 f"the two roots would contribute windows of different spacings")
         self.keypoint_names = list(first.keypoint_names)
         self.T = int(first.T)
-        # Merged per-recording manifest (`_balanced_weights` reads
-        # manifest[rec]["behavior"]). A recording two roots describe differently
-        # is a real conflict, not a merge order question.
+        # Merged per-recording manifest, PER FIELD (`_balanced_weights` reads
+        # manifest[rec]["behavior"], `_resolve_sex` reads sex/fly_sex, ...). A
+        # recording two roots describe differently in any field a loader reads is
+        # a real conflict, not a merge-order question; a field only one root
+        # defines is simply taken.
         self.manifest = {}
-        owner = {}
+        owner = {}                      # rec -> {field: (root name, root path)}
         for d, nm in zip(self.datasets, self.names):
             for rec, meta in d.manifest.items():
-                prev = self.manifest.get(rec)
-                if prev is not None and prev.get("calib_group") != meta.get("calib_group"):
-                    raise ValueError(
-                        f"recording {rec!r} has calib_group {prev.get('calib_group')!r} in "
-                        f"{owner[rec]} and {meta.get('calib_group')!r} in {nm}: the two roots "
-                        f"disagree about how to triangulate the same fly")
-                self.manifest[rec] = meta
-                owner[rec] = nm
+                merged = self.manifest.setdefault(rec, {})
+                who = owner.setdefault(rec, {})
+                for field, value in meta.items():
+                    if field in _MERGE_CHECKED and field in merged and merged[field] != value:
+                        pn, pr = who[field]
+                        raise ValueError(
+                            f"recording {rec!r}: manifest field {field!r} is {merged[field]!r} in "
+                            f"root {pn} ({pr}) and {value!r} in root {nm} ({d.root}). It is read by "
+                            f"{_MERGE_CHECKED[field]}, so the two roots would describe the same "
+                            f"recording differently depending on merge order")
+                    merged[field] = value
+                    who[field] = (nm, d.root)
         self._cum = []
         n = 0
         for d in self.datasets:

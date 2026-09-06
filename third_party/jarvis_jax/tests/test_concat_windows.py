@@ -14,16 +14,32 @@ def _root(base, **kw):
     return make_v12_root(base, **kw)
 
 
+def _pseudo(root, weight=0.3):
+    """Mark a whole root as a pseudo export (root-level manifest defaults, the
+    shape `data/pseudo_export.py` writes), so the two roots of a concat are
+    distinguishable and `source`/`weight` assertions can actually fail."""
+    p = os.path.join(root, "manifest.json")
+    man = json.load(open(p))
+    man["source"] = "pseudo"; man["weight"] = float(weight)
+    json.dump(man, open(p, "w"))
+    return root
+
+
 def test_concat_indexes_and_delegates(tmp_path):
     from jarvis_jax.data.concat_windows import ConcatWindowDataset
     from jarvis_jax.data.v12_windows import V12WindowDataset, WINDOW_KEYS, window_batches
-    a = V12WindowDataset(_root(tmp_path / "a"), "train", T=1, train=False)
-    b = V12WindowDataset(_root(tmp_path / "b"), "train", T=1, train=False)
+    ra, rb = _root(tmp_path / "a"), _pseudo(_root(tmp_path / "b"))
+    a = V12WindowDataset(ra, "train", T=1, train=False)
+    b = V12WindowDataset(rb, "train", T=1, train=False)
     c = ConcatWindowDataset([a, b], names=["real", "pseudo"])
     assert len(c) == len(a) + len(b)
     assert c.which(len(a)) == (1, 0) and c.keypoint_names == a.keypoint_names
     np.testing.assert_array_equal(c[len(a)]["crops"], b[0]["crops"])
-    assert c.source(len(a)) == b.source(0) and c.camera_names(0) == a.camera_names(0)
+    # provenance must come from the OWNING root, so the two roots have to differ
+    # here or this assertion cannot fail (both roots "real" would be vacuous)
+    assert c.source(len(a)) == b.source(0) == "pseudo" and c.source(0) == a.source(0) == "real"
+    assert c.weight(len(a)) == 0.3 and c.weight(0) == 1.0
+    assert c.camera_names(0) == a.camera_names(0)
     c.epoch = 7
     assert a.epoch == 7 and b.epoch == 7
     batch = next(window_batches(c, 2, shuffle=False, num_workers=1, drop_last=False))
@@ -70,13 +86,27 @@ def test_concat_supports_the_sampler_and_cohort_surface(tmp_path):
     from jarvis_jax.data.v12_windows import V12WindowDataset
     from jarvis_jax.train.train_mvq import _balanced_weights, _cohorts
     a = V12WindowDataset(_root(tmp_path / "a"), "train", T=1, train=False)
-    b = V12WindowDataset(_root(tmp_path / "b", n_frames=4), "train", T=1, train=False)
+    # root b's fly0 is annotated MALE in every frame, so the two roots differ in
+    # host sex: a female cohort / female weight mass that ignored `which(i)` would
+    # come out the same for both halves and the assertions below could not fail.
+    b = V12WindowDataset(_root(tmp_path / "b", n_frames=4,
+                               fly0_sex_by_frame={f: "male" for f in range(4)}),
+                         "train", T=1, train=False)
     c = ConcatWindowDataset([a, b])
+    expect_f = [a.is_female(i) for i in range(len(a))] + [b.is_female(i) for i in range(len(b))]
+    assert any(expect_f) and not all(expect_f)          # the check is not vacuous
+    assert not any(expect_f[len(a):])                   # every root-b window is male-host
     w = _balanced_weights(c, 0.5, 1.0)
     assert w.shape == (len(c),) and abs(float(w.sum()) - 1.0) < 1e-9 and (w > 0).all()
     coh = _cohorts(c)
-    assert coh["female"].shape == (len(c),) and coh["female"].any()
-    assert coh["group_A"].all()
+    np.testing.assert_array_equal(coh["female"], np.array(expect_f))
+    np.testing.assert_array_equal(coh["single_fly"],
+                                  np.array([c.n_flies(i) == 1 for i in range(len(c))]))
+    assert coh["group_A"].all() and set(c.manifest) == {REC}   # one recording, one group
+    # female_weight really moves mass onto root a's female-host windows
+    is_f = np.array(expect_f)
+    w3 = _balanced_weights(c, 0.5, 3.0)
+    assert float(w3[is_f].sum()) > float(w[is_f].sum())
 
 
 def test_concat_refuses_mismatched_keypoint_orders(tmp_path):
@@ -119,14 +149,54 @@ def test_concat_refuses_two_roots_that_disagree_about_a_calibration(tmp_path):
     assert ok.manifest[REC]["calib_group"] == "A"
 
 
-def test_concat_requires_the_same_window_length(tmp_path):
+def test_concat_refuses_a_conflicting_manifest_field(tmp_path):
+    """`calib_group` is not the only field that matters: `_balanced_weights`
+    reads `behavior`, and last-one-wins there would silently put BOTH roots'
+    windows in one sampler category or the other depending on merge order.
+    Every field a loader/sampler path reads is conflict-checked; a field only
+    one root defines is merged without complaint."""
+    from jarvis_jax.data.concat_windows import ConcatWindowDataset
+    from jarvis_jax.data.v12_windows import V12WindowDataset
+    ra, rb = _root(tmp_path / "a"), _root(tmp_path / "b")
+    p = os.path.join(rb, "manifest.json")
+    man = json.load(open(p))
+    man["recordings"][REC]["behavior"] = "climbing"          # root a says "courtship"
+    json.dump(man, open(p, "w"))
+    a = V12WindowDataset(ra, "train", T=1, train=False)
+    b = V12WindowDataset(rb, "train", T=1, train=False)
+    assert a.manifest[REC]["behavior"] == "courtship" and b.manifest[REC]["behavior"] == "climbing"
+    with pytest.raises(ValueError, match="behavior") as e:
+        ConcatWindowDataset([a, b], names=["real", "pseudo"])
+    assert REC in str(e.value) and "real" in str(e.value) and "pseudo" in str(e.value)
+    # sex is read too (the _resolve_sex fallback chain)
+    man["recordings"][REC]["behavior"] = "courtship"
+    man["recordings"][REC]["sex"] = "female"                 # root a says "mixed"
+    json.dump(man, open(p, "w"))
+    with pytest.raises(ValueError, match="'sex'"):
+        ConcatWindowDataset([a, V12WindowDataset(rb, "train", T=1, train=False)])
+    # a field only ONE root defines is taken, not a conflict; an unread
+    # bookkeeping field may differ freely
+    man["recordings"][REC].pop("sex")
+    man["recordings"][REC]["checkpoint"] = "/fake/final"     # not read by any window path
+    json.dump(man, open(p, "w"))
+    ok = ConcatWindowDataset([a, V12WindowDataset(rb, "train", T=1, train=False)])
+    assert ok.manifest[REC]["sex"] == "mixed" and ok.manifest[REC]["checkpoint"] == "/fake/final"
+    assert a.manifest[REC].get("checkpoint") is None         # the sub-dataset's dict is not mutated
+
+
+def test_concat_requires_the_same_window_length_and_spacings(tmp_path):
     """A T=1 root and a T=2 root cannot be stacked into one batch: `crops` is
-    (T, C, 448, 448, 3) and `window_batches` stacks them."""
+    (T, C, 448, 448, 3) and `window_batches` stacks them. Different
+    `pair_deltas` would also mean the two roots contribute different spacings
+    (and copy-paste pairs donors BY spacing)."""
     from jarvis_jax.data.concat_windows import ConcatWindowDataset
     from jarvis_jax.data.v12_windows import V12WindowDataset
     ra, rb = _root(tmp_path / "a"), _root(tmp_path / "b")
     with pytest.raises(ValueError, match="T"):
         ConcatWindowDataset([V12WindowDataset(ra, "train", T=1, train=False),
                              V12WindowDataset(rb, "train", T=2, train=False)])
+    with pytest.raises(ValueError, match="pair_deltas"):
+        ConcatWindowDataset([V12WindowDataset(ra, "train", T=2, pair_deltas=(1, 4), train=False),
+                             V12WindowDataset(rb, "train", T=2, pair_deltas=(1,), train=False)])
     with pytest.raises(ValueError, match="at least one"):
         ConcatWindowDataset([])
