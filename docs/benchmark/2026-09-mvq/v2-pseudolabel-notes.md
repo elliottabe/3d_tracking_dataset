@@ -400,7 +400,9 @@ visible in any panel. Matches the stated expectation cleanly.
    rows, but produced 0 edge windows on the real run. A real edge/false-peak
    stratum needs either a lowered existence-write threshold in the coarse
    pass itself, or a separate CenterDetect-peaks-only source -- out of this
-   task's scope.
+   task's scope. **RESOLVED 2026-09-06** by the CenterDetect-peaks source; see
+   "Fix round 1" at the end of this file for the replacement, the two rules
+   that make it honest, and the measured 0.36 % false-peak rate.
 2. **T=2 partners are forward-only** (`f0+delta`), unlike the positive
    pseudo-labels' bidirectional endpoint search -- a coordinator
    simplification (an empty window has no motion to prefer a direction
@@ -713,3 +715,154 @@ nothing (exit 2, with a per-gate breakdown of the rejected rows printed for
 tightening); otherwise it drops rejected framesets plus any whole stratum
 whose own reject rate exceeds 3%, and gates training on the resulting
 `review_summary.json`.
+
+### Fix round 1 (2026-09-06): edge negatives from CenterDetect false peaks
+
+The committed run's edge stratum mined `coarse_tracks.npz` for reads with
+`exist < 0.2` and drew **zero** (`MVQRunner.read_typed` returns None below
+`exist_thresh`, so a sub-threshold read is never written; the real file's
+`exist` never leaves 0.500-1.000). Replaced with the source the spec actually
+asks for -- CenterDetect run over sampled frames, its peaks lifted with
+`coarse_centres.lift_peaks_to_centres`, the centres the two real flies do not
+explain kept as candidates. Two rules make that honest, and both were
+measured, not assumed:
+
+1. **`--cd-peaks` must exceed 2.** `CenterDetector.peaks` hard-codes k=2 and
+   with two flies in frame those two peaks per camera ARE the flies, so
+   `max_animals >= 3` over that array returns nothing new: on
+   `2026_04_02_16_21_32`, 32/32 centres lifted that way sat within 12 units
+   of a tracked fly. `CenterDetectPeaks` runs the SAME checkpoint,
+   preprocessing (`_centerdetect_preprocess`, PIL BILINEAR) and decode with
+   k=8, and `false_peak_centres` then does the production top-2 read first,
+   consumes every peak it explains, and re-lifts the survivors round by round
+   (`_compact_peaks` exists because `_seed_candidates` seeds only from peak
+   slots 0/1). Yield saturates at k=8 -- k=16 and k=24 return the identical
+   candidate set, `extract_top_k_peaks(suppression_radius=15)` cannot find
+   more separated maxima on a 160x160 heatmap.
+2. **The scan skips frames where any fly is untracked** (`--edge-allow-untracked`
+   opts out; ON by default). Without it, a 300-frame scan of
+   `2025_10_20_13_20_04` returns 26 candidates -- and **25 of them sit on
+   frames where the female is untracked, every one 2.3-39.3 units (median
+   11.9) from HER OWN nearest tracked position before/after the gap**. They
+   are her, re-found by CenterDetect after the typed read dropped her. Writing
+   those as "no fly here" would have trained the existence head to suppress
+   the hardest fly in the dataset -- the exact failure the figure exists to
+   catch, arriving through a stratum labelled "arena edge". Cost of the rule
+   is small: 97-100 % of the lift-root recordings' in-bout frames have both
+   flies, and 44 % (13,652/31,125) of 20_04's coarse frames.
+
+Both strata now go through `_clears_gates` in `sample_negatives` (the review's
+IMPORTANT finding: the edge loop called `_accept` directly, so the gates that
+define "no fly in this window" were enforced for interior draws only).
+`test_edge_frac_draws_from_the_false_peak_band` re-checks the distance /
+height / camera rule on edge rows against the recording's own trajectory, and
+`test_edge_candidate_on_a_fly_is_rejected_by_the_gates` feeds a pool whose
+rows sit exactly on a tracked fly and asserts all 20 are rejected on `dist`.
+`--edge-units` changed meaning with the source: it now caps how far OUTSIDE
+the tracked-centroid hull a candidate may sit (signed distance,
+`_hull_signed_distance`), default 100 units; a candidate INSIDE the hull is an
+empty-floor window and is never rejected for it.
+
+**Measured false-peak rate: 28 qualifying candidates in 7,808 scanned frames
+(0.36 %).** 12,218 residual centres were lifted; 12,140 (99.3 %) were rejected
+on distance -- they are secondary CenterDetect responses on the flies' own
+bodies, 2.7-32 units away -- 46 on height, 4 on cameras, 0 outside the hull.
+So a 25 % edge share is not reachable at any quota here: it would need ~140k
+scanned frames (~12 GPU-hours) and there is no evidence the rate rises. Per
+coordinator ruling 2026-09-06 the realised yield is accepted and the
+remainder of `--n 2000` is interior.
+
+That rate is itself the finding. The mask-free empty-window failures the
+stratum was written for (gate bouts 1/69/335) came from **stale REUSED
+windows and single-fly frames** -- both of which this scan deliberately
+excludes, the first because a reused centre is not a CenterDetect peak at
+all, the second because a frame with a fly unaccounted for cannot support the
+claim "this window is empty". With both flies tracked and accounted for,
+CenterDetect essentially does not fire on empty arena. The existence head's
+empty-crop supervision therefore comes mostly from the interior stratum plus
+the stale-window frames the single-fly pass already flags.
+
+#### Real run (2026-09-06, g3102 GPU 6, same sources and `--n 2000` as commit 0fa9733)
+
+```
+--n 2000 --edge-frac 0.25 --edge-scan-frames 1500 --edge-scan-block 64 --edge-oversample 3
+```
+
+**2,000 anchors (28 edge / 1,972 interior) + 5,302 T=2 partners = 7,302
+framesets, 51,114 images**, 5,630 s total of which 2,090 s was the
+CenterDetect scan. The 28 edge anchors carry 78 partners of their own, so
+106 of the 7,302 framesets are edge-stratum (verified by reading the written
+`instances_train.json` back: 7,302 framesets, all `negative: true`,
+`fly_id: -1`, `weight: 1.0`, zero non-negative annotations). `per_role {"negative": 2000, "partner": 5302}`.
+`partner_availability {"1": 1731, "4": 1702, "16": 1869}`.
+**`weight` is 1.0** in the manifest, in every `recordings[*]` block and on
+every frameset (coordinator ruling: a negative's only supervision is an
+existence target of 0, and that target is a geometric fact about the window,
+not a checkpoint's guess -- nothing to down-weight). `source` stays
+`"pseudo"`, `role` stays `"negative"`/`"partner"`; asserted in
+`test_negative_record_survives_write_pseudo_export`.
+
+| recording | src | anchors | edge | interior | partners | scanned | lifted | cand |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| 2025_10_20_13_20_04 | tracks | 201 | **0** | 201 | 194 | 964 | 790 | 0 |
+| 2026_04_02_12_11_50 | lift_root | 200 | 5 | 195 | 564 | 569 | 721 | 5 |
+| 2026_04_02_14_54_28 | lift_root | 200 | 3 | 197 | 583 | 776 | 1157 | 3 |
+| 2026_04_02_15_25_51 | lift_root | 200 | 4 | 196 | 570 | 789 | 1357 | 4 |
+| 2026_04_02_15_44_42 | lift_root | 200 | 1 | 199 | 567 | 539 | 670 | 1 |
+| 2026_04_02_16_03_48 | lift_root | 200 | 2 | 198 | 550 | 669 | 1232 | 2 |
+| 2026_04_02_16_21_32 | lift_root | 200 | 2 | 198 | 580 | 1011 | 1879 | 2 |
+| 2026_04_02_16_39_56 | lift_root | 200 | 7 | 193 | 574 | 674 | 1019 | 7 |
+| 2026_04_02_16_56_37 | lift_root | 200 | **0** | 200 | 540 | 552 | 865 | 0 |
+| 2026_04_02_17_28_34 | lift_root | 199 | 4 | 195 | 580 | 561 | 850 | 4 |
+| 2026_04_02_17_52_50 | lift_root | **0** | 0 | 0 | 0 | 704 | 1678 | 0 |
+
+`2025_10_20_13_20_04` -- the recording whose gate bout 1 motivated the whole
+stratum -- yielded **0 from 964 all-tracked frames**, all 790 residual centres
+rejected on distance. `2026_04_02_17_52_50` again yields 0 anchors (its
+tracked footprint is 5.6 units tall, below `--min-height-units` by itself);
+its 181-anchor share was redistributed as before, so the total is exactly
+2,000. The cross-recording edge top-up found no donor with spare candidates
+(every pool was fully consumed), which is now logged rather than silent.
+
+**Edge rejections inside `sample_negatives`: 0 in every recording** -- the
+scan's gate and the sampler's authoritative re-check agree, as they must. The
+re-check is kept anyway: it is what makes the invariant hold for any pool,
+including a test fake.
+
+**Partners** (5,302 of a 6,000 ceiling): delta 1 taken 1,731 (no_coverage 206,
+collision 60, dist 3); delta 4 taken 1,702 (no_coverage 211, collision 81,
+dist 6); delta 16 taken 1,869 (no_coverage 44, collision 73, dist 14). The
+stride-16 `no_coverage` structural loss on deltas 1/4 for
+`2025_10_20_13_20_04` is unchanged (182/182 each).
+
+**Verify**: `{"windows_checked": 20, "n_windows": 7302, "mean_valid_cameras":
+7.0, "all_negative": true}`. The `figures/` copy of `negatives_report.json` is
+now written AFTER verify (review's minor finding), so the copy that survives
+beside the PNG carries the loader round trip.
+
+**Figure** `figures/2026-09-mvq/v2_pseudo/negatives_check.png`, 16 panels,
+**8 edge** (orange titles, rows 1-2, from `12_11_50`, `15_44_42`, `16_03_48`,
+`16_21_32`) and 8 interior (rows 3-4, from `20_04`, `12_11_50`, `15_25_51`,
+`16_39_56`), 2 cameras per negative.
+
+*Expectation stated before looking*: every panel bare substrate or an arena
+fixture, no fly; a fly in an EDGE panel specifically would mean the false-peak
+candidates are still bypassing the gates.
+
+*Read back*: all 16 panels show machined arena floor (diagonal scratch
+pattern, yellowish dirt flecks) and/or the dark chamber-wall band. No fly
+body, wing or leg in any panel. Two edge panels
+(`16_21_32` Frame_344654, `15_44_42` Frame_421509) carried faint round specks
+too small to resolve at thumbnail size; both were re-rendered at full 448-px
+crop across all 7 cameras with the window centre marked
+(`figures/2026-09-mvq/v2_pseudo/edge_zoom_*.png`) and read back -- the specks
+are out-of-focus dust on the substrate, no elongated body, no legs, and the
+nearest tracked fly is 75.4 u / 76.2 u away with both flies tracked at those
+frames. Matches the expectation; the gate gap is closed.
+
+**Interior stratum already carries arena-edge appearance.** Rebuilding each
+recording's tracked-centroid hull and measuring the drawn interior centres
+against it: 38-81 % of interior anchors per recording sit OUTSIDE that hull
+(median signed distance -2.2 to +9.4 units), i.e. at the chamber periphery --
+which is why most figure panels show the wall band. What the edge stratum adds
+is the "CenterDetect fired here" provenance, not the appearance.

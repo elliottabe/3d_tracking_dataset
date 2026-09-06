@@ -13,36 +13,50 @@ Expectations these tests encode (CLAUDE.md, Task 5 brief Step 1):
     fly's centroid is NaN is skipped ENTIRELY with the flag, and (without it)
     such frames really are sampled from -- both directions are asserted, not
     just the flag's presence.
-  * (c) the arena-edge stratum (`edge_frac`) draws from CenterDetect reads
-    whose existence is low AND whose location is near the recording's own
-    tracked-centroid convex hull -- exactly `edge_frac * n` of the rows,
-    each stamped `stratum={"kind": "edge"}`.
+  * (c) the arena-edge stratum (`edge_frac`) draws from CenterDetect FALSE
+    PEAKS -- exactly `edge_frac * n` of the rows, each stamped
+    `stratum["kind"] == "edge"` with its `cd_score`/`hull_dist_units`, each
+    within `--edge-units` of the recording's own tracked-centroid convex
+    hull, AND each clearing the SAME distance/height/camera gates as an
+    interior draw. That last clause is fix round 1's whole point: the edge
+    loop used to call `_accept` without `_clears_gates`, so nothing stopped a
+    candidate that sits on a fly from being written as "no fly here".
+  * (c2) the gate is not decorative -- a candidate pool that contains a
+    centre ON a tracked fly must be REJECTED, with the rejection counted.
   * (d) a negative record survives `pseudo_export.write_pseudo_export`
     (used AS-IS, unmodified) with the JSON contract Plan B's loader needs:
-    `fly_id == -1`, `negative: true`, a 3-length `center3D`. The loader's own
-    read of that contract (`V12WindowDataset`'s NEGATIVES branch) is a
-    different task's concern; this only guards the WRITE side.
+    `fly_id == -1`, `negative: true`, a 3-length `center3D`, and
+    `weight == 1.0` on every frameset and in the manifest (coordinator
+    ruling 2026-09-06: negatives train at FULL weight, not the positives'
+    0.3). The loader's own read of that contract (`V12WindowDataset`'s
+    NEGATIVES branch) is a different task's concern; this only guards the
+    WRITE side.
   * (e) T=2 partners (coordinator ruling 2026-09-06): every delta an
     anchor's `partners` dict names resolves to an actual partner row at
     `f0 + delta`, sharing the anchor's OWN `center3D` exactly, itself
     clearing the same distance/height/camera gates AT ITS OWN FRAME (never
     assumed from the anchor) -- and every partner frame is unique, never
     colliding with another negative's frame.
+  * (f) `false_peak_centres` recovers a planted phantom from projected
+    peaks, and does NOT recover it when only the production k=2 peaks per
+    camera are available (the reason `--cd-peaks` exists).
 
 Synthetic recording: 2 flies on parallel lines 50 units apart (`fly1 = fly0 +
 (50,0,0)`), 200 coarse frames at stride 16, real 7-camera DLT calibration
 (`mvq_fixtures.cam_P`, the same fixture `test_coarse_track.py` and
 `test_mvq_geometry.py` use) so the >= 5 camera check is a REAL projection,
-not a fake. Two frame bands are carved out of the otherwise-fully-trackable
+not a fake. One frame band is carved out of the otherwise-fully-trackable
 timeline:
 
   * coarse t 100-119 (video frames 1600-1919): fly1's centroid set to NaN --
     the untracked band test (b) needs.
-  * coarse t 150-189 (video frames 2400-3023): fly0's read overwritten with a
-    LOW-EXISTENCE (< 0.2) centre at the trajectory's own max-X point (an
-    axis-aligned extreme of a point cloud is ALWAYS a vertex of its convex
-    hull, so this is provably on the hull, not "probably close") plus tiny
-    jitter -- the false-peak / arena-edge band test (c) needs.
+
+The edge stratum's candidate pool is produced by a FAKE peak reader
+(`fake_peak_reader`) that projects a planted phantom plus the two real flies
+into the fixture's 7 cameras -- CenterDetect itself is a GPU/checkpoint path
+exercised by the real run, exactly as `coarse_track`'s own tests inject a
+fake detector. The geometry under test (greedy lift, residual rounds, hull
+distance, the three gates) is real either way.
 """
 import json
 import os
@@ -64,11 +78,22 @@ W_IMG, H_IMG = 1936, 448
 T_COARSE = 200
 STRIDE = 16
 NAN_LO, NAN_HI = 100, 120        # coarse-index band, fly1 untracked
-EDGE_LO, EDGE_HI = 150, 190      # coarse-index band, fly0 -> false peak near the hull
 MIN_DIST_UNITS = 60.0
 MIN_HEIGHT_UNITS = 6.0
 MIN_CAMS = 5
-EDGE_UNITS = 5.0
+EDGE_UNITS = 100.0
+# The planted CenterDetect phantom. Chosen by SEARCH over the fixture's own
+# calibration and fitted floor, not by eye, so it clears all three gates at
+# EVERY frame of the synthetic trajectory: 66.9 units from the nearer fly at
+# the worst frame (gate 60), 97.7 units above the fitted floor (gate 6), and
+# inside all 7 fixture cameras (gate 5). Its signed hull distance is +61.7
+# units -- OUTSIDE the tracked cloud, which is what an arena-edge false peak
+# is, and inside `EDGE_UNITS`. Note the fixture's fitted floor normal points
+# along -z (`fit_floor`'s skew heuristic on this cloud), which is exactly why
+# a phantom is placed at NEGATIVE z: an "obviously up" +z guess reads as 48
+# units BELOW the floor here. Every number is re-asserted from the fixture in
+# the tests rather than trusted from this comment.
+PHANTOM = np.array([15.0, 5.0, -60.0])
 
 
 def _write_calib(calib_dir, cameras, img_w=W_IMG, img_h=H_IMG):
@@ -106,15 +131,6 @@ def synthetic_tracks(tmp_path):
     X3d[1, NAN_LO:NAN_HI] = np.nan
     exist[1, NAN_LO:NAN_HI] = np.nan
 
-    # false-peak / arena-edge band (test c): fly0's slot overwritten with a
-    # low-exist read at the REAL cloud's max-X point (a provable hull vertex)
-    pts_real = np.concatenate([fly0, fly1], axis=0)
-    vertex = pts_real[np.argmax(pts_real[:, 0])]
-    n_edge = EDGE_HI - EDGE_LO
-    rng = np.random.default_rng(0)
-    X3d[0, EDGE_LO:EDGE_HI] = vertex[None] + rng.normal(scale=0.2, size=(n_edge, 3))
-    exist[0, EDGE_LO:EDGE_HI] = rng.uniform(0.0, 0.2, size=n_edge)
-
     trackable = np.isfinite(X3d).all(-1) & (exist >= 0.5)
 
     tracks_path = str(tmp_path / "coarse_tracks.npz")
@@ -129,8 +145,54 @@ def synthetic_tracks(tmp_path):
 
 
 def _rd(synthetic_tracks, **kw):
-    return eew.build_recdata_from_tracks("test_rec", synthetic_tracks["tracks_path"],
-                                         edge_units=EDGE_UNITS, exist_edge_thresh=0.2, **kw)
+    return eew.build_recdata_from_tracks("test_rec", synthetic_tracks["tracks_path"], **kw)
+
+
+def _peaks_at(points, cam_mats, w=W_IMG, h=H_IMG):
+    """World points -> (C, len(points), 2) full-image px peaks, NaN where the
+    point falls outside the image -- what a detector could actually report.
+
+    Uses the SAME projection the sampler's camera gate uses
+    (`coarse_centres._project_batch`), so a planted phantom's peaks and its
+    `n_cams_inside` cannot disagree by construction.
+    """
+    from jarvis_jax.tracking.coarse_centres import _project_batch
+    uv = _project_batch(np.asarray(points, np.float64), cam_mats)      # (P,C,2)
+    uv = np.transpose(uv, (1, 0, 2)).astype(np.float32)                 # (C,P,2)
+    with np.errstate(invalid="ignore"):
+        bad = ~(np.isfinite(uv).all(-1) & (uv[..., 0] >= 0) & (uv[..., 0] <= w - 1)
+                & (uv[..., 1] >= 0) & (uv[..., 1] <= h - 1))
+    uv[bad] = np.nan
+    return uv
+
+
+def make_fake_peak_reader(synthetic_tracks, rd, phantom=PHANTOM, k=4):
+    """`(rec, frame) -> (peaks (C,k,2), scores (C,k))` with the two real flies
+    in the top two slots and `phantom` behind them.
+
+    CenterDetect itself (checkpoint + GPU) is deliberately NOT in the unit
+    tests -- `coarse_track`'s own tests inject a fake detector for the same
+    reason. What IS real here is everything the fake feeds: the fixture's DLT
+    calibration, the projection, `lift_peaks_to_centres`'s greedy multi-view
+    search and every gate. The slot ORDER matters: the phantom must sit
+    BEHIND the flies, because the production top-2 read is exactly what
+    `false_peak_centres` takes off the table first.
+    """
+    coarse_frame = synthetic_tracks["coarse_frame"]
+    t_of = {int(f): t for t, f in enumerate(coarse_frame)}
+    fly0, fly1 = synthetic_tracks["fly0"], synthetic_tracks["fly1"]
+    C = len(rd.cameras)
+
+    def reader(_rec, frame):
+        t = t_of[int(frame)]
+        pts = [fly0[t], fly1[t], phantom]
+        uv = _peaks_at(pts, rd.cam_mats)                                # (C,3,2)
+        peaks = np.full((C, k, 2), np.nan, np.float32)
+        peaks[:, :uv.shape[1]] = uv[:, :k]
+        scores = np.zeros((C, k), np.float32)
+        scores[:, 0], scores[:, 1], scores[:, 2] = 9.0, 8.0, 1.0
+        return peaks, scores
+    return reader
 
 
 # --------------------------------------------------------------------------- (a)
@@ -176,11 +238,71 @@ def test_require_tracked_excludes_the_untracked_band(synthetic_tracks):
         "the untracked band was never drawn from even WITHOUT --require-tracked -- "
         "this test's negative assertion above would be vacuous")
 
+    # The CenterDetect scan honours the same filter, and defaults to it
+    # (`--edge-allow-untracked` opts out). Measured 2026-09-06 on
+    # 2025_10_20_13_20_04: 25 of the 26 candidates a scan finds WITHOUT this
+    # filter sit on frames where the female is untracked, every one of them
+    # 2.3-39.3 units (median 11.9) from her OWN nearest tracked position --
+    # they are her, re-found by CenterDetect after the typed read dropped
+    # her, and writing them as "no fly here" would train the existence head
+    # to suppress the hardest fly in the dataset.
+    plan_all = eew.plan_scan_frames(rd, 400, rng=np.random.default_rng(9), block=40,
+                                    require_tracked=False)
+    plan_tracked = eew.plan_scan_frames(rd, 400, rng=np.random.default_rng(9), block=40,
+                                        require_tracked=True)
+    assert any(f in nan_frames for f in plan_all), "the scan plan never reaches the NaN band"
+    assert not any(f in nan_frames for f in plan_tracked), (
+        "the CenterDetect scan plan visits frames where a fly is untracked -- "
+        "'no fly is in this window' cannot be checked there")
+
+
+# --------------------------------------------------------------------------- (f)
+def test_false_peak_centres_needs_more_than_the_production_two_peaks(synthetic_tracks):
+    """`--cd-peaks` > 2 is load-bearing, not a tuning knob.
+
+    With the production k=2 the two peaks per camera ARE the two flies, so
+    after the production read consumes them nothing is left to lift and the
+    phantom is invisible -- which is exactly why the committed run's
+    `max_animals >= 3` alone would still have found nothing. With k=4 the
+    same frame yields the planted phantom, within a fraction of a unit of
+    where it was planted.
+    """
+    rd = _rd(synthetic_tracks)
+    frame = int(synthetic_tracks["coarse_frame"][10])
+    peaks4, scores4 = make_fake_peak_reader(synthetic_tracks, rd, k=4)("test_rec", frame)
+
+    got = eew.false_peak_centres(peaks4, scores4, rd.cam_mats, num_animals=2, max_animals=3)
+    assert got, "no residual centre lifted from k=4 peaks -- the phantom was not recovered"
+    d = min(float(np.linalg.norm(g["xyz"] - PHANTOM)) for g in got)
+    assert d < 1.0, f"nearest residual centre is {d:.2f} units from the planted phantom"
+    best = min(got, key=lambda g: np.linalg.norm(g["xyz"] - PHANTOM))
+    assert best["cd_n_views"] >= 3, best
+    assert np.isfinite(best["cd_resid_px"]) and best["cd_resid_px"] < 1.0, best
+
+    # the production k=2 array: same frame, same flies, no phantom recovered
+    two = eew.false_peak_centres(peaks4[:, :2], scores4[:, :2], rd.cam_mats,
+                                 num_animals=2, max_animals=3)
+    assert not any(np.linalg.norm(g["xyz"] - PHANTOM) < 5.0 for g in two), (
+        "the phantom was recovered from only the top-2 peaks -- then --cd-peaks would "
+        "not be needed and this test is not measuring what it claims")
+
 
 # --------------------------------------------------------------------------- (c)
 def test_edge_frac_draws_from_the_false_peak_band(synthetic_tracks):
     rd = _rd(synthetic_tracks)
-    assert len(rd.edge_candidates) > 0, "no false-peak candidates found near the hull at all"
+    reader = make_fake_peak_reader(synthetic_tracks, rd)
+    plan = eew.plan_scan_frames(rd, 40, rng=np.random.default_rng(7), block=20)
+    cands, scan_stats = eew.scan_false_peaks(
+        rd, reader, plan, n_target=40, min_dist_units=MIN_DIST_UNITS,
+        min_height_units=MIN_HEIGHT_UNITS, min_cams=MIN_CAMS, edge_units=EDGE_UNITS,
+        progress_every=0)
+    rd.edge_candidates = cands
+    assert len(cands) >= 10, f"CenterDetect scan found only {len(cands)} candidates ({scan_stats})"
+    # the phantom is what was found, and it is OUTSIDE the tracked hull (the
+    # sign convention `--edge-units` depends on)
+    for c in cands:
+        assert np.linalg.norm(c["xyz"] - PHANTOM) < 1.0
+        assert 0 < c["hull_dist_units"] <= EDGE_UNITS, c
 
     n_want = 40
     edge_frac = 0.25
@@ -193,28 +315,91 @@ def test_edge_frac_draws_from_the_false_peak_band(synthetic_tracks):
     edge_rows = [r for r in rows if r["stratum"]["kind"] == "edge"]
     assert len(edge_rows) == round(edge_frac * n_want) == stats["edge_taken"]
     for r in edge_rows:
-        assert r["stratum"] == {"kind": "edge"}
-        assert r["gates"]["hull_dist_units"] <= EDGE_UNITS
+        assert r["stratum"]["kind"] == "edge"
+        assert r["stratum"]["hull_dist_units"] <= EDGE_UNITS
+        assert r["stratum"]["cd_score"] > 0 and r["stratum"]["cd_n_views"] >= 3
+        # fix round 1: an EDGE row clears the same gates as an interior one,
+        # verified here against the recording's own trajectory and projection
+        # rather than against the sampler's self-report.
+        cand = np.asarray(r["center3D"], np.float64)
+        cents = rd.frame_to_cent.get(int(r["frame"]), [])
+        assert cents, f"edge row at frame {r['frame']} has no tracked coverage to gate against"
+        for c in cents:
+            d = float(np.linalg.norm(cand - c))
+            assert d >= MIN_DIST_UNITS - 1e-6, (
+                f"EDGE negative at frame {r['frame']} is {d:.2f} units from a tracked "
+                f"centroid, below the {MIN_DIST_UNITS}-unit gate -- the edge stratum is "
+                f"bypassing _clears_gates again")
+        assert float(rd.floor.height(cand[None])[0]) >= MIN_HEIGHT_UNITS - 1e-6
+        assert eew._project_inside_count(cand, rd.cam_mats, rd.W, rd.H) >= MIN_CAMS
     interior_rows = [r for r in rows if r["stratum"]["kind"] == "interior"]
     assert len(interior_rows) == n_want - len(edge_rows)
+
+    # `--edge-units` really caps how far outside the hull a candidate may sit:
+    # the same phantom, scanned with a 5-unit cap, is rejected as outside_hull
+    # and NOT as a gate failure (it clears all three gates).
+    tight, tight_stats = eew.scan_false_peaks(
+        rd, reader, plan[:10], n_target=40, min_dist_units=MIN_DIST_UNITS,
+        min_height_units=MIN_HEIGHT_UNITS, min_cams=MIN_CAMS, edge_units=5.0,
+        progress_every=0)
+    assert tight == []
+    assert tight_stats["rejections"]["outside_hull"] == 10, tight_stats["rejections"]
+
+
+# -------------------------------------------------------------------------- (c2)
+def test_edge_candidate_on_a_fly_is_rejected_by_the_gates(synthetic_tracks):
+    """The edge gate is not decorative: a candidate pool row sitting ON a
+    tracked fly must be thrown out, and counted as thrown out.
+
+    This is the exact failure the fix-round-1 review found -- `_accept` called
+    straight from the pool -- reproduced as a test so it cannot come back. The
+    pool here is hand-built rather than scanned, because the point is that
+    `sample_negatives` must not trust ANY pool, however it was produced.
+    """
+    rd = _rd(synthetic_tracks)
+    frames = [int(f) for f in synthetic_tracks["coarse_frame"][20:40]]
+    bad = [{"frame": f, "xyz": np.asarray(rd.frame_to_cent[f][0], np.float64),
+            "cd_score": 5.0, "cd_n_views": 5, "cd_resid_px": 0.5, "hull_dist_units": -1.0}
+           for f in frames]
+    rd.edge_candidates = bad
+
+    rows, _prows, stats = eew.sample_negatives(
+        rd, 20, edge_frac=0.5, min_dist_units=MIN_DIST_UNITS,
+        min_height_units=MIN_HEIGHT_UNITS, min_cams=MIN_CAMS,
+        rng=np.random.default_rng(11), max_tries=500)
+
+    assert stats["edge_taken"] == 0, (
+        "a candidate sitting exactly on a tracked fly was written as an empty-window "
+        "negative -- the edge stratum is not going through _clears_gates")
+    assert stats["edge_rejections"]["dist"] == len(bad), stats["edge_rejections"]
+    assert all(r["stratum"]["kind"] == "interior" for r in rows)
+    assert stats["edge_shortfall"] == 10
 
 
 # --------------------------------------------------------------------------- (d)
 def test_negative_record_survives_write_pseudo_export(synthetic_tracks, tmp_path):
     """Asserts the JSON contract ONLY (fly_id == -1, negative is True, a
-    3-length center3D) -- the loader's own read of a negative frameset lands
-    with the parallel Plan B task. Anchors AND their T=2 partners are
-    written (both are `PseudoRecord(host_fly=None)`, so both hit the same
-    negative branch in `write_pseudo_export`) and the partner's `role` and
-    `partners` map survive the round trip too."""
+    3-length center3D, weight 1.0) -- the loader's own read of a negative
+    frameset lands with the parallel Plan B task. Anchors AND their T=2
+    partners are written (both are `PseudoRecord(host_fly=None)`, so both hit
+    the same negative branch in `write_pseudo_export`) and the partner's
+    `role` and `partners` map survive the round trip too."""
     from jarvis_jax.data.pseudo_export import PseudoRecord, write_pseudo_export
 
     rd = _rd(synthetic_tracks)
+    reader = make_fake_peak_reader(synthetic_tracks, rd)
+    plan = eew.plan_scan_frames(rd, 12, rng=np.random.default_rng(8), block=12)
+    rd.edge_candidates, _ = eew.scan_false_peaks(
+        rd, reader, plan, n_target=12, min_dist_units=MIN_DIST_UNITS,
+        min_height_units=MIN_HEIGHT_UNITS, min_cams=MIN_CAMS, edge_units=EDGE_UNITS,
+        progress_every=0)
     rows, prows, _ = eew.sample_negatives(
         rd, 3, edge_frac=1.0 / 3, min_dist_units=MIN_DIST_UNITS,
         min_height_units=MIN_HEIGHT_UNITS, min_cams=MIN_CAMS,
         rng=np.random.default_rng(4), max_tries=500, partner_deltas=(16,))
     assert len(rows) == 3
+    assert any(r["stratum"]["kind"] == "edge" for r in rows), (
+        "no edge row in the written set -- the edge branch of the writer is untested")
     assert len(prows) > 0, "no delta=16 partner cleared the gates -- test would not cover partners"
 
     export_names = ["Antenna_Base", "EyeL", "EyeR", "Scutellum", "Abd_tip"]
@@ -240,7 +425,8 @@ def test_negative_record_survives_write_pseudo_export(synthetic_tracks, tmp_path
                                "behavior": "courtship", "sex": "mixed",
                                "sex_source": "tracks"}}
     write_pseudo_export(out_root, records, export_names=export_names, cameras=rd.cameras,
-                        recordings=recordings, checkpoint="test-ckpt", gates={}, weight=0.3,
+                        recordings=recordings, checkpoint="test-ckpt", gates={},
+                        weight=eew.build_parser().parse_args(["--out", out_root]).weight,
                         frame_reader=fake_reader, mask_reader=None, write_images=True,
                         progress=False)
 
@@ -254,6 +440,11 @@ def test_negative_record_survives_write_pseudo_export(synthetic_tracks, tmp_path
     for key, fsv in neg_framesets.items():
         assert fsv["fly_id"] == -1, f"{key}: fly_id {fsv['fly_id']} != -1"
         assert fsv["negative"] is True, f"{key}: negative is not True"
+        # coordinator ruling 2026-09-06: negatives train at FULL weight. The
+        # value comes from the CLI default, so a change to that default is a
+        # test failure rather than a silent re-weighting of the whole export.
+        assert fsv["weight"] == 1.0, f"{key}: weight {fsv['weight']} != 1.0"
+        assert fsv["source"] == "pseudo", f"{key}: source {fsv['source']!r}"
         assert len(fsv["center3D"]) == 3, f"{key}: center3D has {len(fsv['center3D'])} entries"
         assert all(np.isfinite(v) for v in fsv["center3D"]), f"{key}: non-finite center3D"
         assert fsv["role"] in ("negative", "partner"), f"{key}: unexpected role {fsv['role']!r}"
@@ -271,6 +462,17 @@ def test_negative_record_survives_write_pseudo_export(synthetic_tracks, tmp_path
     # at least one anchor's OWN partners map survived, non-empty
     assert any(fsv["partners"] for fsv in neg_framesets.values()), (
         "no anchor frameset carries a non-empty partners map in the written export")
+    # an edge row's CenterDetect provenance survives the round trip
+    edge_fs = [f for f in neg_framesets.values() if f["stratum"].get("kind") == "edge"]
+    assert edge_fs, "no edge frameset in the export"
+    assert all("cd_score" in f["stratum"] and "hull_dist_units" in f["stratum"]
+               for f in edge_fs), edge_fs[0]["stratum"]
+
+    manifest = json.load(open(os.path.join(out_root, "manifest.json")))
+    assert manifest["weight"] == 1.0, f"manifest weight {manifest['weight']} != 1.0"
+    assert manifest["source"] == "pseudo"
+    assert all(r["weight"] == 1.0 for r in manifest["recordings"].values()), (
+        manifest["recordings"])
 
 
 # --------------------------------------------------------------------------- (e)
