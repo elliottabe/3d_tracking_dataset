@@ -680,11 +680,11 @@ implemented and unit-tested, but no Clip data enters v2.
 
 ### Spans
 
-Both recordings are free_running Session11 (`notes.txt`: "flies: all female
-Canton S"), same 7-camera rig and calibration as courtship. Candidate spans
-were chosen around walking bouts from `free_running_bout_summary.csv` and
-screened with `--scan` (20 evenly spaced probe frames, CenterDetect peaks
-lifted to a 3D centre): **all eight candidates scored 1.00 trackable**, so the
+All three recordings are free_running Session11 (`notes.txt`: "flies: all
+female Canton S"), same 7-camera rig and calibration as courtship. Candidate
+spans were chosen around walking bouts from `free_running_bout_summary.csv`
+and screened with `--scan` (20 evenly spaced probe frames, CenterDetect peaks
+lifted to a 3D centre): **all ten candidates scored 1.00 trackable**, so the
 first two per recording were taken.
 
 | recording | bout dir | span (canonical slots) | contains walking bout |
@@ -693,6 +693,16 @@ first two per recording were taken.
 | 2026_03_03_14_32_16 | bout_00001 | 90200-92200 | 4 (90913-91188) -- fr_b4 |
 | 2026_03_03_13_25_13 | bout_00000 | 26300-28300 | 1 and 2 |
 | 2026_03_03_13_25_13 | bout_00001 | 121300-123300 | 4 |
+| 2026_03_03_13_37_35 | bout_00000 | 92000-94000 | 2 (92851-93547) |
+| 2026_03_03_13_37_35 | bout_00001 | 111000-113000 | 3 (111575-112045) |
+
+**Extension (2026-09-06):** a third Session11 recording,
+`2026_03_03_13_37_35` (has its own `calibration/`; the session-level
+`notes.txt` covers it too), to push the export past 1,252 framesets. `sync_plan.json`
+status `trim` (no reindex/dropped-frame offset, unlike 13_25_13). Same
+checkpoint/CenterDetect ckpt, GPU node g3102 device 7, `--scan 92000:94000
+--scan 111000:113000` both 1.00/20 trackable, then the pass: 4,000 frames in
+13.1 min (4.9-5.6 frames/s).
 
 Caveat on the scan gate: the 20-frame probe says 1.00, but at stride 1 the
 full pass detects its own centre on 84-100 % of frames and REUSES the previous
@@ -708,6 +718,8 @@ read, not the scan's.
 | 14_32_16 / 00001 | 100 % | 0.996 | 0.827 | 0.196 | 347 | 7.95 / 35.9 / 44.9 | 231 | 0.19 / 6.3 | 0.851 / 0.149 (45) | female 74 % (0.74) |
 | 13_25_13 / 00000 | 100 % | 0.996 | 0.868 | 0.128 | 264 | 2.05 / 9.1 / 46.9 | 100 | 0.19 / 6.1 | 0.948 / 0.052 (61) | female 87 % (0.87) |
 | 13_25_13 / 00001 | 100 % | 0.999 | 0.954 | 0.070 | 93 | 47.6 / 49.1 / 49.7 | 93 | 0.14 / 1.3 | 1.000 / 0.000 (0) | female 100 % (1.00) |
+| 13_37_35 / 00000 | 100 % | 0.993 | 0.703 | 0.286 | 595 | 3.75 / 15.4 / 46.2 | 337 | 0.09 / 1.62 | 1.000 / 0.000 (0) | female 97 % (0.97) |
+| 13_37_35 / 00001 | 100 % | 0.994 | 0.691 | 0.312 | 619 | 7.80 / 47.7 / 49.8 | 375 | 0.22 / 11.95 | 0.915 / 0.086 (41) | female 79 % (0.79) |
 
 Three findings, each with the quantity that separates it from its harmless
 look-alike:
@@ -724,7 +736,10 @@ look-alike:
    the 5.6 mm window): a genuine PHANTOM, on 4.7 % of that bout's frames. It
    never reaches the output (`read_typed(want_sex=-1)` takes the
    higher-existence slot) but it is exactly the material §3.5's
-   existence-negatives want.
+   existence-negatives want. **Extension:** 13_37_35/00001 shows the same
+   pattern -- 375 of its 619 both-typed-slot frames (61 %) sit beyond the
+   collapse distance at a 47.7 u p95, ~49.8 u max -- a second phantom bout on
+   the same footing as 13_25_13/00001.
 2. **Stale reused windows fire existence ~1.0 on empty crops.** 348 of the
    8,000 frames (4.4 %) have existence >= 0.98 with EVERY per-view visibility
    below 0.5; the contact sheet of the six worst
@@ -734,11 +749,18 @@ look-alike:
    visibility head is right where the existence head is wrong, and the
    pseudo-label gates use the visibility (`conf >= 0.5` scores the
    reprojection gate), so **0 of those 348 frames are admitted** (checked
-   directly).
-3. **The sex head is unreliable here.** Across the four bouts the typed read
-   is female on 54 %, 74 %, 87 % and 100 % of written frames (mean p_female
-   0.54-1.00) for a fly that is female by the session's own `notes.txt`. The
-   pass therefore records the RECORDING'S ground truth
+   directly). **Extension:** 13_37_35 reproduces it again -- 0 blind frames
+   on bout_00000, 138 on bout_00001 (existence >= 0.98, all 7 views'
+   visibility < 0.5), contact sheet
+   `figures/2026-09-mvq/v2_pseudo/singlefly_worst_13_37_35_b1.png` (six
+   consecutive frames f112952-112957, bare wooden dowel/floor in both
+   cameras) -- **0 of the 138 admitted** (checked directly, same as before).
+3. **The sex head is unreliable here.** Across the four original bouts the
+   typed read is female on 54 %, 74 %, 87 % and 100 % of written frames (mean
+   p_female 0.54-1.00) for a fly that is female by the session's own
+   `notes.txt`. **Extension:** the third recording's two bouts read female
+   97 % (mean p_female 0.97) and 79 % (0.79) -- inside the same range, not a
+   new failure mode. The pass therefore records the RECORDING'S ground truth
    (`--fly-sex female`, `sex_source: recording_ground_truth`) and keeps the
    model's read beside it in `mvq_meta.json`'s `sex_read`. Training on those
    labels is the corrective signal, not confirmation bias.
@@ -756,12 +778,18 @@ be the clip_A scale collapse) and `eyes` the RIGID EyeL-EyeR spacing:
 | 14_32_16 / 00001 | 1456 (73 %) | 95 | 0.112 -> 0.010 | 0.622 -> 0.028 | 51.6 -> 1.08 | 0 of 42 |
 | 13_25_13 / 00000 | 1668 (83 %) | 110 | 0.126 -> 0.010 | 0.133 -> 0.033 | 7.97 -> 0.72 | 0 of 61 |
 | 13_25_13 / 00001 | 1933 (97 %) | 125 | 0.010 -> 0.010 | 0.030 -> 0.030 | 0.78 -> 0.77 | 0 of 0 |
+| 13_37_35 / 00000 | 1920 (96 %) | 124 | 0.020 -> 0.018 | 0.047 -> 0.045 | 0.63 -> 0.61 | 0 of 0 |
+| 13_37_35 / 00001 | 1465 (73 %) | 97 | 0.124 -> 0.010 | 0.466 -> 0.035 | 7.89 -> 0.97 | 0 of 138 |
 
 Every admitted frame has all 7 cameras seeing at least one keypoint, and the
-admitted median body length is 26.1-27.2 u (2.6-2.7 mm) with CV 0.01-0.03 --
+admitted median body length is 26.0-27.2 u (2.6-2.7 mm) with CV 0.01-0.03 --
 correct anatomy, no scale collapse. Rejections are step (67-671 per bout) and
 reprojection (0-477); existence rejects 0, which is the point of finding 1:
-existence is not the gate that catches the empty windows, visibility is.
+existence is not the gate that catches the empty windows, visibility is. The
+third recording (13_37_35) matches this pattern exactly -- 96 % and 73 %
+admitted, body/eyes CV falling all -> admitted the same way, reprojection
+p95 falling from 7.89 to 0.97 px on the noisier bout, and 0 of its 138 blind
+frames admitted.
 
 ### Independent cross-check vs the pipeline's own ViTPose -> DLT track
 
@@ -799,29 +827,50 @@ JPEG written for frame f is the frame the keypoints came from.
 `OutFiles/v2_singlefly/*/`, into
 `/gscratch/portia/eabe/data/Johnson_lab/red_data_3d_v12_pseudo_singlefly_20260905`.
 
-- **424 anchors** (every admissible one) + **828 T=2 partners** = **1,252
-  framesets**, 8,764 JPEGs, 579 MB, in 160 s. Partner availability 416 / 410 /
-  421 at Delta = 1 / 4 / 16.
-- Per recording: 13_25_13 698, 14_32_16 554. Per bout 274-374, so the largest
-  single bout is 29.9 % of the export -- §3.2's "no bout > 2 %" rule is a
-  courtship-campaign rule over 160 bouts and cannot apply to a four-bout
-  single-fly set.
-- Manifest: `n_flies: 1`, `behavior: free_running`, `sex: female`,
-  `sex_source: recording_ground_truth`, `has_masks: false`, `weight: 0.3`,
-  `balance.female_host_weight: null` (one-sided -- there is no host-sex ratio
-  to restore, and 0.0 would read as "weight these to nothing"). Stratum:
-  1,252 female/mid; `contact`/`apart` are two-fly quantities and are 0 by
-  construction, wall 1.4 %.
-- `verify_export` (the loader round trip `V12WindowDataset` performs, run on
-  the real export): **20 windows checked of 1,252, mean 49.9/50 keypoints with
-  3D, mean 7.0 valid cameras, keypoint_names_ok true.**
-- **Short of the ~2,000 framesets §3.4 asks for.** The binding limit is the
-  anchor pool, not the gates: 4 bouts x 2,000 frames with 16-frame
-  decorrelation is at most 500 anchors, and 424 of them passed. Two more spans
-  per recording -- or a third Session11 recording (all seven have their own
-  calibration and the same all-female `notes.txt`) -- would close the gap; the
-  pass and the extract are one command each, and the extract is re-runnable
-  over the same output root.
+Original run (two recordings, 2026-09-05): **424 anchors** (every admissible
+one) + **828 T=2 partners** = **1,252 framesets**, 8,764 JPEGs, 579 MB, in
+160 s. Partner availability 416 / 410 / 421 at Delta = 1 / 4 / 16. Per
+recording: 13_25_13 698, 14_32_16 554. Manifest: `n_flies: 1`, `behavior:
+free_running`, `sex: female`, `sex_source: recording_ground_truth`,
+`has_masks: false`, `weight: 0.3`, `balance.female_host_weight: null`
+(one-sided -- there is no host-sex ratio to restore, and 0.0 would read as
+"weight these to nothing"). `verify_export`: 20 windows checked of 1,252,
+mean 49.9/50 keypoints with 3D, mean 7.0 valid cameras, keypoint_names_ok
+true. **Short of the ~2,000 framesets §3.4 asks for** -- the binding limit is
+the anchor pool (4 bouts x 2,000 frames with 16-frame decorrelation is at
+most 500 anchors, and 424 of them passed), not the gates.
+
+**Extension (2026-09-06): re-extracted over all THREE recordings**, into the
+SAME export root (the old root was `rm -rf`'d first so every count comes from
+one draw). Same command, `--runs OutFiles/v2_singlefly/*/` now globbing three
+recording dirs / 6 bouts:
+
+- **645 anchors** (every admissible one across all 3 recordings) + **1,264
+  T=2 partners** = **1,909 framesets**, 13,363 JPEGs, in 192 s. Partner
+  availability 636 / 625 / 640 at Delta = 1 / 4 / 16.
+- Per recording: 13_25_13 698, 13_37_35 657, 14_32_16 554. Per bout 97-374
+  (`13_37_35`: bout_00000 371, bout_00001 286), so the largest single bout is
+  19.6 % of the export (down from 29.9 % with two recordings) -- §3.2's "no
+  bout > 2 %" rule is a courtship-campaign rule over 160 bouts and still
+  cannot apply to a six-bout single-fly set.
+- Manifest unchanged in shape: `n_flies: 1`, `behavior: free_running`, `sex:
+  female` for all three recordings, `sex_source: recording_ground_truth`,
+  `has_masks: false`, `weight: 0.3`, `balance.female_host_weight: null`.
+  Stratum: 1,909 female/mid; `contact`/`apart` 0 by construction, wall
+  1.1 % (down from 1.4 %; the third recording's own wall count is 1 of 221
+  anchors = 0.45 %, see `census.json`'s `wall_by_recording`).
+- `verify_export`: **20 windows checked of 1,909, mean 49.9/50 keypoints with
+  3D, mean 7.0 valid cameras, keypoint_names_ok true** -- identical to the
+  two-recording verify except `n_windows`.
+- **Still short of the ~2,000 framesets §3.4 asks for, by 91 (4.6 %).** The
+  task fixed the addition at ONE more recording; 645 anchors from 6 bouts x
+  2,000 frames is closer to the ceiling than the 500-anchor cap of 4 bouts
+  but still short because the female fly's admission rate on `13_37_35`
+  (96 %/73 %) is no higher than on the first two recordings. A fourth
+  Session11 recording (five remain, all with their own calibration and the
+  same all-female `notes.txt`) or two more spans per recording would close
+  the remaining gap; the pass and the extract are still one command each,
+  and the extract is re-runnable over the same output root.
 
 ### Figures (read back against the stated expectation)
 
@@ -845,6 +894,26 @@ no second skeleton anywhere in the crop.*
 - `.../singlefly_worst_14_32_16_b0.png` (the six LOWEST-visibility written
   frames): empty arena floor in both cameras, existence 1.00, visibility 0.00
   -- finding 2 above, and the reason the default sheet selects on visibility.
+
+**Extension (2026-09-06), third recording:**
+
+- `.../singlefly_check_13_37_35_b0.png` (Cam2012857 side + Cam2012862
+  overhead, 12 evenly spaced frames f92000-93999): matches the expectation on
+  every column -- one fly per crop, no second marker set, red head points on
+  the head, magenta abdomen points on the abdomen, yellow thorax/wing points
+  on the thorax and wing bases, six blue leg chains following the real legs
+  through walking and grooming poses.
+- `.../singlefly_check_13_37_35_b1.png` (Cam2012631 side + Cam2012855
+  overhead, f111000-112827): same verdict through frame f112341, then the
+  last two columns (f112490 visibility 0.82, f112827 visibility 0.36) show
+  the fly at the crop edge with part of the skeleton running off her onto
+  bare floor/wall -- the same low-visibility tail as `singlefly_check.png`'s
+  12th column, below the gates' bar, not a new failure.
+- `.../singlefly_worst_13_37_35_b1.png` (the six LOWEST-visibility written
+  frames, f112952-112957): bare wooden-dowel/floor texture in both cameras,
+  no fly anywhere, existence 0.99-1.00, visibility 0.00 -- finding 2
+  reproduced exactly on the third recording, and confirmed (as with the first
+  two) that 0 of these frames are admitted.
 
 ### Commands
 
@@ -873,3 +942,25 @@ One-off diagnostic scripts kept in the session scratchpad per CLAUDE.md (not
 promoted): `summarise_bouts.py` (the per-bout table), `admitted_check.py` (the
 all-vs-admitted invariants), `vs_reference.py` and `shift_probe.py` (the DLT
 cross-check and the lag curve).
+
+**Extension (2026-09-06), third recording.** Same commands, new session dir
+and spans:
+
+```bash
+python scripts/pseudo_labels/singlefly_p3b_pass.py --scan 92000:94000 --scan 111000:113000 \
+  --session-dir <VID>/2026_03_03_13_37_35 --centerdetect <CD> --out OutFiles/v2_singlefly/2026_03_03_13_37_35
+python scripts/pseudo_labels/singlefly_p3b_pass.py \
+  --session-dir <VID>/2026_03_03_13_37_35 --run <RUN>/final --centerdetect <CD> \
+  --bout 92000:94000 --bout 111000:113000 --num-animals 1 --fly-sex female \
+  --out OutFiles/v2_singlefly/2026_03_03_13_37_35
+# the export root was `rm -rf`'d first so all counts come from one draw over
+# all three recordings' OutFiles -- otherwise identical to the command above
+JAX_PLATFORMS=cpu python scripts/pseudo_labels/extract_p3b_pseudolabels.py \
+  --runs OutFiles/v2_singlefly/*/ --num-animals 1 --no-identity-gate \
+  --target 2000 --min-female 0 --per-rec-frac 1.0 --per-bout-cap 2000 \
+  --out /gscratch/portia/eabe/data/Johnson_lab/red_data_3d_v12_pseudo_singlefly_20260905
+```
+
+New one-off diagnostic script, session scratchpad only (not promoted):
+`admitted_check.py` (rebuilt for this recording -- body/eyes CV, reproj p95,
+blind-frame admission, same invariants as the original run's).
