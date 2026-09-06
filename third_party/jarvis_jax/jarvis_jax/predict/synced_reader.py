@@ -63,7 +63,8 @@ def read_one_cam(session_dir, cam_name, plan, start_slot, T):
             if cursor is None:
                 cap.set(cv2.CAP_PROP_POS_FRAMES, pos); cursor = pos
             frame, cursor = _read_at(cap, cursor, pos)
-            yield (None if frame is None else cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)), (frame is not None)
+            # channel-reversing copy instead of cv2.cvtColor (see read_window)
+            yield (None if frame is None else np.ascontiguousarray(frame[:, :, ::-1])), (frame is not None)
     finally:
         cap.release()
 
@@ -105,13 +106,18 @@ def read_window(session_dir, cameras, plan, start_slot, T):
                 if fr is None:
                     frames.append(None); present.append(False)
                 else:
-                    fr = cv2.cvtColor(fr, cv2.COLOR_BGR2RGB)
                     frames.append(fr); present.append(True)
-            # materialize; H,W are fixed up front, so this is always a real array
+            # materialize; H,W are fixed up front, so this is always a real array.
+            # BGR->RGB is done by the channel-reversing copy into `out`, NOT by
+            # cv2.cvtColor: cvtColor fans out over OpenCV's thread pool (32 threads
+            # per process here) and on a node running several readers it took
+            # ~70 ms per 1936x448 frame -- 60 % of read_window's time (profiled
+            # 2026-09-05). The reversed-slice copy is a single memcpy-like pass
+            # (~2 ms) and yields byte-identical pixels.
             out = np.zeros((len(cameras), H, W, 3), np.uint8)
             for ci, fr in enumerate(frames):
                 if fr is not None:
-                    out[ci] = fr
+                    out[ci] = fr[:, :, ::-1]
             yield out, np.asarray(present, bool)
     finally:
         for cap in caps:
