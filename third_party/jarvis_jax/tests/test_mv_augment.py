@@ -1,8 +1,13 @@
 # tests/test_mv_augment.py
+import os
+
 import numpy as np
 import jax, jax.numpy as jnp
 import pytest
 from mvq_fixtures import make_v12_root
+
+_ANATOMY_V1 = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                           "..", "..", "..", "configs", "anatomy", "v1.yaml")
 
 
 def _batch(tmp_path, B=2):
@@ -172,3 +177,52 @@ def test_camera_dropout_keys_off_every_frame_valid(tmp_path):
     assert (cv.sum(-1) >= 3).all()
     dropped = before & ~cv                                        # (T,C) True where THIS aug turned a valid cam off
     assert not dropped[:, 2].any()                                # never drops the already-sometimes-invalid camera
+
+
+def test_lr_swap_covers_every_anatomy_pair():
+    """`build_lr_swap` must pair every L/R landmark in the real anatomy
+    keypoint order (not just the synthetic test fixture's), and
+    `assert_lr_swap_covers` must accept that full coverage rather than
+    raising a false positive."""
+    from omegaconf import OmegaConf
+    from jarvis_jax.data.augment import assert_lr_swap_covers, build_lr_swap
+    names = [str(n) for n in OmegaConf.load(_ANATOMY_V1).model.KP_NAMES]
+    swap = build_lr_swap(names)
+    assert_lr_swap_covers(names, required=names)
+    moved = [i for i in range(len(names)) if swap[i] != i]
+    assert len(moved) == 2 * sum(1 for n in names if n.startswith(("WingL", "T1L", "T2L", "T3L", "EyeL")))
+    for i in moved:
+        assert names[i].replace("L", "R", 1) == names[swap[i]] or names[swap[i]].replace("L", "R", 1) == names[i]
+
+
+def test_lr_swap_refuses_a_half_pair():
+    """A landmark named only on one side (its mirror missing from `names`)
+    must raise, naming the missing partner -- this is what would otherwise
+    let a horizontal flip silently relabel a left leg as itself."""
+    from jarvis_jax.data.augment import assert_lr_swap_covers
+    with pytest.raises(ValueError, match="WingR_base"):
+        assert_lr_swap_covers(["WingL_base", "Scutellum"], required=["WingL_base", "WingR_base", "Scutellum"])
+
+
+def test_t2_augmentation_keeps_gt3d_on_gt2d_in_both_frames(tmp_path):
+    """Every geometric op must update M/t_local so the labels stay consistent --
+    at T=2 the mirror's t_local broadcast and the camera dropout's all-frames
+    AND are the two places that can silently break one frame only."""
+    from jarvis_jax.data.augment import build_lr_swap
+    from jarvis_jax.data.mv_augment import MVAugParams, augment_window
+    from jarvis_jax.data.v12_windows import V12WindowDataset, window_batches
+    from jarvis_jax.models.mvq.geometry import project_local
+    root = make_v12_root(tmp_path, n_frames=5)
+    ds = V12WindowDataset(root, "train", T=2, pair_deltas=(1,), train=False)
+    b = next(window_batches(ds, 2, shuffle=False, num_workers=1, drop_last=False))
+    jb = {k: jnp.asarray(v) for k, v in b.items()}
+    p = MVAugParams(cam_drop_p=1.0, cam_drop_max=2, mirror_p=1.0)
+    a = augment_window(jax.random.PRNGKey(0), jb, p, build_lr_swap(ds.keypoint_names))
+    for t in range(2):
+        uv = jax.vmap(lambda X, M, tl: project_local(X, M, tl))(a["kp3d_local"][:, 0, t], a["M"], a["t_local"][:, t])
+        d = np.linalg.norm(np.asarray(uv) - np.moveaxis(np.asarray(a["kp2d"][:, 0, t]), 1, 2), axis=-1)
+        m = np.asarray(a["vis2d"][:, 0, t])
+        assert float(d[np.moveaxis(m, 1, 2)].max()) < 0.5      # px
+    cv = np.asarray(a["cam_valid"])                             # (B,T,C)
+    assert cv.sum(-1).min() >= 3                                # >= 3 cameras survive, in every frame
+    assert np.array_equal(cv[:, 0], cv[:, 1])

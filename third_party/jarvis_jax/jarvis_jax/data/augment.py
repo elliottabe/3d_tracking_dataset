@@ -39,6 +39,27 @@ def build_lr_swap(names):
     return arr
 
 
+def assert_lr_swap_covers(names, required=None):
+    """Raise unless every left/right landmark in `required` (default `names`)
+    has its partner in `names` and `build_lr_swap` maps the two to each other.
+    A silently unpaired landmark makes the horizontal flip relabel a left leg
+    as itself -- a mirrored image with unmirrored labels, which trains the
+    model to average the two sides."""
+    swap = build_lr_swap(names)
+    idx = {n: i for i, n in enumerate(names)}
+    missing = []
+    for n in (required or names):
+        m = _mirror_name(n)
+        if m is None:
+            continue
+        if m not in idx or n not in idx or swap[idx[n]] != idx[m]:
+            missing.append(m if m not in idx else n)
+    if missing:
+        raise ValueError(f"lr_swap does not pair {sorted(set(missing))}: the horizontal flip "
+                         f"would leave those labels unmirrored")
+    return swap
+
+
 def _rot(theta):
     c, s = jnp.cos(theta), jnp.sin(theta)
     return jnp.array([[c, -s], [s, c]])
