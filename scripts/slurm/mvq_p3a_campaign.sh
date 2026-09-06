@@ -50,8 +50,8 @@ set -euo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 VID=/gscratch/portia/eabe/data/Johnson_lab/Video_recordings/courtship
 PROC=/gscratch/portia/eabe/data/Johnson_lab/processed/courtship
-RUN_NAME=pose_mvq_p3a
-MVQ_CONFIG=p3a
+RUN_NAME=pose_mvq_p3b
+MVQ_CONFIG=p3b
 SLURM_CFG=ckpt_all
 DRY=""
 ONLY=""

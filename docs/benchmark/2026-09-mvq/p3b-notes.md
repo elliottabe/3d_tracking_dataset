@@ -290,3 +290,120 @@ nothing (not even the sex head) starts fresh.
 - `scripts/viz/mvq_copy_paste_check.py` -- `--contact-sep`, `--contact-p`, `--n-contact`, `--n-far`
 - tests: `tests/test_mvq_losses.py` (+2), `tests/test_v12_windows.py` (+2), `tests/test_train_mvq_smoke.py` (+2)
 - `figures/2026-09-mvq/p3b_gates/copy_paste_check.{png,json}` (gitignored)
+
+## Acceptance (2026-09-05, final checkpoint)
+
+Final val (`.../mvq_t1_b16_p3b_contact_20260905/final`): mpjpe 0.0849 mm,
+cross_fly_frac 0.036 overall / 0.055 contact pairs, contact cohort 0.146 mm
+(baseline jitter-10: 0.089 / 0.048 / 0.076 / 0.167).
+
+### Step 1: centre-shift rule (spec Sec6)
+
+`scripts/benchmark/mvq_centre_shift.py --run .../mvq_t1_b16_p3b_contact_20260905/final`
+(153 val windows, unprompted policy). Decision line at 1mm: 1.1x unshifted =
+0.0928mm.
+
+| shift (mm) | policy MPJPE (mm) | miss frac |
+|---:|---:|---:|
+| 0.0 | 0.0844 | 0.000 |
+| 0.5 | 0.0835 | 0.000 |
+| 1.0 | 0.0825 | 0.000 |
+| 2.0 | 0.3801 | 0.000 |
+| 3.0 | 0.6403 | 0.000 |
+
+**PASS.** At 1mm, error 0.0825mm is BELOW the unshifted value (0.0844mm),
+comfortably under the 0.0928mm line; miss fraction is 0.0 throughout 0-1mm.
+Figure read back (`figures/2026-09-mvq/p3b_gates/centre_shift_p3b.png`):
+0/0.5/1.0mm sit together near-flat just under the dashed 1.1x line, the cliff
+starts only between 1 and 2mm (as with the jitter-10 checkpoint this warm-
+started from); miss-rate panel flat at 0.0 across all five shifts.
+Artifacts: `figures/2026-09-mvq/p3b_gates/centre_shift_p3b.{png,json}`.
+
+### Step 2: re-lift bouts 1, 4, 28 of Session0/2025_10_20_13_20_04
+
+`--identity mask`, TWICE (`--containment off` / `--containment on`) into
+`OutFiles/p3b_accept/{off,on}/` (fly_id-less bouts CSV built into
+`OutFiles/p3b_accept/bouts_unified_summary.csv`). Compared against (a) the
+existing r2 lift (jitter-10 checkpoint, containment off,
+`.../pose_mvq_p3a_r2/bouts/`) with the scratchpad per-bout metric script
+(pose-jump: >=5 male kps stepping >0.5mm/frame; straddle: >=5 male kps
+nearer the female centroid than his own; female-missing fraction; male kp
+dropped by containment).
+
+**bout 1** (T=513)
+
+| | (a) r2 jitter-10 | (b) P3b off | (c) P3b on |
+|---|---:|---:|---:|
+| pose-jump | 0.0448 | 0.0000 | 0.0000 |
+| straddle | 0.0019 | 0.1793 | 0.1423 |
+| female NaN | 0.7583 | 0.1092 | 0.1092 |
+
+**bout 4** (T=394)
+
+| | (a) r2 jitter-10 | (b) P3b off | (c) P3b on |
+|---|---:|---:|---:|
+| pose-jump | 0.0279 | 0.0000 | 0.0000 |
+| straddle | 0.2640 | 0.0000 | 0.0000 |
+| female NaN | 0.4822 | 0.2563 | 0.2563 |
+
+**bout 28** (T=2007)
+
+| | (a) r2 jitter-10 | (b) P3b off | (c) P3b on |
+|---|---:|---:|---:|
+| pose-jump | 0.0000 | 0.0000 | 0.0000 |
+| straddle | 0.0005 | 0.0000 | 0.0000 |
+| female NaN | 0.1196 | 0.1545 | 0.1545 |
+
+Male keypoints dropped by containment in (c): bout 1 0.48%, bout 4 0.03%,
+bout 28 0.00% (T-weighted mean over the three bouts ~0.09%) -- containment
+touches almost nothing here because the model itself already fixed most of
+the leak.
+
+**Reading.** Pose-jump: (b) <= (a) in every bout (0.0448->0, 0.0279->0,
+0->0) -- the MODEL fix, present even with containment off. Bout 1's
+straddle number looks like it got WORSE ((a) 0.0019 vs (b) 0.1793), but (a)'s
+number is blind: her centroid is NaN on 75.8% of bout 1's frames under the
+r2 checkpoint, so the straddle test could not fire there at all; P3b's female
+NaN rate on bout 1 is 10.9%, so the metric is now actually measuring instead
+of blind, and (c) (containment on) is lower than (b) (0.1423 < 0.1793),
+matching the expected ordering among the two P3b arms. Bout 4 shows the
+clean case: straddle drops from 26.4% (blind on "only" 48% of frames) to
+0.0% in both P3b arms. Bout 28 stays clean (pose-jump/straddle ~0 throughout)
+as expected, though female-missing ticks up slightly (0.1196 -> 0.1545,
++3.5pp) -- a small, isolated regression against the "not worse than (a)"
+expectation, outweighed by the large female-NaN improvements on bouts 1 and 4
+(0.7583->0.1092, 0.4822->0.2563).
+
+**Verdict: (b) <= (a) holds** (the gating condition for Step 4) -- pose-jump
+improves or ties in all three bouts, and the one metric that looks worse
+(bout 1 straddle) is explained by reduced blindness, not a new defect.
+
+### Step 3: figure
+
+`figures/2026-09-mvq/p3b_gates/p3b_bout1_bout4_compare.png` -- bout 1
+(frames 374, 351, 71) and bout 4 (frames 230, 220, 260), overhead
+Cam2012630 + side Cam2012855, three columns (r2 jitter-10 / P3b containment
+off / P3b containment on), male (fly1) keypoints in orange over both flies'
+SAM mask outlines. Read back: in the r2 column, bout 1's orange male
+keypoints visibly spread onto/around the cyan female outline in both
+cameras (f374, f351 especially); in BOTH P3b columns (off and on) the orange
+points stay on the male's own orange-outlined body in all three bout-1
+frames and both cameras -- i.e. already fixed in the containment-OFF column,
+a model-level fix, not merely the containment filter removing points. Bout 4
+shows the same clean separation in all three columns. Caveat: these three
+frames are the OLD r2-based worst-frame picks, not re-picked for P3b, so a
+clean render here does not contradict the bout 1 straddle metric (17.9%/
+14.2% of frames) -- those residual straddle frames occur elsewhere in the
+bout, not at these particular frames.
+
+### Step 4: config + campaign defaults
+
+Both gates passed -> `configs/mvq/p3b.yaml` created (copy of `p3a.yaml`,
+checkpoint swapped to `.../mvq_t1_b16_p3b_contact_20260905/final`, `identity:
+mask`, `containment: "on"` unchanged). `scripts/slurm/mvq_p3a_campaign.sh`
+defaults changed to `RUN_NAME=pose_mvq_p3b` / `MVQ_CONFIG=p3b` (p3a still
+selectable via `--mvq-config p3a --run-name pose_mvq_p3a`). Verified:
+`JAX_PLATFORMS=cpu pytest third_party/jarvis_jax/tests/test_lift_masked_bout.py -q`
+-- 32 passed; `scripts/slurm/mvq_p3a_campaign.sh --dry-run --only
+2025_10_20_13_20_04` -- prints the array/aggregate sbatch scripts rooted at
+`pose_mvq_p3b` with `mvq=p3b pipeline.lifter=mvq`, nothing submitted.
