@@ -1,9 +1,18 @@
 """Extract P3b campaign pseudo-labels into a v12-format export (spec 2026-09-05 §3.2).
 
-Run:
+Run (the courtship campaign; the two sides are sized separately -- see ruling
+#2 below -- so there is no single "target" for a two-sex pool):
     JAX_PLATFORMS=cpu OMP_NUM_THREADS=8 python scripts/pseudo_labels/extract_p3b_pseudolabels.py \
-        --out /gscratch/portia/eabe/data/Johnson_lab/red_data/red_data_3d_v12_pseudo_p3b_20260905 \
-        --target 10000
+        --out /gscratch/portia/eabe/data/Johnson_lab/red_data_3d_v12_pseudo_p3b_20260905 \
+        --male-n 4000
+
+and the SINGLE-FLY route (spec §3.4, free-running females written by
+`scripts/pseudo_labels/singlefly_p3b_pass.py`), where the pool has one host
+sex, no masks and therefore no containment gate and no identity gate:
+    JAX_PLATFORMS=cpu OMP_NUM_THREADS=8 python scripts/pseudo_labels/extract_p3b_pseudolabels.py \
+        --runs OutFiles/v2_singlefly/*/ --num-animals 1 --no-identity-gate \
+        --target 2000 --min-female 0 \
+        --out /gscratch/portia/eabe/data/Johnson_lab/red_data_3d_v12_pseudo_singlefly_20260905
 
 Two phases, and the first one can stop the second:
 
@@ -92,6 +101,14 @@ class BoutRef:
     n_frames: int
     fly_sex: dict
     cameras: list
+    # provenance the export repeats per annotation and per recording. Defaults
+    # are the masked campaign's; the single-fly route (spec §3.4, free-running
+    # females, `singlefly_p3b_pass.py`) writes its own, and claiming those
+    # frames are courtship pairs whose identity came from a mask review would
+    # be false in the manifest AND in every annotation.
+    behavior: str = "courtship"
+    recording_sex: str = "mixed"
+    sex_source: str = "mvq_p3b_mask_identity"
 
 
 def discover_bouts(run_globs, bout_glob="bout_*"):
@@ -122,7 +139,10 @@ def discover_bouts(run_globs, bout_glob="bout_*"):
                     session_dir=sd, calib_dir=os.path.join(sd, "calibration"),
                     frame_start=int(m.get("frame_start", 0)), n_frames=int(m["n_frames"]),
                     fly_sex=dict(m.get("fly_sex") or {}),
-                    cameras=[str(c) for c in m["cameras"]]))
+                    cameras=[str(c) for c in m["cameras"]],
+                    behavior=str(m.get("behavior", "courtship")),
+                    recording_sex=str(m.get("recording_sex", "mixed")),
+                    sex_source=str(m.get("sex_source", "mvq_p3b_mask_identity"))))
     return out
 
 
@@ -156,12 +176,18 @@ def _hist(x, name):
 
 
 def scan_bout(ref, thr, *, use_identity=True, contact_units=15.0, contact_kp_units=5.0,
-              n_flies=2):
+              n_flies=2, use_masks=True):
     """Gate ONE bout; returns (rows, per-gate histogram counts, reject counts).
 
     Rows are per (anchor frame, admitted fly): a v12 frameset -- and therefore
     a training window -- is per fly, so the host-sex stratification is over
     (frame, fly) pairs, not frames.
+
+    `use_masks=False` is the single-fly route (spec §3.4): a free-running
+    recording has no SAM3 masks at all, so the containment gate cannot run and
+    `admit_bout` is passed `store=None`. It is an explicit argument, never
+    inferred from a missing file: a courtship bout whose mask npz has gone
+    astray must FAIL loudly, not quietly lose its containment gate.
     """
     from jarvis_jax.data.pseudo_gates import admit_bout, load_bout_arrays
     from jarvis_jax.geometry.reprojection_tool import ReprojectionTool
@@ -170,7 +196,7 @@ def scan_bout(ref, thr, *, use_identity=True, contact_units=15.0, contact_kp_uni
     rt = ReprojectionTool(ref.calib_dir)
     cameras = list(rt.cameras.keys())
     a = load_bout_arrays(ref.bout_dir, cameras=cameras, n_flies=n_flies)
-    store = BoutMaskStore(ref.masks_npz, cameras)
+    store = BoutMaskStore(ref.masks_npz, cameras) if use_masks else None
     r = admit_bout(a, store, rt.camera_matrices, thr, use_identity=use_identity)
 
     with np.errstate(invalid="ignore"):
@@ -606,7 +632,14 @@ def build_parser():
                          "for stratification (it admits no frame in the campaign)")
     ap.add_argument("--wall-height-units", type=float, default=30.0)
     ap.add_argument("--no-identity-gate", action="store_true")     # single-fly (Task 4)
-    ap.add_argument("--num-animals", type=int, default=2)
+    ap.add_argument("--num-animals", type=int, default=2,
+                    help="1 is the single-fly route (spec §3.4): no SAM3 masks exist for "
+                         "those recordings, so the containment gate and the mask export "
+                         "are both off")
+    ap.add_argument("--target", type=int, default=None,
+                    help="total anchors to draw when the pool has ONE host sex (the "
+                         "single-fly export). Refused on a two-sex pool: sizing that is "
+                         "what --female-n/--male-n do, and one number cannot balance it")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--gates-json", default=None, help="override GateThresholds fields")
     ap.add_argument("--bouts", default="bout_*", help="bout dir glob (smoke runs)")
@@ -634,7 +667,17 @@ def main(argv=None):
     if not refs:
         raise SystemExit(f"no bouts under {a.runs or [DEFAULT_ROOTS]}")
     recs = sorted({r.recording for r in refs})
+    # A single-fly recording has no SAM3 masks at all (spec §3.4), so neither
+    # the containment gate nor the mask export can run. Keyed on the fly count
+    # the caller asked for, never on a missing file: a courtship bout whose
+    # masks are missing must fail, not silently lose a gate.
+    # (`--no-masks` is a separate question -- it only skips WRITING masks/ into
+    # the export, and must never quietly turn the containment GATE off.)
+    single_fly = int(a.num_animals) == 1
     print(f"[extract] {len(refs)} bouts / {len(recs)} recordings; gates {thr}", flush=True)
+    if single_fly:
+        print("[extract] single-fly route: containment gate OFF (no masks exist), "
+              "no masks/ written", flush=True)
 
     rows, pool, hists, rejects, checkpoints = [], {}, {}, {}, set()
     per_rec_t = collections.Counter()
@@ -644,7 +687,7 @@ def main(argv=None):
             rr, pr, hh, rj = scan_bout(ref, thr, use_identity=not a.no_identity_gate,
                                        contact_units=a.contact_units,
                                        contact_kp_units=a.contact_kp_units,
-                                       n_flies=a.num_animals)
+                                       n_flies=a.num_animals, use_masks=not single_fly)
         except Exception as e:                       # a broken bout must not lose the census
             print(f"[extract] {ref.recording}/{ref.bout:05d}: SKIPPED ({type(e).__name__}: {e})",
                   flush=True)
@@ -693,17 +736,35 @@ def main(argv=None):
         return cen
 
     # ---- per-side draw (ruling #2: all of the female side, capped male side)
+    female_n, male_n = a.female_n, a.male_n
+    if a.target is not None:
+        # `--target` sizes a ONE-SIDED pool (the single-fly export). On a
+        # two-sex pool a single number cannot say how the two sides split, and
+        # guessing would silently un-balance the very thing `female_host_weight`
+        # exists to fix.
+        sexes = sorted({r.host_sex for r in rows})
+        if len(sexes) != 1:
+            raise SystemExit(f"--target {a.target} but the admitted pool has host sexes "
+                             f"{sexes}; size the sides with --female-n/--male-n instead")
+        female_n = int(a.target) if sexes[0] == "female" else None
+        male_n = int(a.target) if sexes[0] != "female" else 0
+        print(f"[extract] --target {a.target}: one host sex ({sexes[0]}) in the pool",
+              flush=True)
     rng = np.random.default_rng(a.seed)
-    picked, sides = sided_draw(rows, female_n=a.female_n, male_n=a.male_n, rng=rng,
+    picked, sides = sided_draw(rows, female_n=female_n, male_n=male_n, rng=rng,
                                per_rec_frac=a.per_rec_frac, per_bout_cap=a.per_bout_cap)
     nf = sides["female"]["n"]
     nm = sides["male"]["n"]
     balance = {"female_n": nf, "male_n": nm,
-               "female_host_weight": round(nm / max(nf, 1), 4),
+               # a one-sided export has no host-sex ratio to restore; 0.0 (or a
+               # division by an empty side) would read as "weight these to
+               # nothing", which is the opposite of what it means
+               "female_host_weight": (round(nm / nf, 4) if nf and nm else None),
                "note": "the export is deliberately NOT 50/50 -- the female side is every "
                        "admissible anchor and the male side is capped; training restores "
                        "50/50 by weighting female-host windows by female_host_weight "
-                       "(train.female_host_weight)"}
+                       "(train.female_host_weight). A one-sided (single-fly) export has "
+                       "no ratio to restore and reports female_host_weight null."}
     srep = {"sides": sides, "balance": balance}
     for sex in ("female", "male"):
         s = sides[sex]
@@ -789,8 +850,12 @@ def main(argv=None):
                         "calib_group": rec,
                         "fly_sex": by_rec_ref[rec].fly_sex,
                         "kp_names": None, "n_flies": a.num_animals,
-                        "behavior": "courtship", "sex": "mixed",
-                        "sex_source": "mvq_p3b_mask_identity"}
+                        # from the bout's own mvq_meta.json (the masked
+                        # campaign's defaults; the single-fly route writes
+                        # free_running / female / its own sex source)
+                        "behavior": by_rec_ref[rec].behavior,
+                        "sex": by_rec_ref[rec].recording_sex,
+                        "sex_source": by_rec_ref[rec].sex_source}
                   for rec in sorted({r.recording for r in picked + partner_rows})}
     for rec in recordings:
         ref = by_rec_ref[rec]
@@ -799,7 +864,7 @@ def main(argv=None):
         checkpoints.add(json.load(open(os.path.join(ref.bout_dir, "mvq_meta.json")))["checkpoint"])
 
     frames = SessionFrames({rec: by_rec_ref[rec].session_dir for rec in recordings}, cameras)
-    masks = None if a.no_masks else CampaignMasks(mask_index, cameras)
+    masks = None if (a.no_masks or single_fly) else CampaignMasks(mask_index, cameras)
     summary = write_pseudo_export(
         a.out, records, export_names=export_names, cameras=cameras, recordings=recordings,
         checkpoint=sorted(checkpoints)[0] if checkpoints else "unknown", gates=thr,

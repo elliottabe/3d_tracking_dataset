@@ -650,3 +650,226 @@ since it is saturated at ~91% under BOTH checkpoints.
 - `figures/2026-09-mvq/p4_maskfree_p3b/fine_bout117/bout117_maskfree_{preview,preview_small}.mp4`, `bout117_maskfree_preview_header.json`, `bout117_maskfree_contact_sheet.png`
 - `figures/2026-09-mvq/p4_maskfree/{coarse_tracks_check,coarse_centres_check}.{png,json}` (jitter-10 counterparts, newly generated this session for a real image comparison)
 - Generating scripts, kept in the session scratchpad per CLAUDE.md (one-off diagnostics, not promoted): `step2_convert_fine_bout_p3b.py`, `step3_render_bout117_p3b.py` (copies of the prior agent's bout-117 scripts repointed at the P3b paths), `straddle_compare.py` (jitter-10 vs P3b straddle/missing-fraction metric, both variants).
+
+## Single-fly pseudo-label pass for mvq v2 (2026-09-06)
+
+Task 4 of `.superpowers/sdd/2026-09-05-mvq-v2-plan-a-pseudolabels`; spec
+`docs/specs/2026-09-05-mvq-v2-pseudolabel-t2-design.md` §3.4. Produces the
+single-fly half of the v2 pseudo-label set -- free-running FEMALES, so the
+female-host stratum the whole effort exists to fix is not starved -- by
+running the same P3b checkpoint mask-free at `--num-animals 1` and writing
+P3b-SHAPED bout dirs that Task 2's extractor reads unchanged.
+
+**Precondition: not re-run.** The P3b single-fly field check is the section
+"P3b on single-fly recordings" above, verdict **SAFE for phantom-fly /
+mis-sexing** on 921+241+276 frames (fr_b2 = free_running/Session11/
+2026_03_03_14_32_16 among them). This pass cites it rather than repeating it;
+what follows are this run's own numbers over 8,000 new frames.
+
+Script: `scripts/pseudo_labels/singlefly_p3b_pass.py` (three modes: the pass,
+`--scan` trackability probe, `--contact-sheet` renderer), test
+`third_party/jarvis_jax/tests/test_singlefly_pass.py`. Checkpoint
+`mvq_t1_b16_p3b_contact_20260905/final`, CenterDetect `cd_focal_bg30/
+ckpt/epoch_004`, GPU node g3102 device 7, ~5 frames/s (8,000 frames in 28 min).
+
+**Clip/Session6/2025_10_12_15_06_46 is EXCLUDED** (controller, 2026-09-05):
+its keypoints come out at ~1/3 scale -- the calibration/rig mismatch recorded
+above under clip_A -- and the cause is unresolved. `--link-cameras` (the
+`Cam*_frames_<a>_<b>.mp4` -> `<Cam>.mp4` symlinks that recording needs) is
+implemented and unit-tested, but no Clip data enters v2.
+
+### Spans
+
+Both recordings are free_running Session11 (`notes.txt`: "flies: all female
+Canton S"), same 7-camera rig and calibration as courtship. Candidate spans
+were chosen around walking bouts from `free_running_bout_summary.csv` and
+screened with `--scan` (20 evenly spaced probe frames, CenterDetect peaks
+lifted to a 3D centre): **all eight candidates scored 1.00 trackable**, so the
+first two per recording were taken.
+
+| recording | bout dir | span (canonical slots) | contains walking bout |
+|---|---|---|---|
+| 2026_03_03_14_32_16 | bout_00000 | 25000-27000 | 2 (25933-26173) -- the field check's fr_b2 |
+| 2026_03_03_14_32_16 | bout_00001 | 90200-92200 | 4 (90913-91188) -- fr_b4 |
+| 2026_03_03_13_25_13 | bout_00000 | 26300-28300 | 1 and 2 |
+| 2026_03_03_13_25_13 | bout_00001 | 121300-123300 | 4 |
+
+Caveat on the scan gate: the 20-frame probe says 1.00, but at stride 1 the
+full pass detects its own centre on 84-100 % of frames and REUSES the previous
+one on the rest (`centre_source`, the coarse pass's rule). The sparse probe
+cannot see that, so the per-bout `frac_centre_detected` below is the number to
+read, not the scan's.
+
+### Per-bout numbers (all 2,000 frames each; units = 0.1 mm)
+
+| recording / bout | written | exist | exactly 1 typed slot >= 0.5 | 2nd typed slot exist (mean) | frames w/ both typed slots | 2nd-slot dist med / p95 / max | > 3.0 u | step med / p99 | centre det / reuse (max run) | sex read (p_female) |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 14_32_16 / 00000 | 100 % | 0.997 | 0.584 | 0.405 | 832 | 6.10 / 32.9 / 47.4 | 493 | 0.33 / 30.5 | 0.841 / 0.159 (46) | female 54 % (0.54) |
+| 14_32_16 / 00001 | 100 % | 0.996 | 0.827 | 0.196 | 347 | 7.95 / 35.9 / 44.9 | 231 | 0.19 / 6.3 | 0.851 / 0.149 (45) | female 74 % (0.74) |
+| 13_25_13 / 00000 | 100 % | 0.996 | 0.868 | 0.128 | 264 | 2.05 / 9.1 / 46.9 | 100 | 0.19 / 6.1 | 0.948 / 0.052 (61) | female 87 % (0.87) |
+| 13_25_13 / 00001 | 100 % | 0.999 | 0.954 | 0.070 | 93 | 47.6 / 49.1 / 49.7 | 93 | 0.14 / 1.3 | 1.000 / 0.000 (0) | female 100 % (1.00) |
+
+Three findings, each with the quantity that separates it from its harmless
+look-alike:
+
+1. **Both typed slots fire on the ONE fly, often** (up to 42 % of frames), so
+   "fraction of frames with exactly one slot above 0.5" is 0.58-0.95, not
+   ~1.0 as the 20-frame probe suggested. Counting live slots cannot tell a
+   hedged sex read from a phantom, so the pass also records the MEDIAN
+   PER-KEYPOINT 3D DISTANCE between the two typed slots
+   (`second_typed_slot_dist_units`) against `pick_typed_pair`'s own same-fly
+   rule (`COLLAPSE_DIST_UNITS` = 3.0 u = 0.3 mm). On three bouts the median is
+   2-8 u -- the same animal read twice, the model hedging on sex -- while on
+   13_25_13/00001 all 93 such frames sit at ~47.6 u (4.8 mm, the far edge of
+   the 5.6 mm window): a genuine PHANTOM, on 4.7 % of that bout's frames. It
+   never reaches the output (`read_typed(want_sex=-1)` takes the
+   higher-existence slot) but it is exactly the material §3.5's
+   existence-negatives want.
+2. **Stale reused windows fire existence ~1.0 on empty crops.** 348 of the
+   8,000 frames (4.4 %) have existence >= 0.98 with EVERY per-view visibility
+   below 0.5; the contact sheet of the six worst
+   (`figures/2026-09-mvq/v2_pseudo/singlefly_worst_14_32_16_b0.png`, frames
+   26749-26757) shows bare arena floor in both cameras with no fly anywhere.
+   This is the spec's known failure reproduced on a single-fly recording. The
+   visibility head is right where the existence head is wrong, and the
+   pseudo-label gates use the visibility (`conf >= 0.5` scores the
+   reprojection gate), so **0 of those 348 frames are admitted** (checked
+   directly).
+3. **The sex head is unreliable here.** Across the four bouts the typed read
+   is female on 54 %, 74 %, 87 % and 100 % of written frames (mean p_female
+   0.54-1.00) for a fly that is female by the session's own `notes.txt`. The
+   pass therefore records the RECORDING'S ground truth
+   (`--fly-sex female`, `sex_source: recording_ground_truth`) and keeps the
+   model's read beside it in `mvq_meta.json`'s `sex_read`. Training on those
+   labels is the corrective signal, not confirmation bias.
+
+### The gates pick the good frames (rigid invariants, all frames vs admitted)
+
+`pseudo_gates.admit_bout(..., store=None, use_identity=False)` -- the real
+gate stack the extractor runs -- over each bout. `body` is the RIGID
+Antenna_Base-Abd_tip length (~24-27 u = 2.4-2.7 mm on a real fly; ~8 u would
+be the clip_A scale collapse) and `eyes` the RIGID EyeL-EyeR spacing:
+
+| recording / bout | admitted | anchors | body CV all -> admitted | eyes CV all -> admitted | reproj p95 all -> admitted (px) | blind frames admitted |
+|---|---|---|---|---|---|---|
+| 14_32_16 / 00000 | 1306 (65 %) | 94 | 0.114 -> 0.033 | 0.569 -> 0.082 | 3.73 -> 1.19 | 0 of 245 |
+| 14_32_16 / 00001 | 1456 (73 %) | 95 | 0.112 -> 0.010 | 0.622 -> 0.028 | 51.6 -> 1.08 | 0 of 42 |
+| 13_25_13 / 00000 | 1668 (83 %) | 110 | 0.126 -> 0.010 | 0.133 -> 0.033 | 7.97 -> 0.72 | 0 of 61 |
+| 13_25_13 / 00001 | 1933 (97 %) | 125 | 0.010 -> 0.010 | 0.030 -> 0.030 | 0.78 -> 0.77 | 0 of 0 |
+
+Every admitted frame has all 7 cameras seeing at least one keypoint, and the
+admitted median body length is 26.1-27.2 u (2.6-2.7 mm) with CV 0.01-0.03 --
+correct anatomy, no scale collapse. Rejections are step (67-671 per bout) and
+reprojection (0-477); existence rejects 0, which is the point of finding 1:
+existence is not the gate that catches the empty windows, visibility is.
+
+### Independent cross-check vs the pipeline's own ViTPose -> DLT track
+
+The only check that does not go through the mvq model: the free-running
+pipeline's `Session11_<rec>_bouts/bouts/bout_<n>/fly0/kp3d.npz` over the same
+video frames and calibration, compared BY KEYPOINT NAME (the reference npz
+stores no `kp_names`; its axis is `cfg.model.KP_NAMES` by construction, which
+the matching body length below confirms).
+
+| recording / bout | walking bout | overlap | frame lag | median agreement | body length mine / reference |
+|---|---|---|---|---|---|
+| 14_32_16 / 00000 | 2 | 241 | 0 | **0.43 u = 0.043 mm** | 26.53 / 26.28 u |
+| 14_32_16 / 00001 | 4 | 276 | 0 | **0.61 u = 0.061 mm** | 26.03 / 25.73 u |
+| 13_25_13 / 00000 | 1 | 550 | +25 | 3.32 u at lag 0 -> **0.50 u at lag +25** | 27.09 / 27.11 u |
+| 13_25_13 / 00000 | 2 | 384 | +26 | 6.55 u at lag 0 -> **0.45 u at lag +26** | 27.12 / 27.07 u |
+| 13_25_13 / 00001 | 4 | 502 | +25/26 | 4.08 u at lag 0 -> **0.52 u at lag +25** | 27.21 / 26.92 u |
+
+**The 13_25_13 offset is a frame-index CONVENTION difference, not an error.**
+That recording's `sync_plan.json` says `status: reindex` with
+`canonical_len 508196` vs 508170 mp4 frames = **26 dropped frames**, while
+14_32_16 is `clean` and needs no shift. This pass maps canonical slots through
+`predict.synced_reader.load_plan`; the reference bout dirs predate the
+dropped-frame gate and index mp4 positions directly, so at frame ~26.5k they
+are 25 frames behind. The lag curve is a clean V with its minimum at +25/+26
+and the agreement there is 0.045-0.052 mm -- the SAME level as 14_32_16's at
+lag 0, and the level the earlier field check measured (0.041/0.068 mm). It
+matters that this pass is on the canonical-slot side: the pseudo-label
+extractor's frame reader (`SessionFrames`) uses the same `load_plan`, so the
+JPEG written for frame f is the frame the keypoints came from.
+
+### Export
+
+`scripts/pseudo_labels/extract_p3b_pseudolabels.py --num-animals 1
+--no-identity-gate --target 2000 --min-female 0` over
+`OutFiles/v2_singlefly/*/`, into
+`/gscratch/portia/eabe/data/Johnson_lab/red_data_3d_v12_pseudo_singlefly_20260905`.
+
+- **424 anchors** (every admissible one) + **828 T=2 partners** = **1,252
+  framesets**, 8,764 JPEGs, 579 MB, in 160 s. Partner availability 416 / 410 /
+  421 at Delta = 1 / 4 / 16.
+- Per recording: 13_25_13 698, 14_32_16 554. Per bout 274-374, so the largest
+  single bout is 29.9 % of the export -- §3.2's "no bout > 2 %" rule is a
+  courtship-campaign rule over 160 bouts and cannot apply to a four-bout
+  single-fly set.
+- Manifest: `n_flies: 1`, `behavior: free_running`, `sex: female`,
+  `sex_source: recording_ground_truth`, `has_masks: false`, `weight: 0.3`,
+  `balance.female_host_weight: null` (one-sided -- there is no host-sex ratio
+  to restore, and 0.0 would read as "weight these to nothing"). Stratum:
+  1,252 female/mid; `contact`/`apart` are two-fly quantities and are 0 by
+  construction, wall 1.4 %.
+- `verify_export` (the loader round trip `V12WindowDataset` performs, run on
+  the real export): **20 windows checked of 1,252, mean 49.9/50 keypoints with
+  3D, mean 7.0 valid cameras, keypoint_names_ok true.**
+- **Short of the ~2,000 framesets §3.4 asks for.** The binding limit is the
+  anchor pool, not the gates: 4 bouts x 2,000 frames with 16-frame
+  decorrelation is at most 500 anchors, and 424 of them passed. Two more spans
+  per recording -- or a third Session11 recording (all seven have their own
+  calibration and the same all-female `notes.txt`) -- would close the gap; the
+  pass and the extract are one command each, and the extract is re-runnable
+  over the same output root.
+
+### Figures (read back against the stated expectation)
+
+Expectation, stated in the script docstring before rendering: *one fly per
+crop, keypoints ON her body (head points at the head end, abdomen at the
+abdomen, leg chains along the legs) at the right scale, in BOTH cameras, and
+no second skeleton anywhere in the crop.*
+
+- `figures/2026-09-mvq/v2_pseudo/singlefly_check.png` (14_32_16/bout_00000, 12
+  frames x Cam2012630 overhead + Cam2012861 side): matches the expectation.
+  One fly per crop, no second marker set anywhere; red head points on the
+  head, magenta abdomen points on the abdomen, yellow thorax/wing points on
+  the thorax and wing bases, and six blue leg chains that follow the real
+  legs, including on the wall-climbing frames where the fly hangs upside down.
+  The 12th column (f26977, visibility 0.74) has the fly at the crop edge with
+  part of the skeleton off her -- the low-visibility tail, below the gates.
+- `.../singlefly_check_13_25_13_b0.png` (Cam2012855 + Cam2012862) and
+  `.../singlefly_check_13_25_13_b1.png` (Cam2012630 + Cam2012857) and
+  `.../singlefly_check_14_32_16_b1.png` (Cam2012631 + Cam2012853): same
+  verdict on the other three bouts and on four further cameras chosen by name.
+- `.../singlefly_worst_14_32_16_b0.png` (the six LOWEST-visibility written
+  frames): empty arena floor in both cameras, existence 1.00, visibility 0.00
+  -- finding 2 above, and the reason the default sheet selects on visibility.
+
+### Commands
+
+```bash
+# span screening (CenterDetect only)
+python scripts/pseudo_labels/singlefly_p3b_pass.py --scan 25000:27000 [--scan ...] \
+  --session-dir <VID>/2026_03_03_14_32_16 --centerdetect <CD> --out OutFiles/v2_singlefly/<rec>
+# the pass (GPU; module load cuda/12.9.1, LD_PRELOAD libstdc++, unset LD_LIBRARY_PATH JAX_PLATFORMS)
+python scripts/pseudo_labels/singlefly_p3b_pass.py \
+  --session-dir <VID>/2026_03_03_14_32_16 --run <RUN>/final --centerdetect <CD> \
+  --bout 25000:27000 --bout 90200:92200 --num-animals 1 --fly-sex female \
+  --out OutFiles/v2_singlefly/2026_03_03_14_32_16
+# the figures
+python scripts/pseudo_labels/singlefly_p3b_pass.py --contact-sheet \
+  OutFiles/v2_singlefly/2026_03_03_14_32_16/bouts/bout_00000 \
+  --out-png figures/2026-09-mvq/v2_pseudo/singlefly_check.png \
+  --sheet-cameras Cam2012630,Cam2012861 --sheet-frames 12         # add --sheet-worst
+# the export
+JAX_PLATFORMS=cpu python scripts/pseudo_labels/extract_p3b_pseudolabels.py \
+  --runs OutFiles/v2_singlefly/*/ --num-animals 1 --no-identity-gate \
+  --target 2000 --min-female 0 --per-rec-frac 1.0 --per-bout-cap 2000 \
+  --out /gscratch/portia/eabe/data/Johnson_lab/red_data_3d_v12_pseudo_singlefly_20260905
+```
+
+One-off diagnostic scripts kept in the session scratchpad per CLAUDE.md (not
+promoted): `summarise_bouts.py` (the per-bout table), `admitted_check.py` (the
+all-vs-admitted invariants), `vs_reference.py` and `shift_probe.py` (the DLT
+cross-check and the lag curve).
