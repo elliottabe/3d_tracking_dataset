@@ -407,3 +407,101 @@ selectable via `--mvq-config p3a --run-name pose_mvq_p3a`). Verified:
 -- 32 passed; `scripts/slurm/mvq_p3a_campaign.sh --dry-run --only
 2025_10_20_13_20_04` -- prints the array/aggregate sbatch scripts rooted at
 `pose_mvq_p3b` with `mvq=p3b pipeline.lifter=mvq`, nothing submitted.
+
+## P3b on single-fly recordings
+
+Field check of `mvq_t1_b16_p3b_contact_20260905/final` -- this checkpoint has
+only ever been run on courtship PAIRS; here it runs mask-free
+(`scripts/coarse_pass_mvq.py`, CenterDetect + mvq, stride 1, `--num-animals
+1`) on three genuinely single-fly spans. Risk tested: a SECOND typed slot
+firing on a single-fly recording (phantom fly / duplicate window), or
+mis-sexing the lone fly.
+
+`--num-animals 1` stores only ONE row, read with `want_sex=-1` (whichever
+typed slot exists) via `read_typed` (`coarse_track.py` docstring, confirmed
+by reading it) -- it cannot show whether the OTHER typed slot ALSO cleared
+threshold in the same window, or whether CenterDetect ever proposed a 2nd
+window. Built `single_fly_slot_probe.py` (direct `MVQRunner`/`CenterDetector`
+probe, same windowing geometry as `coarse_pass`, 20 evenly-spaced
+frames/span) to check that directly; it deliberately passes `max_animals=2`
+to `lift_peaks_to_centres` (production uses `max_animals=num_animals=1`) so
+a would-be 2nd candidate is visible instead of being capped away.
+
+| span | frames | fps | exist>=0.5 | sex read | phantom window (probe, `max_animals=2`) | 2 typed slots same window | pose-jump | vs reference (median, name-matched) | verdict |
+|---|---:|---:|---:|---|---:|---:|---:|---|---|
+| clip_A (Clip/Session6/2025_10_12_15_06_46, f0-921) | 921 | 4.07 | 69.7% (30.3% NaN, never marginal: 0.50-1.0) | 100% male (sex_prob~4e-5), GT unknown | 0/20 | 0/20 | 6.5% | raw 10.79mm / centroid-rel 0.99mm vs data3D.csv | see caveat below |
+| fr_b2 (free_running/Session11/2026_03_03_14_32_16, f25933-26174, bout 2) | 241 | 2.43 | 100% | 100% female (sex_prob 0.996), matches GT (notes.txt: "all female") | 0/20 | 0/20 | 0% | 0.041mm vs bout_00002/fly0/kp3d.npz | SAFE |
+| fr_b4 (same rec, f90913-91189, bout 4) | 276 | 2.84 | 100% | 100% female (sex_prob 0.997), matches GT | 1/20 (duplicate, see below) | 0/20 | 0% | 0.068mm vs bout_00004/fly0/kp3d.npz | SAFE (see caveat) |
+
+Units: verified empirically (Antenna_Base-Abd_tip body length = 24 raw
+units in `data3D.csv` = 2.4mm, matching real Drosophila anatomy) that mvq's
+coarse-pass output, `data3D.csv` and the free-running `kp3d.npz` are all in
+the SAME 0.1mm ("units") convention -- table values converted to mm.
+
+**fr_b2 / fr_b4: clean.** Existence 100%, single window every frame over the
+FULL production run (`n_windows` unique == 1 across all 241/276 frames,
+confirmed from the real `coarse_pass` output, not just the 20-frame probe),
+sex read matches the session's known-all-female ground truth with high
+confidence, zero pose-jump, and kp3d agrees with the independent DLT/STAC
+`kp3d.npz` reference to 0.04-0.07mm median per-keypoint (name-matched via
+`cfg.model.KP_NAMES`, never by index). fr_b4's one probe-flagged frame
+(91173, `max_animals=2` only) has CenterDetect proposing a second 3D
+candidate 2.8mm from the first, but BOTH windows' female slot converges on
+the SAME centroid (`[209.7,35.6,13.4]` vs `[209.7,35.3,13.3]`) -- a DUPLICATE
+window on the one real fly, not a hallucination elsewhere, and the actual
+production `--num-animals 1` run (which correctly caps
+`max_animals=num_animals=1`) never splits into 2 windows for any of its 276
+frames, so this never reaches an output track.
+
+**clip_A: identity gates are safe, but keypoint SCALE COLLAPSES ~3x.**
+Zero phantom windows/slots at any threshold, and sex read is a stable,
+confident single type throughout (no flip-flopping). But body length
+(Antenna_Base-Abd_tip) computed directly from mvq's own kp3d is 0.73-0.94mm
+across sampled frames, vs 2.4mm in `data3D.csv` and vs the 2.6mm the SAME
+metric gives on fr_b2/fr_b4 -- the skeleton is compressed to roughly a
+third of true anatomy, keypoints huddling near the crop centre instead of
+spanning the body. This is why the naive "raw vs reference" distance
+(10.79mm) looked bad but the naive "centroid-relative" distance (0.99mm)
+looked fine: a collapsed near-point skeleton and a normal-sized skeleton
+disagree, after re-centering, by roughly half the real anatomy's spread --
+almost exactly what was measured, i.e. 0.99mm was NOT evidence of good shape
+match, it was hiding the collapse (the CLAUDE.md trap: a plausible-looking
+number for the wrong reason). Confirmed as calibration/rig-specific, not a
+same-scale generalization failure: fr_b2/fr_b4 use the SAME rig+calibration
+convention as courtship training data (`free_running_session11.yaml`: "Same
+7-camera rig + calibration as courtship") and get correct 2.6mm anatomy;
+clip_A is a different rig/session (`Video_recordings/Clip/Session6`, native
+calibration is `Cam*_dlt.csv`, converted here via a scratch Cam*.yaml write
+from `clip_io.load_dlt`, byte-verified to reproject window centres onto the
+detector's own peaks) whose world-unit scale evidently does not match what
+P3b's crop-size convention expects. clip_A's existence miss rate (30.3%
+NaN, never marginal) is a recall gap, not a false-positive identity issue.
+
+**Figures** (read back against the stated expectation -- skeleton ON the
+fly, no second marker set):
+- `figures/2026-09-mvq/p3b_gates/single_fly/fr_b2_contact_sheet.png`,
+  `.../fr_b4_contact_sheet.png` -- 6 frames x (overhead Cam2012630, side
+  Cam2012861): green keypoints sit tightly and correctly-scaled ON the one
+  fly in every frame/camera of both bouts, exist/sex titles read 1.00/female
+  throughout. Matches expectation exactly.
+- `.../clip_A_contact_sheet.png` -- 6 frames x (Cam2012630, Cam2012861):
+  green points form a small, scattered cloud near but not on the fly's body
+  (frames 0/184/368/552 exist 0.71-0.84) and vanish where exist is NaN
+  (frames 736/920) -- disagrees with the "skeleton on the fly" expectation,
+  consistent with the scale-collapse finding above, not a phantom (no
+  second marker set drawn in any frame).
+
+**Overall verdict: SAFE for phantom-fly / mis-sexing** on all three
+single-fly spans -- the specific risk this checkpoint was tested for
+(a second typed slot asserting a fly that isn't there, or mis-sexing the
+lone fly) did not occur in the real `--num-animals 1` production path on
+921+241+276 frames. The one open finding is UNRELATED to that risk:
+clip_A's anatomy scale collapse, attributed to a calibration/rig mismatch
+for that specific test recording rather than a P3b defect, since the
+same-rig-as-training free-running spans are clean. Recommend re-testing
+clip_A (or an equivalent single-fly clip) on a courtship-rig calibration
+before drawing conclusions about P3b's OOD generalization from it.
+
+Scripts (scratch, not committed):
+`single_fly_slot_probe.py`, `make_contact_sheet.py` in
+`/tmp/claude-398823/.../scratchpad/` (session-local).
