@@ -248,3 +248,133 @@ def test_composite_rejects_donor_with_no_mask_content_anywhere():
     # about the empty mask and nothing else
     src["prompt_mask"] = host_mask[None, None].copy()
     assert composite(tgt, src, np.zeros(3, np.float32), CopyPasteParams()) is not None
+
+
+# --- T=2 (mvq-v2 plan B task 2): composite() accepts T >= 1 windows -----------------------
+#
+# NOTE on scope: v12_windows.py (`paste_window`, the `__getitem__` T==1 guard, `window_index`,
+# `pair_deltas`, `delta`/`donor_delta`) is Task 1's deliverable and has NOT landed on this
+# branch yet -- see .superpowers/sdd/2026-09-05-mvq-v2-plan-b-t2-training/progress.md
+# ("BASE for Task 2 = 19c20a4 ... Task 2 running" precedes any Task 1/B1 entry). This task is
+# scoped to `mv_copy_paste.py` only, so the tests below build T=2 samples straight from
+# `V12WindowDataset(..., T=2, ...)` (already general-T today for CONSECUTIVE frames -- only
+# variable-Delta pairing needs Task 1's `pair_deltas`) or by hand, instead of through
+# `paste_window`/`window_index`, which do not exist yet.
+
+def _duplicate_frame_axis(sample):
+    """Turn a T=1 sample dict into a T=2 dict whose second frame is a byte-for-byte
+    duplicate of the first -- used to prove the T>=1 `composite()` path collapses to the
+    original T=1 path when both frames of a window are identical."""
+    out = dict(sample)
+    for k in ("crops", "cam_valid", "t_local", "prompt_mask"):
+        out[k] = np.concatenate([sample[k], sample[k]], axis=0)
+    for k in ("kp2d", "vis2d", "kp3d_local", "has3d"):
+        out[k] = np.concatenate([sample[k], sample[k]], axis=1)
+    return out
+
+
+def test_composite_t2_is_the_t1_path_applied_per_frame(tmp_path):
+    """Byte-equality guard (spec §7 risk 3): a T=2 window whose two frames are
+    identical must composite to two frames identical to the T=1 result."""
+    from jarvis_jax.data.mv_copy_paste import CopyPasteParams, composite
+    ds1, tgt1, src1 = _two_samples(tmp_path)
+    D = np.array([12.0, 0.0, 0.0], np.float32)
+    out1 = composite(tgt1, src1, D, CopyPasteParams())
+    assert out1 is not None
+    tgt2, src2 = _duplicate_frame_axis(tgt1), _duplicate_frame_axis(src1)
+    out2 = composite(tgt2, src2, D, CopyPasteParams())
+    assert out2 is not None
+    for k in ("crops", "prompt_mask"):
+        np.testing.assert_array_equal(out2[k][0], out1[k][0])
+        np.testing.assert_array_equal(out2[k][1], out1[k][0])
+    for k in ("kp2d", "vis2d", "kp3d_local", "has3d"):
+        np.testing.assert_array_equal(out2[k][:, 0], out1[k][:, 0])
+        np.testing.assert_array_equal(out2[k][:, 1], out1[k][:, 0])
+
+
+def _t2_samples(tmp_path):
+    """Real T=2 (consecutive-frame) windows out of V12WindowDataset -- no donor/host
+    overlap in EITHER window (host: fly0 frames 0,1; donor: fly0 frames 2,3, the
+    2nd-fly frame 3 does not touch fly0's own labels)."""
+    from jarvis_jax.data.v12_windows import V12WindowDataset
+    root = make_v12_root(tmp_path, n_frames=5, two_fly_frame=3, manifest_n_flies=1)
+    ds = V12WindowDataset(root, "train", T=2, train=False)
+    tgt = ds[ds.windows.index((REC, 0, 0))]
+    src = ds[ds.windows.index((REC, 0, 2))]
+    return ds, tgt, src
+
+
+def test_donor_keeps_its_own_motion_across_the_pair(tmp_path):
+    from jarvis_jax.data.mv_copy_paste import CopyPasteParams, composite
+    from jarvis_jax.models.mvq.geometry import project_local
+    ds, tgt, src = _t2_samples(tmp_path)
+    D = np.array([12.0, 0.0, 0.0], np.float32)          # contact range, as the T=1 fixture tests use
+    out = composite(tgt, src, D, CopyPasteParams())
+    assert out is not None and out["kp3d_local"].shape[1] == 2
+    # the pasted fly moved by exactly the donor's own frame-to-frame motion, not by
+    # zero (frozen at frame 0) and not by the host's motion -- checked on keypoints
+    # alive in BOTH frames (a keypoint dead in one frame but not the other, per the
+    # per-frame rejection rule, legitimately has kp3d_local zeroed only there).
+    both_alive = out["has3d"][1, 0] & out["has3d"][1, 1]
+    assert both_alive.sum() >= 40                     # sanity: the check below isn't vacuous
+    np.testing.assert_allclose(out["kp3d_local"][1, 1][both_alive] - out["kp3d_local"][1, 0][both_alive],
+                               src["kp3d_local"][0, 1][both_alive] - src["kp3d_local"][0, 0][both_alive], atol=1e-4)
+    # and its 3D still reprojects onto its written 2D in BOTH frames
+    for t in range(2):
+        uv = np.asarray(project_local(jnp.asarray(out["kp3d_local"][1, t]), jnp.asarray(out["M"]),
+                                      jnp.asarray(out["t_local"][t])))
+        has = out["has3d"][1, t]
+        for c in range(out["crops"].shape[1]):
+            np.testing.assert_allclose(uv[has, c], out["kp2d"][1, t, c][has], atol=1e-3)
+
+
+def test_composite_rejects_donor_of_a_different_window_length(tmp_path):
+    """`src` must have the same T as `tgt`: paste_window's donor pool is only
+    length-matched, not spacing-matched, so a length mismatch has to be an
+    explicit reject rather than an out-of-bounds index."""
+    from jarvis_jax.data.mv_copy_paste import CopyPasteParams, composite
+    ds1, tgt1, src1 = _two_samples(tmp_path)
+    tgt2 = _duplicate_frame_axis(tgt1)
+    D = np.array([12.0, 0.0, 0.0], np.float32)
+    assert composite(tgt2, src1, D, CopyPasteParams()) is None       # tgt T=2, src T=1
+    assert composite(tgt1, _duplicate_frame_axis(src1), D, CopyPasteParams()) is None  # tgt T=1, src T=2
+
+
+def test_composite_rejects_the_whole_pair_when_either_frame_has_nothing_to_paste():
+    """A donor with mask content in frame 0 but none in frame 1 (in the only
+    target-valid camera) must void the WHOLE pair -- not paste frame 0 alone
+    and silently drop frame 1's labels."""
+    from jarvis_jax.data.mv_copy_paste import CopyPasteParams, composite
+    from jarvis_jax.train.matching import SEX_UNKNOWN
+
+    H = W = 64
+    M = np.eye(2, 3, dtype=np.float32)[None]
+    t_local = np.zeros((2, 1, 2), np.float32)
+
+    def _sample(masks, fly1_valid=False):
+        return {
+            "crops": np.full((2, 1, H, W, 3), 100, np.uint8),
+            "cam_valid": np.ones((2, 1), bool),
+            "M": M, "t_local": t_local,
+            "kp2d": np.zeros((2, 2, 1, 2, 2), np.float32),
+            "vis2d": np.zeros((2, 2, 1, 2), bool),
+            "kp3d_local": np.zeros((2, 2, 2, 3), np.float32),
+            "has3d": np.zeros((2, 2, 2), bool),
+            "fly_valid": np.array([True, fly1_valid]),
+            "fly_sex": np.array([0, -1], np.int8),
+            "unlabelled_sex": np.int8(SEX_UNKNOWN),
+            "prompt_mask": np.stack(masks)[:, None],
+        }
+
+    host_mask = np.zeros((H, W), bool); host_mask[20:30, 20:30] = True
+    donor_mask_frame0 = np.zeros((H, W), bool); donor_mask_frame0[20:30, 20:30] = True
+    donor_mask_frame1_empty = np.zeros((H, W), bool)             # nothing to paste this frame
+
+    tgt = _sample([host_mask, host_mask])
+    src = _sample([donor_mask_frame0, donor_mask_frame1_empty])
+    src["vis2d"][0] = True
+    src["has3d"][0] = True
+    assert composite(tgt, src, np.zeros(3, np.float32), CopyPasteParams()) is None
+    # sanity: the same donor with content in BOTH frames is accepted
+    src["prompt_mask"][1, 0] = donor_mask_frame0
+    assert composite(tgt, src, np.zeros(3, np.float32), CopyPasteParams()) is not None
