@@ -287,6 +287,23 @@ class V12WindowDataset:
     def __len__(self):
         return len(self.windows)
 
+    def worker_spec(self):
+        """Picklable description of this dataset for a loader worker process
+        (`data/loader_workers.py`). Built from the ATTRIBUTES, not from a
+        stashed copy of the constructor arguments, so it cannot drift from what
+        the object actually is.
+
+        `recordings` is recovered as the set of recordings that survived the
+        constructor's filter, which selects exactly the same framesets whether
+        the caller passed None or that same set."""
+        from jarvis_jax.data.loader_workers import V12Spec
+        return V12Spec(root=self.root, split=self.split, T=int(self.T),
+                       pair_deltas=tuple(self.pair_deltas), max_flies=int(self.max_flies),
+                       jitter_units=float(self.jitter), seed=int(self.seed), train=bool(self.train),
+                       recordings=tuple(sorted({rec for rec, _, _ in self._fs})),
+                       copy_paste=self.copy_paste, center_shift_units=float(self.center_shift),
+                       sex_overrides={r: dict(m) for r, m in self.sex_overrides.items()})
+
     def calib_group(self, i):
         return self.manifest[self.windows[i][0]]["calib_group"]
 
@@ -705,7 +722,28 @@ class V12WindowDataset:
 
 
 def window_batches(ds, batch_size, *, shuffle=True, seed=0, weights=None, num_workers=8,
-                   drop_last=True):
+                   drop_last=True, workers="threads", pool=None, pool_key=None):
+    """Batches of `batch_size` windows, sampled in the PARENT and assembled by
+    `num_workers` workers.
+
+    `workers`:
+      "threads"   -- a `ThreadPoolExecutor` inside this process (the default,
+                     unchanged behaviour). Fine while the Python half of
+                     `__getitem__` is not the bottleneck.
+      "processes" -- a spawn `ProcessSampleLoader` (`data/loader_workers.py`),
+                     which is what feeds 8 GPUs at batch 32: the sample
+                     assembly is GIL-bound, so threads capped out at ~1.5-4 of
+                     32 cores. Batches are byte-identical to the thread path
+                     for the same (indices, seed) -- the epoch travels with
+                     every task and every per-sample RNG is a pure function of
+                     (dataset seed, index, epoch).
+
+    `pool` is an already-built `ProcessSampleLoader` to reuse (rebuilding one
+    per epoch would re-parse every root's COCO json in every worker); when it
+    is None a pool is built on first use and cached on `ds`. `pool_key` picks
+    which dataset inside that pool this call addresses (an mvq run shares one
+    pool between its T=1 and T=2 streams).
+    """
     ds.epoch = int(seed)                 # trainer passes a different seed per epoch
     rng = np.random.default_rng(seed)
     n = len(ds)
@@ -715,7 +753,56 @@ def window_batches(ds, batch_size, *, shuffle=True, seed=0, weights=None, num_wo
     else:
         idx = rng.permutation(n) if shuffle else np.arange(n)
     stop = (n // batch_size) * batch_size if drop_last else n
-    with ThreadPoolExecutor(max_workers=max(1, num_workers)) as pool:
-        for s in range(0, stop, batch_size):
-            samples = list(pool.map(ds.__getitem__, [int(i) for i in idx[s:s + batch_size]]))
+    starts = range(0, stop, batch_size)
+    if workers == "processes":
+        yield from _process_batches(ds, [[int(i) for i in idx[s:s + batch_size]] for s in starts],
+                                    seed=int(seed), num_workers=num_workers,
+                                    pool=pool, pool_key=pool_key)
+        return
+    if workers != "threads":
+        raise ValueError(f"workers must be 'threads' or 'processes', got {workers!r}")
+    tpool = ThreadPoolExecutor(max_workers=max(1, num_workers))
+    drained = False
+    try:
+        for s in starts:
+            samples = list(tpool.map(ds.__getitem__, [int(i) for i in idx[s:s + batch_size]]))
             yield {k: np.stack([smp[k] for smp in samples]) for k in WINDOW_KEYS}
+        drained = True
+    finally:
+        # `with ThreadPoolExecutor(...)` used to wrap this loop, which is correct
+        # only while the generator is fully drained. A consumer that stops
+        # mid-epoch left the pool -- and its `num_workers` threads -- alive until
+        # the generator was garbage collected, and a GC at interpreter shutdown
+        # died inside `Thread.join` ("'NoneType' object is not callable"). Join on
+        # a clean drain (deterministic for the leak test); on abandonment release
+        # the threads without blocking whoever is closing us.
+        tpool.shutdown(wait=drained, cancel_futures=True)
+
+
+def _process_batches(ds, index_lists, *, seed, num_workers, pool, pool_key):
+    """The `workers="processes"` half of `window_batches`."""
+    from jarvis_jax.data.loader_workers import ProcessSampleLoader, dataset_spec
+    owned = None
+    if pool is None:
+        pool = getattr(ds, "_mvq_loader_pool", None)
+        if pool is None or pool.num_workers != max(1, int(num_workers)):
+            if pool is not None:
+                pool.close()
+            pool = ProcessSampleLoader({pool_key: dataset_spec(ds)}, num_workers)
+            try:
+                ds._mvq_loader_pool = pool      # reused across epochs; see the docstring
+            except AttributeError:
+                owned = pool                    # cannot cache it -- close it when we are done
+    # `_MixCounter` counts provenance at `__getitem__`, which now runs in a worker;
+    # the parent tallies the same indices instead, so the realised-mix report is
+    # identical on both paths.
+    note = getattr(ds, "note_drawn", None)
+    try:
+        for bidx, samples in pool.map_batches(index_lists, epoch=int(seed), key=pool_key):
+            if note is not None:
+                for i in bidx:
+                    note(i)
+            yield {k: np.stack([smp[k] for smp in samples]) for k in WINDOW_KEYS}
+    finally:
+        if owned is not None:
+            owned.close()

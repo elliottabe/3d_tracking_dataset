@@ -27,7 +27,17 @@ balance_alpha: 0.5
 log_every: 50
 eval_every: 2000
 save_every: 2000          # §4 (mvq.yaml: 1000)
-num_workers: 24           # 8 GPUs of T=2 windows (64 frames x 7 cameras per batch)
+num_workers: 24           # 8 GPUs of T=2 windows (64 frames x 7 cameras per batch): a step
+                          # of batch 32 needs ~15 samples/s. Measured on the real four-root
+                          # T=2 concat (g3102, 32 cores): threads(24) 9.2, processes(24) 23.1,
+                          # processes(32) 26.8 samples/s. 24 processes is 2.5x the thread
+                          # loader and past the requirement; 32 buys 16 % more for 33 % more
+                          # resident memory (2.25 GB per worker per dataset), not worth it.
+loader_workers: processes # §perf 2026-09-06: sample assembly is GIL-bound, so the in-process
+                          # ThreadPoolExecutor used 1.5-4 of 32 cores and starved 8 GPUs --
+                          # utilisation cycled ~6 s at 100 % then ~3 s at 0 %. Spawn workers
+                          # (data/loader_workers.py) rebuild the roots from a picklable spec;
+                          # batches stay byte-identical to the thread path.
 pretrained: true          # DINOv3 backbone init; the mvq head is fresh (warm_start: null)
 smoke: false
 # §5 grades sex_acc on the calibration groups, mask_containment on contact pairs and

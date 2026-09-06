@@ -244,6 +244,17 @@ class ConcatWindowDataset:
     def __len__(self):
         return self._cum[-1] if self._cum else 0
 
+    def worker_spec(self):
+        """Picklable description of this concat for a loader worker process
+        (`data/loader_workers.py`): the sub-datasets' own specs plus the two
+        things this class adds on top of them. Each sub-dataset is asked for
+        its own spec, so a view around one (e.g. the negatives root's forced
+        `sample_weight`) describes itself rather than being flattened away."""
+        from jarvis_jax.data.loader_workers import ConcatSpec, dataset_spec
+        return ConcatSpec(specs=tuple(dataset_spec(d) for d in self.datasets),
+                          names=tuple(self.names),
+                          allow_calib_mismatch=bool(self.allow_calib_mismatch))
+
     def which(self, i):
         """(sub-dataset index, index WITHIN that dataset) for global index i."""
         i = int(i)

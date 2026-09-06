@@ -788,3 +788,88 @@ Scripts + JSON artifacts: `figures/2026-09-mvq/v2_train/calib_ba/`
 (`analyse.py`, `calib_core.py`, `detect_human_frames.py`, `plot_loo.py`,
 `consequence.py`, `rigid_invariant.py`, `human2d_selfcheck.py`,
 `ac_over_real_volume.py`, `loo_ba_results.json`, `consequence.json`).
+
+## Loader: process workers (2026-09-06)
+
+**Symptom.** On the first 8-GPU / batch-32 v2 run (`mvq_t2_v2_20260906`) GPU
+utilisation cycled ~6 s at 100 % then ~3 s at 0 %: the depth-2 prefetch drained
+and every device waited on data. The trainer process used 150-410 % CPU -- 1.5
+to 4 of the node's 32 cores -- with 24 loader threads. `V12WindowDataset.
+__getitem__` only releases the GIL inside the JPEG decode; the window assembly,
+centre jitter and copy-paste compositing around it are Python/numpy and
+serialise on one interpreter. At 6 GPUs / batch 24 the same loader kept up at
+2.11 s/step, which is 11.4 samples/s -- exactly its ceiling, so that run was
+already loader-bound and simply had less to feed.
+
+**Fix.** `window_batches(..., workers="processes")` dispatches to a **spawn**
+`multiprocessing` pool (`jarvis_jax/data/loader_workers.py`). Fork is not an
+option: the parent holds eight initialised CUDA contexts. Each worker rebuilds
+the roots from a picklable spec (`V12WindowDataset.worker_spec()` /
+`ConcatWindowDataset.worker_spec()`) in the pool initializer; sampling stays in
+the parent (`_balanced_weights`, the epoch permutation, `_MixCounter`'s tally)
+and the epoch travels with every task, so the per-sample RNG --
+`SeedSequence([seed, index, epoch, ...])`, no worker-local state -- lands on the
+same jitter and the same copy-paste donor. Batches are byte-identical to the
+thread path with train=True and copy-paste on
+(`tests/test_loader_workers.py`). One pool serves both the T=1 and T=2
+streams, keyed by T, so two streams cost 24 processes rather than 48.
+
+**Loader-only benchmark**, real four-root T=2 train concat as `run_training`
+builds it (46 003 windows, copy_paste 0.8, jitter 10, pair_deltas 1/4/16),
+batch 32, 12 timed batches, on g3102:
+
+| loader | samples/s | s/batch(32) | vs threads |
+|---|---|---|---|
+| threads(24) | 9.18 | 3.49 | 1.00x |
+| processes(24) | 23.10 | 1.39 | **2.52x** |
+| processes(32) | 26.80 | 1.19 | 2.92x |
+
+Worker memory: 2.25 GB resident per worker per dataset (54 GB over 24 workers
+for one; ~133 GB for the two-T training pool). processes(32) buys 16 % more
+throughput for 33 % more memory, so the config uses 24.
+
+**150-step GPU check**, the real command with `+share_check_steps=150
+train.loader_workers=processes` on all 8 L40S at batch 32:
+
+* **1.44-1.49 s/step**, steady (steps 37/74/111/148 at 280/335/388/442 s) vs
+  **1.82 s/step** on the thread loader (killed run, steps 200-250) -- 20 %
+  faster wall-clock.
+* `nvidia-smi dmon -s u`, 30 samples: mean SM **86 %**, 22 of 30 samples at
+  100 % on all eight devices, the rest brief dips (two to 0). The 6 s/3 s
+  100 %-then-0 % cycle is gone.
+* Trainer + workers together now draw ~620 % CPU (was 150-410 %).
+* Loss shares unchanged and still in band (`other_fly_repulsion` 8.08 %).
+
+**Still loader-bound, and why the dips remain.** 32 samples / 1.45 s = 22
+samples/s, which is the processes(24) benchmark rate, not a GPU limit -- the
+residual 14 % of idle SM is the loader, not the model. Two things cap it: (a)
+this node is shared, and another user held 595 processes and a load average of
+140-320 on its 32 cores throughout both the benchmark and the 150-step run, so
+every number here is a *contended* number; (b) 32 workers measured 16 % faster
+than 24 and is a one-line config change if the extra ~44 GB is acceptable.
+
+**Thread-pool lifetime.** The reported 9 634 OS threads are not a
+`window_batches` leak: a fully drained epoch returns the thread count to its
+baseline (measured, 20 epochs), and a bare 8-device JAX program already sits at
+174 threads before any collective -- the bulk is XLA/NCCL. There *was* a real
+leak on the abandoned path: the `with ThreadPoolExecutor(...)` wrapped the
+generator body, so a consumer that stopped mid-epoch held `num_workers` threads
+until the generator was garbage collected, and the GC at interpreter shutdown
+died inside `Thread.join` (`TypeError: 'NoneType' object is not callable`).
+`window_batches` now joins on a clean drain and releases without waiting on
+abandonment; two tests count `/proc/self/status` Threads across 20 epochs and
+across 10 explicitly closed mid-epoch generators.
+
+**Regenerate.** The loader table: build the four-root T=2 concat exactly as
+`run_training` does (the `pseudo_root`/`singlefly_root`/`negatives_root` of
+`configs/train/mvq_v2.yaml`, `train=True`, `copy_paste_p=0.8`,
+`jitter_units=10`, `pair_deltas=(1,4,16)`, `allow_calib_mismatch=True`), then
+time 12 batches of `window_batches(ds, 32, seed=7)` after discarding the first,
+once with `num_workers=24` and once each with
+`workers="processes", pool=ProcessSampleLoader({None: dataset_spec(ds)}, n)`
+for n in (24, 32). The driver must sit behind `if __name__ == "__main__":` --
+spawn re-imports `__main__`. The GPU check: `/tmp/perfcheck150.sh`, i.e. the
+launch script's environment plus
+`run_id=mvq_t2_v2_perfcheck +share_check_steps=150
+train.loader_workers=processes`, with `nvidia-smi dmon -s u -c 30` alongside.
+The run itself: `bash slurm_logs/launch_mvq_t2_v2.sh`.

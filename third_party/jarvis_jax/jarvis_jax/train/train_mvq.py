@@ -61,6 +61,14 @@ class MVQTrainConfig:
     eval_every: int = 2000
     save_every: int = 1000
     num_workers: int = 16
+    # How `window_batches` assembles samples. "threads" is the historical
+    # in-process ThreadPoolExecutor; "processes" is the spawn pool of
+    # `data/loader_workers.py`. Sample assembly is GIL-bound (only the JPEG
+    # decode releases it), so on 8 GPUs at batch 32 the thread loader used 1.5-4
+    # of 32 cores, delivered ~11 samples/s against the ~15/s the devices eat, and
+    # the depth-2 prefetch drained -- GPU utilisation cycled 100 %/0 %. Batches
+    # are byte-identical between the two paths (tests/test_loader_workers.py).
+    loader_workers: str = "threads"
     pretrained: bool = True
     smoke: bool = False
     val_cohorts: tuple = ("female", "two_fly")
@@ -647,6 +655,14 @@ class _ForceSampleWeight(_DatasetView):
         s["sample_weight"] = np.float32(self._value)
         return s
 
+    def worker_spec(self):
+        """This view carried into a loader worker process. `_DatasetView` is
+        transparent to `worker_spec` through `__getattr__`, but this subclass
+        CHANGES what a sample carries, so it has to say so: the worker rebuilds
+        it as `loader_workers._ForcedWeightView` (the same override, without
+        importing this JAX-bearing module)."""
+        return dataclasses.replace(self._ds.worker_spec(), force_sample_weight=float(self._value))
+
 
 class _MixCounter(_DatasetView):
     """A view that COUNTS which root each drawn window came from.
@@ -668,10 +684,17 @@ class _MixCounter(_DatasetView):
         self._lock = threading.Lock()
         self.counts = collections.Counter()
 
-    def __getitem__(self, i):
+    def note_drawn(self, i):
+        """Count one drawn index. Called here on the thread path (where
+        `__getitem__` runs in the parent) and by `window_batches` itself on the
+        PROCESS path, where `__getitem__` runs in a worker whose counter the
+        parent would never see -- same tally either way."""
         nm = self._ds.name(i)
         with self._lock:
             self.counts[nm] += 1
+
+    def __getitem__(self, i):
+        self.note_drawn(i)
         return self._ds[i]
 
     def realised(self):
@@ -978,6 +1001,7 @@ def run_training(root, *, out_dir, ckpt_dir, mcfg: MVQConfig, tcfg: MVQTrainConf
                for T in tcfg.window_lengths}
     streams = {}
     counters = {}
+    prepared = {}
     for T, ds in train_sets.items():
         w, mass = _mix_weights(ds, tcfg)
         is_f = np.array([ds.is_female(i) for i in range(len(ds))], bool)
@@ -1020,11 +1044,34 @@ def run_training(root, *, out_dir, ckpt_dir, mcfg: MVQConfig, tcfg: MVQTrainConf
                       f"mean sample_weight={mw:.4f}{flag}", flush=True)
             ds = _MixCounter(ds)
             counters[T] = ds
+        prepared[T] = (ds, w)
+    # ONE spawn pool shared by every T stream (`data/loader_workers.py`): each
+    # worker holds a copy of BOTH the T=1 and the T=2 dataset, so two streams
+    # cost 24 processes over the node's 32 cores rather than 2 x 24 competing
+    # for them. Built here, after the samplers, because the spec has to describe
+    # the dataset the stream actually draws from -- `_MixCounter` and the
+    # negatives root's `_ForceSampleWeight` view included. `evaluate` stays on
+    # threads: one pass over a T=1 val split every `eval_every` steps is not the
+    # bottleneck, and a second pool would double the workers' resident memory.
+    loader_pool = None
+    if tcfg.loader_workers == "processes":
+        from jarvis_jax.data.loader_workers import ProcessSampleLoader, dataset_spec
+        t_pool = time.time()
+        loader_pool = ProcessSampleLoader({T: dataset_spec(d) for T, (d, _) in prepared.items()},
+                                          tcfg.num_workers)
+        print(f"[mvq] loader: {tcfg.num_workers} spawn worker processes for T={sorted(prepared)} "
+              f"({time.time() - t_pool:.0f}s to start; each rebuilds every root from its spec)",
+              flush=True)
+    elif tcfg.loader_workers != "threads":
+        raise ValueError(f"train.loader_workers must be 'threads' or 'processes', "
+                         f"got {tcfg.loader_workers!r}")
+    for T, (ds, w) in prepared.items():
         def epochs(ds=ds, w=w, T=T):
             e = 0
             while True:
                 yield from window_batches(ds, tcfg.batch_size, shuffle=True, seed=tcfg.seed + 1000 * e + T,
-                                          weights=w, num_workers=tcfg.num_workers)
+                                          weights=w, num_workers=tcfg.num_workers,
+                                          workers=tcfg.loader_workers, pool=loader_pool, pool_key=T)
                 e += 1
         streams[T] = prefetch((tuple(bt[k] for k in WINDOW_KEYS) for bt in epochs()), mesh, depth=2)
     key = jax.random.PRNGKey(tcfg.seed)
@@ -1089,6 +1136,8 @@ def run_training(root, *, out_dir, ckpt_dir, mcfg: MVQConfig, tcfg: MVQTrainConf
             jax.clear_caches()
         if mngr is not None and (i + 1) % tcfg.save_every == 0:
             _save_step(mngr, i + 1, model, opt, ema, ema_updates)
+    if loader_pool is not None:
+        loader_pool.close()          # 24 idle workers x a few GB while the final eval runs
     if n_share:
         sh = _loss_shares(share_sums, n_share, weights)
         _print_loss_shares(sh)
