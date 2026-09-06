@@ -415,3 +415,161 @@ visible in any panel. Matches the stated expectation cleanly.
    contention from a concurrent campaign export on the same filesystem; a
    quieter node should be substantially faster (uncontended single-seek cost
    measured at ~0.4 s/frame/camera on this recording's own mp4s).
+
+## Real export (post own-window re-lift), 2026-09-06
+
+Everything above this heading was measured on the FIRST P3b lift, which had a
+per-view visibility defect. The campaign was re-lifted with the own-window fix
+(`mvq_meta.gates.window_pref = "own"`, same lifter checkpoint
+`mvq_t1_b16_p3b_contact_20260905/final`, sha `b54cdaef64696345`) and the old
+trees were renamed `pose_mvq_p3b.pre_ownwindow_0905`. The extractor's
+discovery glob is the exact name `.../courtship/*/*/pose_mvq_p3b`, so the
+renamed siblings are invisible to it; `manifest.source_roots` lists the 11
+`pose_mvq_p3b` roots it actually read and `n_source_bouts` 160, which is the
+whole re-lifted campaign (160 bouts x 2 flies = 320 bout-flies, LOO median
+0.60-0.68 px per recording in `pose_mvq_p3b/qc/session_qc.json`).
+
+The stale export (17,812 framesets drawn from the defective lift) was deleted
+and the root re-created from scratch.
+
+### Census: the own-window fix roughly DOUBLES the female-host yield
+
+Same gates, same contact definition, same 160 bouts, 0 bouts skipped in either
+run. One row = one admitted (anchor frame, host fly) = one v12 frameset.
+
+| recording | F pre | F post | M pre | M post |
+|---|---|---|---|---|
+| 2025_10_20_13_20_04 | 434 | 530 | 1591 | 1679 |
+| 2026_04_02_12_11_50 | 67 | 157 | 303 | 324 |
+| 2026_04_02_14_54_28 | 192 | 462 | 656 | 692 |
+| 2026_04_02_15_25_51 | 432 | 883 | 1056 | 1121 |
+| 2026_04_02_15_44_42 | 100 | 278 | 226 | 306 |
+| 2026_04_02_16_03_48 | 42 | 179 | 239 | 291 |
+| 2026_04_02_16_21_32 | 75 | 500 | 558 | 612 |
+| 2026_04_02_16_39_56 | 208 | 434 | 659 | 695 |
+| 2026_04_02_16_56_37 | 86 | 139 | 178 | 208 |
+| 2026_04_02_17_28_34 | 191 | 492 | 475 | 601 |
+| 2026_04_02_17_52_50 | 78 | 153 | 122 | 149 |
+| **TOTAL** | **1,905** | **4,207** (+121 %) | **6,063** | **6,678** (+10 %) |
+
+No recording lost anchors on either side. The female-host stratum is now above
+the controller's 3,000 floor on its own, so the census no longer stops the
+export; the run was still given `--min-female 1905` so that a yield BELOW the
+pre-fix number would have halted it before any frame was decoded.
+
+Post-fix cells (contact := min inter-fly KEYPOINT distance < 5 units):
+female 1,107 contact / 3,100 apart; male 1,476 contact / 4,956 apart / 246 mid
+(the other fly missing, separation undefined). The spec's original CENTROID
+rule still admits nothing anywhere (`by_host_sex_cell_centroid`: 4,207 female
+and 6,432 male all "apart"), exactly as before the re-lift -- the fix did not
+change that verdict. Partner availability 10,704 / 10,661 / 10,595 of 10,885
+anchors at Delta = 1 / 4 / 16 (98.3 / 98.0 / 97.3 %, up from 95 / 93 / 92 %).
+Wall anchors 6 in the whole census (2 recordings), so wall diversity still has
+to come from the real v12 wall subsets. Aggregate gate rejections over 238,558
+fly-frames are unchanged in shape -- containment 55,048, step 33,925, nonfinite
+21,710, reproj 18,465, exist 8,314, identity 0 -- containment is still the
+dominant filter, it just rejects far fewer female frames than it did.
+
+### Draw and export
+
+Decided parameters, unchanged: every admissible female-host anchor, male-host
+capped at 4,000 with per-recording <= 20 % and per-bout <= 200, partners at
+Delta 1/4/16 with endpoint semantics, loss weight 0.3, seed 0.
+
+| side | pool | taken | contact | apart | wall | max recording share | max bout |
+|---|---|---|---|---|---|---|---|
+| female | 4,207 | 4,207 (all) | 1,107 (26.3 %) | 3,100 (73.7 %) | 6 | 21.0 % | 131 |
+| male | 6,678 | 4,000 (capped) | 1,172 (29.3 %) | 2,752 (68.8 %) | 0 | 11.4 % | 100 |
+
+No shortfalls on either side (both >= 25 % contact and >= 25 % apart came out
+of the pool, not out of a relaxation). The male side respected both caps
+(11.4 % <= 20 %, 100 <= 200); the female side is `mode: all`, so its 21.0 %
+recording share is the uncapped side's own composition, not a cap violation.
+
+**`manifest.balance.female_host_weight` is now 0.9508** (= 4,000 / 4,207), not
+the 2.0997 of the stale export: the female side has grown to the size of the
+male cap, so the export is very nearly 50/50 by itself. `train.female_host_weight`
+in `configs/train/mvq_v2.yaml` (4.27 at the time of writing) has to be reset to
+this number, or the trainer will over-weight female-host windows by ~4.5x.
+
+Totals: **25,382 framesets** (8,207 anchors + 17,175 partners), **127,001
+images**, 177,674 annotations, 177,674 mask rows, 0 dropped for < 2 cameras.
+Realised composition: female-host 51.3 %, contact 27.8 %, apart 71.3 %, wall
+0.07 %, largest single bout 2.63 % of the export, all 11 recordings present.
+Per-stratum framesets: female/apart 9,246, female/contact 3,248, male/apart
+9,065, male/contact 3,552, male/mid 271. Partner framesets per delta: 8,078 /
+8,051 / 7,989 at Delta = 1 / 4 / 16.
+
+On disk: **42 GB** (images 26 GB, masks 16 GB, annotations 273 MB), written in
+3,666 s (61 min) single-process on g3102 under load from another user's job;
+the census scan before it took 660 s.
+
+**Verify** (`extract_p3b_pseudolabels.verify_export`, the loader round trip on
+the real export): the in-run check passed 20/25,382 windows, and a second run
+with a larger sample and a different seed (n=100, seed=7) passed too --
+`{"windows_checked": 100, "n_windows": 25382, "mean_kp_with_3d": 49.83,
+"mean_valid_cameras": 7.0, "keypoint_names_ok": true}`. Every sampled window
+has finite `kp3d_local`/`center3D`/`kp2d`, a host fly with triangulated 3D,
+7/7 valid cameras and non-black crops, and the instances' keypoint axis equals
+`annotations/keypoint_names.json`.
+
+**Figure** `figures/2026-09-mvq/v2_pseudo/ownwindow_export_check.png` (12
+panels, `scripts/viz/pseudo_export_check.py`, read back with the Read tool).
+Expectation stated first: on a re-lifted female-host or contact frameset the
+written keypoints must sit ON the host fly -- red head points at the head,
+magenta abdomen points on the abdomen, yellow wing points at the wing tips,
+cyan leg chains running outward from the thorax -- with the annotation's own
+SAM3 outline wrapping THAT animal; if the own-window re-lift had broken host
+assignment, a female-host panel would show the skeleton on the male or split
+between the two flies. What the panels show: `[female host]`
+15_44_42/Frame_301155/fly0 (contact, kpdist 4.56 u) and `[female+contact]`
+Frame_420504/fly0 (kpdist 5.00 u) are anatomically correct in both Cam2012630
+and Cam2012631, outline on the same fly; `[male+contact]`
+16_03_48/Frame_465128/fly1 at kpdist **0.28 u** -- the two flies touching, the
+partner's wing inside the crop -- keeps every keypoint on the outlined host;
+`[wall]` 20_04/Frame_207422/fly0 is correct on Cam2012630 and shows only 14 of
+50 keypoints on Cam2012631, which is the wall view's genuine occlusion (the
+export needs >= 2 valid cameras, not 7); `[partner]` and `[random]` panels are
+correct on both cameras. Fly colouring is natural (a BGR swap would show blue
+flies on an orange floor).
+
+### Exact commands
+
+```bash
+rm -rf /gscratch/portia/eabe/data/Johnson_lab/red_data_3d_v12_pseudo_p3b_20260905
+mkdir -p /gscratch/portia/eabe/data/Johnson_lab/red_data_3d_v12_pseudo_p3b_20260905
+
+# census only (660 s, 160 bouts, no frame decoded)
+JAX_PLATFORMS=cpu OMP_NUM_THREADS=8 nice -n 10 python scripts/pseudo_labels/extract_p3b_pseudolabels.py \
+    --out /gscratch/portia/eabe/data/Johnson_lab/red_data_3d_v12_pseudo_p3b_20260905 --census-only
+
+# draw + export + verify (3,666 s)
+JAX_PLATFORMS=cpu OMP_NUM_THREADS=8 nice -n 10 python scripts/pseudo_labels/extract_p3b_pseudolabels.py \
+    --out /gscratch/portia/eabe/data/Johnson_lab/red_data_3d_v12_pseudo_p3b_20260905 \
+    --male-n 4000 --per-rec-frac 0.20 --per-bout-cap 200 --contact-kp-units 5.0 \
+    --weight 0.3 --seed 0 --min-female 1905 --figures-dir figures/2026-09-mvq/v2_pseudo
+
+# read it back
+python scripts/viz/pseudo_export_check.py \
+    --root /gscratch/portia/eabe/data/Johnson_lab/red_data_3d_v12_pseudo_p3b_20260905 \
+    --out figures/2026-09-mvq/v2_pseudo/ownwindow_export_check.png --n 6 --cams 2
+```
+
+### Concerns
+
+1. **`female_host_weight` moved from 2.0997 to 0.9508.** Any config or run
+   that hard-codes the old value (`configs/train/mvq_v2.yaml` has 4.27) now
+   over-weights the female host. The number lives in
+   `manifest.balance.female_host_weight` -- read it from there.
+2. **The export cannot be sharded by recording.** `extract_p3b_pseudolabels.py`
+   has no `--only`/`--recordings` flag, and `--runs` shards DISCOVERY, which
+   would break the global draw (the male side's per-recording 20 % share, the
+   balance weight and the single manifest). It was therefore run
+   single-process; 61 min for 127,001 images is acceptable and no code change
+   was made.
+3. **Male anchors are still capped at 4,000 out of a 6,678 pool** while the
+   female side takes all 4,207. Raising the male cap would need a matching
+   rethink of the balance weight; left at the decided value.
+4. **Wall frames remain vanishingly rare** (6 anchors campaign-wide, 0.07 % of
+   the export). Wall/OOD diversity has to keep coming from the real v12 wall
+   subsets -- the pseudo set does not supply it.
