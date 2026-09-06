@@ -45,6 +45,26 @@ Any (recording, fly) whose framesets disagree on annotation sex gets ONE
 warning at init naming the counts and the manifest value they disagree with:
 the annotation wins per window, and the warning is there so a recording like
 this one is noticed rather than silently averaged.
+
+WINDOW LENGTH AND SPACING (mvq-v2, spec 2026-09-05 §4). A T > 1 window is
+"labelled at both frames, spacing Delta" rather than "T CONSECUTIVE labelled
+framesets": `pair_deltas` (default `(1,)`, the pre-v2 behaviour) lists the
+spacings tried, and the same (recording, fly, start frame) yields ONE window
+PER spacing that is labelled at every one of its T frames -- so `windows` is
+no longer keyed by (rec, fly, f0) alone and `win_delta[i]` (== `delta(i)`)
+says which spacing window i is. Address a window by `window_index(rec, fly,
+f0, delta)`, never by a position (CLAUDE.md's index-space history). T=1 keeps
+spacing 0 and `frames == [f0]`, byte-identical to before.
+
+NEGATIVES (spec §3.5). A frameset whose `fly_id` is -1 (the pseudo export
+writes them under the key `<rec>/Frame_<n>/neg0`, `data/pseudo_export.py`) is
+an EMPTY WINDOW: real pixels from a place where the coarse pass found no fly,
+centred on the frameset's own `center3D`. It yields `fly_valid` all False,
+`has3d` all False, no 2D labels, an all-zero `prompt_mask`, `unlabelled_sex ==
+SEX_UNKNOWN` (nothing is present-but-unlabelled -- that code would tell the
+existence loss to IGNORE the very window it is meant to learn from) and
+`is_negative` True. It is never another window's second instance, never a
+copy-paste target and never a donor.
 """
 from __future__ import annotations
 
@@ -65,7 +85,7 @@ from jarvis_jax.train.matching import SEX_FEMALE, SEX_MALE, SEX_UNKNOWN, SEX_PRE
 CROP = 448
 WINDOW_KEYS = ("crops", "cam_valid", "M", "t_local", "center3D", "kp3d_local", "has3d",
                "kp2d", "vis2d", "fly_valid", "px_scale", "is_female", "prompt_mask", "crop_origin",
-               "fly_sex", "unlabelled_sex", "sample_weight")
+               "fly_sex", "unlabelled_sex", "sample_weight", "is_negative")
 
 _SEX_CODE = {"female": SEX_FEMALE, "male": SEX_MALE}
 
@@ -89,9 +109,24 @@ def _parse_sex_overrides(overrides):
     return out
 
 
-def _parse_key(key):
-    rec, frame, fly = key.split("/")
-    return rec, int(frame.split("_")[1]), int(fly[3:])
+def _parse_key(key, fsv=None):
+    """(recording, frame, fly id) of a frameset key `<rec>/Frame_<n>/<tail>`.
+
+    `tail` is `fly<id>` for a labelled frameset, but the pseudo export writes
+    empty-window negatives as `neg0` with `fly_id: -1` inside the frameset
+    (`data/pseudo_export.py`, spec §3.5). The frameset's OWN `fly_id` therefore
+    wins whenever it is present and the key is parsed only as a fallback:
+    reading `neg0` positionally returns fly 0, and the negative would then
+    replace that frame's real fly0 window in `_fs`.
+    """
+    rec, frame, tail = key.split("/")
+    fly = (fsv or {}).get("fly_id")
+    if fly is None:
+        if not tail.startswith("fly"):
+            raise ValueError(f"frameset key {key!r}: last segment is not 'fly<id>' and the "
+                             f"frameset carries no 'fly_id' field")
+        fly = tail[3:]
+    return rec, int(frame.split("_")[1]), int(fly)
 
 
 def _affine_np(cam_mats):
@@ -102,9 +137,12 @@ def _affine_np(cam_mats):
 
 
 class V12WindowDataset:
-    def __init__(self, root, split, T=1, *, max_flies=2, jitter_units=3.0, seed=0,
-                 train=True, recordings=None, copy_paste=None, center_shift_units=0.0,
+    def __init__(self, root, split, T=1, *, pair_deltas=(1,), max_flies=2, jitter_units=3.0,
+                 seed=0, train=True, recordings=None, copy_paste=None, center_shift_units=0.0,
                  sex_overrides=None):
+        """`pair_deltas`: the frame spacings a T > 1 window may span (spec §4,
+        Delta in {1, 4, 16}); one window per spacing that is labelled at all T
+        frames. Ignored at T=1 (a single frame has no spacing)."""
         self.root, self.split, self.T = root, split, int(T)
         self.max_flies, self.jitter, self.train = int(max_flies), float(jitter_units), bool(train)
         self.seed = int(seed)
@@ -125,17 +163,27 @@ class V12WindowDataset:
         self._fs = {}                                   # (rec, frame, fly) -> frameset
         self._tools = {}
         for key, fsv in coco["framesets"].items():
-            rec, frame, fly = _parse_key(key)
+            rec, frame, fly = _parse_key(key, fsv)
             if recordings is not None and rec not in recordings:
                 continue
             grp = self.manifest[rec]["calib_group"]
             if grp not in self._tools:
                 self._tools[grp] = ReprojectionTool(os.path.join(root, "calibrations", str(grp)))
             self._fs[(rec, frame, fly)] = fsv
-        self.windows = []
+        self.pair_deltas = tuple(int(d) for d in (pair_deltas or (1,)))
+        self.windows, self.win_delta = [], []
         for (rec, frame, fly) in sorted(self._fs):
-            if all((rec, frame + k, fly) in self._fs for k in range(self.T)):
-                self.windows.append((rec, fly, frame))
+            if fly < 0:                                     # negative window: no partner needed
+                self.windows.append((rec, fly, frame)); self.win_delta.append(0)
+                continue
+            if self.T == 1:
+                self.windows.append((rec, fly, frame)); self.win_delta.append(0)
+                continue
+            for d in self.pair_deltas:                      # "labelled at both frames, spacing d"
+                if all((rec, frame + k * d, fly) in self._fs for k in range(self.T)):
+                    self.windows.append((rec, fly, frame)); self.win_delta.append(d)
+        self._win_index = {(w[0], w[1], w[2], d): i
+                           for i, (w, d) in enumerate(zip(self.windows, self.win_delta))}
         # Per-WINDOW host sex (the host's own frame-0 frameset annotation first),
         # not one collapsed value per (rec, fly): see the module docstring.
         self._win_sex = [self._resolve_fs_sex(rec, f0, fly) for (rec, fly, f0) in self.windows]
@@ -144,11 +192,19 @@ class V12WindowDataset:
             n = sum(1 for (r, fly, _) in self.windows if r == rec and fly in m)
             print(f"[v12_windows] sex_label_overrides {rec}: {dict(sorted(m.items()))} -- overriding the "
                   f"annotation/manifest chain on {n} window(s) of split {self.split!r}", flush=True)
+        # Donor pool for copy-paste, keyed by (calibration group, host sex, SPACING):
+        # the donor is composited into every frame of the host window with its own
+        # motion (`mv_copy_paste.composite`), so its T frames have to span the same
+        # Delta as the host's or the pasted fly would move a different amount of time.
+        # T=1 windows all have spacing 0, so the T=1 pools are unchanged.
         self._donors = {}
-        if self.copy_paste is not None and self.T == 1:
+        if self.copy_paste is not None:
             for i, (rec, fly, _) in enumerate(self.windows):
+                if fly < 0:
+                    continue                                # a negative has no host to donate
                 self._donors.setdefault((self.manifest[rec]["calib_group"],
-                                         _SEX_CODE.get(self._win_sex[i], SEX_UNKNOWN)), []).append(i)
+                                         _SEX_CODE.get(self._win_sex[i], SEX_UNKNOWN),
+                                         self.delta(i)), []).append(i)
 
     def _warn_sex_disagreements(self):
         """Print ONE warning per (recording, fly) whose framesets carry more
@@ -164,6 +220,8 @@ class V12WindowDataset:
         `red_data_3d_v12_export0902` that triggers this."""
         census = collections.defaultdict(collections.Counter)
         for (rec, frame, fly), fsv in self._fs.items():
+            if fly < 0:
+                continue                        # a negative frameset has no host fly to have a sex
             s = _frameset_own_sex(fsv, self._ann)
             if s and s != "unknown":
                 census[(rec, fly)][s] += 1
@@ -181,6 +239,38 @@ class V12WindowDataset:
 
     def calib_group(self, i):
         return self.manifest[self.windows[i][0]]["calib_group"]
+
+    def delta(self, i):
+        """Frame spacing of window i (`win_delta[i]`): one of `pair_deltas` for a
+        T > 1 pair, 0 for a T=1 window and for a negative."""
+        return int(self.win_delta[i])
+
+    def _frames(self, i):
+        """The T video frames window i spans: `f0 + k * delta(i)`. At T=1 (spacing
+        0) that is `[f0]`, the pre-Delta behaviour. A T > 1 NEGATIVE also has
+        spacing 0 -- it repeats its one empty frame, since it asserts nothing that
+        could move between frames."""
+        f0 = self.windows[i][2]
+        return [f0 + k * self.delta(i) for k in range(self.T)]
+
+    def window_index(self, rec, fly, f0, delta=None):
+        """Index of ONE window BY KEY -- never by a position in `windows`.
+
+        `delta=None` means "whatever spacing that (rec, fly, f0) was built with",
+        which is unique for T=1 and for negatives (both spacing 0). At T > 1 with
+        several `pair_deltas` the SAME (rec, fly, f0) exists once per spacing, so
+        `delta=None` is ambiguous there and raises ValueError instead of silently
+        returning the first spacing built; a key that matches nothing raises
+        KeyError."""
+        if delta is not None:
+            return self._win_index[(rec, int(fly), int(f0), int(delta))]
+        hits = [i for (r, f, s, _), i in self._win_index.items() if (r, f, s) == (rec, int(fly), int(f0))]
+        if not hits:
+            raise KeyError((rec, int(fly), int(f0)))
+        if len(hits) > 1:
+            raise ValueError(f"{(rec, int(fly), int(f0))} matches {len(hits)} windows at spacings "
+                             f"{sorted(self.delta(i) for i in hits)} -- pass delta=")
+        return hits[0]
 
     def _fs_field(self, i, key, default):
         """Value of `key` for window i, frameset-first: this window's OWN
@@ -221,9 +311,9 @@ class V12WindowDataset:
         return self._win_sex[i] == "female"
 
     def n_flies(self, i):
-        rec, fly, f0 = self.windows[i]
-        others = {k[2] for k in self._fs if k[0] == rec and f0 <= k[1] < f0 + self.T and k[2] != fly}
-        return 1 + min(len(others), self.max_flies - 1)
+        """Labelled flies in window i (host + others, capped at `max_flies`); 0 for
+        a negative, which asserts no fly at all."""
+        return len(self._window_flies(i)[1])
 
     def _resolve_fs_sex(self, rec, frame, fly):
         """Resolved sex STRING of ONE (recording, frame, fly), ANNOTATION-FIRST:
@@ -234,6 +324,8 @@ class V12WindowDataset:
         A frame this fly has no frameset for (e.g. the other fly of a T=2
         window labelled only in the second frame) has no annotation of its
         own and falls through to the manifest by fly id."""
+        if int(fly) < 0:
+            return "unknown"                 # negative window: no host fly, so no sex
         ov = self.sex_overrides.get(rec, {}).get(int(fly))
         if ov is not None:
             return ov
@@ -257,10 +349,15 @@ class V12WindowDataset:
         return [self.fly_sex_code(rec, fly, f0) for fly in flies]
 
     def _window_flies(self, i):
-        """Labelled fly ids in window i, host first, capped at max_flies (same rule as __getitem__)."""
-        rec, host, f0 = self.windows[i]
-        frames = [f0 + k for k in range(self.T)]
-        others = sorted({k[2] for k in self._fs if k[0] == rec and k[1] in frames and k[2] != host})
+        """Labelled fly ids in window i, host first, capped at max_flies (same rule
+        as __getitem__). EMPTY for a negative window, and a negative frameset is
+        never picked up as another window's extra instance (`k[2] >= 0`)."""
+        rec, host, _ = self.windows[i]
+        if host < 0:
+            return rec, []
+        frames = self._frames(i)
+        others = sorted({k[2] for k in self._fs
+                         if k[0] == rec and k[1] in frames and k[2] != host and k[2] >= 0})
         return rec, [host] + others[: self.max_flies - 1]
 
     def unlabelled_sex(self, i):
@@ -276,7 +373,13 @@ class V12WindowDataset:
         docstring), so "the missing fly id is fly1, and the manifest calls
         fly1 male" would claim a male unlabelled animal in the 677 windows
         whose LABELLED animal already is that male. Otherwise the unlabelled
-        animal is whichever `fly_sex` entry this window has no labels for."""
+        animal is whichever `fly_sex` entry this window has no labels for.
+
+        A NEGATIVE window is always SEX_UNKNOWN: it asserts that there is no fly
+        here at all, and any other code would tell the existence loss to ignore
+        the very window it exists to supervise (spec §3.5)."""
+        if self.windows[i][1] < 0:
+            return SEX_UNKNOWN
         rec, flies = self._window_flies(i)
         meta = self.manifest.get(rec, {})
         n_present = int(meta.get("n_flies", len(flies)))
@@ -373,16 +476,27 @@ class V12WindowDataset:
     # ------------------------------------------------------------------ sample
     def _build(self, i):
         rec, host, f0 = self.windows[i]
+        negative = host < 0
         rt = self._rt(rec); C = rt.num_cameras; T, K, F = self.T, self.K, self.max_flies
         cams = list(rt.cameras.keys())
         M, t = _affine_np(rt.camera_matrices)                         # (C,2,3),(C,2) float64
 
         # --- labels per frame per fly (full-frame), 3D via DLT, host first
-        frames = [f0 + k for k in range(T)]
-        rec_, flies = self._window_flies(i)
+        frames = self._frames(i)                          # [f0] at T=1; [f0, f0+delta, ...] at T>1
+        rec_, flies = self._window_flies(i)               # [] for a negative: nothing is labelled
         kp_full = np.zeros((F, T, C, K, 3), np.float32)
         X3 = np.zeros((F, T, K, 3), np.float32); has3d = np.zeros((F, T, K), bool)
         infos = {}
+        if negative:
+            # No labels to read, but the crops are real pixels: take the per-camera
+            # image infos from the negative frameset's OWN resolved slots (BY NAME,
+            # via `_labels_full`'s cam_to_row) and discard its zero keypoints, so
+            # `kp_full`/`X3`/`has3d` stay zero.
+            for ti, f in enumerate(frames):
+                _, inf = self._labels_full(self._fs[(rec, f, host)], rt)
+                for c in range(C):
+                    if inf[c] is not None:
+                        infos.setdefault((ti, c), inf[c])
         for fi, fly in enumerate(flies):
             for ti, f in enumerate(frames):
                 fsv = self._fs.get((rec, f, fly))
@@ -406,9 +520,17 @@ class V12WindowDataset:
                     cam_valid[ti, c] = False
 
         # --- window centre from the host's 3D (frame 0), jittered in train mode
-        vis0 = has3d[0, 0]
-        pts = X3[0, 0][vis0] if vis0.any() else np.zeros((1, 3), np.float32)
-        center = 0.5 * (pts.max(0) + pts.min(0))
+        if negative:
+            c3 = self._fs[(rec, f0, host)].get("center3D")            # no labels to derive one from
+            if c3 is None:
+                raise ValueError(f"negative frameset {rec}/Frame_{f0}: no 'center3D'. An empty "
+                                 f"window has no labels to place itself with, so the exporter "
+                                 f"must store the centre it sampled (spec §3.5)")
+            center = np.asarray(c3, np.float64)
+        else:
+            vis0 = has3d[0, 0]
+            pts = X3[0, 0][vis0] if vis0.any() else np.zeros((1, 3), np.float32)
+            center = 0.5 * (pts.max(0) + pts.min(0))
         if self.train and self.jitter > 0:
             # Per-sample generator, not a shared self.rng: window_batches draws
             # samples concurrently from a ThreadPoolExecutor, and a numpy
@@ -445,6 +567,8 @@ class V12WindowDataset:
             img = self._decode(info)
             x0, y0 = origin[c]
             crops[ti, c] = img[y0:y0 + CROP, x0:x0 + CROP]
+            if negative:
+                continue                    # no host, so no prompt: `prompt` stays all-zero
             # host mask (may be absent -> zeros)
             fsv = self._fs[(rec, frames[ti], host)]
             for img_id, ann_id in iter_resolved_slots(fsv):
@@ -462,7 +586,8 @@ class V12WindowDataset:
         inside = ((kp2d >= 0) & (kp2d <= CROP - 1)).all(-1)
         vis2d = (kp_full[..., 2] > 0) & inside & cam_valid[None, :, :, None]
         fly_valid = np.array([fi < len(flies) and vis2d[fi].any() for fi in range(F)])
-        fly_valid[0] = True
+        if not negative:
+            fly_valid[0] = True             # the host is instance 0; a negative window has no host
         px_scale = float(np.mean(np.sqrt((M ** 2).sum((1, 2)) / 2.0)))
         return {
             "crops": crops, "cam_valid": cam_valid,
@@ -476,35 +601,47 @@ class V12WindowDataset:
                                  for fi in range(F)], np.int8),
             "unlabelled_sex": np.int8(self.unlabelled_sex(i)),
             "sample_weight": np.float32(self.weight(i)),
+            "is_negative": np.bool_(negative),
         }
 
     def paste_window(self, i, rng):
-        """Copy-paste per spec §6; None when no donor fits after max_tries."""
+        """Copy-paste per spec §6; None when no donor fits after max_tries.
+
+        Host and donor are WHOLE T-frame samples (`_build`), and `composite`
+        pastes the donor into every frame with the same 3D offset but its own
+        per-frame pixels/labels -- so the donor is drawn from the pool of the
+        same calibration group AND THE SAME SPACING (`delta`), or its motion
+        across the window would cover a different amount of time than the
+        host's. `info["donor_delta"]` reports that spacing."""
         from jarvis_jax.data.mv_copy_paste import body_plane_axes, composite, sample_offset
         p = self.copy_paste
         rec, host, _ = self.windows[i]
         grp = self.manifest[rec]["calib_group"]
+        d_i = self.delta(i)
         host_sex = _SEX_CODE.get(self._win_sex[i], SEX_UNKNOWN)   # this window's host, not the (rec, fly) pair's
         tgt = self._build(i)
         axes = body_plane_axes(tgt["kp3d_local"][0, 0], tgt["has3d"][0, 0])
         for _ in range(p.max_tries):
             want = (1 - host_sex) if (host_sex in (0, 1) and rng.uniform() < p.opposite_sex_p) else host_sex
             other = (1 - want) if want in (0, 1) else host_sex
-            pool = [j for j in self._donors.get((grp, want), []) if j != i] \
-                or [j for j in self._donors.get((grp, other), []) if j != i]
+            pool = [j for j in self._donors.get((grp, want, d_i), []) if j != i] \
+                or [j for j in self._donors.get((grp, other, d_i), []) if j != i]
             if not pool:
-                return None          # no donor of either sex in this calibration group
+                return None          # no donor of either sex at this spacing in this calibration group
             j = int(pool[rng.integers(len(pool))])
             D = sample_offset(rng, axes, p)
             out = composite(tgt, self._build(j), D, p)
             if out is not None:
                 sep = float(np.linalg.norm(D))
-                return out, {"donor": j, "D": D, "sep": sep, "contact": sep <= p.contact_sep[1]}
+                return out, {"donor": j, "D": D, "sep": sep, "contact": sep <= p.contact_sep[1],
+                             "donor_delta": self.delta(j)}
         return None
 
     def __getitem__(self, i):
         p = self.copy_paste
-        if (p is not None and self.train and self.T == 1 and self.n_flies(i) == 1
+        # No T restriction: `composite` handles T >= 1 windows (P3a spec §6 as
+        # amended for mvq-v2 §4). n_flies == 1 also excludes negatives (0 flies).
+        if (p is not None and self.train and self.n_flies(i) == 1
                 and self.unlabelled_sex(i) == SEX_UNKNOWN):
             rng = np.random.default_rng(np.random.SeedSequence([self.seed, int(i), int(self.epoch), 7]))
             if rng.uniform() < p.p:

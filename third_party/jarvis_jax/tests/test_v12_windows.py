@@ -283,7 +283,8 @@ def test_copy_paste_hook_is_deterministic_and_skips_unlabelled_present(tmp_path)
     s3 = ds[i]
     assert not np.array_equal(s1["kp2d"][1], s3["kp2d"][1])           # a new epoch draws a new paste
     r = ds.paste_window(i, np.random.default_rng(0))
-    assert r is not None and set(r[1]) == {"donor", "D", "sep", "contact"}
+    assert r is not None and set(r[1]) == {"donor", "D", "sep", "contact", "donor_delta"}
+    assert r[1]["donor_delta"] == 0                                    # T=1 windows have no spacing
     val = V12WindowDataset(root, "val", T=1, train=False, copy_paste=CopyPasteParams(p=1.0))
     assert val[i]["fly_valid"].tolist() == [True, False]               # never in eval mode
 
@@ -303,10 +304,15 @@ def test_paste_window_falls_back_to_other_sex_pool(tmp_path):
                           copy_paste=CopyPasteParams(p=1.0, opposite_sex_p=0.0, max_tries=4))
     i = ds.windows.index((REC, 0, 0))
     j = ds.windows.index((REC, 1, 1))               # fly1, the two-fly frame: annotation sex "male"
-    ds._donors = {("A", 0): [i], ("A", 1): [j]}     # female pool == {i} only; usable donor is male j
+    # pools are keyed (calib group, sex, SPACING); every T=1 window has spacing 0
+    ds._donors = {("A", 0, 0): [i], ("A", 1, 0): [j]}   # female pool == {i} only; usable donor is male j
     r = ds.paste_window(i, np.random.default_rng(0))
     assert r is not None and r[1]["donor"] == j
-    ds._donors = {("A", 0): [i]}                    # no donor of either sex once i excludes itself
+    ds._donors = {("A", 0, 0): [i]}                 # no donor of either sex once i excludes itself
+    assert ds.paste_window(i, np.random.default_rng(0)) is None
+    # a donor of a DIFFERENT spacing is not a candidate either (its frames would
+    # span a different amount of time than the host's)
+    ds._donors = {("A", 0, 4): [j], ("A", 1, 4): [j]}
     assert ds.paste_window(i, np.random.default_rng(0)) is None
 
 
@@ -394,3 +400,132 @@ def test_pseudo_manifest_and_frameset_fields_override(tmp_path):
     assert float(ds[i]["sample_weight"]) == pytest.approx(0.1)
     other = [j for j in range(len(ds)) if j != i][0]
     assert ds.weight(other) == 0.3            # manifest default for the rest of the root
+
+
+# --- mvq-v2 plan B task 1: T=2 at Delta in {1,4,16}, negatives, donor spacing ---------------
+
+def test_t2_windows_are_pairs_at_each_delta(tmp_path):
+    from jarvis_jax.data.v12_windows import V12WindowDataset
+    root = make_v12_root(tmp_path, n_frames=6, two_fly_frame=1)
+    ds = V12WindowDataset(root, "train", T=2, pair_deltas=(1, 4), train=False)
+    got = {(w[0], w[1], w[2], d) for w, d in zip(ds.windows, ds.win_delta)}
+    assert (REC, 0, 0, 1) in got and (REC, 0, 0, 4) in got
+    assert (REC, 0, 3, 4) not in got            # frame 7 does not exist
+    i = ds.window_index(REC, 0, 0, 4)
+    s = ds[i]
+    assert s["crops"].shape[0] == 2 and s["kp3d_local"].shape[1] == 2 and ds.delta(i) == 4
+    # frame 1 of the pair really is frame 0+delta: its labels differ from frame 0's
+    assert not np.allclose(s["kp3d_local"][0, 0], s["kp3d_local"][0, 1])
+    # one origin per (sample, camera), shared by both frames (assemble() relies on it)
+    np.testing.assert_array_equal(s["t_local"][0], s["t_local"][1])
+    # ... and the delta-4 pair is NOT the delta-1 pair: same frame 0, different frame 1
+    j = ds.window_index(REC, 0, 0, 1)
+    s1 = ds[j]
+    np.testing.assert_allclose(s1["kp3d_local"][0, 0], s["kp3d_local"][0, 0], atol=1e-4)
+    assert not np.allclose(s1["kp3d_local"][0, 1], s["kp3d_local"][0, 1])
+    # frame 1 of the delta-4 pair carries frame 4's OWN labels (world coords)
+    ds1 = V12WindowDataset(root, "train", T=1, train=False)
+    ref = ds1[ds1.window_index(REC, 0, 4)]
+    np.testing.assert_allclose(s["kp3d_local"][0, 1] + s["center3D"],
+                               ref["kp3d_local"][0, 0] + ref["center3D"], atol=1e-2)
+
+
+def test_window_index_needs_a_delta_when_several_spacings_share_a_start(tmp_path):
+    """(rec, fly, f0) exists once PER delta at T=2, so `delta=None` there is
+    ambiguous and must say so instead of returning whichever came first."""
+    from jarvis_jax.data.v12_windows import V12WindowDataset
+    root = make_v12_root(tmp_path, n_frames=6, two_fly_frame=1)
+    ds = V12WindowDataset(root, "train", T=2, pair_deltas=(1, 4), train=False)
+    with pytest.raises(ValueError, match="pass delta="):
+        ds.window_index(REC, 0, 0)
+    assert ds.delta(ds.window_index(REC, 0, 0, 1)) == 1
+    with pytest.raises(KeyError):
+        ds.window_index(REC, 0, 0, 3)                     # no window at that spacing
+    # only ONE spacing reaches frame 4 as a start (4+4 = 8 does not exist)
+    assert ds.delta(ds.window_index(REC, 0, 4)) == 1
+
+
+def test_t1_still_means_single_frames(tmp_path):
+    from jarvis_jax.data.v12_windows import V12WindowDataset
+    root = make_v12_root(tmp_path, n_frames=4)
+    ds = V12WindowDataset(root, "train", T=1, train=False)
+    assert all(d == 0 for d in ds.win_delta) and ds[0]["crops"].shape[0] == 1
+
+
+def _add_negative(root, frame=0, center=(200.0, 50.0, 0.0)):
+    """Write ONE empty-window negative frameset (`fly_id: -1`, key `neg0`, its
+    own stored `center3D`) into the train split, the shape
+    `data/pseudo_export.py` writes for spec §3.5."""
+    p = os.path.join(root, "annotations", "instances_train.json")
+    coco = json.load(open(p))
+    src = coco["framesets"][f"{REC}/Frame_{frame}/fly0"]
+    coco["framesets"][f"{REC}/Frame_{frame}/neg0"] = {
+        "recording": REC, "fly_id": -1, "negative": True, "center3D": list(center),
+        "subset": "negative", "frames": src["frames"], "ann_ids": src["ann_ids"]}
+    json.dump(coco, open(p, "w"))
+
+
+def test_negative_frameset_has_no_flies_and_a_stored_centre(tmp_path):
+    from jarvis_jax.data.v12_windows import V12WindowDataset
+    from jarvis_jax.train.matching import SEX_UNKNOWN
+    root = make_v12_root(tmp_path, n_frames=3)
+    _add_negative(root)
+    ds = V12WindowDataset(root, "train", T=1, train=False)
+    i = ds.window_index(REC, -1, 0)
+    s = ds[i]
+    assert s["fly_valid"].sum() == 0 and not s["has3d"].any() and bool(s["is_negative"])
+    assert int(s["unlabelled_sex"]) == SEX_UNKNOWN
+    np.testing.assert_allclose(s["center3D"], [200.0, 50.0, 0.0], atol=1e-4)
+    assert s["crops"].shape == (1, 7, 448, 448, 3) and s["cam_valid"].any()
+    # nothing is claimed beyond "no fly": no 2D labels, no prompt, no host sex --
+    # and the pixels are still a real decoded picture, not a zero-filled window.
+    assert not s["vis2d"].any() and not s["prompt_mask"].any()
+    assert not bool(s["is_female"]) and s["fly_sex"].tolist() == [SEX_UNKNOWN, SEX_UNKNOWN]
+    assert ds.n_flies(i) == 0 and ds.source(i) == "real" and ds.role(i) == "anchor"
+    assert (s["crops"] > 0).any()
+    # the negative does not disturb the labelled window in the SAME frame
+    j = ds.window_index(REC, 0, 0)
+    assert ds.n_flies(j) == 1 and ds[j]["fly_valid"].tolist() == [True, False]
+    assert not bool(ds[j]["is_negative"]) and ds[j]["has3d"].any()
+
+
+def test_negative_windows_never_pair_or_donate(tmp_path):
+    """A negative has no host: it is not a copy-paste target (n_flies == 0), it
+    is not in any donor pool, and no labelled window picks it up as a second
+    instance."""
+    from jarvis_jax.data.v12_windows import V12WindowDataset
+    from jarvis_jax.data.mv_copy_paste import CopyPasteParams
+    root = make_v12_root(tmp_path, n_frames=3, two_fly_frame=1, manifest_n_flies=1)
+    _add_negative(root)
+    ds = V12WindowDataset(root, "train", T=1, train=True, copy_paste=CopyPasteParams(p=1.0, max_tries=20))
+    neg = ds.window_index(REC, -1, 0)
+    assert ds[neg]["fly_valid"].sum() == 0            # p=1.0 and still no pasted donor
+    assert all(j != neg for pool in ds._donors.values() for j in pool)
+    host = ds.window_index(REC, 0, 2)                 # a labelled window in the same recording
+    assert ds[host]["fly_valid"].tolist() == [True, True]        # pasted, as before the negatives
+
+
+def test_t2_copy_paste_pairs_a_donor_of_the_same_spacing(tmp_path):
+    """The donor's two frames must span the SAME delta as the host's, or the
+    pasted fly's 'own motion' would cover a different amount of time."""
+    from jarvis_jax.data.v12_windows import V12WindowDataset
+    from jarvis_jax.data.mv_copy_paste import CopyPasteParams
+    root = make_v12_root(tmp_path, n_frames=8, two_fly_frame=1, manifest_n_flies=1)
+    man = json.load(open(os.path.join(root, "manifest.json")))
+    man["recordings"][REC]["fly_sex"] = {"fly0": "female"}
+    json.dump(man, open(os.path.join(root, "manifest.json"), "w"))
+    ds = V12WindowDataset(root, "train", T=2, pair_deltas=(1, 4), train=True,
+                          copy_paste=CopyPasteParams(p=1.0, max_tries=20))
+    i = ds.window_index(REC, 0, 0, 4)
+    r = ds.paste_window(i, np.random.default_rng(0))
+    assert r is not None
+    sample, info = r
+    assert set(info) == {"donor", "D", "sep", "contact", "donor_delta"}
+    assert info["donor_delta"] == 4 == ds.delta(info["donor"]) and info["donor"] != i
+    assert sample["fly_valid"].tolist() == [True, True] and sample["crops"].shape[0] == 2
+    # the pasted fly carries the donor's own two-frame motion (not frozen at frame 0)
+    both = sample["has3d"][1, 0] & sample["has3d"][1, 1]
+    assert both.sum() >= 10
+    assert not np.allclose(sample["kp3d_local"][1, 1][both], sample["kp3d_local"][1, 0][both])
+    # __getitem__ pastes at T=2 as well (the T==1 guard is gone)
+    assert ds[i]["fly_valid"].tolist() == [True, True]

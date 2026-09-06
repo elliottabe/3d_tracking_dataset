@@ -105,8 +105,13 @@ def composite(tgt, src, D, params: CopyPasteParams):
     above, is applied PER FRAME independently -- a keypoint dead in frame 0
     can still be alive in frame 1.
 
-    For T == 1 this is byte-identical to the original P3a implementation
-    (guarded by `tests/test_mv_copy_paste.py::test_composite_t2_is_the_t1_path_applied_per_frame`)."""
+    The T frames are treated independently (one shared `D`, one shared set of
+    per-camera shifts), so a T=2 window whose two frames are duplicates
+    composites to two copies of this function's own T=1 result -- the
+    self-consistency guard in
+    `tests/test_mv_copy_paste.py::test_composite_t2_is_the_t1_path_applied_per_frame`.
+    Parity of the T=1 path with the original P3a implementation was established
+    by review trace, not by that test (both of its sides run this code)."""
     if tgt["fly_valid"].shape[0] < 2 or bool(tgt["fly_valid"][1]) or int(tgt["unlabelled_sex"]) != SEX_UNKNOWN:
         raise ValueError("composite: target must have exactly one labelled fly and no unlabelled animal "
                          "(loader hook enforces this)")

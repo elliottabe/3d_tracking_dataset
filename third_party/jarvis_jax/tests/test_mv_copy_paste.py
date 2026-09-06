@@ -252,19 +252,16 @@ def test_composite_rejects_donor_with_no_mask_content_anywhere():
 
 # --- T=2 (mvq-v2 plan B task 2): composite() accepts T >= 1 windows -----------------------
 #
-# NOTE on scope: v12_windows.py (`paste_window`, the `__getitem__` T==1 guard, `window_index`,
-# `pair_deltas`, `delta`/`donor_delta`) is Task 1's deliverable and has NOT landed on this
-# branch yet -- see .superpowers/sdd/2026-09-05-mvq-v2-plan-b-t2-training/progress.md
-# ("BASE for Task 2 = 19c20a4 ... Task 2 running" precedes any Task 1/B1 entry). This task is
-# scoped to `mv_copy_paste.py` only, so the tests below build T=2 samples straight from
-# `V12WindowDataset(..., T=2, ...)` (already general-T today for CONSECUTIVE frames -- only
-# variable-Delta pairing needs Task 1's `pair_deltas`) or by hand, instead of through
-# `paste_window`/`window_index`, which do not exist yet.
+# NOTE on scope: these tests exercise `mv_copy_paste.composite` ALONE, so they build T=2
+# samples straight from `V12WindowDataset(..., T=2, ...)` or by hand rather than through
+# `paste_window`. The loader wiring that feeds it (`pair_deltas`, `delta`/`donor_delta`,
+# the spacing-matched donor pool, and `__getitem__` pasting at T>1) landed with Task 1 and
+# is covered by `tests/test_v12_windows.py::test_t2_copy_paste_pairs_a_donor_of_the_same_spacing`.
 
 def _duplicate_frame_axis(sample):
     """Turn a T=1 sample dict into a T=2 dict whose second frame is a byte-for-byte
-    duplicate of the first -- used to prove the T>=1 `composite()` path collapses to the
-    original T=1 path when both frames of a window are identical."""
+    duplicate of the first -- used to show the T>=1 `composite()` path collapses to its
+    own T=1 result when both frames of a window are identical."""
     out = dict(sample)
     for k in ("crops", "cam_valid", "t_local", "prompt_mask"):
         out[k] = np.concatenate([sample[k], sample[k]], axis=0)
@@ -274,8 +271,15 @@ def _duplicate_frame_axis(sample):
 
 
 def test_composite_t2_is_the_t1_path_applied_per_frame(tmp_path):
-    """Byte-equality guard (spec §7 risk 3): a T=2 window whose two frames are
-    identical must composite to two frames identical to the T=1 result."""
+    """SELF-CONSISTENCY guard (spec §7 risk 3): a T=2 window whose two frames
+    are identical must composite to two frames identical to what the SAME
+    function returns for the T=1 window -- i.e. the per-frame loop adds no
+    cross-frame coupling and treats frame 1 exactly as frame 0.
+
+    It is NOT a byte-equality test against the pre-T2 implementation (both
+    sides here run today's code); parity with the original P3a path was
+    established by the Task-2 reviewer's line-by-line trace of the loop, and
+    this test is what keeps the two frames interchangeable from here on."""
     from jarvis_jax.data.mv_copy_paste import CopyPasteParams, composite
     ds1, tgt1, src1 = _two_samples(tmp_path)
     D = np.array([12.0, 0.0, 0.0], np.float32)
