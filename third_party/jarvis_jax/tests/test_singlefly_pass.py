@@ -157,6 +157,49 @@ class FakeRunner:
                 "xyz": np.zeros((b, self.I, self.K, 3), np.float32)}
 
 
+class FakeRunnerStaleWindow(FakeRunner):
+    """`FakeRunner`, but on every `low_vis_every`-th frame it reproduces the
+    real stale-reused-window failure (singlefly_p3b_pass.py's docstring):
+    CenterDetect's peak is missing, the window is REUSED (stale, off the real
+    fly), and the model still fires existence >= 0.98 on the SLOT_FEMALE typed
+    slot while EVERY camera's per-view visibility sits near 0.05 -- far below
+    `pseudo_gates.GateThresholds.conf_min` (0.5). `reprojection_gate` scores
+    only views with `conf >= conf_min`; an all-low-vis frame has none, so its
+    per-view distance is NaN -> inf and it can never reach `reproj_min_views`.
+    These frames must therefore be rejected by the REPROJECTION gate
+    specifically -- existence must stay clean, since that is exactly what let
+    348/8000 stale frames on the real run reach the gates un-rejected by
+    existence alone.
+
+    A frame index is threaded through `windows()` -> `infer()` as an extra
+    batch-concatenated key (`concat_windows` glues arbitrary keys as long as
+    every window in the batch carries the same ones), since the fake `infer`
+    otherwise has no way to know which of the pass's T frames a batch row is.
+    """
+
+    def __init__(self, *a, low_vis_every=4, low_vis=0.05, **kw):
+        super().__init__(*a, **kw)
+        self._t = -1
+        self.low_vis_every = int(low_vis_every)
+        self.low_vis = float(low_vis)
+
+    def windows(self, frames, present, centres, prompt_mask=None):
+        self._t += 1
+        w = super().windows(frames, present, centres, prompt_mask=prompt_mask)
+        w["_t"] = np.full((w["centres"].shape[0],), self._t, np.int64)
+        return w
+
+    def infer(self, w, *, prompt_on=None):
+        from jarvis_jax.train.matching import SLOT_FEMALE
+        t = np.asarray(w.pop("_t"))
+        out = super().infer(w, prompt_on=prompt_on)
+        low = (t % self.low_vis_every) == 0
+        if low.any():
+            out["exist"][low, SLOT_FEMALE] = 0.99
+            out["vis"][low] = self.low_vis
+        return out
+
+
 class FakeDetector:
     """CenterDetect stand-in: peak 0 of every camera is the exact projection
     of `centre(t)`, peak 1 is NaN (one fly). `centre(t) -> None` means the
@@ -185,10 +228,10 @@ def _frames(n, C=len(CAMS)):
 
 
 def _run(m, tmp_path, *, T=24, exist_fn=None, centre=None, out="bout", fly_sex="female",
-         slot_offset=100.0):
+         slot_offset=100.0, runner_cls=FakeRunner):
     cm = cam_mats()
-    r = FakeRunner(_fake_checkpoint(tmp_path), kp_names=_mvq_names(), cm=cm,
-                   exist_fn=exist_fn, slot_offset=slot_offset)
+    r = runner_cls(_fake_checkpoint(tmp_path), kp_names=_mvq_names(), cm=cm,
+                    exist_fn=exist_fn, slot_offset=slot_offset)
     centre = centre or (lambda t: np.array([0.2 * t, 0.0, 0.0]))
     det = FakeDetector(cm, centre)
     out_dir = str(tmp_path / out)
@@ -384,6 +427,40 @@ def test_the_real_gate_stack_admits_the_bout_only_without_the_identity_gate(tmp_
 
     r_id = admit_bout(arrays, None, cm, thr, use_identity=True)
     assert not r_id.frame.any(), "the identity gate must refuse a single_typed bout"
+
+
+def test_stale_reused_window_high_existence_low_visibility_rejected_by_reprojection_gate(tmp_path):
+    """The real failure mode this pass hits on a CenterDetect miss: the
+    window is REUSED (stale, off the fly) and the model fires existence
+    >= 0.98 with per-view visibility < 0.5 on every camera of the empty crop
+    (verified on the real run: 348/8000 frames, 0 admitted). EXPECTATION: the
+    stale frames (every 4th, from `FakeRunnerStaleWindow`) must be rejected
+    specifically by `pseudo_gates.reprojection_gate` -- existence must stay
+    clean on them -- while the normal-visibility frames in between are
+    admitted same as ever. Nothing here exercises identity or containment
+    (`store=None`, `use_identity=False`, matching the single-fly route)."""
+    from jarvis_jax.data.pseudo_gates import GateThresholds, admit_bout, load_bout_arrays
+    m = _load()
+    res, out_dir, cm = _run(m, tmp_path, T=24, runner_cls=FakeRunnerStaleWindow)
+
+    stale = (np.arange(24) % 4) == 0
+    assert stale.any() and (~stale).any(), "the fixture must produce both kinds of frame"
+
+    arrays = load_bout_arrays(out_dir, cameras=CAMS, n_flies=1)
+    exist = np.asarray(arrays.meta["per_frame"]["exist"])[0]
+    assert np.all(exist[stale] >= 0.98), "the stale windows' existence must still read as high"
+
+    thr = GateThresholds()
+    r = admit_bout(arrays, None, cm, thr, use_identity=False)
+
+    assert not r.fly[0, stale].any(), (
+        "stale reused windows (high existence, ~0.05 visibility on every camera) "
+        "must not be admitted")
+    assert r.fly[0, ~stale].all(), "normal-visibility frames must still be admitted"
+    assert r.reasons["reproj"][0, stale].all(), (
+        "the rejection must be attributable to the reprojection/visibility gate")
+    assert not r.reasons["exist"][0, stale].any(), (
+        "existence must not be what rejects these frames -- it reads high, per the bug")
 
 
 class _FakeFrames:
