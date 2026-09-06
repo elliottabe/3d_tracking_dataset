@@ -192,6 +192,7 @@ def build_mvq_lift_array_script(
     batch: int = 8,
     merge_dist_units: float = 30.0,
     identity: str = "mask",
+    window_pref: str = "own",
     mask_assign_margin_units: float = 8.0,
     mask_assign_max_units: float = 60.0,
     containment: str = "on",
@@ -260,7 +261,8 @@ PYTHONPATH=third_party/jarvis_jax:. python -u scripts/mvq_lift_bout.py \\
     --out {run_dir} --bout ${{SLURM_ARRAY_TASK_ID}} \\
     --run {checkpoint}{step_arg} --exist-thresh {exist_thresh} --batch {batch} \\
     --merge-dist-units {merge_dist_units} \\
-    --identity {identity} --mask-assign-margin-units {mask_assign_margin_units} \\
+    --identity {identity} --window-pref {window_pref} \\
+    --mask-assign-margin-units {mask_assign_margin_units} \\
     --mask-assign-max-units {mask_assign_max_units} \\
     --containment {containment} \\
     --containment-min-views {containment_min_views} \\
@@ -698,7 +700,8 @@ def main():
             return mvq_gate_string(str(mv["checkpoint"]), step=mv.get("step"),
                                    exist_thresh=float(mv.get("exist_thresh", 0.5)),
                                    identity=_id,
-                                   containment=mv.get("containment"))
+                                   containment=mv.get("containment"),
+                                   window_pref=mv.get("window_pref"))
 
         _not_current = [i for i in idxs
                         if not bout_lift_is_current(
@@ -734,6 +737,7 @@ def main():
             batch=int(mv.get("batch", 8)),
             merge_dist_units=float(mv.get("merge_dist_units", 30.0)),
             identity=str(mv.get("identity", "mask")),
+            window_pref=str(mv.get("window_pref", "own")),
             mask_assign_margin_units=float(mv.get("mask_assign_margin_units", 8.0)),
             mask_assign_max_units=float(mv.get("mask_assign_max_units", 60.0)),
             # `resolved_containment` because a YAML `containment: on` is the

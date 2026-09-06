@@ -171,6 +171,16 @@ def build_parser():
                         "in 1/800 s) above which the keypoint is SUSPECT in both "
                         "frames -- dropped only if it also fails containment in "
                         "either, or the step is above twice this (a pure spike)")
+    p.add_argument("--window-pref", dest="window_pref", choices=("own", "any"),
+                   default="own",
+                   help="--identity mask only: which window a fly is read from when "
+                        "several hold it. 'own' (default) prefers the window centred "
+                        "on that fly's OWN mask and falls back to the others only "
+                        "when it has no candidate -- the partner's crop puts half the "
+                        "fly at the edge and drives its conf3d to ~0.1, which gates "
+                        "it out of the offsets sampler, the rigid repair and the "
+                        "display. 'any' is the pre-2026-09-05 rule. In the gate "
+                        "signature")
     p.add_argument("--mask-assign-max-units", dest="mask_assign_max_units",
                    type=float, default=60.0,
                    help="--identity mask only: garbage cap on that distance (world "
@@ -229,13 +239,14 @@ def main(argv=None):
     runner = MVQRunner(args.run, step=args.step, attn_impl=args.attn_impl,
                        calib_dir=calib_dir, cameras=cameras, batch=int(args.batch),
                        exist_thresh=float(args.exist_thresh), identity=args.identity,
-                       containment=args.containment)
+                       containment=args.containment, window_pref=args.window_pref)
     print(f"[mvq-lift] checkpoint {runner.checkpoint} step {runner.step_label}; "
           f"K={runner.K} slots={runner.I} exist_thresh={runner.exist_thresh} "
           f"identity={runner.identity}; "
           f"unrestored={runner.meta.get('_unrestored_leaves', [])}", flush=True)
     print(f"[mvq-lift] gates (identity={runner.identity}, "
-          f"containment={runner.containment}) {runner.gates_string()}", flush=True)
+          f"containment={runner.containment}, window_pref={runner.window_pref}) "
+          f"{runner.gates_string()}", flush=True)
     print(f"[mvq-lift] {len(bouts)} bout(s): {bouts}", flush=True)
 
     review = load_review(args.review) if args.review else {}
@@ -256,7 +267,8 @@ def main(argv=None):
         gates_string = mvq_gate_string(runner.checkpoint, step=runner.step,
                                        exist_thresh=runner.exist_thresh,
                                        identity=identity,
-                                       containment=args.containment)
+                                       containment=args.containment,
+                                       window_pref=args.window_pref)
         if not args.force and bout_lift_is_current(out_dir, gates_string):
             print(f"[mvq-lift] bout {bout}: skip (kp3d.npz already carries these gates, "
                   f"identity {identity})", flush=True)
@@ -284,7 +296,7 @@ def main(argv=None):
             runner, read_window(args.session_dir, cameras, plan, abs_start, n),
             centres, ok, out_dir=out_dir, model_names=model_names,
             merge_dist_units=float(args.merge_dist_units),
-            identity=args.identity,
+            identity=args.identity, window_pref=args.window_pref,
             mask_assign_margin_units=float(args.mask_assign_margin_units),
             mask_assign_max_units=float(args.mask_assign_max_units),
             mask_store=store, containment=args.containment,

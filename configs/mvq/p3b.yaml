@@ -103,6 +103,32 @@ containment_min_views: 3
 containment_own_margin_px: 6.0
 containment_max_step_units: 5.0
 
+# WHICH WINDOW a fly is read from when several hold it.
+#
+# A frame with two separated masks plans two 448-px crops, one per mask, and at
+# courtship distances both usually contain BOTH animals. `any` (the rule before
+# 2026-09-05) took each fly from whichever window read it most confidently --
+# routinely the PARTNER's crop. The 3D is the same animal and the IK fits it,
+# but half its body then sits at or past that crop's edge, so the per-view
+# visibilities are ~0 and `conf3d` (their mean) collapses with them. Bout 10 of
+# Session1/2026_04_02_14_54_28 read the female out of the male's window on
+# 293/303 frames: head/thorax conf3d 0.10 there vs 0.71 from her own window,
+# and across 12 sampled p3b bouts 7 female tracks sat at <= 0.4 while the male
+# read ~0.99.
+#
+# That matters because conf3d is a GATE: the offsets sampler needs min conf
+# >= 0.7, the rigid-edge repair 0.5, the side-by-side display hides low-conf 2D
+# points ("half the fly disappears"), and the pseudo-label export thresholds on
+# it. `own` consults the window centred on the fly's own mask FIRST and only
+# falls back to the others when its own has no candidate passing exist_thresh
+# and the mask test -- a preference, never a filter, and a no-op on a merged
+# window (which is both flies' own).
+#
+# Enrolled in the gate signature: conf3d is written into kp3d.npz, so a lift
+# under `own` and one under `any` are different files. Adding the key at all
+# makes every pre-2026-09-05 lift stale, which is the point.
+window_pref: own
+
 # Windows per forward. The 448-crop x 7-camera DINOv3-B forward is the cost
 # here; 8 fits comfortably on a 48 GB card at XLA_PYTHON_CLIENT_MEM_FRACTION
 # 0.9 alongside the mask store. NOT part of the gate signature (batching

@@ -408,7 +408,8 @@ def test_the_gate_string_differs_with_containment_on_and_off():
     assert mvq_gate_signature(ck, identity="sex", containment="on")["containment"] is False
     # thresholds are deliberately NOT enrolled (mvq_meta.json carries them)
     assert set(json.loads(on)) == {"lifter", "checkpoint", "step", "sha256",
-                                   "exist_thresh", "identity", "containment"}
+                                   "exist_thresh", "identity", "containment",
+                                   "window_pref"}
 
 
 def test_resolved_containment_accepts_the_yaml_boolean():

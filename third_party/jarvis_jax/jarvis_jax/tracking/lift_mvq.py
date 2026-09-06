@@ -115,6 +115,44 @@ MASK_ASSIGN_MAX_UNITS = 60.0       # 6 mm; a garbage cap only -- the 448-px
                                    # instance beyond this is not in the crop
                                    # either mask placed
 
+# WHICH WINDOW a fly is read out of, when more than one of them holds it.
+#
+# A frame with two separated masks plans TWO 448-px crops, one centred on each
+# mask, and at courtship distances BOTH crops usually contain BOTH animals. The
+# mask-assignment rule above is about geometry only ("which mask is this
+# instance nearest?"), so before this preference existed a fly was taken from
+# whichever window read it most confidently -- routinely the OTHER fly's crop.
+#
+# The 3D survives that: it is the same animal, triangulated from the same seven
+# views, and the IK fits it. The CONFIDENCE does not. A fly at the edge of a
+# crop centred on its partner has half its body at or past the crop boundary,
+# so the model's per-view visibility for those keypoints is ~0 and `conf3d`
+# (its mean over cameras) collapses with it. Measured 2026-09-05 on the p3b
+# campaign: bout 10 of Session1/2026_04_02_14_54_28 read the FEMALE out of the
+# MALE's window on 293 of 303 frames, and her head/thorax conf3d was 0.10 there
+# against 0.71 from her own window; across 12 sampled p3b bouts, 7 female
+# tracks sat at front-group conf3d <= 0.4 while the male read ~0.99 (and the
+# older r2 lift shows the male doing the same when he is read from HER window).
+# conf3d is a GATE downstream -- the offsets sampler needs min conf >= 0.7, the
+# rigid-edge repair 0.5, the side-by-side display hides low-conf 2D points
+# ("half the fly disappears"), the pseudo-label export thresholds on it -- so
+# those frames were being discarded for a cropping accident.
+#
+#   "own"  (default) a fly is taken from the window centred on ITS OWN mask
+#          whenever that window holds a candidate passing `exist_thresh` and
+#          the same relative-nearest mask test; only when its own window holds
+#          none does it fall back to instances from the other windows.
+#   "any"  the pre-2026-09-05 rule: the best candidate from any window.
+#
+# It is a PREFERENCE, not a filter: nothing is NaN'd for being in the wrong
+# crop, and `mvq_meta.json` records per frame which flies were read from their
+# own window (`per_frame.own_window`) and how often each fell back
+# (`n_from_other_window`). A MERGED window (two masks within
+# `merge_dist_units` share one crop) is every fly's own window, so the two
+# modes are identical there by construction.
+WINDOW_PREF_MODES = ("own", "any")
+DEFAULT_WINDOW_PREF = "own"
+
 
 def _sigmoid(x):
     return 1.0 / (1.0 + np.exp(-np.asarray(x, np.float64)))
@@ -215,6 +253,23 @@ def resolved_identity(identity):
     return identity
 
 
+def resolved_window_pref(window_pref):
+    """`window_pref` as one of `WINDOW_PREF_MODES` (None -> `DEFAULT_WINDOW_PREF`).
+
+    Refused by name rather than defaulted, for the same reason `identity` is: a
+    typo'd mode that silently became "any" would stamp a gate string saying
+    "own" on a lift that ran the old rule, and nothing downstream re-derives
+    which window each fly came from.
+    """
+    if window_pref is None:
+        return DEFAULT_WINDOW_PREF
+    window_pref = str(window_pref).strip().lower()
+    if window_pref not in WINDOW_PREF_MODES:
+        raise ValueError(f"mvq window_pref must be one of {list(WINDOW_PREF_MODES)}, "
+                         f"got {window_pref!r}")
+    return window_pref
+
+
 def resolve_mask_identity(identity, mask_sex_meta, *, where=""):
     """The identity rule ONE bout will actually run, given what its masks carry.
 
@@ -262,7 +317,7 @@ def resolve_mask_identity(identity, mask_sex_meta, *, where=""):
 
 
 def mvq_gate_signature(checkpoint, *, step=None, exist_thresh=None, identity=None,
-                       containment=None):
+                       containment=None, window_pref=None):
     """The Stage-B `gates` payload for an mvq-lifted kp3d.npz.
 
     With `pipeline.lifter: mvq` the DLT gates (view-conf, mask-agreement,
@@ -304,11 +359,24 @@ def mvq_gate_signature(checkpoint, *, step=None, exist_thresh=None, identity=Non
     must not charge a 12-minute STAC re-solve per bout-fly on every sweep
     point, while a lift that ran the filter and one that did not are
     genuinely different files.
+
+    `window_pref` (`WINDOW_PREF_MODES`) is which window a fly is read from when
+    several hold it. It does not move the 3D, but it decides the per-view
+    visibilities -- and so `conf3d`, which IS in kp3d.npz and gates the offsets
+    sampler, the rigid-edge repair, the display and the pseudo-label export.
+    Same effective-value discipline as `containment`: the preference only
+    exists inside the mask-identity assignment, so it is reported as "any"
+    whenever `identity` is not "mask", where the rule genuinely does not run.
+    Adding the key at all makes every lift produced before 2026-09-05 stale,
+    which is intended -- those lifts carry the cross-window confidences.
     """
     if not checkpoint:
         raise ValueError("pipeline.lifter=mvq needs mvq.checkpoint set -- the Stage-B gate "
                          "signature must name the weights that produced kp3d.npz")
     step = resolved_step(step)                    # refuses "latest" by name
+    # validated whatever the identity mode is (a typo must never pass), then
+    # reported as the no-op it is when the mask assignment does not run
+    window_pref = resolved_window_pref(window_pref)
     return {"lifter": "mvq",
             "checkpoint": os.path.abspath(str(checkpoint)),
             "step": "final" if step is None else step,
@@ -316,14 +384,17 @@ def mvq_gate_signature(checkpoint, *, step=None, exist_thresh=None, identity=Non
             "exist_thresh": float(EXIST_THRESH if exist_thresh is None else exist_thresh),
             "identity": resolved_identity(identity),
             "containment": bool(resolved_containment(containment)
-                                and resolved_identity(identity) == "mask")}
+                                and resolved_identity(identity) == "mask"),
+            "window_pref": (window_pref if resolved_identity(identity) == "mask"
+                            else "any")}
 
 
 def mvq_gate_string(checkpoint, *, step=None, exist_thresh=None, identity=None,
-                    containment=None):
+                    containment=None, window_pref=None):
     """`mvq_gate_signature` as the stable string stored inside kp3d.npz."""
     return json.dumps(mvq_gate_signature(checkpoint, step=step, exist_thresh=exist_thresh,
-                                         identity=identity, containment=containment),
+                                         identity=identity, containment=containment,
+                                         window_pref=window_pref),
                       sort_keys=True)
 
 
@@ -363,7 +434,7 @@ class MVQRunner:
 
     def __init__(self, run_dir_or_final, *, step=None, attn_impl=None, calib_dir, cameras,
                  batch=32, exist_thresh=EXIST_THRESH, identity=None,
-                 containment=None):
+                 containment=None, window_pref=None):
         self.checkpoint = os.path.abspath(str(run_dir_or_final))
         # Which rule the caller will use to name the written flies. The runner
         # does not apply it (that is `lift_masked_bout`'s job); it is carried
@@ -376,6 +447,10 @@ class MVQRunner:
         # run; `lift_masked_bout` resolves its own, per bout, against that
         # bout's masks and its own `mask_store`.
         self.containment = resolved_containment(containment)
+        # Likewise carried only so `gates_string()` names the rule the lift
+        # will run (`lift_masked_bout` applies it); a runner and a lift that
+        # disagree about it would stamp a gate string for the other one.
+        self.window_pref = resolved_window_pref(window_pref)
         if step == "latest":
             import orbax.checkpoint as ocp
             mgr = ocp.CheckpointManager(os.path.abspath(os.path.join(self.checkpoint, "ckpt")),
@@ -608,10 +683,11 @@ class MVQRunner:
         and every bout-fly written by a pass asks for it.
         """
         if self._gates is None:
-            self._gates = mvq_gate_signature(self.checkpoint, step=self.step,
-                                             exist_thresh=self.exist_thresh,
-                                             identity=self.identity,
-                                             containment=getattr(self, "containment", False))
+            self._gates = mvq_gate_signature(
+                self.checkpoint, step=self.step, exist_thresh=self.exist_thresh,
+                identity=self.identity,
+                containment=getattr(self, "containment", False),
+                window_pref=getattr(self, "window_pref", None))
         return dict(self._gates)
 
     def gates_string(self):
@@ -739,6 +815,7 @@ ASSIGN_REASONS = ("nearest", "typed_preferred", "typed_fallback", "none")
 
 
 def pick_mask_pair(out, off, nb, runner, mask_centres, *,
+                   own_windows=None, window_pref=None,
                    margin_units=MASK_ASSIGN_MARGIN_UNITS,
                    max_units=MASK_ASSIGN_MAX_UNITS,
                    collapse_dist_units=COLLAPSE_DIST_UNITS):
@@ -764,6 +841,19 @@ def pick_mask_pair(out, off, nb, runner, mask_centres, *,
     Among the instances that qualify for one mask, that fly's TYPED slot wins
     if it is among them (`assign_reason` "typed_preferred"), else the nearest
     does ("nearest"); ties break on existence.
+
+    OWN WINDOW FIRST (`window_pref`, see `WINDOW_PREF_MODES`). Both flies are
+    usually inside BOTH crops at courtship distances, so "every instance of
+    every window" repeatedly handed a fly the read from its PARTNER's crop --
+    the same animal, the same 3D, but half its body at the crop edge and a
+    per-view visibility (hence `conf3d`) near zero. Under `window_pref="own"`
+    the qualifying instances from the window centred on THIS fly's own mask are
+    considered first, and the other windows are consulted only when its own
+    window offers none; the rule inside each group is unchanged (typed slot,
+    then distance, then existence). `own_windows` names each fly's window as a
+    LOCAL index into `[off, off + nb)` -- what `frame_windows`' per-fly
+    assignment returns -- with -1 for "this fly has no window in this batch".
+    A merged window is both flies' own window, so nothing changes there.
 
     TYPED FALLBACK. When no instance qualifies for a mask -- the usual cause
     is the two flies being nearly equidistant, i.e. geometry ABSTAINING rather
@@ -792,6 +882,10 @@ def pick_mask_pair(out, off, nb, runner, mask_centres, *,
         off, nb: this frame's window rows, `[off, off + nb)`.
         runner: for `I`, `exist_thresh`.
         mask_centres: (2,3) each mask fly's triangulated centre, world units.
+        own_windows: (2,) LOCAL window index of each fly's own crop (-1 if it
+            has none in this batch), or None for "no window information", which
+            makes `window_pref` a no-op.
+        window_pref: "own" (default) or "any" -- see above.
 
     Returns:
         picks: {fi: (slot_read result, absolute window index)}.
@@ -801,11 +895,22 @@ def pick_mask_pair(out, off, nb, runner, mask_centres, *,
             pick reads "none").
         collapsed: bool, whether the guard fired.
         dropped_fi: the fi it NaN'd, or None.
+        own: {fi: bool} for each fly PICKED -- whether its instance came out of
+            its own window. False means the preference fell back (or is off).
     """
     typed = (SLOT_FEMALE, SLOT_MALE)
     mask_centres = np.asarray(mask_centres, np.float64)
     have = [bool(np.isfinite(mask_centres[f]).all()) for f in (0, 1)]
     margin, cap = float(margin_units), float(max_units)
+    pref = resolved_window_pref(window_pref)
+    # each fly's own window as an ABSOLUTE row of `out`, or -1 for "none in
+    # this batch" (no centre, or a frame whose windows were truncated to
+    # runner.batch) -- which simply leaves that fly with no preference
+    if own_windows is None:
+        own_row = [-1, -1]
+    else:
+        own_row = [(int(off) + int(w)) if 0 <= int(w) < int(nb) else -1
+                   for w in own_windows]
 
     # every live instance of every window of this frame, with its distance to
     # each mask centre (inf where that mask has no centre this frame)
@@ -829,13 +934,23 @@ def pick_mask_pair(out, off, nb, runner, mask_centres, *,
         other by the margin, and not absurdly far from it."""
         return d[fi] <= cap and d[fi] + margin <= d[1 - fi]
 
+    def _prefer_own(cands_for_fi, fi, b_at):
+        """The best of `cands_for_fi` (already sorted-comparable tuples),
+        taken from fly `fi`'s OWN window if it has one there. `b_at` reads the
+        window index out of a candidate tuple."""
+        if pref == "own" and own_row[fi] >= 0:
+            own_only = [c for c in cands_for_fi if b_at(c) == own_row[fi]]
+            if own_only:
+                return min(own_only)
+        return min(cands_for_fi)
+
     for fi in (0, 1):
         if not have[fi]:
             continue
         mine = [(s != typed[fi], d[fi], -e, b, s) for b, s, e, d in cands
                 if _belongs(d, fi)]
         if mine:
-            not_typed, dd, _ne, b, s = min(mine)
+            not_typed, dd, _ne, b, s = _prefer_own(mine, fi, lambda c: c[3])
             picks[fi] = (slot_read(out, b, s), b)
             dists[fi] = dd
             reasons[fi] = "nearest" if not_typed else "typed_preferred"
@@ -847,7 +962,8 @@ def pick_mask_pair(out, off, nb, runner, mask_centres, *,
                 if s == typed[fi] and d[fi] <= cap and not _belongs(d, 1 - fi)]
         if not live:
             continue
-        _ne, dd, b = min(live)                       # highest existence wins
+        # highest existence wins, its own window first
+        _ne, dd, b = _prefer_own(live, fi, lambda c: c[2])
         picks[fi] = (slot_read(out, b, typed[fi]), b)
         dists[fi] = dd
         reasons[fi] = "typed_fallback"
@@ -864,7 +980,8 @@ def pick_mask_pair(out, off, nb, runner, mask_centres, *,
             picks.pop(dropped_fi)
             dists.pop(dropped_fi)
             reasons[dropped_fi] = "none"
-    return picks, dists, reasons, collapsed, dropped_fi
+    own = {fi: (own_row[fi] >= 0 and b == own_row[fi]) for fi, (_r, b) in picks.items()}
+    return picks, dists, reasons, collapsed, dropped_fi, own
 
 
 def frame_windows(centres, ok=None, *, merge_dist_units=30.0):
@@ -1330,6 +1447,20 @@ def bout_lift_is_current(out_dir, gates_string, n_flies=2):
     return True
 
 
+def _own_frac_str(own_window, identity_resolved):
+    """"fly0 0.97 / fly1 1.00" -- the fraction of each fly's WRITTEN frames
+    that came from its own window, for the lifter's one-line summary. "n/a"
+    under identity="sex", where the preference does not run."""
+    if identity_resolved != "mask":
+        return "n/a"
+    out = []
+    for f in (0, 1):
+        w = own_window[f] >= 0
+        out.append(f"fly{f} " + (f"{float((own_window[f][w] == 1).mean()):.2f}"
+                                 if w.any() else "-"))
+    return " / ".join(out)
+
+
 def _mean_or_none(a):
     a = np.asarray(a, np.float64)
     a = a[np.isfinite(a)]
@@ -1338,7 +1469,7 @@ def _mean_or_none(a):
 
 def lift_masked_bout(runner, frames_iter, centres, ok, *, out_dir, model_names,
                      merge_dist_units=30.0, collapse_dist_units=COLLAPSE_DIST_UNITS,
-                     identity=None,
+                     identity=None, window_pref=None,
                      mask_assign_margin_units=MASK_ASSIGN_MARGIN_UNITS,
                      mask_assign_max_units=MASK_ASSIGN_MAX_UNITS,
                      mask_store=None, containment=None,
@@ -1373,6 +1504,13 @@ def lift_masked_bout(runner, frames_iter, centres, ok, *, out_dir, model_names,
             so in `mvq_meta.json`. The RESOLVED mode is what the gates string
             names and what the skip check compares, so a fallback bout is not
             mistaken for a mask-identity one (see `resolve_mask_identity`).
+        window_pref: `"own"` (default) or `"any"`; None takes the runner's.
+            `identity="mask"` only -- which window a fly is read from when more
+            than one holds it (`WINDOW_PREF_MODES`). "own" prefers the window
+            centred on that fly's own mask, which is what keeps its `conf3d`
+            off the floor; "any" is the pre-2026-09-05 rule. Enrolled in the
+            gate signature, because conf3d is written into kp3d.npz and gates
+            several downstream stages.
         mask_assign_margin_units / mask_assign_max_units: `identity="mask"`
             only -- how much NEARER its own mask an instance must be than the
             other mask to be assigned by geometry, and the garbage cap on that
@@ -1412,9 +1550,10 @@ def lift_masked_bout(runner, frames_iter, centres, ok, *, out_dir, model_names,
                   over cameras, conf3d_mvq_raw (T,K), kp_names (K,), gates
     and, per bout, `sex.json` (male_fly 1; method "mask_human_id_review" or
     "mvq_sex_head") and `mvq_meta.json` (which carries the per-frame
-    `collapsed` flag, `identity_source`, `slot_used` and `sex_head_agrees`,
-    the per-fly `n_collapsed` counts, `collapsed_frac` and
-    `sex_head_disagree_frac`).
+    `collapsed` flag, `identity_source`, `slot_used`, `sex_head_agrees` and
+    `own_window` -- 1 read from this fly's own window, 0 from another, -1
+    nothing written -- the per-fly `n_collapsed` and `n_from_other_window`
+    counts, `collapsed_frac` and `sex_head_disagree_frac`).
 
     Returns a dict of the per-frame bookkeeping (in the MODEL's own keypoint
     order, before the name permutation) plus `skipped`.
@@ -1429,6 +1568,18 @@ def lift_masked_bout(runner, frames_iter, centres, ok, *, out_dir, model_names,
             f"asked for {identity!r}; `runner.gates_string()` would then disagree with "
             f"the gates stamped into kp3d.npz, and a later staleness check could not "
             f"tell which rule assigned the flies")
+    # Same contract for the window preference: it is in the gate string, so a
+    # runner built for one mode and a lift asked for the other would stamp a
+    # string describing neither.
+    window_pref = resolved_window_pref(window_pref if window_pref is not None
+                                       else getattr(runner, "window_pref", None))
+    runner_window_pref = getattr(runner, "window_pref", None)
+    if (runner_window_pref is not None
+            and resolved_window_pref(runner_window_pref) != window_pref):
+        raise ValueError(
+            f"the runner was built for window_pref={runner_window_pref!r} but this lift "
+            f"was asked for {window_pref!r}; `runner.gates_string()` would then disagree "
+            f"with the gates stamped into kp3d.npz")
     out_dir = str(out_dir)
     # Resolve the EFFECTIVE mode BEFORE the gate string and the currency check.
     # Gating on the requested mode instead would stamp `identity: mask` on a
@@ -1459,7 +1610,8 @@ def lift_masked_bout(runner, frames_iter, centres, ok, *, out_dir, model_names,
     gates_string = mvq_gate_string(runner.checkpoint, step=runner.step,
                                    exist_thresh=runner.exist_thresh,
                                    identity=identity_resolved,
-                                   containment=containment_on)
+                                   containment=containment_on,
+                                   window_pref=window_pref)
     if not force and bout_lift_is_current(out_dir, gates_string):
         if verbose:
             print(f"[mvq-lift] skip {out_dir}: kp3d.npz already carries these gates "
@@ -1495,6 +1647,16 @@ def lift_masked_bout(runner, frames_iter, centres, ok, *, out_dir, model_names,
     sex_prob = np.full((2, T), np.nan, np.float32)
     slot = np.full((2, T), -1, np.int8)
     window = np.full((2, T), -1, np.int8)
+    # identity="mask" only: was this fly read from the window centred on ITS
+    # OWN mask? 1 yes, 0 another window, -1 nothing written this frame. The
+    # audit quantity for the own-window preference -- a bout whose female is
+    # mostly 0 is the p3b conf3d collapse.
+    own_window = np.full((2, T), -1, np.int8)
+    n_from_other_window = [0, 0]
+    # each fly's own window for the frame, as a LOCAL index into that frame's
+    # planned windows. Filled by the frame loop and read by `_flush`, which
+    # runs a whole batch later and no longer has the plan.
+    own_widx = np.full((2, T), -1, np.int8)
     all_exist = np.full((T, I), np.nan, np.float32)   # every slot, for the meta
     n_windows = np.zeros(T, np.int8)
     no_centre = np.zeros(T, bool)
@@ -1524,8 +1686,9 @@ def lift_masked_bout(runner, frames_iter, centres, ok, *, out_dir, model_names,
                 # The masks' human id review decides which written fly is
                 # which; the model only says which instance is nearest which
                 # mask. See `pick_mask_pair`.
-                picks, dists, reasons, collapsed[t], drop = pick_mask_pair(
+                picks, dists, reasons, collapsed[t], drop, own = pick_mask_pair(
                     out, off, nb, runner, centres[:, t],
+                    own_windows=own_widx[:, t], window_pref=window_pref,
                     margin_units=mask_assign_margin_units,
                     max_units=mask_assign_max_units,
                     collapse_dist_units=collapse_dist_units)
@@ -1533,6 +1696,10 @@ def lift_masked_bout(runner, frames_iter, centres, ok, *, out_dir, model_names,
                     mask_dist[fi, t] = d
                 for fi, r in reasons.items():
                     assign_reason[fi][t] = r
+                for fi, o in own.items():
+                    own_window[fi, t] = 1 if o else 0
+                    if not o:
+                        n_from_other_window[fi] += 1
             else:
                 # Typed-slot read + collapse guard: see `pick_typed_pair`'s
                 # docstring for the full rationale (measured on Session0 bout
@@ -1560,13 +1727,15 @@ def lift_masked_bout(runner, frames_iter, centres, ok, *, out_dir, model_names,
             raise ValueError(f"frames_iter yielded more than the {T} frames the centres "
                              f"describe -- the mask npz and the video read must cover "
                              f"the SAME bout frames")
-        # `frame_windows`' per-fly window assignment is deliberately NOT used
-        # by identity="mask": an instance is matched to a mask by DISTANCE
-        # over every window of the frame, so a fly that the model localises in
-        # the OTHER fly's crop (routine when they are close) is still
-        # available to its own mask.
-        wc, _assign = frame_windows(centres[:, t], ok[:, t],
-                                    merge_dist_units=merge_dist_units)
+        # `frame_windows`' per-fly window assignment does not RESTRICT
+        # identity="mask": an instance is matched to a mask by DISTANCE over
+        # every window of the frame, so a fly the model localises only in the
+        # OTHER fly's crop is still available to its own mask. It does ORDER
+        # the search -- `window_pref="own"` consults a fly's own window first
+        # (see WINDOW_PREF_MODES) -- which is why the assignment is kept here
+        # and handed to `pick_mask_pair` rather than discarded.
+        wc, w_assign = frame_windows(centres[:, t], ok[:, t],
+                                     merge_dist_units=merge_dist_units)
         n_seen = t + 1
         if wc.shape[0] == 0:
             no_centre[t] = True
@@ -1580,6 +1749,11 @@ def lift_masked_bout(runner, frames_iter, centres, ok, *, out_dir, model_names,
                     f"offending frame is reported)", RuntimeWarning, stacklevel=2)
                 warned_drop = True
             wc = wc[:runner.batch]
+        # after the truncation, so a fly whose window was dropped reads -1
+        # ("no own window") instead of indexing a window that is not there
+        for _fi in (0, 1):
+            _a = int(w_assign[_fi])
+            own_widx[_fi, t] = _a if 0 <= _a < wc.shape[0] else -1
         if rows + wc.shape[0] > runner.batch:
             _flush()
         batch.append(runner.windows(frames, present, wc))
@@ -1690,6 +1864,13 @@ def lift_masked_bout(runner, frames_iter, centres, ok, *, out_dir, model_names,
         # they differ only when masks with no human review forced a fallback.
         "identity": identity,
         "identity_resolved": identity_resolved,
+        # which window each fly was read from, and how often the preference
+        # had to fall back (both None under identity="sex", where the mask
+        # assignment -- and so the preference -- does not run at all)
+        "window_pref": window_pref,
+        "n_from_other_window": ({"fly0": int(n_from_other_window[0]),
+                                 "fly1": int(n_from_other_window[1])}
+                                if identity_resolved == "mask" else None),
         "mask_assign_margin_units": float(mask_assign_margin_units),
         "mask_assign_max_units": float(mask_assign_max_units),
         "assign_reason_counts": reason_counts,
@@ -1722,6 +1903,8 @@ def lift_masked_bout(runner, frames_iter, centres, ok, *, out_dir, model_names,
                               if identity_resolved == "mask" else None),
             "mask_dist_units": np.round(np.nan_to_num(mask_dist, nan=-1.0), 3).tolist(),
             "window": window.astype(int).tolist(),
+            "own_window": (own_window.astype(int).tolist()
+                           if identity_resolved == "mask" else None),
             "exist": np.round(np.nan_to_num(exist, nan=-1.0), 4).tolist(),
             "sex_prob": np.round(np.nan_to_num(sex_prob, nan=-1.0), 4).tolist(),
             "exist_all_slots": np.round(np.nan_to_num(all_exist, nan=-1.0), 4).tolist(),
@@ -1736,6 +1919,7 @@ def lift_masked_bout(runner, frames_iter, centres, ok, *, out_dir, model_names,
               f"sex-head disagree {disagree_frac}, "
               f"assign {reason_counts or 'n/a'}, "
               f"{int(no_centre.sum())} with no mask centre, "
+              f"own-window {_own_frac_str(own_window, identity_resolved)}, "
               f"{int(collapsed.sum())} collapsed "
               f"({100 * (collapsed.mean() if T else 0):.1f}%, dropped "
               f"fly0 {n_collapsed[0]} / fly1 {n_collapsed[1]}), "
@@ -1743,6 +1927,11 @@ def lift_masked_bout(runner, frames_iter, centres, ok, *, out_dir, model_names,
     return {"skipped": False, "out_dir": out_dir, "gates": gates_string,
             "kp3d_mvq": kp3d, "kp2d_mvq": kp2d, "vis": vis, "conf_raw": conf_raw,
             "exist": exist, "sex_prob": sex_prob, "slot": slot, "window": window,
+            "own_window": own_window,
+            "n_from_other_window": ({"fly0": int(n_from_other_window[0]),
+                                     "fly1": int(n_from_other_window[1])}
+                                    if identity_resolved == "mask" else None),
+            "window_pref": window_pref,
             "no_centre": no_centre, "n_windows": n_windows,
             "collapsed": collapsed,
             "identity": identity, "identity_resolved": identity_resolved,

@@ -1217,3 +1217,286 @@ def test_mvq_lift_cli_exposes_the_identity_mode():
         recording_cfg="configs/recording/session0.yaml")
     assert "--identity mask" in s
     assert "--mask-assign-margin-units 8.0" in s and "--mask-assign-max-units 60.0" in s
+
+
+# ======================================================= own-window preference
+# Measured 2026-09-05 on the p3b campaign. With TWO windows -- one centred on
+# each fly's mask -- and both flies inside both 448-px crops, `pick_mask_pair`
+# took each fly from whichever window read it most confidently, ANY window. On
+# bout 10 of Session1/2026_04_02_14_54_28 that put the FEMALE in the MALE's
+# window on 293 of 303 frames. The 3D is still produced (the other views
+# extrapolate it and the IK fits), but half her body sits at or beyond that
+# crop's edge, so the per-view visibility of those keypoints -- and hence
+# `conf3d`, its mean over cameras -- collapses: her head/thorax/T1-T2 read
+# 0.01-0.1 out of the male's window against 0.7-0.9 out of her own. conf3d
+# gates the offsets sampler (min conf >= 0.7), the rigid-edge repair (0.5), the
+# side-by-side display and the pseudo-label export, so those frames are dropped
+# downstream even though the geometry is fine.
+
+
+class WindowVisFake(PlacedFake):
+    """Both flies visible in BOTH windows, but only sharply in their OWN one.
+
+    Slot 1 (the female-typed slot) is always at world x=0 and slot 2 (male) at
+    x=200, whatever window the crop came from -- the p3b situation, where each
+    448-px crop contains both animals. What differs is the per-view
+    VISIBILITY: an instance read out of the window centred on the OTHER fly's
+    mask sits at the crop edge and comes back with `vis` `edge_vis` (default
+    0.1) instead of `own_vis` (0.9).
+
+    So the window an instance is read from is invisible in its kp3d and
+    obvious in its conf3d -- exactly the defect this preference fixes.
+    """
+
+    def __init__(self, *a, own_vis=0.9, edge_vis=0.1, **kw):
+        kw.setdefault("place", lambda cx, s: (0.0 if s == 1 else 200.0, 0.0, 0.0))
+        super().__init__(*a, **kw)
+        self._own_vis, self._edge_vis = float(own_vis), float(edge_vis)
+
+    def infer(self, w, *, prompt_on=None):
+        out = PlacedFake.infer(self, w, prompt_on=prompt_on)
+        centres = np.asarray(w["centres"], np.float64)
+        for b in range(centres.shape[0]):
+            for s in range(self.I):
+                x = float(self._place(centres[b, 0], s)[0])
+                near = abs(centres[b, 0] - x) < 50.0
+                out["vis"][b, s] = self._own_vis if near else self._edge_vis
+        return out
+
+
+def test_own_window_is_preferred_when_both_windows_hold_the_fly(tmp_path):
+    """Case (1). Two windows, both containing both flies' instances, and the
+    female's OWN-window instance and the MALE-window instance are both inside
+    the mask rule (same body, same 3D). The male's window reads her slot MORE
+    confidently (0.95 vs 0.90), which is what used to win.
+
+    Expectation if the fix is right: fly0 is written from window 0 -- her own
+    -- `own_window` is True, and her `conf3d` is the own-window 0.9, not the
+    crop-edge 0.1 that made "half the fly disappear" downstream.
+    """
+    from jarvis_jax.tracking.lift_mvq import lift_masked_bout
+    centres, ok = _two_mask_windows()
+    r = WindowVisFake(
+        _fake_checkpoint(tmp_path), kp_names=_mvq_names(),
+        # her slot fires HARDER in his window than in hers -- the old tie-break
+        exist_fn=lambda c: (np.array([0.0, 0.90, 0.95, 0.0], np.float32) if c[0] < 100
+                            else np.array([0.0, 0.95, 0.90, 0.0], np.float32)))
+    out = tmp_path / "bout"
+    res = lift_masked_bout(r, _frames(1), centres, ok, out_dir=str(out),
+                           model_names=_model_names(), identity="mask",
+                           mask_sex_meta=HUMAN_MASKS)
+    # both flies come out of their own window
+    assert res["window"][0, 0] == 0 and res["window"][1, 0] == 1
+    assert bool(res["own_window"][0, 0]) and bool(res["own_window"][1, 0])
+    assert res["n_from_other_window"] == {"fly0": 0, "fly1": 0}
+    # ... and it really is her body / his body, not a swap
+    np.testing.assert_allclose(res["kp3d_mvq"][0, 0, :, 0], 0.0, atol=1e-4)
+    np.testing.assert_allclose(res["kp3d_mvq"][1, 0, :, 0], 200.0, atol=1e-4)
+    # case (5): conf3d written for the CHOSEN instance -- the own-window read
+    with np.load(out / "fly0" / "kp3d.npz") as z:
+        np.testing.assert_allclose(z["conf3d"][0], 0.9, atol=1e-6)
+    with np.load(out / "fly1" / "kp3d.npz") as z:
+        np.testing.assert_allclose(z["conf3d"][0], 0.9, atol=1e-6)
+
+    meta = json.load(open(out / "mvq_meta.json"))
+    assert meta["window_pref"] == "own"
+    assert meta["per_frame"]["own_window"] == [[1], [1]]
+    assert meta["n_from_other_window"] == {"fly0": 0, "fly1": 0}
+    assert meta["gates"]["window_pref"] == "own"
+
+
+def test_window_pref_any_reproduces_the_old_cross_window_read(tmp_path):
+    """The same fixture with `window_pref="any"` -- the pre-fix rule -- must
+    still take the female out of the MALE's window and hand her the crop-edge
+    confidence. Pinning the old behaviour is what makes case (1) a measurement
+    of the change rather than of the fixture."""
+    from jarvis_jax.tracking.lift_mvq import lift_masked_bout
+    centres, ok = _two_mask_windows()
+    r = WindowVisFake(
+        _fake_checkpoint(tmp_path), kp_names=_mvq_names(),
+        exist_fn=lambda c: (np.array([0.0, 0.90, 0.95, 0.0], np.float32) if c[0] < 100
+                            else np.array([0.0, 0.95, 0.90, 0.0], np.float32)))
+    out = tmp_path / "bout"
+    res = lift_masked_bout(r, _frames(1), centres, ok, out_dir=str(out),
+                           model_names=_model_names(), identity="mask",
+                           window_pref="any", mask_sex_meta=HUMAN_MASKS)
+    assert res["window"][0, 0] == 1                 # HIS window
+    assert res["window"][1, 0] == 0                 # ... and he is in HERS
+    assert not bool(res["own_window"][0, 0]) and not bool(res["own_window"][1, 0])
+    assert res["n_from_other_window"] == {"fly0": 1, "fly1": 1}
+    # identical 3D, collapsed confidence -- the whole defect in two numbers
+    np.testing.assert_allclose(res["kp3d_mvq"][0, 0, :, 0], 0.0, atol=1e-4)
+    np.testing.assert_allclose(res["kp3d_mvq"][1, 0, :, 0], 200.0, atol=1e-4)
+    for fly in (0, 1):
+        with np.load(out / f"fly{fly}" / "kp3d.npz") as z:
+            np.testing.assert_allclose(z["conf3d"][0], 0.1, atol=1e-6)
+
+
+def test_own_window_falls_back_to_another_window_when_it_has_nothing(tmp_path):
+    """Case (2). The female's own window has NO candidate above `exist_thresh`
+    (0.2 for both slots), the male's window has her at 0.95. The preference is
+    a preference, not a filter: she must still be written -- from his window --
+    with `own_window` False and `n_from_other_window` counting it, so the
+    fallback is visible in the meta rather than looking like an own-window
+    read."""
+    from jarvis_jax.tracking.lift_mvq import lift_masked_bout
+    centres, ok = _two_mask_windows()
+    r = WindowVisFake(
+        _fake_checkpoint(tmp_path), kp_names=_mvq_names(),
+        exist_fn=lambda c: (np.array([0.0, 0.2, 0.2, 0.0], np.float32) if c[0] < 100
+                            else np.array([0.0, 0.95, 0.90, 0.0], np.float32)))
+    out = tmp_path / "bout"
+    res = lift_masked_bout(r, _frames(1), centres, ok, out_dir=str(out),
+                           model_names=_model_names(), identity="mask",
+                           mask_sex_meta=HUMAN_MASKS)
+    assert res["window"][0, 0] == 1 and not bool(res["own_window"][0, 0])
+    assert res["assign_reason"][0][0] == "typed_preferred"
+    np.testing.assert_allclose(res["kp3d_mvq"][0, 0, :, 0], 0.0, atol=1e-4)
+    assert res["n_from_other_window"] == {"fly0": 1, "fly1": 0}
+    meta = json.load(open(out / "mvq_meta.json"))
+    assert meta["per_frame"]["own_window"] == [[0], [1]]
+    assert meta["n_from_other_window"] == {"fly0": 1, "fly1": 0}
+
+
+def test_merged_single_window_is_unchanged_by_the_preference(tmp_path):
+    """Case (3). Two flies within `merge_dist_units` share ONE crop, so every
+    fly's own window IS that window and the preference can change nothing.
+    `window_pref="own"` and `"any"` must produce byte-identical arrays, and
+    both flies must read `own_window` True."""
+    from jarvis_jax.tracking.lift_mvq import lift_masked_bout
+    centres = np.zeros((2, 1, 3), np.float32)
+    centres[1, :, 0] = 20.0                  # 20 units apart -> ONE window at x=10
+    ok = np.ones((2, 1), bool)
+    res = {}
+    for pref in ("own", "any"):
+        r = PlacedFake(_fake_checkpoint(tmp_path), kp_names=_mvq_names(),
+                       exist_fn=lambda c: np.array([0.0, 0.9, 0.9, 0.0], np.float32),
+                       place=lambda cx, s: (0.0 if s == 1 else 20.0, 0.0, 0.0))
+        res[pref] = lift_masked_bout(r, _frames(1), centres, ok,
+                                     out_dir=str(tmp_path / pref),
+                                     model_names=_model_names(), identity="mask",
+                                     window_pref=pref, mask_sex_meta=HUMAN_MASKS)
+    assert list(res["own"]["n_windows"]) == [1]
+    for key in ("kp3d_mvq", "kp2d_mvq", "vis", "conf_raw", "exist", "slot", "window"):
+        np.testing.assert_array_equal(np.nan_to_num(res["own"][key], nan=-999),
+                                      np.nan_to_num(res["any"][key], nan=-999),
+                                      err_msg=f"{key} moved on a merged window")
+    assert bool(res["own"]["own_window"][0, 0]) and bool(res["own"]["own_window"][1, 0])
+    assert res["own"]["n_from_other_window"] == {"fly0": 0, "fly1": 0}
+    assert res["own"]["slot"][0, 0] == 1 and res["own"]["slot"][1, 0] == 2
+
+
+def test_gate_string_carries_window_pref_and_stales_every_old_lift(tmp_path):
+    """Case (4). The preference changes which instance -- and so which
+    confidences -- land in kp3d.npz, so it belongs in the Stage-B gate string
+    for the same reason `identity` and `containment` do. Every lift produced
+    before it existed carries a gates string WITHOUT the key and must read as
+    not-current."""
+    from jarvis_jax.tracking.lift_mvq import (bout_lift_is_current, lift_masked_bout,
+                                              mvq_gate_string)
+    ckpt = _fake_checkpoint(tmp_path)
+    g_own = mvq_gate_string(ckpt, step=None, exist_thresh=0.5, identity="mask",
+                            containment="off", window_pref="own")
+    g_any = mvq_gate_string(ckpt, step=None, exist_thresh=0.5, identity="mask",
+                            containment="off", window_pref="any")
+    assert g_own != g_any
+    assert json.loads(g_own)["window_pref"] == "own"
+    assert json.loads(g_any)["window_pref"] == "any"
+    # the default is the fix, so a caller that says nothing gets "own"
+    assert mvq_gate_string(ckpt, step=None, exist_thresh=0.5, identity="mask",
+                           containment="off") == g_own
+    with pytest.raises(ValueError, match="window_pref"):
+        mvq_gate_string(ckpt, step=None, exist_thresh=0.5, identity="mask",
+                        containment="off", window_pref="whatever")
+    # under identity="sex" the rule does not run at all, so the EFFECTIVE
+    # value is reported -- the same discipline `containment` already follows
+    assert json.loads(mvq_gate_string(ckpt, step=None, exist_thresh=0.5,
+                                      identity="sex", containment="off",
+                                      window_pref="own"))["window_pref"] == "any"
+
+    centres, ok = _two_mask_windows()
+    r = PlacedFake(ckpt, kp_names=_mvq_names())
+    out = tmp_path / "bout"
+    lift_masked_bout(r, _frames(1), centres, ok, out_dir=str(out),
+                     model_names=_model_names(), identity="mask",
+                     mask_sex_meta=HUMAN_MASKS)
+    with np.load(out / "fly0" / "kp3d.npz") as z:
+        assert str(z["gates"]) == g_own
+    assert bout_lift_is_current(str(out), g_own)
+    assert not bout_lift_is_current(str(out), g_any)
+
+    # a PRE-FIX lift: same everything, gates string without the key
+    old = json.loads(g_own)
+    old.pop("window_pref")
+    old_gates = json.dumps(old, sort_keys=True)
+    assert not bout_lift_is_current(str(out), old_gates)
+    stale = tmp_path / "stale"
+    for fly in (0, 1):
+        (stale / f"fly{fly}").mkdir(parents=True)
+        np.savez(stale / f"fly{fly}" / "kp3d.npz",
+                 kp3d=np.zeros((1, 3, 3), np.float32), gates=np.asarray(old_gates))
+    (stale / "sex.json").write_text(json.dumps({"male_fly": 1,
+                                                "method": "mask_human_id_review"}))
+    assert bout_lift_is_current(str(stale), old_gates)      # the fixture is valid
+    assert not bout_lift_is_current(str(stale), g_own)      # ... and now stale
+
+
+def test_window_pref_is_what_run_bout_stage_b_expects(tmp_path):
+    """run_bout's own `stage_b_gate_signature` must reproduce the string a
+    window_pref lift stamps, or every re-lifted bout is refused at Stage B --
+    and the shipped p3b config must carry the mode the campaign runs."""
+    from jarvis_jax.tracking.lift_mvq import lift_masked_bout
+    ckpt = _fake_checkpoint(tmp_path)
+    centres, ok = _two_mask_windows()
+    r = PlacedFake(ckpt, kp_names=_mvq_names(), exist_thresh=0.55)
+    out = tmp_path / "bout"
+    lift_masked_bout(r, _frames(1), centres, ok, out_dir=str(out),
+                     model_names=_model_names(), identity="mask",
+                     mask_sex_meta=HUMAN_MASKS)
+    fn = next(n for n in ast.parse(RUN_BOUT.read_text()).body
+              if isinstance(n, ast.FunctionDef) and n.name == "stage_b_gate_signature")
+    g = {"json": json}
+    exec(compile(ast.Module(body=[fn], type_ignores=[]), "<rb>", "exec"), g)
+    cfg = OmegaConf.create({"detector": {"conf_thresh": 0.3},
+                            "pipeline": {"lifter": "mvq"},
+                            "mvq": {"checkpoint": ckpt, "step": None,
+                                    "exist_thresh": 0.55, "identity": "mask",
+                                    "containment": "off", "window_pref": "own"}})
+    with np.load(out / "fly0" / "kp3d.npz") as z:
+        assert str(z["gates"]) == g["stage_b_gate_signature"](cfg)
+    cfg_any = OmegaConf.merge(cfg, {"mvq": {"window_pref": "any"}})
+    assert g["stage_b_gate_signature"](cfg_any) != g["stage_b_gate_signature"](cfg)
+    # an mvq config that says nothing still gets the fix
+    cfg_none = OmegaConf.create({"detector": {"conf_thresh": 0.3},
+                                 "pipeline": {"lifter": "mvq"},
+                                 "mvq": {"checkpoint": ckpt, "step": None,
+                                         "exist_thresh": 0.55, "identity": "mask",
+                                         "containment": "off"}})
+    assert g["stage_b_gate_signature"](cfg_none) == g["stage_b_gate_signature"](cfg)
+    _p3b = OmegaConf.load(REPO / "configs" / "mvq" / "p3b.yaml")
+    assert str(_p3b.window_pref) == "own"
+
+
+def test_mvq_lift_cli_and_slurm_array_expose_the_window_pref():
+    """The campaign runs the lift from the CLI and from the slurm array text;
+    both have to name the mode, and `own` is the default."""
+    spec = importlib.util.spec_from_file_location(
+        "mvq_lift_bout_wp", REPO / "scripts" / "mvq_lift_bout.py")
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    a = m.build_parser().parse_args(
+        ["--session-dir", "/s", "--out", "/o", "--run", "/r", "--bout", "1"])
+    assert a.window_pref == "own"
+    a = m.build_parser().parse_args(
+        ["--session-dir", "/s", "--out", "/o", "--run", "/r", "--bout", "1",
+         "--window-pref", "any"])
+    assert a.window_pref == "any"
+
+    s = _slurm_mod().build_mvq_lift_array_script(
+        job_name="mvq", partition="ckpt-all", account="portia", cpus=8, mem=48,
+        gpus=1, time_limit="12:00:00", requeue=True, conda_env="3d_tracking",
+        idxs=[25], session_dir="/s", predictions_dir="/p", run_dir="/r",
+        checkpoint="/ckpt/final", step=None, exist_thresh=0.5, batch=8,
+        identity="mask", window_pref="own", anatomy_cfg="configs/anatomy/v1.yaml",
+        recording_cfg="configs/recording/session0.yaml")
+    assert "--window-pref own" in s
