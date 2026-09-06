@@ -106,6 +106,50 @@ def _rewrite_csv(m, csv_path, rows):
         w.writerows(rows)
 
 
+# --------------------------------------------- missing-wing-cams fixture
+def _records_missing_wing(rows, rec):
+    """Like `_records`, but a row may carry `missing_wing=True` (host fly's
+    WingL_base -- the fixture's one `Wing*`-named keypoint -- globally
+    invisible, so it is invisible in EVERY camera: 0 visible cameras, below
+    any `--reject-missing-wing-cams N>=1`) and/or its own `partners` map, so
+    the missing-wing rule's anchor-drop + partner-cascade can be exercised
+    without touching the shared `pseudo_fixtures.py`."""
+    from jarvis_jax.data.pseudo_export import PseudoRecord
+    cm = cam_mats()
+    rng = np.random.default_rng(0)
+    body = rng.normal(size=(len(KP_NAMES), 3)) * np.array([3.0, 1.5, 1.0])
+    proj = project(cm, body)
+    kp3d = body[None]
+    kp2d = proj[None]
+    wing_i = KP_NAMES.index("WingL_base")
+    out = []
+    for i, spec in enumerate(rows):
+        sex_code = 1 if spec["host_sex"] == MALE else 0
+        vis = np.ones((1, len(KP_NAMES)), bool)
+        if spec.get("missing_wing"):
+            vis[0, wing_i] = False
+        out.append(PseudoRecord(
+            recording=rec, frame=1000 + i, host_fly=0,
+            kp3d=kp3d, kp2d=kp2d, vis=vis, sex=np.array([sex_code], np.int8),
+            stratum={"host_sex": spec["host_sex"], "contact": bool(spec["contact"]),
+                     "apart": not bool(spec["contact"]), "wall": bool(spec["wall"])},
+            gates={"exist": 0.95, "step_units": 0.1, "reproj_px": 0.5, "contain_frac": 0.97},
+            partners=spec.get("partners") or {}, role=spec.get("role", "anchor"), bout=1))
+    return out
+
+
+def _write_fake_export_missing_wing(tmp_path, rows, rec="rec0"):
+    from jarvis_jax.data.pseudo_export import write_pseudo_export
+    calib_dir = make_calib(tmp_path / "calib", cam_mats())
+    out = str(tmp_path / "pseudo")
+    write_pseudo_export(
+        out, _records_missing_wing(rows, rec), export_names=KP_NAMES, cameras=CAMS,
+        recordings={rec: {"calib_dir": calib_dir, "fly_sex": {"fly0": "female", "fly1": "male"}}},
+        checkpoint="/fake/final", gates={"exist_min": 0.8},
+        frame_reader=lambda r, f: np.full((len(CAMS), H, W, 3), 200, np.uint8))
+    return out
+
+
 # ------------------------------------------ v2 render: skeleton edge topology
 def test_skeleton_edges_reuse_body_wing_topology_and_colour_by_distal_group():
     """`_skeleton_edges_colored` must reuse the exact head/wing/abdomen name
@@ -529,3 +573,200 @@ def test_cascade_drops_orphaned_partner_but_keeps_one_still_referenced():
 
     m._clean_dangling_partners(fs, dropped)
     assert fs["rec/Frame_3000/fly0"]["partners"] == {"4": 2001}   # untouched, still resolves
+
+
+# --------------------------------------------------- --max-reject-frac / --cell-drop-frac
+def test_apply_review_override_records_block_and_applies_past_default_threshold(tmp_path):
+    """User-decision override (2026-09-06 real scenario): 19/300 = 6.33%
+    overall rejects, well past the spec's 3% abort -- `--max-reject-frac 1.0`
+    lets it through, `--cell-drop-frac none` keeps the single (violating)
+    cell instead of dropping it, and the override is recorded verbatim
+    (value + reason + measured fractions) in BOTH manifest.json and
+    review_summary.json so the decision is auditable later."""
+    m = _load_cli()
+    root = _fixture_cells(tmp_path, [(FEMALE, False, False, 300)])
+    out = str(tmp_path / "gallery")
+    m.main(["--export", root, "--n", "300", "--out", out])
+    csv_path = os.path.join(out, "review.csv")
+    with open(csv_path, newline="") as f:
+        rows = list(csv.DictReader(f))
+    assert len(rows) == 300
+    for r in rows[:19]:
+        r["verdict"] = "reject"                              # 19/300 = 0.0633...
+    _rewrite_csv(m, csv_path, rows)
+
+    code = m.main(["--export", root, "--apply-review", csv_path,
+                  "--max-reject-frac", "1.0", "--cell-drop-frac", "none",
+                  "--override-reason", "user decision 2026-09-06: train with the 19 "
+                  "reviewed rejects removed and no cell drop"])
+
+    assert code == 0
+    expect_frac = round(19 / 300, 4)
+    manifest = json.load(open(os.path.join(root, "manifest.json")))
+    review = manifest["review"]
+    assert review["reject_frac"] == expect_frac
+    assert review["dropped_strata"] == []                    # cell kept despite its own > 3% rate
+    ov = review["overrides"]
+    assert ov["max_reject_frac"] == 1.0
+    assert ov["cell_drop_frac"] is None
+    assert ov["reason"].startswith("user decision 2026-09-06")
+    assert ov["measured"]["overall_reject_frac"] == expect_frac
+    assert ov["measured"]["per_cell_reject_frac"][f"{FEMALE}/apart/floor"] == expect_frac
+
+    summary = json.load(open(os.path.join(out, "review_summary.json")))
+    assert summary["overrides"] == ov
+
+    coco = json.load(open(os.path.join(root, "annotations", "instances_train.json")))
+    assert len(coco["framesets"]) == 300 - 19                 # only the 19 rejected rows dropped
+
+
+def test_apply_review_default_call_has_no_overrides_block(tmp_path):
+    """Sibling to (d): an ordinary (no-override) call must not gain an
+    `overrides` key -- existing tests' exact-dict comparisons on
+    `manifest["review"]` (e.g. test (d)/(e)) depend on this."""
+    m = _load_cli()
+    root = _fixture_40(tmp_path)
+    out = str(tmp_path / "gallery")
+    m.main(["--export", root, "--n", "40", "--out", out])
+    csv_path = os.path.join(out, "review.csv")
+
+    code = m.main(["--export", root, "--apply-review", csv_path])
+
+    assert code == 0
+    manifest = json.load(open(os.path.join(root, "manifest.json")))
+    assert "overrides" not in manifest["review"]
+    summary = json.load(open(os.path.join(out, "review_summary.json")))
+    assert "overrides" not in summary
+    assert "missing_wing_dropped" not in summary
+
+
+def test_apply_review_override_without_reason_raises(tmp_path):
+    m = _load_cli()
+    root = _fixture_cells(tmp_path, [(FEMALE, True, False, 100)])
+    out = str(tmp_path / "gallery")
+    m.main(["--export", root, "--n", "100", "--out", out])
+    csv_path = os.path.join(out, "review.csv")
+    with open(csv_path, newline="") as f:
+        rows = list(csv.DictReader(f))
+    for r in rows[:10]:
+        r["verdict"] = "reject"
+    _rewrite_csv(m, csv_path, rows)
+
+    import pytest
+    with pytest.raises(ValueError):
+        m.main(["--export", root, "--apply-review", csv_path, "--max-reject-frac", "1.0"])
+    # neither file is touched when the call raises before applying anything
+    manifest = json.load(open(os.path.join(root, "manifest.json")))
+    assert "review" not in manifest
+
+
+def test_apply_review_cell_drop_frac_none_disables_whole_cell_drop(tmp_path):
+    """Sibling to test (e): the SAME 1/10 = 10% (cell) > 3% overrun that
+    normally drops the whole cell must instead keep it, whole, when
+    `--cell-drop-frac none` is passed."""
+    m = _load_cli()
+    root = _fixture_40(tmp_path)
+    out = str(tmp_path / "gallery")
+    m.main(["--export", root, "--n", "40", "--out", out])
+    csv_path = os.path.join(out, "review.csv")
+    with open(csv_path, newline="") as f:
+        rows = list(csv.DictReader(f))
+    target_cell = f"{FEMALE}/contact/floor"
+    cell_rows = [r for r in rows if r["cell"] == target_cell]
+    assert len(cell_rows) == 10
+    cell_rows[0]["verdict"] = "reject"                        # 1/10 = 10% (cell) > 3%; 1/40 overall
+    _rewrite_csv(m, csv_path, rows)
+
+    code = m.main(["--export", root, "--apply-review", csv_path,
+                  "--cell-drop-frac", "none", "--override-reason", "keep all cells (test)"])
+
+    assert code == 0
+    manifest = json.load(open(os.path.join(root, "manifest.json")))
+    assert manifest["review"]["dropped_strata"] == []
+    assert manifest["review"]["overrides"]["cell_drop_frac"] is None
+    coco = json.load(open(os.path.join(root, "annotations", "instances_train.json")))
+    remaining = coco["framesets"]
+    assert len(remaining) == 39                               # only the 1 rejected row dropped
+    assert sum(1 for v in remaining.values()
+              if m._cell_of(v["stratum"]) == target_cell) == 9   # the other 9 of the cell survive
+
+
+# --------------------------------------------------------- --reject-missing-wing-cams
+def test_apply_review_reject_missing_wing_cams_drops_frame_and_cascades_partner(tmp_path):
+    """The one `Wing*` keypoint (`WingL_base`) is globally invisible (0 of 7
+    cameras) on the frame_1000 anchor -- below any N>=1 -- so `--reject-
+    missing-wing-cams 3` must drop it even though the CSV verdict is blank
+    (the rule is independent of human review), cascade its sole partner
+    (frame_1001), and leave the unrelated frame_1002 anchor untouched."""
+    m = _load_cli()
+    rows = [
+        {"host_sex": FEMALE, "contact": True, "wall": False,
+         "missing_wing": True, "partners": {"1": 1001}},
+        {"host_sex": FEMALE, "contact": True, "wall": False, "role": "partner"},
+        {"host_sex": FEMALE, "contact": True, "wall": False},
+    ]
+    root = _write_fake_export_missing_wing(tmp_path, rows)
+    out = str(tmp_path / "gallery")
+    m.main(["--export", root, "--n", "2", "--out", out])       # samples only the 2 anchors
+    csv_path = os.path.join(out, "review.csv")
+    with open(csv_path, newline="") as f:
+        sampled = list(csv.DictReader(f))
+    assert len(sampled) == 2
+    assert all((r["verdict"] or "") == "" for r in sampled)    # nobody rejected by review
+
+    code = m.main(["--export", root, "--apply-review", csv_path,
+                  "--reject-missing-wing-cams", "3"])
+
+    assert code == 0
+    coco = json.load(open(os.path.join(root, "annotations", "instances_train.json")))
+    remaining = coco["framesets"]
+    assert "rec0/Frame_1000/fly0" not in remaining             # missing-wing anchor dropped
+    assert "rec0/Frame_1001/fly0" not in remaining             # its sole partner cascaded
+    assert "rec0/Frame_1002/fly0" in remaining                 # unrelated anchor untouched
+
+    summary = json.load(open(os.path.join(out, "review_summary.json")))
+    assert summary["missing_wing_dropped"] == {"anchors": 1, "partners": 1}
+    assert summary["n_dropped_framesets"] == 2                 # the anchor + its cascaded partner
+    manifest = json.load(open(os.path.join(root, "manifest.json")))
+    assert "overrides" not in manifest["review"]               # not a spec-gate override
+
+
+def test_reject_missing_wing_cams_zero_is_off_by_default(tmp_path):
+    m = _load_cli()
+    rows = [{"host_sex": FEMALE, "contact": True, "wall": False, "missing_wing": True}]
+    root = _write_fake_export_missing_wing(tmp_path, rows)
+    out = str(tmp_path / "gallery")
+    m.main(["--export", root, "--n", "1", "--out", out])
+    csv_path = os.path.join(out, "review.csv")
+
+    code = m.main(["--export", root, "--apply-review", csv_path])
+
+    assert code == 0
+    coco = json.load(open(os.path.join(root, "annotations", "instances_train.json")))
+    assert "rec0/Frame_1000/fly0" in coco["framesets"]          # default N=0 -- rule off
+    summary = json.load(open(os.path.join(out, "review_summary.json")))
+    assert "missing_wing_dropped" not in summary
+
+
+def test_missing_wing_keys_unit_ignores_non_anchor_and_missing_ann():
+    """Unit-level: `_missing_wing_keys` only ever considers `role == "anchor"`
+    framesets, and a `None`/unresolvable ann_id contributes 0 (not an error)
+    to that camera's visibility count."""
+    m = _load_cli()
+    kp_names = ["Antenna_Base", "WingL_base"]
+    anns_by_id = {
+        1: {"keypoints": [0, 0, 1, 5, 5, 1]},     # WingL_base visible (v=1)
+        2: {"keypoints": [0, 0, 1, 5, 5, 0]},     # WingL_base NOT visible (v=0)
+    }
+    fs = {
+        "rec/Frame_1/fly0": {"role": "anchor", "ann_ids": [1, None, 2]},   # wing seen in 1/3 cams
+        "rec/Frame_2/fly0": {"role": "partner", "ann_ids": [None]},        # not an anchor: ignored
+    }
+    wing_idx = m._wing_indices(kp_names)
+    assert wing_idx == [1]
+
+    dropped = m._missing_wing_keys(fs, anns_by_id, wing_idx, min_cams=2)
+
+    assert dropped == {"rec/Frame_1/fly0"}                     # 1 visible camera < 2
+    assert m._missing_wing_keys(fs, anns_by_id, wing_idx, min_cams=1) == set()  # 1 >= 1, kept
+    assert m._missing_wing_keys(fs, anns_by_id, wing_idx, min_cams=0) == set()  # 0 == off

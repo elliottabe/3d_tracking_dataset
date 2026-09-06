@@ -930,3 +930,89 @@ every overhead/side full-frame panel, and the corresponding zoom panel shows
 that fly filling most of the tile with legs/wings resolved at the upsampled
 scale and a light mask-outline contour visible around the body. No skeleton
 crosses onto a neighbouring fly or the arena floor in either page.
+
+### Review applied (2026-09-06)
+
+Human pass on the 300-anchor gallery (`docs/benchmark/2026-09-mvq/v2-review/
+review.csv`): 19 rejects / 300 = 6.3 % overall, per cell female/apart 12/113,
+female/contact 4/40, male/contact 3/43, male/apart 0/103. Plain `--apply-
+review` refused per spec SS3.3 (overall 6.3 % > 3 % abort threshold, checked
+first, before any per-cell logic ever runs).
+
+**User decision (option 3):** apply the 19 reviewed rejects as-is and train
+anyway on every stratum cell, including the three whose OWN reject rate also
+exceeds 3 % (female/apart 10.6 %, female/contact 10.0 %, male/contact 7.0 %)
+-- the pseudo-label 0.3 sample weight is the intended noise mitigation for
+exactly this kind of residual label error, not a 3 % ceiling on it. The user
+also asked that framesets missing wing keypoints be rejected as a separate,
+independent data-quality rule.
+
+**Implementation** (`scripts/pseudo_labels/pseudolabel_gallery.py`):
+
+- `--max-reject-frac` (default 0.03) and `--cell-drop-frac` (default 0.03,
+  accepts `none` to disable the whole-cell drop entirely) override the
+  spec's two hard-coded 3 % thresholds independently. Either differing from
+  the default is an OVERRIDE of the spec gate and requires `--override-
+  reason`; `apply_review` raises `ValueError` otherwise. The override,
+  together with the MEASURED overall and per-cell reject fractions at the
+  time it was used, is recorded verbatim under `overrides` in both
+  `manifest.json["review"]` and `review_summary.json` -- an ordinary
+  (no-override) call gains no `overrides` key, so the existing exact-dict
+  assertions on `manifest["review"]` from the SS3.3 test suite are
+  unaffected.
+- `--reject-missing-wing-cams N` (default 0 = off): at apply time, drops
+  every ANCHOR frameset (cascading its T=2 partner exactly like a
+  human-rejected anchor, via the same `_cascade_partner_drop`) whose
+  annotations have some `Wing*`-named keypoint (BY NAME, from the export's
+  own `keypoint_names`) visible (`v > 0`) in fewer than `N` cameras. Applied
+  EXPORT-WIDE (all 8207 anchors), not just the 300 reviewed -- this is a
+  data-quality rule independent of the human pass, and does not participate
+  in `overrides`/`max_reject_frac`/`cell_drop_frac` at all.
+
+**Real run** (`--max-reject-frac 1.0 --cell-drop-frac none --reject-
+missing-wing-cams 3`), on
+`/gscratch/portia/eabe/data/Johnson_lab/red_data_3d_v12_pseudo_p3b_20260905`,
+after backing up `annotations/instances_train.json` and `manifest.json` to
+`<export>/pre_review_backup/`:
+
+```
+framesets   25382 -> 24805  (-577)
+anchors      8207 -> 8016   (-191 unique; 19 review-rejected + 174
+                             missing-wing, with a 2-anchor overlap between
+                             the two -- 2 of the 19 CSV rejects also fail
+                             the wing rule, matching the pre-run estimate
+                             exactly)
+partners    17175 -> 16789  (-386 cascaded, from either reason)
+missing-wing anchors: 174 / 8207 anchors = 2.12 % export-wide (pre-run
+  estimate from the reviewed sample was "~1-2%"; on the reviewed 300
+  itself, 2 of 19 rejects and 4 of 281 accepts also failed the wing rule --
+  reproduced exactly by re-running `_missing_wing_keys` against the 300-row
+  sample post hoc)
+dropped_strata: []  (cell-drop disabled by the override; all 5 strata kept,
+  including the 3 whose own reject rate exceeds 3%: female/apart 10.6%,
+  female/contact 10.0%, male/contact 7.0%, per `overrides.measured
+  .per_cell_reject_frac`)
+```
+
+The printed per-reason cascade breakdown ("37 cascaded partners from
+review/19 review-dropped anchors; 174 missing-wing anchors dropped (354
+cascaded partners)") double-counts a handful of partners referenced by
+BOTH a review-rejected and a missing-wing anchor (37 + 354 = 391 vs the
+true 386 cascaded, a 5-frameset overlap) -- informational only; the actual
+removal (`n_dropped_framesets` / the rewritten `instances_train.json`) is
+computed once from the true union and is exact (`unresolved refs: 0`,
+checked below).
+
+**Verification:** `V12WindowDataset(export, "train", T=2,
+pair_deltas=(1,4,16))` builds 35099 windows and reads sample 0 cleanly
+(all expected keys/shapes: `crops (2,7,448,448,3)`, `kp3d_local (2,2,50,3)`,
+etc.) against the rewritten export -- the loader never touches `review`/
+`gates`/`stratum`, only `frames`/`ann_ids`/`partners`, so this is a real
+end-to-end resolution check, not just a JSON-shape check. A direct scan of
+every remaining frameset's `frames`/`ann_ids`/`partners` references (image
+ids, ann ids, and partner frameset keys) found 0 unresolved.
+
+`review.csv` and `review_summary.json` are versioned at
+`docs/benchmark/2026-09-mvq/v2-review/` (git-ignored `docs/benchmark/`
+force-added, per this project's usual convention for small text evidence
+artifacts) alongside this note.

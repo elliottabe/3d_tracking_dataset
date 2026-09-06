@@ -578,15 +578,89 @@ def _clean_dangling_partners(fs, drop_keys):
         v["partners"] = kept
 
 
-def apply_review(export_root, csv_path):
-    """Spec SS3.3, exactly: overall reject fraction > 3% -> abort (exit 2),
-    print the per-gate breakdown, write NOTHING. Else drop the rejected
-    framesets, then drop every whole stratum cell whose OWN reject rate (over
-    the reviewed sample) exceeds 3% -- applied to every matching frameset in
-    the WHOLE export, not just the sampled ones (spec: "dropped entirely
-    rather than thinned"). Rewrites `annotations/instances_train.json`,
+def _wing_indices(kp_names):
+    """Indices of `kp_names` whose name starts with `Wing` -- BY NAME, from
+    the export's own `keypoint_names` (never a positional guess)."""
+    return [i for i, n in enumerate(kp_names) if n.startswith("Wing")]
+
+
+def _missing_wing_keys(fs, anns_by_id, wing_idx, min_cams):
+    """ANCHOR frameset keys where some wing keypoint is visible (v > 0) in
+    fewer than `min_cams` cameras (user decision 2026-09-06). Applied to
+    EVERY anchor in the export (`fs`), not just the reviewed sample -- the
+    rule is a data-quality gate at apply time, independent of the human
+    review. `min_cams <= 0` (the default, "off") or no wing keypoints at all
+    short-circuits to no drops."""
+    if min_cams <= 0 or not wing_idx:
+        return set()
+    drop = set()
+    for key, v in fs.items():
+        if v.get("role") != "anchor":
+            continue
+        counts = [0] * len(wing_idx)
+        for ann_id in v.get("ann_ids") or []:
+            if ann_id is None:
+                continue
+            ann = anns_by_id.get(ann_id)
+            if ann is None:
+                continue
+            kp = np.asarray(ann["keypoints"], np.float32).reshape(-1, 3)
+            for j, widx in enumerate(wing_idx):
+                if kp[widx, 2] > 0:
+                    counts[j] += 1
+        if any(c < min_cams for c in counts):
+            drop.add(key)
+    return drop
+
+
+def _reverse_partner_refs(fs):
+    """`partner frameset key -> {anchor keys that reference it}`, over every
+    ANCHOR in `fs` (mirrors `_cascade_partner_drop`'s own `referenced`
+    computation) -- used only to attribute a cascaded-partner drop back to
+    the seed set(s) that caused it, for reporting."""
+    refs = collections.defaultdict(set)
+    for key, v in fs.items():
+        if v.get("role") != "anchor":
+            continue
+        rec, fly = v.get("recording"), v.get("fly_id")
+        if fly is None:
+            continue
+        for pf in (v.get("partners") or {}).values():
+            refs[f"{rec}/Frame_{pf}/fly{fly}"].add(key)
+    return refs
+
+
+def apply_review(export_root, csv_path, *, max_reject_frac=REJECT_THRESHOLD,
+                 cell_drop_frac=REJECT_THRESHOLD, override_reason=None,
+                 reject_missing_wing_cams=0):
+    """Spec SS3.3, by default exactly: overall reject fraction > 3% -> abort
+    (exit 2), print the per-gate breakdown, write NOTHING. Else drop the
+    rejected framesets, then drop every whole stratum cell whose OWN reject
+    rate (over the reviewed sample) exceeds 3% -- applied to every matching
+    frameset in the WHOLE export, not just the sampled ones (spec: "dropped
+    entirely rather than thinned"). Rewrites `annotations/instances_train.json`,
     `manifest.json["review"]`, and a `review_summary.json` beside the CSV.
-    Returns an exit code (0 ok, 2 aborted)."""
+    Returns an exit code (0 ok, 2 aborted).
+
+    `max_reject_frac`/`cell_drop_frac` override the spec's two 3% thresholds
+    (`cell_drop_frac=None` disables the whole-cell drop entirely, keeping
+    every cell). Either differing from `REJECT_THRESHOLD` is an OVERRIDE of
+    the spec gate and requires `override_reason` (a human-readable string,
+    e.g. citing the decision date) -- recorded, with the measured overall and
+    per-cell reject fractions, under `overrides` in both `manifest.json` and
+    `review_summary.json` so the decision is auditable after the fact.
+
+    `reject_missing_wing_cams` (0 = off) additionally drops every ANCHOR
+    frameset whose annotations have some `Wing*`-named keypoint visible in
+    fewer than that many cameras, export-wide (`_missing_wing_keys`) -- an
+    independent data-quality rule, not a spec-gate override, so it has no
+    effect on `max_reject_frac`/`cell_drop_frac`/`overrides`."""
+    is_override = (max_reject_frac != REJECT_THRESHOLD) or (cell_drop_frac != REJECT_THRESHOLD)
+    if is_override and not (override_reason and override_reason.strip()):
+        raise ValueError(
+            "--override-reason is required whenever --max-reject-frac or --cell-drop-frac "
+            f"differs from the spec default ({REJECT_THRESHOLD})")
+
     with open(csv_path, newline="") as f:
         rows = list(csv.DictReader(f))
     total = len(rows)
@@ -595,35 +669,54 @@ def apply_review(export_root, csv_path):
     rejected_rows = [r for r in rows if (r.get("verdict") or "").strip().lower() == "reject"]
     reject_frac = len(rejected_rows) / total
 
-    if reject_frac > REJECT_THRESHOLD:
+    if reject_frac > max_reject_frac:
         print(f"[pseudolabel_gallery] overall reject fraction {reject_frac:.1%} "
-              f"({len(rejected_rows)}/{total}) exceeds {REJECT_THRESHOLD:.0%} -- NOT "
+              f"({len(rejected_rows)}/{total}) exceeds {max_reject_frac:.0%} -- NOT "
               f"applying the review; tighten the offending gate and regenerate.")
         _print_gate_breakdown(rejected_rows)
         return 2
 
     per_cell_total = collections.Counter(r["cell"] for r in rows)
     per_cell_reject = collections.Counter(r["cell"] for r in rejected_rows)
-    dropped_cells = sorted(c for c, tot in per_cell_total.items()
-                           if per_cell_reject.get(c, 0) / tot > REJECT_THRESHOLD)
+    per_cell_reject_frac = {c: per_cell_reject.get(c, 0) / tot for c, tot in per_cell_total.items()}
+    if cell_drop_frac is None:
+        dropped_cells = []
+    else:
+        dropped_cells = sorted(c for c, frac in per_cell_reject_frac.items()
+                               if frac > cell_drop_frac)
     dropped_cell_set = set(dropped_cells)
 
     ann_path = os.path.join(export_root, "annotations", "instances_train.json")
     coco = json.load(open(ann_path))
     fs = coco["framesets"]
+    anns_by_id = {a["id"]: a for a in coco["annotations"]}
+    kp_names = list(coco["keypoint_names"])
 
     rejected_keys = {r["frameset"] for r in rejected_rows}
-    drop_keys = set()
+    review_seed = set()
     for key, v in fs.items():
         if key in rejected_keys:
-            drop_keys.add(key)
+            review_seed.add(key)
             continue
         if v.get("role") == "negative" or v.get("fly_id") is None:
             continue
         if _cell_of(v.get("stratum") or {}) in dropped_cell_set:
-            drop_keys.add(key)
+            review_seed.add(key)
 
-    drop_keys = _cascade_partner_drop(fs, drop_keys)
+    wing_idx = _wing_indices(kp_names)
+    wing_seed = _missing_wing_keys(fs, anns_by_id, wing_idx, reject_missing_wing_cams)
+
+    drop_keys = _cascade_partner_drop(fs, review_seed | wing_seed)
+    cascaded_extra = drop_keys - review_seed - wing_seed
+    reverse_refs = _reverse_partner_refs(fs) if cascaded_extra else {}
+    review_cascaded = wing_cascaded = 0
+    for pk in cascaded_extra:
+        refs = reverse_refs.get(pk, set())
+        from_review = bool(refs & review_seed)
+        from_wing = bool(refs & wing_seed)
+        review_cascaded += int(from_review)
+        wing_cascaded += int(from_wing)
+
     _clean_dangling_partners(fs, drop_keys)
     for key in drop_keys:
         fs.pop(key, None)
@@ -632,7 +725,19 @@ def apply_review(export_root, csv_path):
 
     review_block = {"file": csv_path, "n": total, "reject_frac": round(reject_frac, 4),
                     "dropped_strata": dropped_cells}
+    if is_override:
+        review_block["overrides"] = {
+            "max_reject_frac": max_reject_frac,
+            "cell_drop_frac": cell_drop_frac,
+            "reason": override_reason,
+            "measured": {
+                "overall_reject_frac": round(reject_frac, 4),
+                "per_cell_reject_frac": {c: round(v, 4) for c, v in per_cell_reject_frac.items()},
+            },
+        }
     summary = dict(review_block, n_dropped_framesets=len(drop_keys))
+    if reject_missing_wing_cams > 0:
+        summary["missing_wing_dropped"] = {"anchors": len(wing_seed), "partners": wing_cascaded}
     with open(os.path.join(os.path.dirname(csv_path), "review_summary.json"), "w") as f:
         json.dump(summary, f, indent=1)
 
@@ -644,7 +749,9 @@ def apply_review(export_root, csv_path):
 
     print(f"[pseudolabel_gallery] applied review: {len(rejected_rows)}/{total} rejected "
           f"({reject_frac:.1%}), {len(dropped_cells)} whole strata dropped {dropped_cells}, "
-          f"{len(drop_keys)} framesets removed.")
+          f"{review_cascaded} cascaded partners from review/{len(review_seed)} review-dropped "
+          f"anchors; {len(wing_seed)} missing-wing anchors dropped ({wing_cascaded} cascaded "
+          f"partners); {len(drop_keys)} framesets removed total.")
     return 0
 
 
@@ -666,10 +773,33 @@ def main(argv=None):
                     help="apply a filled-in review.csv (spec SS3.3): overall reject "
                          "fraction > 3%% aborts and writes nothing; else drop rejected "
                          "framesets and any whole stratum whose own reject rate exceeds 3%%")
+    ap.add_argument("--max-reject-frac", type=float, default=REJECT_THRESHOLD,
+                    help=f"override the spec's overall reject-fraction abort threshold "
+                         f"(default {REJECT_THRESHOLD}); differing from the default is an "
+                         f"OVERRIDE and requires --override-reason")
+    ap.add_argument("--cell-drop-frac", default=str(REJECT_THRESHOLD), metavar="FRAC|none",
+                    help=f"override the spec's per-cell reject-fraction threshold that drops "
+                         f"a whole stratum cell (default {REJECT_THRESHOLD}); 'none' disables "
+                         f"the whole-cell drop entirely (every cell is kept); differing from "
+                         f"the default is an OVERRIDE and requires --override-reason")
+    ap.add_argument("--override-reason", default=None,
+                    help="required whenever --max-reject-frac or --cell-drop-frac differs "
+                         "from the spec default; recorded verbatim in manifest.json[\"review\"]"
+                         "/review_summary.json[\"overrides\"] for audit")
+    ap.add_argument("--reject-missing-wing-cams", type=int, default=0, metavar="N",
+                    help="drop anchor framesets (and cascade their partners) where some "
+                         "Wing*-named keypoint is visible in fewer than N cameras, export-wide; "
+                         "0 (default) disables the rule")
     args = ap.parse_args(argv)
 
     if args.apply_review:
-        return apply_review(args.export, args.apply_review)
+        cell_drop_frac = (None if str(args.cell_drop_frac).strip().lower() == "none"
+                          else float(args.cell_drop_frac))
+        return apply_review(args.export, args.apply_review,
+                            max_reject_frac=args.max_reject_frac,
+                            cell_drop_frac=cell_drop_frac,
+                            override_reason=args.override_reason,
+                            reject_missing_wing_cams=args.reject_missing_wing_cams)
     if not args.out:
         ap.error("--out is required to generate a gallery")
     summary = generate(args.export, args.out, args.n, args.seed,

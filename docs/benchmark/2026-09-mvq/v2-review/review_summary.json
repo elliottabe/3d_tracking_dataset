@@ -1,0 +1,26 @@
+{
+ "file": "figures/2026-09-mvq/v2_pseudo/gallery/review.csv",
+ "n": 300,
+ "reject_frac": 0.0633,
+ "dropped_strata": [],
+ "overrides": {
+  "max_reject_frac": 1.0,
+  "cell_drop_frac": null,
+  "reason": "user decision 2026-09-06: train with the 19 reviewed rejects removed and no cell drop; pseudo weight 0.3 is the noise mitigation",
+  "measured": {
+   "overall_reject_frac": 0.0633,
+   "per_cell_reject_frac": {
+    "female/apart/floor": 0.1062,
+    "female/apart/wall": 0.0,
+    "female/contact/floor": 0.1,
+    "male/apart/floor": 0.0,
+    "male/contact/floor": 0.0698
+   }
+  }
+ },
+ "n_dropped_framesets": 577,
+ "missing_wing_dropped": {
+  "anchors": 174,
+  "partners": 354
+ }
+}
