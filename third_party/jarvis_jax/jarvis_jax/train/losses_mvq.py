@@ -51,11 +51,11 @@ class LossWeights:
     # and every P3a/P3b run's loss, are unchanged).
     persist: float = 0.5
     persist_margin_units: float = 2.0
-    # per-keypoint loss weight multiplier applied to wing landmarks (see
-    # `wing_kp_weight`); this is only the DEFAULT multiplier baked for callers
-    # that build the weight vector from it -- `mvq_loss` itself takes the
-    # already-built (K,) vector as `kp_weight`.
-    wing_kp_mult: float = 1.0
+    # (No `wing_kp_mult` here on purpose: `mvq_loss` takes the already-built (K,)
+    # `kp_weight` vector, so the multiplier lives in ONE place -- the trainer's
+    # `MVQTrainConfig.wing_kp_mult`, which `run_training` turns into that vector
+    # via `wing_kp_weight(names, ...)`. A second copy on LossWeights was dead
+    # config that could silently disagree with the vector actually in use.)
 
 
 def _huber(d, delta):

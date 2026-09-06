@@ -104,6 +104,13 @@ class MVQTrainConfig:
     # existence head sees one.
     negatives_root: str | None = None
     negatives_frac: float = 0.05
+    # v2: the female-host mass to SOLVE for, PER ROOT (`_balanced_weights`). Each
+    # root has its own census, so the one hand-solved `female_host_weight` above
+    # is only right for the root it was solved on -- applied to all four and
+    # mass-averaged it lands wherever they happen to average out to (measured
+    # ~0.75 female for 4.27). None = fall back to `female_host_weight` (the P3b
+    # path, so `mvq.yaml` runs are unchanged).
+    female_host_target: float | None = None
     # Per-keypoint loss multiplier on the WING landmarks (spec §4: wing keypoint
     # AND wing visibility weight x2). Built BY NAME (`losses_mvq.wing_kp_weight`),
     # never by index -- see CLAUDE.md's keypoint-order history.
@@ -469,17 +476,27 @@ def _cohorts(ds):
     return c
 
 
-def _balanced_weights(ds, alpha, female_weight, female_host_weight=1.0):
+def _balanced_weights(ds, alpha, female_weight, female_host_weight=1.0,
+                      female_host_target=None, label=None):
     """Per-window sampling weights, normalised to sum 1.
 
     `female_weight` (P2) multiplies female-host windows INSIDE the
     behaviour-category balance, so how much of the sampled mass it actually buys
     depends on how the categories fall out. `female_host_weight` (P3b) multiplies
     them again on the FINAL normalised weights, so the mass ratio it produces is
-    exactly `female_host_weight x (mass_F / mass_M)` and can be solved for a target
-    ratio: on `red_data_3d_v12_export0902` train the unweighted ratio is 0.234
-    (202 female-host windows of 2661), so 4.27 makes the two host sexes equally
-    likely. 1.0 leaves the P2 behaviour untouched.
+    exactly `female_host_weight x (mass_F / mass_M)`.
+
+    `female_host_target` (v2) SOLVES that multiplier instead of taking it on
+    faith: given this dataset's own post-balance female mass `f`, the multiplier
+    that lands the female-host mass exactly on `target` is
+    `target*(1-f) / ((1-target)*f)`. A hand-tuned `female_host_weight` is only
+    correct for the ONE census it was solved on -- 4.27 was solved for
+    `red_data_3d_v12_export0902` train (202 female-host windows of 2661) -- and
+    v2 applies the balance PER ROOT, where each root has its own census, so a
+    single hand number stacks into whatever the roots happen to average out to.
+    When `female_host_target` is set it wins and `female_host_weight` is unused.
+    A root with no female host (or no male/other host) cannot reach any interior
+    target at all: the multiplier stays 1.0 and a note is printed naming `label`.
     """
     is_f = np.array([ds.is_female(i) for i in range(len(ds))], bool)
     cats = [f"{ds.manifest[ds.windows[i][0]].get('behavior', 'unknown')}_{'female' if is_f[i] else 'other'}"
@@ -488,7 +505,32 @@ def _balanced_weights(ds, alpha, female_weight, female_host_weight=1.0):
     w = np.array([(1.0 / counts[c]) ** alpha for c in cats])
     w *= np.where(is_f, female_weight, 1.0)
     w = w / w.sum()
-    w = w * np.where(is_f, float(female_host_weight), 1.0)
+    mult = float(female_host_weight)
+    if female_host_target is not None:
+        t = float(female_host_target)
+        if not 0.0 < t < 1.0:
+            raise ValueError(f"female_host_target must be strictly between 0 and 1, got {t}")
+        f = float(w[is_f].sum())
+        who = f"[mvq] {label or getattr(ds, 'root', 'train set')}"
+        # One-sided by COUNT first (exact), then by mass with a tolerance: an
+        # all-female root's `f` comes back as 0.9999999999999998, not 1.0, and a
+        # bare `f >= 1.0` would sail past it and "solve" a multiplier of 4e-16 --
+        # which reads as a legitimate number in the log and would zero out the
+        # female mass of any root that is merely NEARLY one-sided.
+        n_f = int(is_f.sum())
+        one_sided = n_f == 0 or n_f == len(is_f) or f <= 1e-9 or f >= 1.0 - 1e-9
+        if one_sided:
+            mult = 1.0
+            side = "no female-host window" if n_f == 0 or f <= 1e-9 else "no male/other-host window"
+            print(f"{who}: female_host_target={t:.3f} UNATTAINABLE -- this root has {side} "
+                  f"(post-balance female mass {f:.4f}); multiplier left at 1.0 and the root's "
+                  f"sampling weights are unchanged", flush=True)
+        else:
+            mult = t * (1.0 - f) / ((1.0 - t) * f)
+            print(f"{who}: female_host_target={t:.3f}, post-balance female mass {f:.4f} "
+                  f"-> solved female-host multiplier {mult:.4f} (train.female_host_weight="
+                  f"{female_host_weight} is unused while a target is set)", flush=True)
+    w = w * np.where(is_f, mult, 1.0)
     return w / w.sum()
 
 
@@ -501,7 +543,11 @@ def _mix_weights(ds, tcfg):
     so each root's behaviour balance and host-sex ratio are restored INSIDE it
     -- which is why the pseudo export's manifest `balance.female_host_weight`
     is information to log, not a second multiplier to apply here (applying it
-    again would over-sample female hosts by ~2x). The roots' TOTAL masses are
+    again would over-sample female hosts by ~2x), and why the female-host
+    multiplier is SOLVED per root from `female_host_target` rather than taken
+    from a hand number solved on one census (which, applied to every root and
+    then mass-averaged, lands wherever the roots happen to average out to --
+    measured ~0.75 female for 4.27 across these four). The roots' TOTAL masses are
     then set so the negatives take exactly `negatives_frac` and the remaining
     mass splits by window count: how many negatives the exporter happened to
     write must not decide how often the existence head sees an empty window,
@@ -509,6 +555,10 @@ def _mix_weights(ds, tcfg):
     each root actually holds (their per-sample loss weight, not their sampling
     rate, is what marks a pseudo label as less trustworthy).
     """
+    frac = float(tcfg.negatives_frac)
+    if not 0.0 <= frac < 1.0:
+        raise ValueError(f"negatives_frac must be in [0, 1), got {frac} -- at 1.0 the sampler would "
+                         f"draw nothing but empty windows")
     subs = list(getattr(ds, "datasets", [ds]))
     names_ = list(getattr(ds, "names", ["real"]))
     ws = []
@@ -518,11 +568,12 @@ def _mix_weights(ds, tcfg):
                 f"train root '{nm}' ({getattr(d, 'root', '?')}) contributes 0 windows at T={ds.T} "
                 f"-- a root with no window at this length would silently drop out of the mix "
                 f"(check pair_deltas: a Delta no pair of labelled frames spans yields nothing)")
-        ws.append(_balanced_weights(d, tcfg.balance_alpha, tcfg.female_weight, tcfg.female_host_weight))
+        ws.append(_balanced_weights(d, tcfg.balance_alpha, tcfg.female_weight, tcfg.female_host_weight,
+                                    female_host_target=tcfg.female_host_target,
+                                    label=f"T={ds.T} root '{nm}'"))
     n_win = np.array([float(len(d)) for d in subs])
     is_neg = np.array([nm == _NEGATIVES_NAME for nm in names_], bool)
     if is_neg.any():
-        frac = float(tcfg.negatives_frac)
         pos = np.where(is_neg, 0.0, n_win)
         mass = np.where(is_neg, frac / max(int(is_neg.sum()), 1),
                         pos / max(pos.sum(), 1e-12) * (1.0 - frac))
@@ -532,9 +583,62 @@ def _mix_weights(ds, tcfg):
     return w / w.sum(), dict(zip(names_, (float(m) for m in mass)))
 
 
-class _MixCounter:
-    """Transparent wrapper over a train dataset that COUNTS which root each
-    drawn window came from.
+class _DatasetView:
+    """Transparent wrapper over a window dataset: everything the loader,
+    sampler and cohort code asks (`is_female`, `n_flies`, `manifest`,
+    `windows`, `delta`, ...) delegates to the wrapped dataset, so a view can
+    be handed to `ConcatWindowDataset`/`window_batches` in place of the real
+    thing. `epoch` needs an explicit property because it is WRITTEN (once per
+    epoch, by `window_batches`) and the write has to reach the real dataset."""
+
+    def __init__(self, ds):
+        self._ds = ds
+
+    def __len__(self):
+        return len(self._ds)
+
+    def __getitem__(self, i):
+        return self._ds[i]
+
+    @property
+    def epoch(self):
+        return self._ds.epoch
+
+    @epoch.setter
+    def epoch(self, value):
+        self._ds.epoch = int(value)       # must reach every sub-dataset (ConcatWindowDataset fans out)
+
+    def __getattr__(self, k):
+        if k == "_ds":                    # before __init__, or after a failed unpickle
+            raise AttributeError(k)
+        return getattr(self._ds, k)
+
+
+class _ForceSampleWeight(_DatasetView):
+    """A view whose every window reports and carries `sample_weight = value`.
+
+    Used for the empty-window NEGATIVES root (spec §3.5). The export ships a
+    whole-manifest `weight` of 0.3 like the rest of the pseudo-labelled data,
+    but `sample_weight` multiplies EVERY loss term per sample -- including the
+    existence BCE that is the only reason a negative exists -- so training a
+    negative at 0.3 would down-weight the one target it carries. The sampling
+    RATE of negatives is set separately and explicitly by `negatives_frac`."""
+
+    def __init__(self, ds, value=1.0):
+        super().__init__(ds)
+        self._value = np.float32(value)
+
+    def weight(self, i):
+        return float(self._value)
+
+    def __getitem__(self, i):
+        s = dict(self._ds[i])
+        s["sample_weight"] = np.float32(self._value)
+        return s
+
+
+class _MixCounter(_DatasetView):
+    """A view that COUNTS which root each drawn window came from.
 
     The realised real/pseudo/negative mix has to be counted, not inferred: two
     roots can carry the same `sample_weight` (the batch's only per-sample
@@ -549,29 +653,15 @@ class _MixCounter:
     """
 
     def __init__(self, ds):
-        self._ds = ds
+        super().__init__(ds)
         self._lock = threading.Lock()
         self.counts = collections.Counter()
-
-    def __len__(self):
-        return len(self._ds)
 
     def __getitem__(self, i):
         nm = self._ds.name(i)
         with self._lock:
             self.counts[nm] += 1
         return self._ds[i]
-
-    @property
-    def epoch(self):
-        return self._ds.epoch
-
-    @epoch.setter
-    def epoch(self, value):
-        self._ds.epoch = int(value)       # must reach every sub-dataset (ConcatWindowDataset fans out)
-
-    def __getattr__(self, k):             # every other question (is_female, n_flies, ...) delegates
-        return getattr(self._ds, k)
 
     def realised(self):
         with self._lock:
@@ -586,6 +676,9 @@ class _MixCounter:
 _TERM_WEIGHTS = {"reproj": "reproj", "l3d": "l3d", "uv2d": "uv2d", "vis": "vis",
                  "exist": "exist", "sex": "sex", "rep": "rep",
                  "other_rep": "other_fly_repulsion", "persist": "persist"}
+# the only metrics `_loss_shares` reads -- accumulating the rest would force a
+# host sync on per-batch diagnostics (exist_acc, n_negative, ...) nothing reports.
+_SHARE_KEYS = tuple(_TERM_WEIGHTS) + ("conf", "total")
 
 
 def _loss_shares(sums, n, weights: LossWeights):
@@ -761,9 +854,20 @@ def run_training(root, *, out_dir, ckpt_dir, mcfg: MVQConfig, tcfg: MVQTrainConf
         for path, nm, cp in extra:
             if not path:
                 continue
-            parts.append(V12WindowDataset(path, "train", T=T, train=True, seed=tcfg.seed, copy_paste=cp,
-                                          jitter_units=tcfg.jitter_units, sex_overrides=ov,
-                                          pair_deltas=pair_deltas))
+            d = V12WindowDataset(path, "train", T=T, train=True, seed=tcfg.seed, copy_paste=cp,
+                                 jitter_units=tcfg.jitter_units, sex_overrides=ov,
+                                 pair_deltas=pair_deltas)
+            if nm == _NEGATIVES_NAME:
+                # The export ships the pseudo-label weight (0.3); a negative must
+                # train at 1.0 -- see `_ForceSampleWeight`.
+                exported = float(d.weight(0)) if len(d) else float("nan")
+                print(f"[mvq] T={T} negatives root {path}: export sample_weight {exported:g} "
+                      f"OVERRIDDEN to 1.0 -- sample_weight multiplies every loss term, and the "
+                      f"existence target is the only thing an empty window carries (spec §3.5); "
+                      f"how OFTEN a negative is drawn is set by negatives_frac="
+                      f"{tcfg.negatives_frac}, not by its loss weight", flush=True)
+                d = _ForceSampleWeight(d, 1.0)
+            parts.append(d)
             part_names.append(nm)
         if len(parts) > 1:
             train_sets[T] = ConcatWindowDataset(parts, names=part_names)
@@ -774,13 +878,8 @@ def run_training(root, *, out_dir, ckpt_dir, mcfg: MVQConfig, tcfg: MVQTrainConf
     # be mirrored in pixels and NOT in labels, training the two sides to average.
     # Checked against the keypoint names the MODEL emits, before step 0.
     assert_lr_swap_covers(names, required=names)
-    # ONE wing multiplier: `LossWeights.wing_kp_mult` exists for callers that build
-    # the (K,) vector themselves; run_training builds it from `tcfg.wing_kp_mult`,
-    # so a loss-block value that disagrees is a config error, not a silent tie-break.
-    if weights.wing_kp_mult != 1.0 and weights.wing_kp_mult != tcfg.wing_kp_mult:
-        raise ValueError(f"train.wing_kp_mult={tcfg.wing_kp_mult} but train.loss.wing_kp_mult="
-                         f"{weights.wing_kp_mult}: set the wing multiplier in ONE place "
-                         f"(train.wing_kp_mult -- run_training builds the (K,) vector from it)")
+    # ONE place for the wing multiplier: `train.wing_kp_mult`. `mvq_loss` takes the
+    # already-built (K,) vector, so there is no second knob inside `LossWeights`.
     kp_weight = wing_kp_weight(names, tcfg.wing_kp_mult)
     n_wing = int((np.asarray(kp_weight) != 1.0).sum())
     if tcfg.wing_kp_mult != 1.0:
@@ -803,8 +902,9 @@ def run_training(root, *, out_dir, ckpt_dir, mcfg: MVQConfig, tcfg: MVQTrainConf
         run_dir = os.path.dirname(os.path.abspath(out_dir))
         os.makedirs(run_dir, exist_ok=True)
         with open(os.path.join(run_dir, "mvq_run.json"), "w") as f:
-            json.dump({"model": dataclasses.asdict(mcfg), "train": dataclasses.asdict(tcfg), "val": None,
-                      "keypoint_names": names}, f, indent=1)
+            json.dump({"model": dataclasses.asdict(mcfg), "train": dataclasses.asdict(tcfg),
+                      "loss": dataclasses.asdict(weights), "aug": dataclasses.asdict(aug),
+                      "val": None, "keypoint_names": names}, f, indent=1)
 
     model = MVQModel(mcfg, rngs=nnx.Rngs(tcfg.seed))
     if tcfg.pretrained:
@@ -859,8 +959,14 @@ def run_training(root, *, out_dir, ckpt_dir, mcfg: MVQConfig, tcfg: MVQTrainConf
         w, mass = _mix_weights(ds, tcfg)
         is_f = np.array([ds.is_female(i) for i in range(len(ds))], bool)
         mf, mm = float(w[is_f].sum()), float(w[~is_f].sum())
+        # NOTE the aggregate is over ALL roots, so it only equals `female_host_target`
+        # when every root could reach it: a one-sided root (an all-female single-fly
+        # export, the all-"other" negatives) is left unchanged by design and pulls the
+        # aggregate off the target by its own mass. The per-root lines above say which.
+        knob = (f"female_host_target={tcfg.female_host_target}" if tcfg.female_host_target is not None
+                else f"female_host_weight={tcfg.female_host_weight}")
         print(f"[mvq] T={T} sampler: {int(is_f.sum())}/{len(ds)} female-host windows, "
-              f"female_host_weight={tcfg.female_host_weight} -> weight mass female {mf:.4f} "
+              f"{knob} -> weight mass female {mf:.4f} "
               f"male/other {mm:.4f} (F/M {mf / max(mm, 1e-12):.3f})", flush=True)
         subs = list(getattr(ds, "datasets", [ds]))
         sub_names = list(getattr(ds, "names", ["real"]))
@@ -880,10 +986,13 @@ def run_training(root, *, out_dir, ckpt_dir, mcfg: MVQConfig, tcfg: MVQTrainConf
                           f"{bal['female_host_weight']} (INFORMATION -- not applied again; the "
                           f"per-root balance above already restores the host-sex ratio)", flush=True)
                 # `sample_weight` comes from each ROOT's manifest, not from tcfg, so a
-                # mislabelled export would train at a weight nobody configured.
+                # mislabelled pseudo export would train at a weight nobody configured.
+                # The negatives root is exempt: its weight is FORCED to 1.0 above
+                # (`_ForceSampleWeight`), and the override was already announced.
                 mw = float(np.mean([d.weight(k) for k in range(len(d))]))
-                want = 1.0 if nm in ("real", _NEGATIVES_NAME) else float(tcfg.pseudo_weight)
-                flag = "" if abs(mw - want) <= 1e-6 else f"  <-- WARNING: expected {want:g}"
+                flag = ""
+                if nm in ("pseudo", "singlefly") and abs(mw - float(tcfg.pseudo_weight)) > 1e-6:
+                    flag = f"  <-- WARNING: expected train.pseudo_weight={tcfg.pseudo_weight:g}"
                 print(f"[mvq]   {nm}: source={d.source(0)!r} role={d.role(0)!r} "
                       f"mean sample_weight={mw:.4f}{flag}", flush=True)
             ds = _MixCounter(ds)
@@ -929,8 +1038,9 @@ def run_training(root, *, out_dir, ckpt_dir, mcfg: MVQConfig, tcfg: MVQTrainConf
         loss, metrics, ema = step_fns[T](model, opt, ema, jax.random.fold_in(key, i), batch, jnp.float32(pp))
         loss = float(loss); ema_updates += 1
         if n_share:
-            for k_, v_ in metrics.items():
-                share_sums[k_] += float(v_)
+            for k_ in _SHARE_KEYS:
+                if k_ in metrics:
+                    share_sums[k_] += float(metrics[k_])
         if (i + 1) % tcfg.log_every == 0:
             ms = " ".join(f"{k}={float(v):.4f}" for k, v in metrics.items() if k != "total")
             print(f"step {i+1}/{tcfg.total_steps} T={T} loss {loss:.4f} {ms} ({time.time()-t0:.0f}s)", flush=True)
@@ -968,7 +1078,8 @@ def run_training(root, *, out_dir, ckpt_dir, mcfg: MVQConfig, tcfg: MVQTrainConf
     os.makedirs(out_dir, exist_ok=True)
     ckptr = ocp.StandardCheckpointer(); ckptr.save(out_dir, nnx.split(em)[1], force=True); ckptr.wait_until_finished()
     with open(os.path.join(out_dir, "mvq_run.json"), "w") as f:
-        json.dump({"model": dataclasses.asdict(mcfg), "train": dataclasses.asdict(tcfg), "val": val,
+        json.dump({"model": dataclasses.asdict(mcfg), "train": dataclasses.asdict(tcfg),
+                  "loss": dataclasses.asdict(weights), "aug": dataclasses.asdict(aug), "val": val,
                   "keypoint_names": names}, f, indent=1)
     return {"final_loss": loss, "val": val, "steps": tcfg.total_steps, "resumed_from": start,
            "ema_updates": ema_updates}

@@ -287,3 +287,36 @@ def test_predict_session_main_from_cfg_maps_config(monkeypatch):
     assert captured["vitpose_ckpt"] == cfg.paths.vitpose_ckpt
     assert captured["v2v_final"].endswith("run4/final")
     assert captured["sharpen"] == cfg.model.sharpen
+
+
+def test_train_mvq_v2_group_resolves():
+    """`train=mvq_v2` (mvq-v2 spec 2026-09-05 §4) must compose AND survive the
+    Hydra -> MVQTrainConfig conversion in `jarvis_jax/scripts/train_mvq.py`: the
+    v2 keys are new dataclass fields, and a yaml list reaching a `tuple` field
+    (pair_deltas) is exactly the kind of thing that only fails at launch."""
+    from jarvis_jax.data.mv_augment import MVAugParams
+    from jarvis_jax.train.losses_mvq import LossWeights
+    from jarvis_jax.train.train_mvq import MVQTrainConfig
+    cfg = _compose(["paths=hyak", "model=mvq", "train=mvq_v2"])
+    OmegaConf.resolve(cfg)
+    t = OmegaConf.to_container(cfg.train, resolve=True)
+    assert list(t["window_lengths"]) == [1, 2] and list(t["pair_deltas"]) == [1, 4, 16]
+    assert t["female_host_target"] == 0.5          # solved per root, not the hand number
+    assert t["negatives_frac"] == 0.05 and t["pseudo_weight"] == 0.3
+    assert t["warm_start"] is None                 # §2 decision 1: from scratch
+    assert t["prompt_p_start"] == 0.0 and t["prompt_p_end"] == 0.0
+    assert t["wing_kp_mult"] == 2.0 and t["jitter_units"] == 10.0
+    assert t["batch_size"] == 32 and t["total_steps"] == 40000
+    assert t["loss"]["other_fly_repulsion"] == 20.0 and t["loss"]["persist"] == 0.5
+    assert t["mv_aug"]["cam_drop_p"] == 0.1
+    # every root path is absolute and outside red_data/ (the export location)
+    for k in ("pseudo_root", "singlefly_root", "negatives_root"):
+        assert t[k].startswith("/gscratch/") and "/red_data/" not in t[k], (k, t[k])
+    # the same conversion the entrypoint does -- unknown keys filtered, lists to tuples
+    t["window_lengths"] = tuple(t["window_lengths"]); t["val_cohorts"] = tuple(t["val_cohorts"])
+    t["pair_deltas"] = tuple(int(v) for v in t["pair_deltas"])
+    t["copy_paste_contact_sep"] = tuple(float(v) for v in t["copy_paste_contact_sep"])
+    tcfg = MVQTrainConfig(**{k: v for k, v in t.items() if k in MVQTrainConfig.__dataclass_fields__})
+    assert tcfg.pair_deltas == (1, 4, 16) and tcfg.female_host_target == 0.5
+    assert LossWeights(**t["loss"]).persist == 0.5      # no unknown key in the loss block
+    assert MVAugParams(**t["mv_aug"]).cam_drop_p == 0.1

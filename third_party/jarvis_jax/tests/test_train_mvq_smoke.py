@@ -633,7 +633,9 @@ def _negatives_copy(src, dst, *, deltas=(1, 4)):
         coco["framesets"] = neg
         json.dump(coco, open(p, "w"))
     m = json.load(open(os.path.join(dst, "manifest.json")))
-    m["source"], m["weight"], m["role"] = "pseudo", 1.0, "negative"
+    # 0.3, NOT 1.0: the real negatives export ships the pseudo-label weight, and
+    # `run_training` is the thing that must force it back to 1.0 for training.
+    m["source"], m["weight"], m["role"] = "pseudo", 0.3, "negative"
     json.dump(m, open(os.path.join(dst, "manifest.json"), "w"))
     return str(dst)
 
@@ -672,7 +674,7 @@ def test_t2_run_trains_and_mixes_roots(tmp_path, capsys):
                           log_every=1, num_workers=1, pretrained=False, window_lengths=(1, 2),
                           pair_deltas=(1, 4), pseudo_root=pseudo, pseudo_weight=0.3,
                           singlefly_root=single, negatives_root=negs, negatives_frac=0.05,
-                          wing_kp_mult=2.0, smoke=True)
+                          wing_kp_mult=2.0, female_host_target=0.5, smoke=True)
     run = tmp_path / "run"
     res = run_training(real, out_dir=str(run / "final"), ckpt_dir=str(run / "ckpt"), mcfg=_v2_mcfg(),
                        tcfg=tcfg, aug=MVAugParams(enabled=False), weights=LossWeights(persist=0.5))
@@ -682,6 +684,15 @@ def test_t2_run_trains_and_mixes_roots(tmp_path, capsys):
     assert meta["train"]["singlefly_root"] == single and meta["train"]["negatives_root"] == negs
     assert meta["train"]["negatives_frac"] == 0.05 and meta["train"]["wing_kp_mult"] == 2.0
     assert meta["val"]["unprompted"]["mpjpe3d_mm"] == meta["val"]["unprompted"]["mpjpe3d_mm"]   # not NaN
+    # the OBJECTIVE is recorded too, not just the schedule: a run.json that cannot
+    # say what `persist` or `other_fly_repulsion` were is not a reproducible record
+    # (Task 6/7 read this block for the scorecard header).
+    assert meta["loss"]["persist"] == 0.5
+    assert meta["loss"]["persist_margin_units"] == 2.0 and "other_fly_repulsion" in meta["loss"]
+    assert meta["aug"]["enabled"] is False and "cam_drop_p" in meta["aug"]
+    # the same objective is on disk BEFORE step 0 (the run-dir copy), so a crashed
+    # run still says what it was optimising
+    assert json.load(open(run / "mvq_run.json"))["loss"]["persist"] == 0.5
 
     out = capsys.readouterr().out
     # the mass table, per T, naming every root and pinning the negatives share
@@ -696,6 +707,15 @@ def test_t2_run_trains_and_mixes_roots(tmp_path, capsys):
     assert realised, out[-4000:]
     for nm in ("real", "pseudo", "singlefly", "negatives"):
         assert f"{nm}=" in realised[0], realised
+    # the negatives root's exported 0.3 is overridden to 1.0, and said so
+    over = [ln for ln in out.splitlines() if "OVERRIDDEN to 1.0" in ln]
+    assert len(over) == 2 and all("0.3" in ln for ln in over), over        # one per T
+    neg_line = [ln for ln in out.splitlines() if ln.strip().startswith("[mvq]   negatives:")]
+    assert neg_line and all("mean sample_weight=1.0000" in ln for ln in neg_line), neg_line
+    assert not any("WARNING" in ln for ln in neg_line), neg_line
+    # and the per-root female-host multiplier was SOLVED, not taken from the hand number
+    assert any("solved female-host multiplier" in ln or "UNATTAINABLE" in ln
+               for ln in out.splitlines()), out[-4000:]
 
 
 def test_t2_val_split_stays_the_real_root_only(tmp_path, monkeypatch):
@@ -781,3 +801,120 @@ def test_loss_share_check_reports_every_term(tmp_path):
         assert np.isfinite(sh["terms"][name]["share"]), (name, sh["terms"][name])
     assert abs(sum(t["share"] for t in sh["terms"].values()) - 1.0) < 1e-4
     assert sh["terms"]["other_rep"]["weight"] == 20.0
+
+
+class _CensusDS:
+    """The only surface `_balanced_weights` touches (len, windows, manifest,
+    is_female), with a chosen female:male host census over two behaviours."""
+
+    def __init__(self, n_female, n_male, root="fake"):
+        self.root = root
+        self.windows = [(f"rec{i % 2}", 0, i) for i in range(n_female + n_male)]
+        self.manifest = {"rec0": {"behavior": "courtship"}, "rec1": {"behavior": "walking"}}
+        self._f = np.zeros(n_female + n_male, bool)
+        self._f[:n_female] = True
+
+    def __len__(self):
+        return len(self.windows)
+
+    def is_female(self, i):
+        return bool(self._f[i])
+
+
+def test_female_host_target_solves_the_multiplier_per_root(capsys):
+    """`female_host_weight` is a hand number solved for ONE census (4.27 for
+    `red_data_3d_v12_export0902` train). v2 balances four roots separately, each
+    with its own census, so the same number applied to all of them lands the
+    OVERALL female mass wherever they happen to average out to -- not on 0.5.
+    `female_host_target` solves the multiplier per root instead.
+
+    Expectation on a 1:3 female:male root: the female-host weight mass is exactly
+    the target, and drawing with the sampler's own `rng.choice(..., p=w)` realises
+    0.5 within 0.02. On an all-female root the target is unattainable at any
+    multiplier, so the weights must come back UNCHANGED and say so in the log."""
+    from jarvis_jax.train.train_mvq import _balanced_weights
+
+    ds = _CensusDS(1000, 3000, root="one_to_three")
+    is_f = ds._f
+    w = _balanced_weights(ds, 0.5, 1.0, female_host_target=0.5, label="one_to_three")
+    assert abs(w.sum() - 1.0) < 1e-12
+    assert abs(w[is_f].sum() - 0.5) < 1e-9, w[is_f].sum()
+    # realised over the SAME draw window_batches makes (rng.choice with p=w)
+    idx = np.random.default_rng(0).choice(len(ds), size=20000, replace=True, p=w)
+    assert abs(is_f[idx].mean() - 0.5) < 0.02, is_f[idx].mean()
+    # a non-0.5 target is honoured too (the knob is a target, not a switch)
+    w25 = _balanced_weights(ds, 0.5, 1.0, female_host_target=0.25, label="one_to_three")
+    assert abs(w25[is_f].sum() - 0.25) < 1e-9
+    out = capsys.readouterr().out
+    assert "solved female-host multiplier" in out and "one_to_three" in out
+
+    # all-female root: no multiplier can produce a male-host draw, so leave it be
+    allf = _CensusDS(500, 0, root="single_fly_root")
+    base = _balanced_weights(allf, 0.5, 1.0)
+    tgt = _balanced_weights(allf, 0.5, 1.0, female_host_target=0.5, label="single_fly_root")
+    np.testing.assert_allclose(tgt, base, rtol=0, atol=0)
+    out = capsys.readouterr().out
+    assert "UNATTAINABLE" in out and "single_fly_root" in out and "no male/other-host window" in out
+    # ... and the mirror case (a negatives root: no female host at all)
+    allm = _CensusDS(0, 500, root="negatives_root")
+    np.testing.assert_allclose(
+        _balanced_weights(allm, 0.5, 1.0, female_host_target=0.5, label="negatives_root"),
+        _balanced_weights(allm, 0.5, 1.0), rtol=0, atol=0)
+    assert "no female-host window" in capsys.readouterr().out
+
+    # the hand-number path is untouched when no target is set (mvq.yaml/P3b runs)
+    np.testing.assert_allclose(_balanced_weights(ds, 0.5, 1.0, 4.27),
+                               _balanced_weights(ds, 0.5, 1.0, 4.27, None), rtol=0, atol=0)
+
+
+def test_negatives_train_at_sample_weight_one(tmp_path):
+    """The negatives export ships the pseudo-label weight (0.3), but
+    `sample_weight` multiplies EVERY loss term per sample -- including the
+    existence BCE, which is the only thing an empty window carries. Training a
+    negative at 0.3 would down-weight its single purpose, so `run_training`
+    forces 1.0. How OFTEN negatives are drawn is `negatives_frac`'s job, and
+    that is unaffected."""
+    from jarvis_jax.data.v12_windows import V12WindowDataset
+    from jarvis_jax.train.train_mvq import _ForceSampleWeight
+    (tmp_path / "real").mkdir()
+    real = make_v12_root(tmp_path / "real", n_frames=6)
+    negs = _negatives_copy(real, tmp_path / "negatives")
+    raw = V12WindowDataset(negs, "train", T=1, train=True, pair_deltas=(1,))
+    assert len(raw) and raw.weight(0) == 0.3 and raw.source(0) == "pseudo"      # as exported
+    assert bool(raw[0]["is_negative"]) and float(raw[0]["sample_weight"]) == pytest.approx(0.3)
+    forced = _ForceSampleWeight(raw, 1.0)
+    assert len(forced) == len(raw) and forced.weight(0) == 1.0
+    s = forced[0]
+    assert float(s["sample_weight"]) == 1.0 and bool(s["is_negative"])
+    # the view is transparent: everything else still answers from the real dataset
+    assert forced.keypoint_names == raw.keypoint_names and forced.T == raw.T
+    assert forced.n_flies(0) == 0 and forced.root == raw.root
+    forced.epoch = 7
+    assert raw.epoch == 7, "the epoch write must reach the wrapped dataset"
+
+
+def test_female_host_target_on_a_root_that_is_all_female_by_a_float_hair(tmp_path, capsys):
+    """Regression: an all-female root's post-balance female mass comes back as
+    0.9999999999999998, not 1.0 (measured on the T=2 fixture root, where only
+    fly0 has labelled pairs). A bare `f >= 1.0` one-sided guard sails past that
+    and "solves" a multiplier of ~4e-16, which prints as a legitimate
+    `-> solved female-host multiplier 0.0000` and would zero out the female mass
+    of any root that is merely NEARLY one-sided. Caught only by reading the run
+    log of the CPU smoke: the guard must be on the window COUNT (exact), with the
+    mass check as a toleranced backstop.
+
+    Expectation: this root reports UNATTAINABLE and its weights are byte-identical
+    to the no-target call."""
+    from jarvis_jax.data.v12_windows import V12WindowDataset
+    from jarvis_jax.train.train_mvq import _balanced_weights
+    (tmp_path / "real").mkdir()
+    root = make_v12_root(tmp_path / "real", n_frames=6)
+    ds = V12WindowDataset(root, "train", T=2, train=True, pair_deltas=(1, 4))
+    assert len(ds) and all(ds.is_female(i) for i in range(len(ds))), "fixture must be all-female at T=2"
+    base = _balanced_weights(ds, 0.5, 1.0)
+    assert 1.0 - 1e-12 < float(base.sum()) <= 1.0 + 1e-12
+    tgt = _balanced_weights(ds, 0.5, 1.0, female_host_target=0.5, label="T=2 root 'real'")
+    np.testing.assert_allclose(tgt, base, rtol=0, atol=0)
+    out = capsys.readouterr().out
+    assert "UNATTAINABLE" in out and "no male/other-host window" in out, out
+    assert "solved female-host multiplier" not in out, out

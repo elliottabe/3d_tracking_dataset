@@ -49,11 +49,9 @@ def main(cfg):
     if n_share > 0:
         print(f"[mvq] LOSS-SHARE CHECK: {n_share} steps, no eval/checkpoint "
               f"(drop +share_check_steps to train)", flush=True)
-        return run_training(cfg.paths.data_root, out_dir=os.path.join(run_dir, "final"),
-                            ckpt_dir=None, mcfg=mcfg, tcfg=tcfg, aug=aug, weights=weights,
-                            share_check_steps=n_share)
     return run_training(cfg.paths.data_root, out_dir=os.path.join(run_dir, "final"),
-                        ckpt_dir=os.path.join(run_dir, "ckpt"), mcfg=mcfg, tcfg=tcfg, aug=aug, weights=weights)
+                        ckpt_dir=None if n_share else os.path.join(run_dir, "ckpt"),
+                        mcfg=mcfg, tcfg=tcfg, aug=aug, weights=weights, share_check_steps=n_share)
 
 
 if __name__ == "__main__":

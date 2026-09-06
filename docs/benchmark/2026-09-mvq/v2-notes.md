@@ -418,3 +418,101 @@ before any dataset load.
   `window_lengths=[1,2] pair_deltas=[1,4,16] pseudo_weight=0.3
   negatives_frac=0.05 wing_kp_mult=2.0 prompt_p_start=0.0 jitter_units=10.0
   female_host_weight=4.27 copy_paste_contact_sep=[4.0,25.0] warm_start=None`).
+
+### Fix round 1 (2026-09-06)
+
+Four rulings from review, plus two defects the CPU smoke log exposed.
+
+**1. `mvq_run.json` now records the OBJECTIVE, not just the schedule.** Both writes (the
+run-dir copy before step 0 and `final/mvq_run.json` at the end) carry
+`"loss": dataclasses.asdict(weights)` and `"aug": dataclasses.asdict(aug)` alongside
+`"model"`/`"train"`. Before this, a v2 run's file could not say what `persist`,
+`persist_margin_units` or `other_fly_repulsion` were — the three weights the whole round is
+about — so no scorecard header or A/B could reconstruct the objective. Asserted in the T=2
+smoke test (`meta["loss"]["persist"] == 0.5`, `meta["aug"]["cam_drop_p"]` present, and the
+same block on disk before step 0).
+
+**2. The female-host multiplier is SOLVED per root, not hand-set.** `female_host_weight:
+4.27` was solved for one census (`red_data_3d_v12_export0902` train: 202 female-host windows
+of 2661). v2 balances four roots separately, each with its own census, so the one number
+STACKS and the aggregate lands wherever the roots average out to — measured ~0.75 female
+across these four, not the 0.5 spec §4 asks for. New knob `train.female_host_target`
+(mvq_v2.yaml: `0.5`): `_balanced_weights` computes each root's own post-balance female mass
+`f` and applies `target*(1-f) / ((1-target)*f)`, which lands that root's female-host mass
+exactly on the target. It prints the multiplier it solved, per root:
+
+```
+[mvq] T=1 root 'real': female_host_target=0.500, post-balance female mass 0.7101 -> solved female-host multiplier 0.4082 (train.female_host_weight=4.27 is unused while a target is set)
+[mvq] T=1 root 'singlefly': female_host_target=0.500 UNATTAINABLE -- this root has no male/other-host window (post-balance female mass 1.0000); multiplier left at 1.0 and the root's sampling weights are unchanged
+[mvq] T=1 root 'negatives': female_host_target=0.500 UNATTAINABLE -- this root has no female-host window (post-balance female mass 0.0000); multiplier left at 1.0 and the root's sampling weights are unchanged
+```
+
+`female_host_weight` stays as the fallback when no target is set, so `mvq.yaml`/P3b runs are
+bit-identical (pinned by a test). `mvq_v2.yaml` keeps it at 4.27 but documents it as unused.
+
+**Reading the ratio back — updated guidance.** The aggregate line
+(`T=<T> sampler: ... weight mass female ...`) equals the target only when EVERY root could
+reach it. A one-sided root is left unchanged by design and pulls the aggregate off the target
+by its own mass: the fixture's single-fly root is all-female and the negatives root has no
+host sex at all, so its aggregate is 0.6175 at T=1, not 0.5, and that is correct. **Read the
+per-root lines first**, then the aggregate; and read the realised ratio over the NON-NEGATIVE
+windows (the trainer prints both). On the real launch, expect the aggregate to sit near 0.5
+only if the single-fly export contains both sexes — check its per-root line and record it.
+
+**Two defects the CPU smoke log exposed (neither had a failing test before):**
+
+- *One-sided-root guard was float-blind.* An all-female root's post-balance female mass comes
+  back as `0.9999999999999998`, not `1.0` (measured on the T=2 fixture root, where only fly0
+  has labelled pairs). The first guard was `f >= 1.0`, so it sailed past that and "solved" a
+  multiplier of ~4e-16, printing the plausible-looking `-> solved female-host multiplier
+  0.0000`. On a root that is merely NEARLY one-sided that would have zeroed the female mass
+  outright. Now guarded on the window COUNT (exact) with a toleranced mass backstop, and
+  pinned by `test_female_host_target_on_a_root_that_is_all_female_by_a_float_hair`. Found only
+  by reading the run log of the 20-step CPU run — the four-root smoke test passed either way.
+- *The aggregate line named the wrong knob*, printing `female_host_weight=4.27` while a target
+  was in force. It now names whichever knob is actually active.
+
+**3. Negatives train at `sample_weight = 1.0`.** The negatives export ships the pseudo-label
+weight (0.3) like the rest of the campaign data, but `sample_weight` multiplies EVERY loss
+term per sample — including the existence BCE, which is the only thing an empty window
+carries — so training a negative at 0.3 down-weights its single purpose. `run_training` now
+wraps the negatives root in `_ForceSampleWeight(d, 1.0)` and announces it:
+
+```
+[mvq] T=1 negatives root <path>: export sample_weight 0.3 OVERRIDDEN to 1.0 -- sample_weight
+multiplies every loss term, and the existence target is the only thing an empty window
+carries (spec §3.5); how OFTEN a negative is drawn is set by negatives_frac=0.05, not by its
+loss weight
+```
+
+How often a negative is drawn is unchanged — that is `negatives_frac`'s job. The old
+"expected 1" WARNING path is gone (the weight is forced, so there is nothing to warn about);
+the pseudo/single-fly roots keep their `expected train.pseudo_weight` warning. The test
+fixture now writes manifest weight 0.3 to match the real export, so the override is what the
+test exercises.
+
+**4. Smaller items.** A `test_configs.py` case composes `train=mvq_v2` and runs the same
+Hydra→dataclass conversion the entrypoint does (`pair_deltas == (1,4,16)`,
+`female_host_target 0.5`, `negatives_frac 0.05`, `warm_start None`, both export paths
+absolute and outside `red_data/`). `scripts/train_mvq.py`'s duplicated `run_training` call is
+collapsed to one. `LossWeights.wing_kp_mult` is REMOVED (dead: `mvq_loss` takes the built
+`(K,)` vector, so the multiplier lives only at `train.wing_kp_mult`) along with the
+now-pointless raise that compared the two. `negatives_frac` is validated to `[0, 1)`.
+`share_sums` accumulates only the metrics `_loss_shares` reads (`_SHARE_KEYS`), so the share
+check no longer forces a host sync on per-batch diagnostics nothing reports.
+
+**5. Gradient accumulation does NOT exist** in `train_mvq.py`. The documented OOM fallback
+`train.batch_size=16` therefore HALVES the effective batch rather than preserving it — no
+accumulation step is applied. Ruling: acceptable and recorded. If v2 OOMs, either accept the
+halved effective batch (and say so in the launch record) or implement accumulation first;
+do not silently treat `batch_size=16` as equivalent to 32.
+
+**Verification (foreground, `JAX_PLATFORMS=cpu`, from `third_party/jarvis_jax`).**
+`pytest tests/test_train_mvq_smoke.py tests/test_configs.py tests/test_mvq_losses.py -q`
+→ **64 passed, 1 failed in 454 s**; the failure is the same pre-existing, unrelated
+`test_configs.py::test_sam3_main_from_cfg_maps_config`. Three new tests
+(`test_female_host_target_solves_the_multiplier_per_root` — exact 0.5 mass on a 1:3 census
+plus a 20k-draw realised check within 0.02, both one-sided cases, and the no-target path
+pinned bit-identical; `test_female_host_target_on_a_root_that_is_all_female_by_a_float_hair`;
+`test_negatives_train_at_sample_weight_one`) and one new config test. The 20-step Hydra CPU
+run was re-run after the fixes and exits 0 with the corrected log lines quoted above.

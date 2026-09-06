@@ -37,11 +37,17 @@ copy_paste_p: 0.8                    # §4 (mvq.yaml: 0.0)
 copy_paste_opposite_sex_p: 0.7
 copy_paste_contact_p: 0.7            # §4 (mvq.yaml: 0.3)
 copy_paste_contact_sep: [4.0, 25.0]  # §4 contact-heavy setting (mvq.yaml: [8, 30])
-female_host_weight: 4.27  # §4 "female-host weight so the host-sex ratio is 0.5".
-                          # Solved on red_data_3d_v12_export0902 train (202 of 2661
-                          # windows female-host); it applies PER ROOT, and the run log's
-                          # "realised host-sex ratio" line is where it is verified --
-                          # re-solve it if the real root changes.
+female_host_target: 0.5   # §4 "female-host weight so the host-sex ratio is 0.5", as a
+                          # TARGET the trainer solves per root rather than a hand number.
+                          # v2 balances each root separately (real / pseudo / single-fly /
+                          # negatives), and each has its own female-host census, so one
+                          # multiplier solved on one census stacks into whatever the roots
+                          # average out to (4.27 across these four measured ~0.75 female).
+                          # `_balanced_weights` prints the multiplier it solved for every
+                          # root; the run log's "realised host-sex ratio" line, read over
+                          # the NON-NEGATIVE windows, is where 0.5 is verified.
+female_host_weight: 4.27  # UNUSED while female_host_target is set (it is the fallback for
+                          # the mvq.yaml/P3b path). Kept at its P3b value for the record.
 sex_label_overrides: {}
 warm_start: null          # §2 decision 1: FROM SCRATCH, no warm start
 jitter_units: 10.0        # §4 / P4 §6: 1 mm, the mask-free window-centre budget
@@ -55,7 +61,11 @@ pseudo_weight: 0.3        # §3.2 loss multiplier on pseudo labels
 singlefly_root: /gscratch/portia/eabe/data/Johnson_lab/red_data_3d_v12_pseudo_singlefly_20260905
 negatives_root: /gscratch/portia/eabe/data/Johnson_lab/red_data_3d_v12_pseudo_negatives_20260905
 negatives_frac: 0.05      # §3.5: 5 % of the SAMPLED MASS (pinned, not proportional to
-                          # how many negatives the exporter happened to write)
+                          # how many negatives the exporter happened to write). The
+                          # negatives root's own manifest weight (0.3, the pseudo default)
+                          # is OVERRIDDEN to sample_weight 1.0 by run_training and the
+                          # override is printed: sample_weight multiplies every term, and
+                          # the existence target is all an empty window carries.
 wing_kp_mult: 2.0         # §4: wing keypoint AND wing visibility weight x2, applied
                           # BY NAME (losses_mvq.wing_kp_weight)
 # loss weights -- mvq.yaml's, with the three v2/P3b changes called out
