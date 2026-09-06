@@ -2,7 +2,25 @@
 over ONE bout's on-disk arrays: no model, no GPU, so the whole gate stack is
 unit-testable. Thresholds live in `GateThresholds` and nowhere else -- the
 extractor, the gallery and the notes all read them from the same object, and
-the resolved values are written into the export manifest's `gates` block."""
+the resolved values are written into the export manifest's `gates` block.
+
+Anchors and partners are separate concepts. `admit_bout.frame` is the set of
+DECORRELATED ANCHOR frames (>= `decorrelation` frames apart); a T=2 partner
+frame at `Delta` from an anchor is never itself an anchor and never enters
+the spacing count -- Task 2 derives it directly from `partners[delta]` at
+each anchor `a` (forward: `partners[delta][a]`; backward:
+`partners[delta][a - delta]`). `partner_masks` only checks the two named
+frames of the pair (endpoint semantics, per spec §3.2's "when those frames
+also pass the gates") -- the model at training time is shown just those two
+frames, never anything in between.
+
+The containment gate is EXPECTED to reject flies with a poor mask fit (e.g.
+the female fly on some bouts, see docs/benchmark/2026-09-mvq/
+v2-pseudolabel-notes.md) -- there is no adaptive per-fly threshold here.
+Task 2 must run a per-stratum yield census across all 160 bouts before
+sampling, rather than assume any single bout yields a balanced female/male
+draw.
+"""
 from __future__ import annotations
 
 import dataclasses
@@ -108,18 +126,25 @@ def reprojection_gate(kp2d, kp3d, cam_mats, conf, thr):
             d = np.where(conf[f, t] >= thr.conf_min, d, np.nan)
             with np.errstate(invalid="ignore"):
                 med[f, t] = np.nanmedian(d, axis=-1)
-    min_views = min(thr.reproj_min_views, C)          # a bout with fewer cameras than the
-    ok = (np.nan_to_num(med, nan=np.inf) <= thr.reproj_px).sum(-1) >= min_views    # threshold requires ALL of them, not none
+    ok = (np.nan_to_num(med, nan=np.inf) <= thr.reproj_px).sum(-1) >= thr.reproj_min_views
     return ok, med
 
 
 def containment_gate(kp3d, store, cam_mats, thr):
     """(F,T) admitted and (F,T) the best `contain_min_cams`-th containment
     fraction: per camera, the share of the fly's reprojected keypoints inside
-    its OWN mask dilated by `contain_dilate_px`."""
+    its OWN mask dilated by `contain_dilate_px`. Thresholds are ABSOLUTE (spec
+    §3.2 requires >= 5 cameras) -- a bout with fewer valid cameras than
+    `contain_min_cams` simply fails this gate; it is never relaxed."""
     from jarvis_jax.tracking.lift_mvq import _disk_offsets, _inside_mask_dilated, project_points
     dy, dx = _disk_offsets(thr.contain_dilate_px)
     F, T = kp3d.shape[:2]; C = len(store.cameras)
+    cam_mats = np.asarray(cam_mats)
+    if cam_mats.shape[0] != C:
+        raise ValueError(
+            f"containment_gate: cam_mats has {cam_mats.shape[0]} cameras but "
+            f"the mask store has {C} ({list(store.cameras)}) -- they cannot "
+            f"be aligned by name at this call site; pass matching arrays.")
     frac = np.zeros((F, T), np.float64)
     for f in range(F):
         for t in range(T):
@@ -132,15 +157,19 @@ def containment_gate(kp3d, store, cam_mats, thr):
                 inside = _inside_mask_dilated(store.mask_at(f, c, t), uv[c], ok[c], dy, dx)
                 per_cam.append(inside[ok[c]].mean())
             per_cam = sorted(per_cam, reverse=True)
-            min_cams = min(thr.contain_min_cams, C)   # a bout with fewer cameras than the
-            frac[f, t] = per_cam[min_cams - 1] if len(per_cam) >= min_cams else 0.0     # threshold requires ALL of them, not none
+            frac[f, t] = per_cam[thr.contain_min_cams - 1] if len(per_cam) >= thr.contain_min_cams else 0.0
     return frac >= thr.contain_frac, frac
 
 
 def decorrelate(admit, spacing, protect=None):
-    """Greedy first-fit thinning: keep an admitted frame only if it is at least
-    `spacing` frames after the last kept one. `protect` (T,) marks frames that
-    are T=2 partners of a kept anchor and therefore exempt (spec §3.2)."""
+    """Greedy first-fit thinning: keep an admitted frame only if it is at
+    least `spacing` frames after the last kept one. `protect` (T,), if given,
+    marks frames exempt from the spacing check. NOT how T=2 partners work:
+    `admit_bout` does NOT pass `protect` here -- partner frames are derived
+    separately, at each decorrelated anchor, from `partner_masks`'s output;
+    they are never anchors themselves and never affect this spacing count
+    (wiring partners in as `protect` here would let them chain into new
+    anchors and collapse the >= `spacing` invariant)."""
     keep = np.zeros_like(admit, bool)
     last = -10 ** 9
     for t in np.flatnonzero(admit):
@@ -150,28 +179,36 @@ def decorrelate(admit, spacing, protect=None):
 
 
 def partner_masks(admit, deltas):
-    """{delta: (T,) bool} -- True where EVERY frame in the closed span
-    [t, t+delta] passes. A 'T=2' partner pair at delta > 1 spans more than
-    its two endpoints: a gate rejecting a frame strictly inside the span
-    still makes the (anchor, partner) pair unusable even though both
-    endpoints individually pass."""
+    """{delta: (T,) bool} -- True where frame t AND frame t+delta BOTH pass.
+    Endpoint semantics only (spec §3.2: a partner counts "when those frames
+    also pass the gates") -- a T=2 pair is exactly the two named frames; the
+    model is shown only those two, so nothing strictly between them (which
+    is never sampled) affects whether the pair is usable."""
     admit = np.asarray(admit, bool)
     T = admit.shape[0]
-    csum = np.concatenate([[0], np.cumsum(admit.astype(np.int64))])
     out = {}
     for d in deltas:
         d = int(d)
         m = np.zeros(T, bool)
         n = T - d
         if n > 0:
-            window_len = d + 1
-            total = csum[d + 1:d + 1 + n] - csum[0:n]      # sum(admit[t : t+d+1])
-            m[:n] = total == window_len
+            m[:n] = admit[:n] & admit[d:d + n]
         out[d] = m
     return out
 
 
 def admit_bout(arrays, store, cam_mats, thr, *, use_identity=True):
+    if store is not None and list(arrays.cameras) != list(store.cameras):
+        raise ValueError(
+            f"admit_bout: kp2d camera order {list(arrays.cameras)} != mask "
+            f"store camera order {list(store.cameras)} -- cam_mats must "
+            f"align with BOTH by name, never assumed positional.")
+    cam_mats = np.asarray(cam_mats)
+    if cam_mats.shape[0] != len(arrays.cameras):
+        raise ValueError(
+            f"admit_bout: cam_mats has {cam_mats.shape[0]} cameras but "
+            f"arrays.cameras has {len(arrays.cameras)} ({list(arrays.cameras)}) "
+            f"-- they cannot be aligned by name at this call site.")
     ex_ok, ex_q = existence_gate(arrays.meta, thr)
     st_ok, st_q = step_gate(arrays.kp3d, thr)
     rp_ok, rp_q = reprojection_gate(arrays.kp2d, arrays.kp3d, cam_mats, arrays.conf, thr)
@@ -183,11 +220,13 @@ def admit_bout(arrays, store, cam_mats, thr, *, use_identity=True):
     id_bad = identity_gate(arrays.meta, thr) if use_identity else np.zeros(ex_ok.shape[1], bool)
     fly = ex_ok & st_ok & rp_ok & ct_ok & finite & ~id_bad[None, :]
     frame_any = fly.any(0) & ~id_bad
+    # Anchors are decorrelated ALONE (no `protect`): T=2 partners are derived
+    # separately by the caller, at each anchor, from `partners[delta]` --
+    # see module docstring. Feeding partners into `decorrelate` as `protect`
+    # would let them chain into new anchors and collapse the >= `spacing`
+    # invariant.
+    frame = decorrelate(frame_any, thr.decorrelation)
     partners = partner_masks(frame_any, thr.deltas)
-    protect = np.zeros_like(frame_any)
-    for d, m in partners.items():
-        protect[d:] |= m[: len(protect) - d]
-    frame = decorrelate(frame_any, thr.decorrelation, protect=None)   # anchors only
     reasons = {"exist": ~ex_ok, "step": ~st_ok, "reproj": ~rp_ok, "contain": ~ct_ok,
                "nonfinite": ~finite, "identity": id_bad}
     quant = {"exist": ex_q, "step_units": st_q, "reproj_px": rp_q, "contain_frac": ct_q}

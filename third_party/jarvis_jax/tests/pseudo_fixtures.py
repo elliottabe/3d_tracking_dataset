@@ -1,16 +1,19 @@
 """A miniature `pose_mvq_p3b/bouts/bout_XXXXX/` tree plus its SAM3 mask npz,
-small enough for CPU tests: 2 flies, 3 cameras, T frames, 6 keypoints, an
-80x120 frame. Geometry is exact: kp2d is the projection of kp3d through
-`cam_mats`, so the reprojection gate passes unless a test perturbs it."""
+small enough for CPU tests: 2 flies, 7 cameras (the real canonical Session0
+names, so tests exercise the real >= 5-camera thresholds, not a relaxed toy
+count), T frames, 6 keypoints, an 80x120 frame. Geometry is exact: kp2d is
+the projection of kp3d through `cam_mats`, so the reprojection gate passes
+unless a test perturbs it."""
 import json
 import numpy as np
 
-CAMS = ["Cam2012630", "Cam2012631", "Cam2012853"]
+CAMS = ["Cam2012630", "Cam2012631", "Cam2012853", "Cam2012855",
+        "Cam2012857", "Cam2012861", "Cam2012862"]
 KP_NAMES = ["Antenna_Base", "EyeL", "EyeR", "Scutellum", "Abd_tip", "WingL_base"]
 H, W = 80, 120
 
 
-def cam_mats(n_cam=3):
+def cam_mats(n_cam=len(CAMS)):
     """(C,4,3) `ReprojectionTool.camera_matrices` convention (p_h @ M).
 
     scale=1.0 (not 2.0): at scale 2 the theta=0 camera's u = 2*x + 60 puts
@@ -54,16 +57,23 @@ def make_bout(tmp_path, *, T=40, sep_units=40.0, name="bout_00004", exist=0.95,
         for t in range(T):
             kp2d[f, t] = project(cm, kp3d[f, t])
     conf = np.full((2, T, C, K), 0.9, np.float32)
+    if isinstance(identity, (list, tuple)):                # per-frame mix, e.g. some "sex"-head
+        assert len(identity) == T, f"identity list must have T={T} entries, got {len(identity)}"
+        identity_source = list(identity)
+        identity_resolved = "mixed"
+    else:
+        identity_source = [identity] * T
+        identity_resolved = identity
     per_frame = {
         "exist": [[exist] * T, [exist] * T],
         "collapsed": [0] * T,
         "slot_used": [[1] * T, [2] * T],
-        "identity_source": [identity] * T,
+        "identity_source": identity_source,
         "assign_reason": [["typed_preferred"] * T, ["typed_preferred"] * T],
     }
     for t in drop_frames:                                  # an existence dip on fly0
         per_frame["exist"][0][t] = 0.2
-    meta = {"n_frames": T, "identity_resolved": identity, "containment": True,
+    meta = {"n_frames": T, "identity_resolved": identity_resolved, "containment": True,
             "keypoint_names_written": KP_NAMES, "cameras": CAMS,
             "checkpoint": "/fake/final", "step": "final", "frame_start": 1000,
             "bout": int(name.split("_")[-1]), "session_dir": str(tmp_path / "video"),

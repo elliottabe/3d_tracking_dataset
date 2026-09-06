@@ -30,6 +30,8 @@ def test_low_existence_frame_is_a_negative_for_that_slot_not_a_guess(tmp_path):
 def test_step_spike_rejects_both_neighbouring_frames(tmp_path):
     r, _ = _gates(tmp_path, T=20, spike_frames=(9,))
     assert not r.fly[1, 8] and not r.fly[1, 9]
+    assert not r.fly[1, 10]              # the spike reverts after frame 9, so frame 10's
+                                          # incoming step is ALSO large -- rejected too
     assert r.fly[1, 11]
     assert r.quant["step_units"][1, 9] > 3.0
 
@@ -75,7 +77,43 @@ def test_decorrelate_protects_partners(tmp_path):
 
 def test_partner_masks_need_the_partner_frame_to_pass_too(tmp_path):
     from jarvis_jax.data.pseudo_gates import partner_masks
-    admit = np.ones(20, bool); admit[5] = False
+    admit = np.ones(20, bool); admit[19] = False          # kills frame 19 as a partner ENDPOINT
     p = partner_masks(admit, (1, 4, 16))
-    assert not p[1][4] and p[1][6] is np.True_ or p[1][6]
-    assert not p[4][1] and p[16][3] is np.False_ or not p[16][3]
+    # each anchor whose partner IS frame 19 loses the pair, at every delta
+    assert not p[1][18]                                   # anchor 18, delta=1 -> partner 19
+    assert not p[4][15]                                   # anchor 15, delta=4 -> partner 19
+    assert not p[16][3]                                   # anchor 3,  delta=16 -> partner 19
+    # the neighbouring anchor one frame earlier is unaffected (its partner isn't 19)
+    assert p[1][17] and p[4][14] and p[16][2]
+
+
+def test_anchors_decorrelated_alone_partners_available_at_every_anchor(tmp_path):
+    """Anchors and partners are separate: anchors are thinned to >= 16 frames
+    apart with NO exemption for partner frames (partners never chain into
+    new anchors), while every anchor still has a usable T=2 partner (forward
+    or backward) at each configured delta, derived straight from
+    `partners[delta]` -- exactly how Task 2 is expected to read them."""
+    r, _ = _gates(tmp_path, T=40)
+    anchors = np.flatnonzero(r.frame).tolist()
+    assert anchors == [0, 16, 32]
+    assert np.diff(anchors).min() >= 16                  # decorrelation spacing invariant holds
+    T = r.fly.shape[1]
+    for a in anchors:
+        for d in (1, 4, 16):
+            fwd = a + d < T and bool(r.partners[d][a])
+            bwd = a - d >= 0 and bool(r.partners[d][a - d])
+            assert fwd or bwd, f"anchor {a} has no delta={d} partner in either direction"
+
+
+def test_identity_gate_rejects_mixed_frames_individually(tmp_path):
+    """`identity_source` can vary frame-by-frame within one bout: only the
+    specific frames with a non-mask head are rejected, not the whole bout."""
+    T = 20
+    identity = ["mask"] * T
+    identity[3] = "sex"; identity[14] = "sex"
+    r, _ = _gates(tmp_path, T=T, identity=identity)
+    assert r.reasons["identity"][3] and r.reasons["identity"][14]
+    others = [t for t in range(T) if t not in (3, 14)]
+    assert not r.reasons["identity"][others].any()
+    assert not r.fly[:, 3].any() and not r.fly[:, 14].any()
+    assert r.fly[:, others].all()
