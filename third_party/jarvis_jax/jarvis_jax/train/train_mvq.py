@@ -1,9 +1,11 @@
 """Training loop for the multi-view query lifter (mvq)."""
 from __future__ import annotations
 
+import collections
 import dataclasses
 import json
 import os
+import threading
 import time
 
 import jax
@@ -13,7 +15,8 @@ import optax
 import orbax.checkpoint as ocp
 from flax import nnx
 
-from jarvis_jax.data.augment import build_lr_swap
+from jarvis_jax.data.augment import assert_lr_swap_covers, build_lr_swap
+from jarvis_jax.data.concat_windows import ConcatWindowDataset
 from jarvis_jax.data.distractor import build_part_index
 from jarvis_jax.data.mv_augment import MVAugParams, augment_window
 from jarvis_jax.data.mv_copy_paste import CopyPasteParams
@@ -25,11 +28,16 @@ from jarvis_jax.models.mvq import MVQConfig, MVQModel
 from jarvis_jax.models.mvq.policy import EXIST_THRESH, mask_containment, policy_instance
 from jarvis_jax.sharding import data_parallel_mesh, replicate, shard_batch
 from jarvis_jax.train.checkpoint import warm_start_partial
-from jarvis_jax.train.losses_mvq import LossWeights, mvq_loss
+from jarvis_jax.train.losses_mvq import LossWeights, mvq_loss, wing_kp_weight
 
 MM_PER_UNIT = 0.1
 CONTACT_UNITS = 30.0  # 3 mm; real mounting pairs have centroid gaps of ~24-30 units, see p3a-notes.md
 _RATIO_BATCHES = 200  # batches over which run_training reports the realised host-sex sampling ratio
+# v2 (spec 2026-09-05 §4): the extra TRAIN roots concatenated onto the human v12
+# root, in the order they are stacked. "negatives" is special-cased by
+# `_mix_weights` (it is the one root whose share is pinned, not proportional to
+# its window count); the others split the remaining mass by window count.
+_NEGATIVES_NAME = "negatives"
 
 
 @dataclasses.dataclass
@@ -76,6 +84,30 @@ class MVQTrainConfig:
     sex_label_overrides: dict = dataclasses.field(default_factory=dict)
     warm_start: str | None = None
     jitter_units: float = 3.0  # train-time window-centre jitter, world units (0.1 mm); P4 §6 raises it to 10 for the mask-free route
+    # ---- mvq v2 (spec 2026-09-05 §2 decision 3, §4) ---------------------------
+    # Frame spacings a T > 1 window may span, in VIDEO frames: {1, 4, 16} is
+    # 1.25-20 ms at 800 fps. Ignored at T=1. `(1,)` is the pre-v2 behaviour
+    # (consecutive pairs only), so every P3a/P3b config is unchanged.
+    pair_deltas: tuple = (1,)
+    # Extra TRAIN roots concatenated onto the human v12 root (`ConcatWindowDataset`);
+    # the VAL split stays the human root alone (spec §7, "validation on human labels
+    # only"). `pseudo_weight` is the per-sample loss weight those roots are EXPECTED
+    # to carry -- the actual number reaching `sample_weight` comes from each root's
+    # own manifest (`V12WindowDataset.weight`), and `run_training` warns if the two
+    # disagree rather than silently training at the export's value.
+    pseudo_root: str | None = None
+    pseudo_weight: float = 0.3
+    singlefly_root: str | None = None
+    # Empty-window negatives (spec §3.5): `negatives_frac` of the SAMPLED MASS,
+    # pinned rather than proportional to the root's window count -- how many
+    # negatives happen to have been exported must not decide how often the
+    # existence head sees one.
+    negatives_root: str | None = None
+    negatives_frac: float = 0.05
+    # Per-keypoint loss multiplier on the WING landmarks (spec §4: wing keypoint
+    # AND wing visibility weight x2). Built BY NAME (`losses_mvq.wing_kp_weight`),
+    # never by index -- see CLAUDE.md's keypoint-order history.
+    wing_kp_mult: float = 1.0
 
 
 _MEAN = jnp.asarray(IMAGENET_MEAN); _STD = jnp.asarray(IMAGENET_STD)
@@ -111,12 +143,16 @@ def _batch_to_model(batch):
                 t_local=batch["t_local"], prompt_mask=batch["prompt_mask"])
 
 
-def make_train_step(aug: MVAugParams, lr_swap, part_of_k, weights: LossWeights, ema_decay: float):
+def make_train_step(aug: MVAugParams, lr_swap, part_of_k, weights: LossWeights, ema_decay: float,
+                    kp_weight=None):
+    """`kp_weight`: the (K,) per-keypoint loss multiplier (`losses_mvq.wing_kp_weight`,
+    built BY NAME), or None for the uniform pre-v2 behaviour."""
     swap = jnp.asarray(lr_swap); pok = np.asarray(part_of_k)
+    kpw = None if kp_weight is None else jnp.asarray(kp_weight)
 
     def loss_fn(model, batch):
         out = model(**_batch_to_model(batch), prompt_on=batch["prompt_on"])
-        return mvq_loss(out, batch, weights, pok)
+        return mvq_loss(out, batch, weights, pok, kpw)
 
     @nnx.jit
     def step(model, optimizer, ema, key, batch, prompt_p):
@@ -144,7 +180,8 @@ def _fwd(model, crops, cam_valid, M, t_local, prompt_mask, prompt_on):
     return model(crops, cam_valid, M, t_local, prompt_mask, prompt_on=prompt_on)
 
 
-def evaluate(model, ds, batch_size, *, cohorts: dict, part_of_k, weights, mesh, num_workers=8):
+def evaluate(model, ds, batch_size, *, cohorts: dict, part_of_k, weights, mesh, num_workers=8,
+             kp_weight=None):
     """One pass over `ds` (JPEGs decoded ONCE per window via `window_batches`,
     not once per prompted/unprompted mode) running BOTH the prompted and the
     unprompted forward on every decoded batch. `batch_size` should be
@@ -166,6 +203,11 @@ def evaluate(model, ds, batch_size, *, cohorts: dict, part_of_k, weights, mesh, 
     repeating its final row) up to `batch_size` so every batch shards evenly
     across the mesh; the per-sample loop below still only reads the first
     `B0` (real) rows, so padding never contaminates a per-sample statistic.
+
+    `kp_weight` (v2) is passed straight through to `mvq_loss` so eval scores the
+    SAME objective training optimises. It moves no number reported here: the
+    three px metrics and every per-sample statistic below are built from
+    unweighted L2 distances, and eval discards `mvq_loss`'s scalar loss.
 
     `reproj_px`/`uv2d_px`/`head_vs_reproj_px` are themselves BATCH-level means
     (from `mvq_loss`, over that batch's valid (vis2d & fly_valid) entries) --
@@ -224,7 +266,7 @@ def evaluate(model, ds, batch_size, *, cohorts: dict, part_of_k, weights, mesh, 
             out = _fwd(model, normalize_crops(jb["crops"]), jb["cam_valid"], jb["M"], jb["t_local"],
                        jb["prompt_mask"], on)
             jb_m = dict(jb); jb_m["prompt_on"] = on
-            _, m = mvq_loss(out, jb_m, weights, part_of_k)      # reuses the matching
+            _, m = mvq_loss(out, jb_m, weights, part_of_k, kp_weight)   # reuses the matching
             xyz = np.asarray(out["xyz"])                          # (B,I,T,K,3)
             I = xyz.shape[1]
             if mode not in slot_counts:
@@ -450,6 +492,147 @@ def _balanced_weights(ds, alpha, female_weight, female_host_weight=1.0):
     return w / w.sum()
 
 
+def _mix_weights(ds, tcfg):
+    """(weights, mass) for ONE train dataset: per-window sampling weights summing
+    to 1, and the per-root mass table behind them.
+
+    A plain `V12WindowDataset` is just `_balanced_weights` (unchanged). A
+    `ConcatWindowDataset` gets `_balanced_weights` run SEPARATELY on each root,
+    so each root's behaviour balance and host-sex ratio are restored INSIDE it
+    -- which is why the pseudo export's manifest `balance.female_host_weight`
+    is information to log, not a second multiplier to apply here (applying it
+    again would over-sample female hosts by ~2x). The roots' TOTAL masses are
+    then set so the negatives take exactly `negatives_frac` and the remaining
+    mass splits by window count: how many negatives the exporter happened to
+    write must not decide how often the existence head sees an empty window,
+    whereas the real/pseudo/single-fly split IS meant to follow how much data
+    each root actually holds (their per-sample loss weight, not their sampling
+    rate, is what marks a pseudo label as less trustworthy).
+    """
+    subs = list(getattr(ds, "datasets", [ds]))
+    names_ = list(getattr(ds, "names", ["real"]))
+    ws = []
+    for d, nm in zip(subs, names_):
+        if len(d) == 0:
+            raise ValueError(
+                f"train root '{nm}' ({getattr(d, 'root', '?')}) contributes 0 windows at T={ds.T} "
+                f"-- a root with no window at this length would silently drop out of the mix "
+                f"(check pair_deltas: a Delta no pair of labelled frames spans yields nothing)")
+        ws.append(_balanced_weights(d, tcfg.balance_alpha, tcfg.female_weight, tcfg.female_host_weight))
+    n_win = np.array([float(len(d)) for d in subs])
+    is_neg = np.array([nm == _NEGATIVES_NAME for nm in names_], bool)
+    if is_neg.any():
+        frac = float(tcfg.negatives_frac)
+        pos = np.where(is_neg, 0.0, n_win)
+        mass = np.where(is_neg, frac / max(int(is_neg.sum()), 1),
+                        pos / max(pos.sum(), 1e-12) * (1.0 - frac))
+    else:
+        mass = n_win / max(n_win.sum(), 1e-12)
+    w = np.concatenate([wi * m for wi, m in zip(ws, mass)])
+    return w / w.sum(), dict(zip(names_, (float(m) for m in mass)))
+
+
+class _MixCounter:
+    """Transparent wrapper over a train dataset that COUNTS which root each
+    drawn window came from.
+
+    The realised real/pseudo/negative mix has to be counted, not inferred: two
+    roots can carry the same `sample_weight` (the batch's only per-sample
+    provenance signal), and reproducing the sampler's own RNG draw here would
+    silently drift the moment `window_batches` changed how it draws. Counting
+    at `__getitem__` is exact for whatever the sampler actually asked for.
+
+    `window_batches` fetches a batch from a ThreadPoolExecutor, so the counter
+    is locked; `prefetch` runs up to `depth` batches ahead, so the report is
+    keyed on the counter's OWN total rather than assuming it is in lock-step
+    with the training step.
+    """
+
+    def __init__(self, ds):
+        self._ds = ds
+        self._lock = threading.Lock()
+        self.counts = collections.Counter()
+
+    def __len__(self):
+        return len(self._ds)
+
+    def __getitem__(self, i):
+        nm = self._ds.name(i)
+        with self._lock:
+            self.counts[nm] += 1
+        return self._ds[i]
+
+    @property
+    def epoch(self):
+        return self._ds.epoch
+
+    @epoch.setter
+    def epoch(self, value):
+        self._ds.epoch = int(value)       # must reach every sub-dataset (ConcatWindowDataset fans out)
+
+    def __getattr__(self, k):             # every other question (is_female, n_flies, ...) delegates
+        return getattr(self._ds, k)
+
+    def realised(self):
+        with self._lock:
+            c = dict(self.counts)
+        n = max(sum(c.values()), 1)
+        return c, n
+
+
+# `mvq_loss` metric name -> the LossWeights field that multiplies it into `total`.
+# `conf` is absent on purpose: it enters `total` at weight 1 (LossWeights.conf is
+# lambda INSIDE the term, not an outer weight -- see losses_mvq).
+_TERM_WEIGHTS = {"reproj": "reproj", "l3d": "l3d", "uv2d": "uv2d", "vis": "vis",
+                 "exist": "exist", "sex": "sex", "rep": "rep",
+                 "other_rep": "other_fly_repulsion", "persist": "persist"}
+
+
+def _loss_shares(sums, n, weights: LossWeights):
+    """Each loss term's WEIGHTED share of `total`, averaged over `n` steps.
+
+    `mvq_loss` reports the deep-supervision terms (pass1 + aux layers) only
+    inside `total`, so their contribution is reported as the remainder
+    `deep_supervision` rather than left as an unexplained gap -- the shares
+    then sum to 1 and a term's share can be read as a fraction of the whole.
+    """
+    total = sums["total"] / n
+    terms, named = {}, 0.0
+    for name, attr in _TERM_WEIGHTS.items():
+        w = float(getattr(weights, attr))
+        mean = sums.get(name, 0.0) / n
+        terms[name] = {"weight": w, "mean": mean, "weighted": w * mean}
+        named += w * mean
+    terms["conf"] = {"weight": 1.0, "mean": sums.get("conf", 0.0) / n,
+                     "weighted": sums.get("conf", 0.0) / n}
+    named += terms["conf"]["weighted"]
+    terms["deep_supervision"] = {"weight": float(weights.pass1), "mean": float("nan"),
+                                 "weighted": total - named}
+    for t in terms.values():
+        t["share"] = t["weighted"] / total if total else float("nan")
+    return {"steps": int(n), "total": total, "terms": terms}
+
+
+def _print_loss_shares(sh):
+    print(f"[mvq] loss shares over {sh['steps']} steps (mean total {sh['total']:.4f}):", flush=True)
+    for name, t in sorted(sh["terms"].items(), key=lambda kv: -kv[1]["weighted"]):
+        print(f"[mvq]   {name:<17s} w={t['weight']:<6.3g} mean={t['mean']:<10.4g} "
+              f"weighted={t['weighted']:<10.4g} share={100 * t['share']:6.2f}%", flush=True)
+    s = 100 * sh["terms"]["other_rep"]["share"]
+    w = sh["terms"]["other_rep"]["weight"]
+    if w <= 0:
+        verdict = "other_fly_repulsion is OFF (weight 0)"
+    elif s > 50:
+        verdict = f"DOMINANT (> 50 %): halve the weight to {w / 2:g} and re-measure"
+    elif s < 2:
+        verdict = f"INERT (< 2 %): raise the weight to {2 * w:g} and re-measure"
+    elif 5 <= s <= 30:
+        verdict = "in the 5-30 % launch band"
+    else:
+        verdict = "borderline (outside 5-30 %, inside 2-50 %): judge against p3b-notes.md"
+    print(f"[mvq] other_fly_repulsion (weight {w:g}) share = {s:.2f}% -- {verdict}", flush=True)
+
+
 def _make_manager(ckpt_dir, *, max_to_keep=3):
     """mvq-local checkpoint manager: model + optimizer + EMA + ema_meta (Orbax
     items the shared `train/checkpoint.py` doesn't know about -- kept local
@@ -535,10 +718,23 @@ def _restore_latest(mngr, model, optimizer, ema):
 
 
 def run_training(root, *, out_dir, ckpt_dir, mcfg: MVQConfig, tcfg: MVQTrainConfig,
-                 aug: MVAugParams, weights: LossWeights):
+                 aug: MVAugParams, weights: LossWeights, share_check_steps: int = 0):
+    """`share_check_steps > 0` (v2 Step 6): run that many steps of the REAL
+    pipeline -- same concatenated roots, sampler, augmentation and T
+    alternation the full run will use -- print each loss term's weighted share
+    of `total`, and return `{"loss_shares": ..., ...}` WITHOUT evaluating or
+    writing a final checkpoint. Reusing `run_training` rather than a separate
+    harness is the point of the check: a standalone loop would measure a
+    different loss balance than the one the 40k launch actually optimises.
+    """
     n_dev = len(jax.devices())
     if tcfg.batch_size % n_dev:
         raise ValueError(f"batch_size {tcfg.batch_size} not divisible by {n_dev} devices")
+    n_share = int(share_check_steps or 0)
+    if n_share > 0:
+        tcfg = dataclasses.replace(tcfg, total_steps=n_share,
+                                   log_every=max(1, min(tcfg.log_every, n_share // 4 or 1)))
+        ckpt_dir = None
 
     # Dataset load + cohort validation BEFORE any GPU-heavy work (model build,
     # pretrained-weight download, device replication): a misconfigured/empty
@@ -547,12 +743,49 @@ def run_training(root, *, out_dir, ckpt_dir, mcfg: MVQConfig, tcfg: MVQTrainConf
                                   contact_p=tcfg.copy_paste_contact_p,
                                   contact_sep=tuple(tcfg.copy_paste_contact_sep)) if tcfg.copy_paste_p > 0 else None)
     ov = dict(tcfg.sex_label_overrides or {})
+    pair_deltas = tuple(int(d) for d in (tcfg.pair_deltas or (1,)))
     train_sets = {T: V12WindowDataset(root, "train", T=T, train=True, seed=tcfg.seed, copy_paste=copy_paste,
-                                      jitter_units=tcfg.jitter_units, sex_overrides=ov)
+                                      jitter_units=tcfg.jitter_units, sex_overrides=ov,
+                                      pair_deltas=pair_deltas)
                  for T in tcfg.window_lengths}
+    # v2 (spec §4): the pseudo-label, single-fly and empty-window-negative
+    # exports are SEPARATE v12 roots (own calibrations, images, annotation ids),
+    # so they are stacked index-wise onto the human root rather than merged.
+    # TRAIN ONLY -- `val_ds` below stays the human root alone (spec §7,
+    # "validation on human labels only"): a pseudo frameset in the val set
+    # would move the very number the run is judged by.
+    extra = [(tcfg.pseudo_root, "pseudo", copy_paste), (tcfg.singlefly_root, "singlefly", copy_paste),
+             (tcfg.negatives_root, _NEGATIVES_NAME, None)]   # a negative has no host to paste onto
+    for T in list(train_sets):
+        parts, part_names = [train_sets[T]], ["real"]
+        for path, nm, cp in extra:
+            if not path:
+                continue
+            parts.append(V12WindowDataset(path, "train", T=T, train=True, seed=tcfg.seed, copy_paste=cp,
+                                          jitter_units=tcfg.jitter_units, sex_overrides=ov,
+                                          pair_deltas=pair_deltas))
+            part_names.append(nm)
+        if len(parts) > 1:
+            train_sets[T] = ConcatWindowDataset(parts, names=part_names)
     val_ds = V12WindowDataset(root, "val", T=1, train=False, sex_overrides=ov)
     names = train_sets[tcfg.window_lengths[0]].keypoint_names
     lr_swap = build_lr_swap(names); part_of_k, _ = build_part_index(names)
+    # The horizontal flip relabels left/right BY NAME; an unpaired landmark would
+    # be mirrored in pixels and NOT in labels, training the two sides to average.
+    # Checked against the keypoint names the MODEL emits, before step 0.
+    assert_lr_swap_covers(names, required=names)
+    # ONE wing multiplier: `LossWeights.wing_kp_mult` exists for callers that build
+    # the (K,) vector themselves; run_training builds it from `tcfg.wing_kp_mult`,
+    # so a loss-block value that disagrees is a config error, not a silent tie-break.
+    if weights.wing_kp_mult != 1.0 and weights.wing_kp_mult != tcfg.wing_kp_mult:
+        raise ValueError(f"train.wing_kp_mult={tcfg.wing_kp_mult} but train.loss.wing_kp_mult="
+                         f"{weights.wing_kp_mult}: set the wing multiplier in ONE place "
+                         f"(train.wing_kp_mult -- run_training builds the (K,) vector from it)")
+    kp_weight = wing_kp_weight(names, tcfg.wing_kp_mult)
+    n_wing = int((np.asarray(kp_weight) != 1.0).sum())
+    if tcfg.wing_kp_mult != 1.0:
+        print(f"[mvq] wing keypoint/visibility weight x{tcfg.wing_kp_mult} on {n_wing} of {len(names)} "
+              f"landmarks: {[n for n, w in zip(names, kp_weight) if w != 1.0]}", flush=True)
     cohorts = _cohorts(val_ds)
     for c in tcfg.val_cohorts:
         if not cohorts.get(c, np.zeros(1, bool)).any():
@@ -564,11 +797,14 @@ def run_training(root, *, out_dir, ckpt_dir, mcfg: MVQConfig, tcfg: MVQTrainConf
     # copy first and falls back to `final/mvq_run.json` for older layouts.
     # `val` is None here (not yet computed) and overwritten with the real
     # numbers by the final write at the end of this function.
-    run_dir = os.path.dirname(os.path.abspath(out_dir))
-    os.makedirs(run_dir, exist_ok=True)
-    with open(os.path.join(run_dir, "mvq_run.json"), "w") as f:
-        json.dump({"model": dataclasses.asdict(mcfg), "train": dataclasses.asdict(tcfg), "val": None,
-                  "keypoint_names": names}, f, indent=1)
+    # (a share check writes nothing: it is a 200-step probe, and leaving its
+    # `total_steps` behind in a real run dir would misdescribe the run.)
+    if not n_share:
+        run_dir = os.path.dirname(os.path.abspath(out_dir))
+        os.makedirs(run_dir, exist_ok=True)
+        with open(os.path.join(run_dir, "mvq_run.json"), "w") as f:
+            json.dump({"model": dataclasses.asdict(mcfg), "train": dataclasses.asdict(tcfg), "val": None,
+                      "keypoint_names": names}, f, indent=1)
 
     model = MVQModel(mcfg, rngs=nnx.Rngs(tcfg.seed))
     if tcfg.pretrained:
@@ -615,15 +851,43 @@ def run_training(root, *, out_dir, ckpt_dir, mcfg: MVQConfig, tcfg: MVQTrainConf
     go, so = nnx.split(opt); opt = nnx.merge(go, replicate(so, mesh))
     ema = replicate(ema, mesh)
 
-    step_fns = {T: make_train_step(aug, lr_swap, part_of_k, weights, tcfg.ema) for T in tcfg.window_lengths}
+    step_fns = {T: make_train_step(aug, lr_swap, part_of_k, weights, tcfg.ema, kp_weight)
+               for T in tcfg.window_lengths}
     streams = {}
+    counters = {}
     for T, ds in train_sets.items():
-        w = _balanced_weights(ds, tcfg.balance_alpha, tcfg.female_weight, tcfg.female_host_weight)
+        w, mass = _mix_weights(ds, tcfg)
         is_f = np.array([ds.is_female(i) for i in range(len(ds))], bool)
         mf, mm = float(w[is_f].sum()), float(w[~is_f].sum())
         print(f"[mvq] T={T} sampler: {int(is_f.sum())}/{len(ds)} female-host windows, "
               f"female_host_weight={tcfg.female_host_weight} -> weight mass female {mf:.4f} "
               f"male/other {mm:.4f} (F/M {mf / max(mm, 1e-12):.3f})", flush=True)
+        subs = list(getattr(ds, "datasets", [ds]))
+        sub_names = list(getattr(ds, "names", ["real"]))
+        if len(subs) > 1:
+            print(f"[mvq] T={T} sampler mix: "
+                  + "  ".join(f"{nm} {len(d)} windows -> mass {mass[nm]:.4f}"
+                              for nm, d in zip(sub_names, subs)), flush=True)
+            for nm, d in zip(sub_names, subs):
+                # The pseudo export's manifest carries `balance.female_host_weight`
+                # (n_male/n_female) as INFORMATION: `_mix_weights` already ran
+                # `_balanced_weights` inside this root, which restores the 0.5
+                # host-sex ratio, so applying the manifest number again would
+                # over-sample female hosts by that factor.
+                bal = (getattr(d, "manifest_root", None) or {}).get("balance") or {}
+                if bal.get("female_host_weight") is not None:
+                    print(f"[mvq]   {nm}: manifest balance.female_host_weight="
+                          f"{bal['female_host_weight']} (INFORMATION -- not applied again; the "
+                          f"per-root balance above already restores the host-sex ratio)", flush=True)
+                # `sample_weight` comes from each ROOT's manifest, not from tcfg, so a
+                # mislabelled export would train at a weight nobody configured.
+                mw = float(np.mean([d.weight(k) for k in range(len(d))]))
+                want = 1.0 if nm in ("real", _NEGATIVES_NAME) else float(tcfg.pseudo_weight)
+                flag = "" if abs(mw - want) <= 1e-6 else f"  <-- WARNING: expected {want:g}"
+                print(f"[mvq]   {nm}: source={d.source(0)!r} role={d.role(0)!r} "
+                      f"mean sample_weight={mw:.4f}{flag}", flush=True)
+            ds = _MixCounter(ds)
+            counters[T] = ds
         def epochs(ds=ds, w=w, T=T):
             e = 0
             while True:
@@ -634,29 +898,47 @@ def run_training(root, *, out_dir, ckpt_dir, mcfg: MVQConfig, tcfg: MVQTrainConf
     key = jax.random.PRNGKey(tcfg.seed)
     Ts = list(tcfg.window_lengths)
     loss = float("nan"); t0 = time.time()
-    # Realised host-sex ratio of what the sampler ACTUALLY draws, over the first
-    # `_RATIO_BATCHES` batches -- `female_host_weight` sets a weight mass, and this
-    # is the number that says whether the draws came out where they were aimed
-    # (`is_female` is the HOST's sex and survives copy-paste, which only adds a donor).
-    seen_f = seen_n = 0
+    # Realised host-sex ratio and root mix of what the sampler ACTUALLY draws,
+    # over the first `_RATIO_BATCHES` batches (or the whole run, if shorter --
+    # a 20-step smoke run must print it too, or the plumbing is unverified).
+    # `female_host_weight` and the mass table above set a weight mass; these are
+    # the numbers that say whether the draws came out where they were aimed
+    # (`is_female` is the HOST's sex and survives copy-paste, which only adds a
+    # donor). NEGATIVES have no host sex at all, so the ratio is reported both
+    # over everything drawn and over the non-negative windows alone.
+    n_ratio = max(1, min(_RATIO_BATCHES, tcfg.total_steps - start))
+    seen_f = seen_n = seen_neg = 0
+    share_sums = collections.defaultdict(float)
     for i in range(start, tcfg.total_steps):
         T = Ts[i % len(Ts)]
         batch = dict(zip(WINDOW_KEYS, next(streams[T])))
-        if i - start < _RATIO_BATCHES:
-            seen_f += int(np.asarray(batch["is_female"]).sum()); seen_n += int(batch["is_female"].shape[0])
-            if i - start == _RATIO_BATCHES - 1:
-                print(f"[mvq] realised host-sex ratio over the first {_RATIO_BATCHES} batches: "
-                      f"female {seen_f}/{seen_n} = {seen_f / max(seen_n, 1):.3f}", flush=True)
+        if i - start < n_ratio:
+            is_f = np.asarray(batch["is_female"]); neg = np.asarray(batch["is_negative"])
+            seen_f += int(is_f.sum()); seen_n += int(is_f.shape[0]); seen_neg += int(neg.sum())
+            if i - start == n_ratio - 1:
+                pos = max(seen_n - seen_neg, 1)
+                print(f"[mvq] realised host-sex ratio over the first {n_ratio} batches: "
+                      f"female {seen_f}/{seen_n} = {seen_f / max(seen_n, 1):.3f} "
+                      f"(of the {pos} non-negative windows: {seen_f / pos:.3f}); "
+                      f"negatives {seen_neg}/{seen_n} = {seen_neg / max(seen_n, 1):.3f}", flush=True)
+                for T_, cnt in sorted(counters.items()):
+                    c, n_c = cnt.realised()
+                    print(f"[mvq] T={T_} realised mix over {n_c} windows drawn: "
+                          + " ".join(f"{nm}={c.get(nm, 0) / n_c:.3f}" for nm in cnt.names), flush=True)
         pp = tcfg.prompt_p_start + (tcfg.prompt_p_end - tcfg.prompt_p_start) * min(i / max(tcfg.prompt_anneal_steps, 1), 1.0)
         loss, metrics, ema = step_fns[T](model, opt, ema, jax.random.fold_in(key, i), batch, jnp.float32(pp))
         loss = float(loss); ema_updates += 1
+        if n_share:
+            for k_, v_ in metrics.items():
+                share_sums[k_] += float(v_)
         if (i + 1) % tcfg.log_every == 0:
             ms = " ".join(f"{k}={float(v):.4f}" for k, v in metrics.items() if k != "total")
             print(f"step {i+1}/{tcfg.total_steps} T={T} loss {loss:.4f} {ms} ({time.time()-t0:.0f}s)", flush=True)
-        if (i + 1) % tcfg.eval_every == 0 or i + 1 == tcfg.total_steps:
+        if not n_share and ((i + 1) % tcfg.eval_every == 0 or i + 1 == tcfg.total_steps):
             em = _with_ema(model, ema, tcfg.ema, ema_updates)
             val = evaluate(em, val_ds, tcfg.batch_size, cohorts=cohorts, part_of_k=part_of_k,
-                           weights=weights, mesh=mesh, num_workers=tcfg.num_workers)
+                           weights=weights, mesh=mesh, num_workers=tcfg.num_workers,
+                           kp_weight=kp_weight)
             for mode, r in val.items():
                 print(f"  val[{mode}] " + " ".join(f"{k}={v:.4f}" for k, v in r.items()), flush=True)
             # `del em` frees nothing by itself -- em's arrays alias the SAME
@@ -674,11 +956,15 @@ def run_training(root, *, out_dir, ckpt_dir, mcfg: MVQConfig, tcfg: MVQTrainConf
             jax.clear_caches()
         if mngr is not None and (i + 1) % tcfg.save_every == 0:
             _save_step(mngr, i + 1, model, opt, ema, ema_updates)
+    if n_share:
+        sh = _loss_shares(share_sums, n_share, weights)
+        _print_loss_shares(sh)
+        return {"loss_shares": sh, "final_loss": loss, "steps": n_share}
     if mngr is not None:
         _save_step(mngr, tcfg.total_steps, model, opt, ema, ema_updates); mngr.wait_until_finished()
     em = _with_ema(model, ema, tcfg.ema, ema_updates)
     val = evaluate(em, val_ds, tcfg.batch_size, cohorts=cohorts, part_of_k=part_of_k,
-                   weights=weights, mesh=mesh, num_workers=tcfg.num_workers)
+                   weights=weights, mesh=mesh, num_workers=tcfg.num_workers, kp_weight=kp_weight)
     os.makedirs(out_dir, exist_ok=True)
     ckptr = ocp.StandardCheckpointer(); ckptr.save(out_dir, nnx.split(em)[1], force=True); ckptr.wait_until_finished()
     with open(os.path.join(out_dir, "mvq_run.json"), "w") as f:

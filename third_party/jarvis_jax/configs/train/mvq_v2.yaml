@@ -1,0 +1,102 @@
+# @package train
+# mvq v2 -- spec docs/specs/2026-09-05-mvq-v2-pseudolabel-t2-design.md.
+# T=2 two-frame lifter trained FROM SCRATCH (§2 decision 1) on the human v12 root
+# + a human-reviewed pseudo-label export + a single-fly export (both at loss weight
+# 0.3, §3.2) + empty-window negatives at 5 % of the sampled mass (§3.5).
+# Every line that differs from configs/train/mvq.yaml names the section it comes
+# from; the rest is mvq.yaml verbatim, so a diff of the two files is the recipe change.
+lr: 3.0e-4
+weight_decay: 0.05
+warmup_steps: 1000        # §4 (mvq.yaml: 500) -- from scratch, so a longer warmup
+total_steps: 40000        # §4 (mvq.yaml: 30000); ~1 day on 8 L40S at ~2.2 s/step
+batch_size: 32            # §4: 4/device on 8 GPUs. The 7-device layout HUNG P3b
+                          # (p3b-notes.md); run_training refuses a batch that does
+                          # not divide len(jax.devices()).
+backbone_lr_mult: 0.1
+grad_clip: 1.0
+ema: 0.999
+seed: 0
+window_lengths: [1, 2]    # §2 decision 3: real singles as T=1, pairs as T=2, alternating
+pair_deltas: [1, 4, 16]   # §2 decision 3 / §4: 1.25-20 ms at 800 fps. One window per
+                          # spacing that is labelled at BOTH frames; T=1 ignores it.
+prompt_p_start: 0.0       # §4 "prompting off" -- from step 0, not annealed
+prompt_p_end: 0.0
+prompt_anneal_steps: 2000 # unused at start == end == 0; kept so the field is explicit
+female_weight: 1.0
+balance_alpha: 0.5
+log_every: 50
+eval_every: 2000
+save_every: 2000          # §4 (mvq.yaml: 1000)
+num_workers: 24           # 8 GPUs of T=2 windows (64 frames x 7 cameras per batch)
+pretrained: true          # DINOv3 backbone init; the mvq head is fresh (warm_start: null)
+smoke: false
+# §5 grades sex_acc on the calibration groups, mask_containment on contact pairs and
+# the policy miss fraction on single-fly windows, so those cohorts must be non-empty.
+val_cohorts: [female, two_fly, contact_pair, single_fly]
+copy_paste_p: 0.8                    # §4 (mvq.yaml: 0.0)
+copy_paste_opposite_sex_p: 0.7
+copy_paste_contact_p: 0.7            # §4 (mvq.yaml: 0.3)
+copy_paste_contact_sep: [4.0, 25.0]  # §4 contact-heavy setting (mvq.yaml: [8, 30])
+female_host_weight: 4.27  # §4 "female-host weight so the host-sex ratio is 0.5".
+                          # Solved on red_data_3d_v12_export0902 train (202 of 2661
+                          # windows female-host); it applies PER ROOT, and the run log's
+                          # "realised host-sex ratio" line is where it is verified --
+                          # re-solve it if the real root changes.
+sex_label_overrides: {}
+warm_start: null          # §2 decision 1: FROM SCRATCH, no warm start
+jitter_units: 10.0        # §4 / P4 §6: 1 mm, the mask-free window-centre budget
+                          # (mvq.yaml: 3.0)
+# ---- v2 data mix (§3.2, §3.4, §3.5) ------------------------------------------
+# TRAIN ONLY: the val split stays the human root alone (§7, "validation on human
+# labels only"). Each root's own manifest carries the per-sample `weight` that
+# reaches the loss; `pseudo_weight` is what the run log checks it against.
+pseudo_root: /gscratch/portia/eabe/data/Johnson_lab/red_data_3d_v12_pseudo_p3b_20260905
+pseudo_weight: 0.3        # §3.2 loss multiplier on pseudo labels
+singlefly_root: /gscratch/portia/eabe/data/Johnson_lab/red_data_3d_v12_pseudo_singlefly_20260905
+negatives_root: /gscratch/portia/eabe/data/Johnson_lab/red_data_3d_v12_pseudo_negatives_20260905
+negatives_frac: 0.05      # §3.5: 5 % of the SAMPLED MASS (pinned, not proportional to
+                          # how many negatives the exporter happened to write)
+wing_kp_mult: 2.0         # §4: wing keypoint AND wing visibility weight x2, applied
+                          # BY NAME (losses_mvq.wing_kp_weight)
+# loss weights -- mvq.yaml's, with the three v2/P3b changes called out
+loss:
+  reproj: 1.0
+  l3d: 0.5
+  uv2d: 0.5
+  vis: 0.1
+  conf: 0.2
+  exist: 1.0
+  sex: 0.5
+  rep: 0.5
+  other_fly_repulsion: 20.0   # §4 = the weight P3b actually converged with: at 0.5 the
+                              # term was ~0.2 of a ~35 total and no metric moved; at 20
+                              # from step 4000 cross_fly_frac fell 0.052 -> 0.036 and
+                              # contact_pair 0.178 -> 0.146 mm (p3b-notes.md). v2 trains
+                              # from scratch at T=2 with negatives, a DIFFERENT loss
+                              # balance -- measure it with `+share_check_steps=200`
+                              # before launching (v2-notes.md "loss-share check").
+  pass1: 0.5
+  aux: 0.3
+  huber_px: 8.0
+  rep_px: 20.0
+  rep_units: 2.5
+  persist: 0.5                # §4 identity-persistence hinge (T=2 only; 0 at T=1)
+  persist_margin_units: 2.0   # §4: 0.2 mm of slack over the GT centroid displacement
+mv_aug:
+  enabled: true
+  rot_deg: 30.0
+  scale_min: 0.8
+  scale_max: 1.25
+  translate_frac: 0.1
+  world_yaw: true
+  world_tilt_deg: 30.0
+  mirror_p: 0.5             # §4 horizontal flip with L/R keypoint relabelling
+                            # (run_training asserts every L/R landmark is paired)
+  cam_drop_p: 0.1           # §4 "each camera absent with p 0.1" (mvq.yaml: 0.3)
+  cam_drop_max: 2
+  brightness: 0.2
+  contrast: 0.2
+  gamma: 0.2
+  blur_max: 0.5
+  noise_scale: 0.02
+  pc_color: 0.2

@@ -21,6 +21,8 @@ def main(cfg):
     mcfg = build_dataclass(MVQConfig, cfg.model)
     tnode = OmegaConf.to_container(cfg.train, resolve=True)
     tnode["window_lengths"] = tuple(tnode["window_lengths"]); tnode["val_cohorts"] = tuple(tnode["val_cohorts"])
+    if "pair_deltas" in tnode:                                  # yaml list -> tuple of ints (v2, spec §4)
+        tnode["pair_deltas"] = tuple(int(v) for v in tnode["pair_deltas"])
     if "copy_paste_contact_sep" in tnode:                       # yaml list -> tuple (CopyPasteParams field)
         tnode["copy_paste_contact_sep"] = tuple(float(v) for v in tnode["copy_paste_contact_sep"])
     if "sex_label_overrides" in tnode:                          # OmegaConf DictConfig -> plain dict
@@ -37,6 +39,19 @@ def main(cfg):
         print(f"[mvq] WARNING: paths.runs_root={cfg.paths.runs_root} != paths.mvq_runs_root={mvq_root} "
               f"(pass paths.runs_root='${{paths.mvq_runs_root}}' to use it) -- this run WILL land in {run_dir}",
               flush=True)
+    # v2 Step 6 launch check: `+share_check_steps=200` runs that many steps of the
+    # REAL pipeline, prints each loss term's weighted share of `total` and exits
+    # WITHOUT eval, checkpoint or run-dir json. It exists because spec §4 sets
+    # `loss.other_fly_repulsion=20` from a WARM-STARTED T=1 run, and v2 trains from
+    # scratch at T=2 with negatives -- a different loss balance. Read the printed
+    # `other_fly_repulsion ... share` line before spending a day of 8 GPUs on it.
+    n_share = int(cfg.get("share_check_steps", 0) or 0)
+    if n_share > 0:
+        print(f"[mvq] LOSS-SHARE CHECK: {n_share} steps, no eval/checkpoint "
+              f"(drop +share_check_steps to train)", flush=True)
+        return run_training(cfg.paths.data_root, out_dir=os.path.join(run_dir, "final"),
+                            ckpt_dir=None, mcfg=mcfg, tcfg=tcfg, aug=aug, weights=weights,
+                            share_check_steps=n_share)
     return run_training(cfg.paths.data_root, out_dir=os.path.join(run_dir, "final"),
                         ckpt_dir=os.path.join(run_dir, "ckpt"), mcfg=mcfg, tcfg=tcfg, aug=aug, weights=weights)
 

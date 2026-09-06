@@ -7,7 +7,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from flax import nnx
-from mvq_fixtures import make_v12_root
+from mvq_fixtures import REC, make_v12_root
 
 
 def test_two_steps_cpu_and_eval(tmp_path):
@@ -541,3 +541,243 @@ def test_p3b_knobs_reach_the_dataset_and_the_copy_paste_params(tmp_path, monkeyp
                  tcfg=dataclasses.replace(tcfg, copy_paste_p=0.0, sex_label_overrides={}),
                  aug=MVAugParams(enabled=False), weights=LossWeights())
     assert seen and all(c["copy_paste"] is None for c in seen)
+
+
+# ---------------------------------------------------------------- mvq v2 (T=2)
+# spec 2026-09-05 §4: T=2 pairs at Delta in {1,4,16}, trained from scratch on
+# the human v12 root + a pseudo-label export (weight 0.3) + a single-fly export
+# (0.3) + empty-window negatives (5 % of the sampled mass).
+
+def _rename_recording(root, old, new):
+    """Rename the one recording in a v12 fixture root (images, masks, image
+    `file_name`s, frameset keys, manifest). The single-fly export really is a
+    DIFFERENT recording (free_running Session11 / Clip Session6, spec §3.4),
+    and `ConcatWindowDataset` refuses two roots that describe the same
+    recording differently -- so a copy that kept the name would not be
+    testing the real layout."""
+    import shutil
+    for sub in ("images", "masks"):
+        a = os.path.join(root, sub, old)
+        if os.path.isdir(a):
+            shutil.move(a, os.path.join(root, sub, new))
+    for split in ("train", "val"):
+        p = os.path.join(root, "annotations", f"instances_{split}.json")
+        coco = json.load(open(p))
+        for im in coco["images"]:
+            im["file_name"] = im["file_name"].replace(f"{old}/", f"{new}/", 1)
+            if im.get("recording") == old:
+                im["recording"] = new
+        coco["framesets"] = {k.replace(f"{old}/", f"{new}/", 1): {**v, "recording": new}
+                             for k, v in coco["framesets"].items()}
+        json.dump(coco, open(p, "w"))
+    m = json.load(open(os.path.join(root, "manifest.json")))
+    m["recordings"] = {(new if r == old else r): v for r, v in m["recordings"].items()}
+    json.dump(m, open(os.path.join(root, "manifest.json"), "w"))
+
+
+def _pseudo_copy(src, dst, *, weight=0.3, source="pseudo", role="anchor", keep_flies=None,
+                 rename_rec=None):
+    """A pseudo-flavoured copy of a v12 fixture root: the whole-manifest
+    `source`/`weight`/`role` defaults the real export writes, read back by
+    `V12WindowDataset.source/weight/role` (frameset -> per-recording manifest
+    -> whole-manifest default). `keep_flies` (e.g. `{0}`) drops the other
+    flies' framesets and `rename_rec` renames the recording, which is how the
+    SINGLE-FLY root differs from the courtship one."""
+    import shutil
+    shutil.copytree(src, dst)
+    if rename_rec is not None:
+        _rename_recording(str(dst), REC, rename_rec)
+    if keep_flies is not None:
+        for split in ("train", "val"):
+            p = os.path.join(dst, "annotations", f"instances_{split}.json")
+            coco = json.load(open(p))
+            coco["framesets"] = {k: v for k, v in coco["framesets"].items()
+                                 if int(v["fly_id"]) in keep_flies}
+            json.dump(coco, open(p, "w"))
+    m = json.load(open(os.path.join(dst, "manifest.json")))
+    m["source"], m["weight"], m["role"] = source, float(weight), role
+    if keep_flies is not None:
+        for rec in m["recordings"].values():
+            rec["n_flies"] = len(keep_flies)     # else the loader claims a present-but-unlabelled fly
+    json.dump(m, open(os.path.join(dst, "manifest.json"), "w"))
+    return str(dst)
+
+
+def _negatives_copy(src, dst, *, deltas=(1, 4)):
+    """A NEGATIVES-only copy (spec §3.5): every frameset replaced by an empty
+    window keyed `<rec>/Frame_<n>/neg0` with `fly_id: -1`, its own `center3D`
+    and a `partners` map (delta -> the partner's ABSOLUTE frame) over the SAME
+    images. `V12WindowDataset._build` discards a negative's keypoints, so
+    reusing fly0's resolved slots is what the real export's placeholder rows
+    amount to; without `partners` a negative contributes NO T > 1 window at all
+    (the loader refuses to freeze a pair), which is the mistake this helper
+    exists to not make. Weight stays 1.0: a negative exists to supervise the
+    existence head and `sample_weight` multiplies every term, so a
+    down-weighted negative would assert nothing."""
+    import shutil
+    shutil.copytree(src, dst)
+    for split in ("train", "val"):
+        p = os.path.join(dst, "annotations", f"instances_{split}.json")
+        coco = json.load(open(p))
+        frames = sorted(int(k.split("/")[1].split("_")[1]) for k, v in coco["framesets"].items()
+                        if int(v["fly_id"]) == 0)
+        neg = {}
+        for key, fsv in coco["framesets"].items():
+            rec, frame, tail = key.split("/")
+            if tail != "fly0":
+                continue
+            f = int(frame.split("_")[1])
+            neg[f"{rec}/{frame}/neg0"] = {
+                **fsv, "fly_id": -1, "subset": "neg", "center3D": [0.0, 0.0, 0.0],
+                "partners": {str(d): f + d for d in deltas if f + d in frames}}
+        coco["framesets"] = neg
+        json.dump(coco, open(p, "w"))
+    m = json.load(open(os.path.join(dst, "manifest.json")))
+    m["source"], m["weight"], m["role"] = "pseudo", 1.0, "negative"
+    json.dump(m, open(os.path.join(dst, "manifest.json"), "w"))
+    return str(dst)
+
+
+def _v2_mcfg():
+    from jarvis_jax.models.mvq import MVQConfig
+    return MVQConfig(crop=448, patch=16, embed_dim=32, num_keypoints=50, num_cameras=7, n_instances=4,
+                     n_local=1, n_global=1, dec_layers_3d=2, dec_layers_2d=1, dec_heads=4, mlp_ratio=2.0,
+                     refine_passes=1, patch_rgb=3, fourier_bands=2, backbone="tiny", backbone_depth=1,
+                     backbone_heads=4, remat=False)
+
+
+def test_t2_run_trains_and_mixes_roots(tmp_path, capsys):
+    """The v2 recipe end to end on the tiny fixture: T=2 pairs at Delta in
+    {1, 4}, a pseudo root and a single-fly root at weight 0.3, an
+    empty-window negatives root at 5 % of the sampled mass, wing keypoints
+    at 2x.
+
+    Expectation if the wiring is right: a finite loss; `final/mvq_run.json`'s
+    `train` block records the v2 knobs (Task 6/7 read them for the scorecard
+    header); validation still runs on the REAL root only (spec §7) and
+    reports a non-NaN unprompted mpjpe; the sampler's mass table names all
+    four roots with the negatives at exactly `negatives_frac`; and the
+    realised mix COUNTS windows drawn per root -- a root whose mass is set
+    but which never actually gets drawn is the failure this catches."""
+    from jarvis_jax.data.mv_augment import MVAugParams
+    from jarvis_jax.train.losses_mvq import LossWeights
+    from jarvis_jax.train.train_mvq import MVQTrainConfig, run_training
+    (tmp_path / "real").mkdir()
+    real = make_v12_root(tmp_path / "real", n_frames=6)
+    pseudo = _pseudo_copy(real, tmp_path / "pseudo")
+    single = _pseudo_copy(real, tmp_path / "singlefly", keep_flies={0},
+                          rename_rec="2026_02_02_00_00_00")
+    negs = _negatives_copy(real, tmp_path / "negatives")
+    tcfg = MVQTrainConfig(total_steps=2, batch_size=2, warmup_steps=1, eval_every=2, save_every=2,
+                          log_every=1, num_workers=1, pretrained=False, window_lengths=(1, 2),
+                          pair_deltas=(1, 4), pseudo_root=pseudo, pseudo_weight=0.3,
+                          singlefly_root=single, negatives_root=negs, negatives_frac=0.05,
+                          wing_kp_mult=2.0, smoke=True)
+    run = tmp_path / "run"
+    res = run_training(real, out_dir=str(run / "final"), ckpt_dir=str(run / "ckpt"), mcfg=_v2_mcfg(),
+                       tcfg=tcfg, aug=MVAugParams(enabled=False), weights=LossWeights(persist=0.5))
+    assert np.isfinite(res["final_loss"])
+    meta = json.load(open(run / "final" / "mvq_run.json"))
+    assert meta["train"]["pair_deltas"] == [1, 4] and meta["train"]["pseudo_root"] == pseudo
+    assert meta["train"]["singlefly_root"] == single and meta["train"]["negatives_root"] == negs
+    assert meta["train"]["negatives_frac"] == 0.05 and meta["train"]["wing_kp_mult"] == 2.0
+    assert meta["val"]["unprompted"]["mpjpe3d_mm"] == meta["val"]["unprompted"]["mpjpe3d_mm"]   # not NaN
+
+    out = capsys.readouterr().out
+    # the mass table, per T, naming every root and pinning the negatives share
+    mass = [ln for ln in out.splitlines() if "sampler mix" in ln]
+    assert len(mass) == 2 and "T=1" in mass[0] and "T=2" in mass[1], mass
+    assert all(all(nm in ln for nm in ("real", "pseudo", "singlefly", "negatives")) for ln in mass), mass
+    import re
+    assert all(re.search(r"negatives \d+ windows -> mass 0\.0500", ln) for ln in mass), mass
+    # the REALISED mix, COUNTED per root (never inferred from sample_weight --
+    # two roots can share one value)
+    realised = [ln for ln in out.splitlines() if "realised mix" in ln]
+    assert realised, out[-4000:]
+    for nm in ("real", "pseudo", "singlefly", "negatives"):
+        assert f"{nm}=" in realised[0], realised
+
+
+def test_t2_val_split_stays_the_real_root_only(tmp_path, monkeypatch):
+    """Spec §7 ("validation on human labels only"): the pseudo/single-fly/
+    negatives roots reach the TRAIN split and nothing else -- a negative or a
+    pseudo frameset in the val set would move the very headline number the run
+    is judged by. Records every `V12WindowDataset(root, split, ...)` the
+    trainer builds and asserts the val split was built on `root` alone, and
+    that every train root got the SAME T and the SAME spacings."""
+    from jarvis_jax.data.mv_augment import MVAugParams
+    from jarvis_jax.train.losses_mvq import LossWeights
+    import jarvis_jax.train.train_mvq as train_mvq
+    from jarvis_jax.data.v12_windows import V12WindowDataset as Real
+    from jarvis_jax.train.train_mvq import MVQTrainConfig, run_training
+
+    seen = []
+
+    class Recording(Real):
+        def __init__(self, root, split, T=1, **kw):
+            seen.append((str(root), split, kw.get("pair_deltas"), int(T)))
+            super().__init__(root, split, T, **kw)
+
+    monkeypatch.setattr(train_mvq, "V12WindowDataset", Recording)
+    (tmp_path / "real").mkdir()
+    real = make_v12_root(tmp_path / "real", n_frames=6)
+    pseudo = _pseudo_copy(real, tmp_path / "pseudo")
+    negs = _negatives_copy(real, tmp_path / "negatives")
+    tcfg = MVQTrainConfig(total_steps=1, batch_size=2, warmup_steps=1, eval_every=1, save_every=1,
+                          log_every=1, num_workers=1, pretrained=False, window_lengths=(2,),
+                          pair_deltas=(1, 4), pseudo_root=pseudo, negatives_root=negs, smoke=True)
+    run_training(real, out_dir=str(tmp_path / "final"), ckpt_dir=None, mcfg=_v2_mcfg(), tcfg=tcfg,
+                 aug=MVAugParams(enabled=False), weights=LossWeights())
+    val = [s for s in seen if s[1] == "val"]
+    assert val and all(s[0] == real for s in val), seen
+    train = [s for s in seen if s[1] == "train"]
+    assert sorted({s[0] for s in train}) == sorted({real, pseudo, negs}), train
+    assert all(s[2] == (1, 4) and s[3] == 2 for s in train), train
+
+
+def test_batch_size_must_divide_the_device_count(tmp_path, monkeypatch):
+    """The v2 launch is batch 32 on 8 devices; the 7-device layout hung P3b
+    (p3b-notes.md), so a batch that does not divide the device count must fail
+    at once, naming both numbers, BEFORE any dataset load or model build (the
+    root here does not even exist)."""
+    import jax as _jax
+    from jarvis_jax.data.mv_augment import MVAugParams
+    from jarvis_jax.train.losses_mvq import LossWeights
+    from jarvis_jax.train.train_mvq import MVQTrainConfig, run_training
+    monkeypatch.setattr(_jax, "devices", lambda *a, **k: [object()] * 7)
+    tcfg = MVQTrainConfig(total_steps=1, batch_size=32, window_lengths=(1, 2), pair_deltas=(1, 4, 16),
+                          pretrained=False, smoke=True)
+    with pytest.raises(ValueError, match=r"batch_size 32 .*7"):
+        run_training(str(tmp_path / "no-such-root"), out_dir=str(tmp_path / "f"), ckpt_dir=None,
+                     mcfg=_v2_mcfg(), tcfg=tcfg, aug=MVAugParams(enabled=False), weights=LossWeights())
+
+
+def test_loss_share_check_reports_every_term(tmp_path):
+    """Step-6 launch check: `share_check_steps=N` runs N steps of the REAL
+    pipeline (same sampler, augs and T alternation the 40k launch will use)
+    and reports each term's WEIGHTED share of `total`, then returns without
+    eval or a final checkpoint. Expectation: every term is reported with a
+    finite share, the shares sum to 1.0 once the un-itemised deep-supervision
+    remainder is counted, and `other_rep` carries its launch weight -- which
+    is the number the 5-30 % band is judged against before spending a day of
+    8 GPUs on an unmeasured loss balance."""
+    from jarvis_jax.data.mv_augment import MVAugParams
+    from jarvis_jax.train.losses_mvq import LossWeights
+    from jarvis_jax.train.train_mvq import MVQTrainConfig, run_training
+    (tmp_path / "real").mkdir()
+    real = make_v12_root(tmp_path / "real", n_frames=6)
+    tcfg = MVQTrainConfig(total_steps=1000, batch_size=2, warmup_steps=1, log_every=1, num_workers=1,
+                          pretrained=False, window_lengths=(1, 2), pair_deltas=(1, 4),
+                          wing_kp_mult=2.0, smoke=True)
+    res = run_training(real, out_dir=str(tmp_path / "final"), ckpt_dir=str(tmp_path / "ckpt"),
+                       mcfg=_v2_mcfg(), tcfg=tcfg, aug=MVAugParams(enabled=False),
+                       weights=LossWeights(other_fly_repulsion=20.0, persist=0.5), share_check_steps=2)
+    sh = res["loss_shares"]
+    assert res["steps"] == 2 and "val" not in res
+    assert not os.path.isdir(tmp_path / "final")          # no eval, no final checkpoint
+    for name in ("reproj", "l3d", "uv2d", "vis", "conf", "exist", "sex", "rep", "other_rep",
+                 "persist", "deep_supervision"):
+        assert name in sh["terms"], sorted(sh["terms"])
+        assert np.isfinite(sh["terms"][name]["share"]), (name, sh["terms"][name])
+    assert abs(sum(t["share"] for t in sh["terms"].values()) - 1.0) < 1e-4
+    assert sh["terms"]["other_rep"]["weight"] == 20.0
