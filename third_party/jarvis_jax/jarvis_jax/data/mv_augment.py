@@ -110,6 +110,8 @@ def _mirror(key, b, p, lr_swap):
         b["M"], b["t_local"][:, 0])
     # t_local is identical across frames only if origins are shared per window (they are);
     # apply the same b-shift to every frame:
+    # frame-invariance of t_local (asserted on the raw batch) is pinned by
+    # tests/test_mv_augment.py::test_t2_augmentation_keeps_gt3d_on_gt2d_in_both_frames
     tl2 = jnp.broadcast_to(tl2[:, None], b["t_local"].shape)
     sel = lambda a, m: jnp.where(do.reshape((B,) + (1,) * (a.ndim - 1)), m, a)
     X = b["kp3d_local"][..., lr_swap, :] * jnp.array([-1.0, 1.0, 1.0])

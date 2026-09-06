@@ -216,6 +216,13 @@ def test_t2_augmentation_keeps_gt3d_on_gt2d_in_both_frames(tmp_path):
     ds = V12WindowDataset(root, "train", T=2, pair_deltas=(1,), train=False)
     b = next(window_batches(ds, 2, shuffle=False, num_workers=1, drop_last=False))
     jb = {k: jnp.asarray(v) for k, v in b.items()}
+    # `_mirror` (mv_augment.py) broadcasts frame 0's t_local to every frame instead of
+    # transforming each frame's own -- correct ONLY because the loader gives every frame
+    # of a window the same crop origin (v12_windows.py's `_build`). Pin that invariant on
+    # the RAW, pre-augmentation batch: if the loader ever gives frames their own origin,
+    # this must fail FIRST, before the reprojection check below goes looking for the bug
+    # in the wrong place.
+    np.testing.assert_array_equal(np.asarray(jb["t_local"][:, 0]), np.asarray(jb["t_local"][:, 1]))
     p = MVAugParams(cam_drop_p=1.0, cam_drop_max=2, mirror_p=1.0)
     a = augment_window(jax.random.PRNGKey(0), jb, p, build_lr_swap(ds.keypoint_names))
     for t in range(2):
