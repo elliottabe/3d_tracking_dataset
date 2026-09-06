@@ -475,6 +475,20 @@ class MVQRunner:
         self.M, self.t = _affine_np(self.rt.camera_matrices)                 # (C,2,3),(C,2) f64
         self.batch = int(batch)
         self.exist_thresh = float(exist_thresh)
+        # Post-training temperature calibration (`scripts/benchmark/
+        # mvq_calibrate.py`, spec 2026-09-05-mvq-v2-pseudolabel-t2-design.md
+        # §5): read-only here, NOT enrolled in the gate string (unlike
+        # `exist_thresh`/`identity`/`window_pref`) -- the checkpoint's
+        # calibration is a property of the WEIGHTS (already named by
+        # `checkpoint`/`step` in the gate signature), not an independent
+        # choice a caller makes, so two lifts of the same checkpoint always
+        # agree on it. Defaults to 1.0 (no-op) for any run whose
+        # `mvq_run.json` predates calibration or was never calibrated --
+        # an uncalibrated checkpoint must behave exactly as it always did,
+        # not silently gain a temperature of 0 or crash.
+        calib = self.meta.get("calibration") or {}
+        self.exist_temperature = float(calib.get("exist_temperature", 1.0))
+        self.vis_temperature = float(calib.get("vis_temperature", 1.0))
         self._gates = None
 
     # ------------------------------------------------------------------ windows
@@ -552,6 +566,26 @@ class MVQRunner:
         (B,I,C,K,2) FULL-FRAME px, vis (B,I,C,K) per-view visibility sigmoid,
         exist (B,I), sex_prob (B,I) = P(female), conf_raw (B,I,K) the D4RT
         confidence head, xyz (B,I,K,3) ROI-LOCAL (what `policy_slot` scores).
+
+        `vis`/`exist` are CALIBRATED: the raw `vis_logit`/`exist_logit` are
+        divided by `self.vis_temperature`/`self.exist_temperature`
+        (`mvq_calibrate.py`'s fitted values, 1.0 -- a no-op -- on an
+        uncalibrated checkpoint) BEFORE the sigmoid, so `exist_thresh=0.5`
+        means calibrated 0.5 everywhere a caller reads `out["exist"]`
+        (`read_typed`, `policy_slot`, `pick_typed_pair`, `pick_mask_pair`,
+        `coarse_track`). The calibrated `exist_logit` is also what feeds
+        `assemble`'s OWN internal `sigmoid(exist_logit) >= exist_thresh`
+        NaN-gate, so a slot's `kp3d` is never populated while its reported
+        `exist` reads below `exist_thresh`, or vice versa. Dividing every
+        logit by the same positive temperature is monotone, so it changes
+        no ranking/argmax -- `policy_instance`'s slot choice and
+        `read_typed`'s threshold comparison read the SAME slot a raw-logit
+        caller would have picked, just with a probability that means what
+        it says (`tests/test_mvq_calibrate.py::
+        test_runner_applies_the_stored_temperature`). `conf_raw`/`sex_prob`
+        are NOT calibrated here -- only existence and per-view visibility
+        were fit (spec §5); the D4RT confidence head and the sex head keep
+        their raw sigmoid.
         """
         B0 = int(w["crops"].shape[0])
         if B0 > self.batch:
@@ -575,13 +609,20 @@ class MVQRunner:
         out = _fwd(self.model, normalize_crops(jnp.asarray(crops)), jnp.asarray(cam_valid),
                    jnp.asarray(_pad(w["M"])), jnp.asarray(_pad(w["t_local"])),
                    jnp.asarray(prompt), jnp.asarray(_pad(on)))
-        kp3d, conf3d, kp2d, sex_prob = assemble(out, centres, origin,
+        # Calibration (see the docstring above): every existence/visibility
+        # sigmoid in this method reads these TEMPERED logits, never the raw
+        # ones -- `assemble`'s internal exist-gate included, via `out_cal`.
+        exist_logit = np.asarray(out["exist_logit"]) / self.exist_temperature
+        vis_logit = np.asarray(out["vis_logit"]) / self.vis_temperature
+        out_cal = dict(out)
+        out_cal["exist_logit"] = exist_logit
+        kp3d, conf3d, kp2d, sex_prob = assemble(out_cal, centres, origin,
                                                 exist_thresh=self.exist_thresh,
                                                 cam_valid=np.asarray(cam_valid))
         return {"kp3d": kp3d[:B0, :, 0],
                 "kp2d": kp2d[:B0, :, 0],
-                "vis": _sigmoid(np.asarray(out["vis_logit"]))[:B0, :, 0].astype(np.float32),
-                "exist": _sigmoid(np.asarray(out["exist_logit"]))[:B0].astype(np.float32),
+                "vis": _sigmoid(vis_logit)[:B0, :, 0].astype(np.float32),
+                "exist": _sigmoid(exist_logit)[:B0].astype(np.float32),
                 "sex_prob": sex_prob[:B0],
                 "conf_raw": conf3d[:B0, :, 0],
                 "xyz": np.asarray(out["xyz"])[:B0, :, 0]}
@@ -1855,6 +1896,13 @@ def lift_masked_bout(runner, frames_iter, centres, ok, *, out_dir, model_names,
         "step": runner.step_label,
         "gates": json.loads(gates_string),
         "exist_thresh": float(runner.exist_thresh),
+        # like `collapse_dist_units` below: recorded for provenance only, not
+        # enrolled in the gate string -- `runner.infer` already applied these
+        # (default 1.0, a no-op) to every existence/visibility number this
+        # bout's `exist`/`vis` arrays and `mvq_meta.json["per_frame"]["exist"]`
+        # carry.
+        "exist_temperature": float(getattr(runner, "exist_temperature", 1.0)),
+        "vis_temperature": float(getattr(runner, "vis_temperature", 1.0)),
         "merge_dist_units": float(merge_dist_units),
         "cameras": list(runner.cameras),
         "keypoint_names_mvq": list(runner.kp_names),
