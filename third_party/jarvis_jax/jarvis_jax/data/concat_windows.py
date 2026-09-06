@@ -9,20 +9,39 @@ and forwards every per-window question to the sub-dataset that owns it.
 
 Everything downstream keeps working because it only ever asks the dataset
 questions BY INDEX: `window_batches` (`len`, `__getitem__`, `epoch`),
-`train_mvq._balanced_weights` (`windows`, `manifest`, `is_female`) and
+`train_mvq._mix_weights` (`windows`, `is_female`, `calib_group`) and
 `train_mvq._cohorts` (`is_female`, `n_flies`, `calib_group`, `fly_centroids`).
-Per-window provenance (`source`, `weight`, `role`) resolves inside each
-sub-dataset, so a pseudo root's 0.3 weight reaches `sample_weight` unchanged.
+Per-window provenance (`source`, `weight`, `role`, `behavior` via
+`_balanced_weights`, `sex`/`fly_sex` via `unlabelled_sex`) resolves INSIDE
+each sub-dataset off ITS OWN manifest -- `train_mvq._mix_weights` runs
+`_balanced_weights` separately per root (`ds.datasets`), never on this
+class's own merged `.manifest` -- so a pseudo root's 0.3 weight reaches
+`sample_weight` unchanged, and two roots may legitimately describe one
+shared recording's `behavior`/`weight`/`fly_sex`/... differently (spec
+"Calibration witness test", 2026-09-06 round 2: e.g. the negatives root has
+no per-fly identity at all, so its `fly_sex` is `{}` where the human root's
+is populated -- that is not a defect to refuse).
 
 What it refuses, rather than silently mixing:
   * different `keypoint_names` (the keypoint axis would mean two different
     things in one batch -- CLAUDE.md's keypoint-order history);
   * different window lengths T, or different `pair_deltas` (the `crops` axis
     would not stack, and copy-paste pairs donors by spacing);
-  * a recording that two roots describe DIFFERENTLY in any manifest field a
-    loader or sampler reads (`_MERGE_CHECKED`) -- the merge is per field, so a
-    field only one root defines is simply taken, but a real disagreement would
-    silently change what a window means depending on merge order.
+  * a recording whose `calib_group` genuinely differs in CONTENT across
+    roots (see below) -- the one merged-manifest field any loader path can
+    reach (`V12WindowDataset.calib_group`/`_rt` inside each sub-dataset, and
+    `_cohorts`' `group_<g>` cohorts) UNLESS told to proceed explicitly.
+
+Every OTHER field is merged PER FIELD, take-the-first-value, and NEVER
+raises: a field only one root defines is simply taken; a field two roots
+define DIFFERENTLY is still taken from whichever root set it first, and the
+disagreement is recorded in `self.manifest_disagreements[rec][field]` (every
+differing root's own value, by root name) purely for inspection -- nothing
+in this package reads `ConcatWindowDataset.manifest[rec]` for anything but
+`calib_group`, so there is nothing for a silent merge-order pick to break.
+Empty/`None` on one side (`{}`, `[]`, `""`, `None`) is never treated as a
+disagreement at all: the non-empty side wins with no record, since an absent
+value (like the negatives root's `fly_sex`) is not a claim to conflict with.
 
 `calib_group` is checked by CONTENT, not name (Calibration witness test,
 2026-09-06): the pseudo/negatives exports name a recording's calibration
@@ -49,25 +68,33 @@ import numpy as np
 
 from jarvis_jax.geometry.reprojection_tool import ReprojectionTool
 
-# manifest[rec] fields some loader/sampler path READS, and its reader. A
-# disagreement between two roots about one of these is a conflict, not a merge:
-# last-one-wins would decide, invisibly, which root's description of the
-# recording every window of BOTH roots is interpreted with. Fields not listed
-# here (bookkeeping like `split`, `sex_source`, `checkpoint`) are not read by
-# any window/sampler code path and merge last-one-wins.
+# manifest[rec] fields actually read off a ConcatWindowDataset instance's OWN
+# (merged) `.manifest` anywhere in jarvis_jax/data, jarvis_jax/train/train_mvq.py
+# or scripts/ -- grepped 2026-09-06 round 2. Every per-window accessor
+# (`calib_group(i)`, `source(i)`, `weight(i)`, `role(i)`, `is_female(i)`,
+# `n_flies(i)`, `unlabelled_sex(i)`, ...) delegates to the OWNING sub-dataset
+# and reads THAT sub-dataset's own `.manifest`, never this one; `train_mvq.
+# _mix_weights` (train_mvq.py:576) likewise calls `_balanced_weights` once
+# PER root in `ds.datasets`, so `_balanced_weights`' own
+# `ds.manifest[...]["behavior"]` read (train_mvq.py:513) never sees this
+# class's merged dict in the real training path either. `calib_group` is the
+# one exception, kept here even though no reader indexes
+# `ConcatWindowDataset.manifest[rec]["calib_group"]` directly: two roots
+# genuinely disagreeing about which calibration triangulates a shared
+# recording is a correctness hazard this class still refuses to paper over
+# silently (Calibration witness test) -- compared and enforced by CONTENT in
+# __init__, not via this dict's generic equality branch.
 _MERGE_CHECKED = {
-    # Special-cased in __init__ (compared by CONTENT, not name) -- see module
-    # docstring "Calibration witness test". Still listed here so it reads as a
-    # checked field; the generic name-equality branch never fires for it.
-    "calib_group": "V12WindowDataset.calib_group/_rt -- which calibration triangulates it",
-    "sex": "v5_3d._resolve_sex fallback, and unlabelled_sex's 'mixed' branch",
-    "fly_sex": "v5_3d._resolve_sex per-fly fallback, and unlabelled_sex",
-    "n_flies": "unlabelled_sex -- is an animal present but unlabelled?",
-    "behavior": "train_mvq._balanced_weights -- the sampler's balance category",
-    "source": "V12WindowDataset._fs_field -> source() -- real vs pseudo",
-    "weight": "V12WindowDataset._fs_field -> weight() -> the sample's sample_weight",
-    "role": "V12WindowDataset._fs_field -> role()",
+    "calib_group": "special-cased in __init__ -- compared by CONTENT, not name",
 }
+
+
+def _is_empty(v):
+    """None, or an empty str/list/dict/tuple/set -- an ABSENT value, not a
+    real (possibly zero/false) one. The negatives root's `fly_sex: {}` (it
+    has no per-fly identity at all) must not read as disagreeing with the
+    human root's populated dict."""
+    return v is None or (isinstance(v, (str, list, dict, tuple, set)) and len(v) == 0)
 
 
 def _calib_matrices_by_name(calib_dir):
@@ -131,12 +158,20 @@ class ConcatWindowDataset:
         # one entry per recording, only when `allow_calib_mismatch=True` let a
         # genuine content disagreement through instead of raising.
         self.calib_mismatches = []
-        # Merged per-recording manifest, PER FIELD (`_balanced_weights` reads
-        # manifest[rec]["behavior"], `_resolve_sex` reads sex/fly_sex, ...). A
-        # recording two roots describe differently in any field a loader reads is
-        # a real conflict, not a merge-order question; a field only one root
-        # defines is simply taken.
+        # Merged per-recording manifest, PER FIELD, take-the-FIRST-value and
+        # NEVER raise (only `calib_group` -- below -- is content-checked and can
+        # raise/warn): nothing in this package reads `ConcatWindowDataset.
+        # manifest[rec]` for any other field (module docstring), so a
+        # disagreement there is not a hazard to refuse, only something to
+        # record for inspection.
         self.manifest = {}
+        # rec -> {field: {root name: that root's own value}} for every field
+        # (other than calib_group) two roots defined DIFFERENTLY and non-emptily
+        # -- e.g. the human root's `behavior` "climbing+courtship" for
+        # 2025_10_20_13_20_04 vs the pseudo/negatives exports' "courtship", or a
+        # per-recording `weight` override that differs across roots. Purely a
+        # record: `self.manifest[rec][field]` keeps the first root's value.
+        self.manifest_disagreements = {}
         owner = {}                      # rec -> {field: (root name, root path)}
         _calib_warned = set()           # rec -- so a 3rd+ root shares ONE warning/entry
         for d, nm in zip(self.datasets, self.names):
@@ -144,6 +179,21 @@ class ConcatWindowDataset:
                 merged = self.manifest.setdefault(rec, {})
                 who = owner.setdefault(rec, {})
                 for field, value in meta.items():
+                    if field != "calib_group" and field in merged and merged[field] != value:
+                        # Empty/None on either side is never a disagreement --
+                        # an absent value (the negatives root's `fly_sex: {}`)
+                        # is not a claim to conflict with; the non-empty side
+                        # wins with no record.
+                        if _is_empty(merged[field]) or _is_empty(value):
+                            if _is_empty(merged[field]) and not _is_empty(value):
+                                merged[field] = value
+                                who[field] = (nm, d.root)
+                            continue
+                        pn, _pr = who[field]
+                        dis = self.manifest_disagreements.setdefault(rec, {}).setdefault(field, {})
+                        dis.setdefault(pn, merged[field])
+                        dis[nm] = value
+                        continue         # merged[field] KEEPS the first-seen value
                     if field == "calib_group" and "calib_group" in merged and merged[field] != value:
                         # NAMES differ -- the generic equality check above would
                         # raise here; compare CONTENT instead (module docstring).
@@ -178,13 +228,7 @@ class ConcatWindowDataset:
                         # canonical merged value/owner stays the first-seen one --
                         # every later root is compared against the SAME baseline.
                         continue
-                    if field in _MERGE_CHECKED and field in merged and merged[field] != value:
-                        pn, pr = who[field]
-                        raise ValueError(
-                            f"recording {rec!r}: manifest field {field!r} is {merged[field]!r} in "
-                            f"root {pn} ({pr}) and {value!r} in root {nm} ({d.root}). It is read by "
-                            f"{_MERGE_CHECKED[field]}, so the two roots would describe the same "
-                            f"recording differently depending on merge order")
+                    # first time this (rec, field) is seen, or the values agree
                     merged[field] = value
                     who[field] = (nm, d.root)
         self._cum = []

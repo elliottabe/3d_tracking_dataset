@@ -220,12 +220,16 @@ def test_concat_allow_calib_mismatch_override_warns_and_records(tmp_path, capsys
     assert ok.calib_group(0) == "A" and ok.calib_group(len(a)) == "B"
 
 
-def test_concat_refuses_a_conflicting_manifest_field(tmp_path):
-    """`calib_group` is not the only field that matters: `_balanced_weights`
-    reads `behavior`, and last-one-wins there would silently put BOTH roots'
-    windows in one sampler category or the other depending on merge order.
-    Every field a loader/sampler path reads is conflict-checked; a field only
-    one root defines is merged without complaint."""
+def test_concat_records_conflicting_manifest_fields_without_raising(tmp_path):
+    """Round 2 (2026-09-06): NOTHING reads `ConcatWindowDataset.manifest[rec]`
+    except `calib_group` -- `_balanced_weights` (and its `behavior` read) runs
+    PER SUB-DATASET on that root's OWN manifest (`train_mvq._mix_weights`),
+    same for `source`/`weight`/`role`/`sex`/`fly_sex` via their per-index
+    delegates -- so a disagreeing `behavior`/`sex`/... is BY DESIGN (the real
+    human root really does say 'climbing+courtship' for one recording the
+    pseudo export calls 'courtship') and must be RECORDED, never refused.
+    A field only one root defines is merged without complaint, same as
+    before."""
     from jarvis_jax.data.concat_windows import ConcatWindowDataset
     from jarvis_jax.data.v12_windows import V12WindowDataset
     ra, rb = _root(tmp_path / "a"), _root(tmp_path / "b")
@@ -236,23 +240,48 @@ def test_concat_refuses_a_conflicting_manifest_field(tmp_path):
     a = V12WindowDataset(ra, "train", T=1, train=False)
     b = V12WindowDataset(rb, "train", T=1, train=False)
     assert a.manifest[REC]["behavior"] == "courtship" and b.manifest[REC]["behavior"] == "climbing"
-    with pytest.raises(ValueError, match="behavior") as e:
-        ConcatWindowDataset([a, b], names=["real", "pseudo"])
-    assert REC in str(e.value) and "real" in str(e.value) and "pseudo" in str(e.value)
-    # sex is read too (the _resolve_sex fallback chain)
+    ok = ConcatWindowDataset([a, b], names=["real", "pseudo"])
+    # first root's value wins in the merged (unread) manifest; the disagreement
+    # is recorded by root name, not silently dropped
+    assert ok.manifest[REC]["behavior"] == "courtship"
+    assert ok.manifest_disagreements[REC]["behavior"] == {"real": "courtship", "pseudo": "climbing"}
+    # the SUB-datasets are untouched -- each root's own manifest still says
+    # what it always said, so `_mix_weights`' per-root `_balanced_weights` call
+    # (the actual reader) still sees the right category for its own windows
+    assert a.manifest[REC]["behavior"] == "courtship" and b.manifest[REC]["behavior"] == "climbing"
+
+    # sex disagreeing too -- also recorded, never raised
     man["recordings"][REC]["behavior"] = "courtship"
     man["recordings"][REC]["sex"] = "female"                 # root a says "mixed"
     json.dump(man, open(p, "w"))
-    with pytest.raises(ValueError, match="'sex'"):
-        ConcatWindowDataset([a, V12WindowDataset(rb, "train", T=1, train=False)])
+    ok2 = ConcatWindowDataset([a, V12WindowDataset(rb, "train", T=1, train=False)],
+                             names=["real", "pseudo"])
+    assert ok2.manifest[REC]["sex"] == "mixed"
+    assert ok2.manifest_disagreements[REC]["sex"] == {"real": "mixed", "pseudo": "female"}
+
+    # empty/None on one side is NEVER a disagreement -- the negatives root's
+    # fly_sex is always {} (no per-fly identity); the non-empty side wins with
+    # no record at all
+    man["recordings"][REC]["sex"] = "mixed"
+    man["recordings"][REC]["fly_sex"] = {}
+    json.dump(man, open(p, "w"))
+    ok3 = ConcatWindowDataset([a, V12WindowDataset(rb, "train", T=1, train=False)],
+                             names=["real", "pseudo"])
+    assert ok3.manifest[REC]["fly_sex"] == a.manifest[REC]["fly_sex"] != {}
+    assert "fly_sex" not in ok3.manifest_disagreements.get(REC, {})
+    assert "sex" not in ok3.manifest_disagreements.get(REC, {}) and REC not in ok3.calib_alias
+
     # a field only ONE root defines is taken, not a conflict; an unread
     # bookkeeping field may differ freely
-    man["recordings"][REC].pop("sex")
+    man["recordings"][REC].pop("fly_sex")
     man["recordings"][REC]["checkpoint"] = "/fake/final"     # not read by any window path
     json.dump(man, open(p, "w"))
-    ok = ConcatWindowDataset([a, V12WindowDataset(rb, "train", T=1, train=False)])
-    assert ok.manifest[REC]["sex"] == "mixed" and ok.manifest[REC]["checkpoint"] == "/fake/final"
+    ok4 = ConcatWindowDataset([a, V12WindowDataset(rb, "train", T=1, train=False)],
+                             names=["real", "pseudo"])
+    assert ok4.manifest[REC]["fly_sex"] == a.manifest[REC]["fly_sex"]
+    assert ok4.manifest[REC]["checkpoint"] == "/fake/final"
     assert a.manifest[REC].get("checkpoint") is None         # the sub-dataset's dict is not mutated
+    assert ok4.manifest_disagreements.get(REC, {}) == {}
 
 
 def test_concat_requires_the_same_window_length_and_spacings(tmp_path):
