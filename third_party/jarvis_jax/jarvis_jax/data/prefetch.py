@@ -3,7 +3,7 @@ by device-putting the next batch while the current step runs."""
 import queue
 import threading
 
-import jax.numpy as jnp
+import numpy as np
 
 from jarvis_jax.sharding import shard_batch
 
@@ -17,7 +17,14 @@ def prefetch(batch_iter, mesh, depth=2):
     def worker():
         try:
             for batch in batch_iter:
-                dev = tuple(shard_batch(jnp.asarray(a), mesh) for a in batch)
+                # np.asarray, NOT jnp.asarray: a jnp array lands on the default
+                # device first and device_put then shards it DEVICE-TO-DEVICE,
+                # racing the running step's NCCL collectives -- 7 GPUs spin at
+                # 100 % waiting for the 8th (hangs at steps 500 and 700 on
+                # 2026-09-06; the P3b 7-device hang had the same signature).
+                # From host memory every shard is a plain host-to-device copy,
+                # which cannot deadlock with a collective.
+                dev = tuple(shard_batch(np.asarray(a), mesh) for a in batch)
                 q.put(("ok", dev))
         except Exception as e:  # surface to the consumer, don't die silently
             q.put(("err", e))
