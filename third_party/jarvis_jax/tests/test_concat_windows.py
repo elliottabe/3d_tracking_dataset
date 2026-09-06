@@ -3,15 +3,42 @@
 import json
 import os
 
+import cv2
 import numpy as np
 import pytest
-from mvq_fixtures import REC, make_v12_root
+from mvq_fixtures import CAMS, REC, make_v12_root
 
 
 def _root(base, **kw):
     """`make_v12_root` writes into `<base>/v12` and does not create `base`."""
     base.mkdir(parents=True, exist_ok=True)
     return make_v12_root(base, **kw)
+
+
+def _rename_calib_group(root, old, new):
+    """Rename a v12 root's calibration dir AND its manifest `calib_group` --
+    the pseudo/negatives exports name a recording's group after the
+    recording id while the human root uses letters (Calibration witness
+    test, 2026-09-06), so a NAME change with the SAME files is the normal
+    case, not a corruption."""
+    os.rename(os.path.join(root, "calibrations", old), os.path.join(root, "calibrations", new))
+    man = json.load(open(os.path.join(root, "manifest.json")))
+    man["recordings"][REC]["calib_group"] = new
+    json.dump(man, open(os.path.join(root, "manifest.json"), "w"))
+
+
+def _perturb_calib_matrix(root, group, cam, delta=5.0):
+    """Add `delta` to one camera's projection matrix (0,0) entry -- several
+    px of reprojection, the size of a genuine calibration disagreement, not
+    the ~1e-15 serialisation noise a re-export produces."""
+    path = os.path.join(root, "calibrations", group, f"{cam}.yaml")
+    fs = cv2.FileStorage(path, cv2.FILE_STORAGE_READ)
+    mat = fs.getNode("projectionMatrix").mat()
+    fs.release()
+    mat = mat.copy(); mat[0, 0] += delta
+    fs = cv2.FileStorage(path, cv2.FILE_STORAGE_WRITE)
+    fs.write("projectionMatrix", mat)
+    fs.release()
 
 
 def _pseudo(root, weight=0.3):
@@ -124,29 +151,73 @@ def test_concat_refuses_mismatched_keypoint_orders(tmp_path):
                              V12WindowDataset(rb, "train", T=1, train=False)])
 
 
-def test_concat_refuses_two_roots_that_disagree_about_a_calibration(tmp_path):
-    """Both roots carry the same recording name but different `calib_group`:
-    the same fly would be triangulated two ways, and `manifest[rec]` (read by
-    `_balanced_weights`) could only hold one of them."""
+def test_concat_accepts_a_renamed_but_content_identical_calib_group(tmp_path):
+    """Both roots carry the same recording, but the calibration group is named
+    DIFFERENTLY (the pseudo/negatives exports name it after the recording id,
+    the human root uses a letter) -- if the calibration CONTENT is the same,
+    that's a serialisation difference, not a real disagreement, and must be
+    accepted with an alias recorded, not raise (Calibration witness test,
+    2026-09-06)."""
     from jarvis_jax.data.concat_windows import ConcatWindowDataset
     from jarvis_jax.data.v12_windows import V12WindowDataset
     ra, rb = _root(tmp_path / "a"), _root(tmp_path / "b")
-    os.rename(os.path.join(rb, "calibrations", "A"), os.path.join(rb, "calibrations", "B"))
-    man = json.load(open(os.path.join(rb, "manifest.json")))
-    man["recordings"][REC]["calib_group"] = "B"
-    json.dump(man, open(os.path.join(rb, "manifest.json"), "w"))
+    _rename_calib_group(rb, "A", "B")     # same files, renamed dir + manifest field
     a = V12WindowDataset(ra, "train", T=1, train=False)
     b = V12WindowDataset(rb, "train", T=1, train=False)
     assert a.calib_group(0) == "A" and b.calib_group(0) == "B"
-    with pytest.raises(ValueError, match="calib_group"):
-        ConcatWindowDataset([a, b])
-    # the same recording with the SAME group in both roots is fine (a pseudo
-    # export of a recording the human root also labels is the normal case)
-    man["recordings"][REC]["calib_group"] = "A"
-    json.dump(man, open(os.path.join(rb, "manifest.json"), "w"))
-    os.rename(os.path.join(rb, "calibrations", "B"), os.path.join(rb, "calibrations", "A"))
-    ok = ConcatWindowDataset([a, V12WindowDataset(rb, "train", T=1, train=False)])
+    ok = ConcatWindowDataset([a, b], names=["real", "pseudo"])
+    assert ok.calib_alias[REC] == {"real": "A", "pseudo": "B"}
+    assert ok.calib_mismatches == []
+    # the merged manifest keeps the first-seen group name; each sub-dataset
+    # still triangulates with its OWN calibration dir (never merged)
     assert ok.manifest[REC]["calib_group"] == "A"
+    assert ok.calib_group(0) == "A" and ok.calib_group(len(a)) == "B"
+    # the same recording with the SAME group in both roots is the normal case
+    # too, and needs no alias at all
+    _rename_calib_group(rb, "B", "A")
+    ok2 = ConcatWindowDataset([a, V12WindowDataset(rb, "train", T=1, train=False)])
+    assert ok2.manifest[REC]["calib_group"] == "A" and ok2.calib_alias == {}
+
+
+def test_concat_refuses_two_roots_whose_calibration_content_actually_differs(tmp_path):
+    """A renamed group whose matrices genuinely differ (not a serialisation
+    difference) must still raise BY DEFAULT -- which calibration is right is
+    not this class's call to make silently."""
+    from jarvis_jax.data.concat_windows import ConcatWindowDataset
+    from jarvis_jax.data.v12_windows import V12WindowDataset
+    ra, rb = _root(tmp_path / "a"), _root(tmp_path / "b")
+    _rename_calib_group(rb, "A", "B")
+    _perturb_calib_matrix(rb, "B", CAMS[0], delta=5.0)
+    a = V12WindowDataset(ra, "train", T=1, train=False)
+    b = V12WindowDataset(rb, "train", T=1, train=False)
+    with pytest.raises(ValueError, match="calibration CONTENT differs") as e:
+        ConcatWindowDataset([a, b], names=["real", "pseudo"])
+    msg = str(e.value)
+    assert REC in msg and "real" in msg and "pseudo" in msg and "max |diff|" in msg
+
+
+def test_concat_allow_calib_mismatch_override_warns_and_records(tmp_path, capsys):
+    """`allow_calib_mismatch=True` proceeds instead of raising: prints one
+    WARNING per recording and records the disagreement in
+    `calib_mismatches` -- each sub-dataset still uses its OWN calibration
+    per sample (never merged)."""
+    from jarvis_jax.data.concat_windows import ConcatWindowDataset
+    from jarvis_jax.data.v12_windows import V12WindowDataset
+    ra, rb = _root(tmp_path / "a"), _root(tmp_path / "b")
+    _rename_calib_group(rb, "A", "B")
+    _perturb_calib_matrix(rb, "B", CAMS[0], delta=5.0)
+    a = V12WindowDataset(ra, "train", T=1, train=False)
+    b = V12WindowDataset(rb, "train", T=1, train=False)
+    ok = ConcatWindowDataset([a, b], names=["real", "pseudo"], allow_calib_mismatch=True)
+    out = capsys.readouterr().out
+    assert out.count("WARNING") == 1 and REC in out and "calibration CONTENT differs" in out
+    assert len(ok.calib_mismatches) == 1
+    m = ok.calib_mismatches[0]
+    assert m["recording"] == REC and m["max_diff"] > 1.0
+    assert {r["name"] for r in m["roots"]} == {"real", "pseudo"}
+    assert {r["calib_group"] for r in m["roots"]} == {"A", "B"}
+    # each root still uses its OWN calibration for its own samples
+    assert ok.calib_group(0) == "A" and ok.calib_group(len(a)) == "B"
 
 
 def test_concat_refuses_a_conflicting_manifest_field(tmp_path):

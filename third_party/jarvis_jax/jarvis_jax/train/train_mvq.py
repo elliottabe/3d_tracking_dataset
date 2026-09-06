@@ -115,6 +115,17 @@ class MVQTrainConfig:
     # AND wing visibility weight x2). Built BY NAME (`losses_mvq.wing_kp_weight`),
     # never by index -- see CLAUDE.md's keypoint-order history.
     wing_kp_mult: float = 1.0
+    # Calibration witness test (2026-09-06): the pseudo/negatives/single-fly
+    # exports name a recording's `calib_group` after the recording id, the
+    # human root uses letters, so a shared recording's group NAME differs
+    # across roots even when the calibration CONTENT is identical --
+    # `ConcatWindowDataset` checks content, not name, and only raises on a
+    # genuine mismatch. False (the safe default): any recording whose two
+    # roots' calibrations actually differ in content fails fast. True:
+    # proceed, with each root using its OWN calibration per sample, and print
+    # + record (`mvq_run.json["train_data"]["calib_mismatches"]`) every
+    # recording it let through.
+    allow_calib_mismatch: bool = False
 
 
 _MEAN = jnp.asarray(IMAGENET_MEAN); _STD = jnp.asarray(IMAGENET_STD)
@@ -849,6 +860,11 @@ def run_training(root, *, out_dir, ckpt_dir, mcfg: MVQConfig, tcfg: MVQTrainConf
     # would move the very number the run is judged by.
     extra = [(tcfg.pseudo_root, "pseudo", copy_paste), (tcfg.singlefly_root, "singlefly", copy_paste),
              (tcfg.negatives_root, _NEGATIVES_NAME, None)]   # a negative has no host to paste onto
+    # Calibration witness test (2026-09-06): recorded once here (identical
+    # across T -- same roots, same calibration files) and written into
+    # `mvq_run.json["train_data"]` below so a run says which recordings it let
+    # through under `allow_calib_mismatch`.
+    calib_mismatches, calib_alias = [], {}
     for T in list(train_sets):
         parts, part_names = [train_sets[T]], ["real"]
         for path, nm, cp in extra:
@@ -870,7 +886,13 @@ def run_training(root, *, out_dir, ckpt_dir, mcfg: MVQConfig, tcfg: MVQTrainConf
             parts.append(d)
             part_names.append(nm)
         if len(parts) > 1:
-            train_sets[T] = ConcatWindowDataset(parts, names=part_names)
+            train_sets[T] = ConcatWindowDataset(parts, names=part_names,
+                                                allow_calib_mismatch=tcfg.allow_calib_mismatch)
+            for m in train_sets[T].calib_mismatches:
+                if m not in calib_mismatches:
+                    calib_mismatches.append(m)
+            for rec, alias in train_sets[T].calib_alias.items():
+                calib_alias.setdefault(rec, alias)
     val_ds = V12WindowDataset(root, "val", T=1, train=False, sex_overrides=ov)
     names = train_sets[tcfg.window_lengths[0]].keypoint_names
     lr_swap = build_lr_swap(names); part_of_k, _ = build_part_index(names)
@@ -898,13 +920,14 @@ def run_training(root, *, out_dir, ckpt_dir, mcfg: MVQConfig, tcfg: MVQTrainConf
     # numbers by the final write at the end of this function.
     # (a share check writes nothing: it is a 200-step probe, and leaving its
     # `total_steps` behind in a real run dir would misdescribe the run.)
+    train_data = {"calib_mismatches": calib_mismatches, "calib_alias": calib_alias}
     if not n_share:
         run_dir = os.path.dirname(os.path.abspath(out_dir))
         os.makedirs(run_dir, exist_ok=True)
         with open(os.path.join(run_dir, "mvq_run.json"), "w") as f:
             json.dump({"model": dataclasses.asdict(mcfg), "train": dataclasses.asdict(tcfg),
                       "loss": dataclasses.asdict(weights), "aug": dataclasses.asdict(aug),
-                      "val": None, "keypoint_names": names}, f, indent=1)
+                      "val": None, "keypoint_names": names, "train_data": train_data}, f, indent=1)
 
     model = MVQModel(mcfg, rngs=nnx.Rngs(tcfg.seed))
     if tcfg.pretrained:
@@ -1080,7 +1103,7 @@ def run_training(root, *, out_dir, ckpt_dir, mcfg: MVQConfig, tcfg: MVQTrainConf
     with open(os.path.join(out_dir, "mvq_run.json"), "w") as f:
         json.dump({"model": dataclasses.asdict(mcfg), "train": dataclasses.asdict(tcfg),
                   "loss": dataclasses.asdict(weights), "aug": dataclasses.asdict(aug), "val": val,
-                  "keypoint_names": names}, f, indent=1)
+                  "keypoint_names": names, "train_data": train_data}, f, indent=1)
     return {"final_loss": loss, "val": val, "steps": tcfg.total_steps, "resumed_from": start,
            "ema_updates": ema_updates}
 

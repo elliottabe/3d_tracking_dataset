@@ -23,10 +23,31 @@ What it refuses, rather than silently mixing:
     loader or sampler reads (`_MERGE_CHECKED`) -- the merge is per field, so a
     field only one root defines is simply taken, but a real disagreement would
     silently change what a window means depending on merge order.
+
+`calib_group` is checked by CONTENT, not name (Calibration witness test,
+2026-09-06): the pseudo/negatives exports name a recording's calibration
+group after the recording id, while the human root uses letters, so the same
+recording legitimately carries two different `calib_group` NAMES across
+roots. A name mismatch loads both `<root>/calibrations/<group>` dirs via
+`ReprojectionTool` and compares `camera_matrices` BY CAMERA NAME
+(`np.allclose(atol=1e-6)`): identical content (a serialisation difference,
+e.g. `A` vs the recording id both meaning the same physical calibration) is
+accepted silently and recorded in `calib_alias`; genuinely different content
+raises ValueError naming the recording, both roots/groups and the max
+|diff| -- UNLESS `allow_calib_mismatch=True`, which prints one WARNING per
+recording and records it in `calib_mismatches` instead of raising. Either
+way each sub-dataset keeps triangulating its own samples with its OWN
+calibration dir (`V12WindowDataset.calib_group`/`_rt`); this class never
+merges calibration files, only compares them.
 """
 from __future__ import annotations
 
 import bisect
+import os
+
+import numpy as np
+
+from jarvis_jax.geometry.reprojection_tool import ReprojectionTool
 
 # manifest[rec] fields some loader/sampler path READS, and its reader. A
 # disagreement between two roots about one of these is a conflict, not a merge:
@@ -35,6 +56,9 @@ import bisect
 # here (bookkeeping like `split`, `sex_source`, `checkpoint`) are not read by
 # any window/sampler code path and merge last-one-wins.
 _MERGE_CHECKED = {
+    # Special-cased in __init__ (compared by CONTENT, not name) -- see module
+    # docstring "Calibration witness test". Still listed here so it reads as a
+    # checked field; the generic name-equality branch never fires for it.
     "calib_group": "V12WindowDataset.calib_group/_rt -- which calibration triangulates it",
     "sex": "v5_3d._resolve_sex fallback, and unlabelled_sex's 'mixed' branch",
     "fly_sex": "v5_3d._resolve_sex per-fly fallback, and unlabelled_sex",
@@ -46,8 +70,30 @@ _MERGE_CHECKED = {
 }
 
 
+def _calib_matrices_by_name(calib_dir):
+    """{camera name: (4,3) float64 affine matrix} for one `calibrations/<group>`
+    dir, keyed the way `ReprojectionTool` itself pairs them (`.cameras` and
+    `.camera_matrices` are built from the same iteration, so zipping them is
+    safe) -- comparing BY NAME is what makes this correct across two roots
+    whose camera files needn't glob-sort the same way."""
+    rt = ReprojectionTool(calib_dir)
+    return {name: np.asarray(mat, np.float64) for name, mat in zip(rt.cameras, rt.camera_matrices)}
+
+
+def _max_calib_diff(dir_a, dir_b):
+    """Max |diff| between two calibration dirs' camera matrices, matched BY
+    NAME. Raises ValueError (unconditionally -- this is a structural problem,
+    not a content-drift one `allow_calib_mismatch` is meant to paper over) if
+    the two dirs do not calibrate the same camera set."""
+    mats_a, mats_b = _calib_matrices_by_name(dir_a), _calib_matrices_by_name(dir_b)
+    if set(mats_a) != set(mats_b):
+        raise ValueError(f"calibration dirs {dir_a!r} and {dir_b!r} calibrate different camera "
+                         f"sets: {sorted(mats_a)} vs {sorted(mats_b)}")
+    return max(float(np.max(np.abs(mats_a[name] - mats_b[name]))) for name in mats_a)
+
+
 class ConcatWindowDataset:
-    def __init__(self, datasets, names=None):
+    def __init__(self, datasets, names=None, allow_calib_mismatch=False):
         self.datasets = list(datasets)
         if not self.datasets:
             raise ValueError("ConcatWindowDataset needs at least one dataset")
@@ -74,6 +120,17 @@ class ConcatWindowDataset:
                                  f"the two roots would contribute windows of different spacings")
         self.keypoint_names = list(first.keypoint_names)
         self.T = int(first.T)
+        self.allow_calib_mismatch = bool(allow_calib_mismatch)
+        # rec -> {root name: that root's OWN calib_group name}, populated only
+        # when two roots named the same recording's calibration DIFFERENTLY but
+        # the calibration CONTENT matched (a serialisation difference, e.g. a
+        # letter group vs the recording-id group the pseudo exports use) --
+        # "for logging"; nothing downstream reads it.
+        self.calib_alias = {}
+        # [{"recording", "roots": [{"name","root","calib_group"}, ...], "max_diff"}]
+        # one entry per recording, only when `allow_calib_mismatch=True` let a
+        # genuine content disagreement through instead of raising.
+        self.calib_mismatches = []
         # Merged per-recording manifest, PER FIELD (`_balanced_weights` reads
         # manifest[rec]["behavior"], `_resolve_sex` reads sex/fly_sex, ...). A
         # recording two roots describe differently in any field a loader reads is
@@ -81,11 +138,46 @@ class ConcatWindowDataset:
         # defines is simply taken.
         self.manifest = {}
         owner = {}                      # rec -> {field: (root name, root path)}
+        _calib_warned = set()           # rec -- so a 3rd+ root shares ONE warning/entry
         for d, nm in zip(self.datasets, self.names):
             for rec, meta in d.manifest.items():
                 merged = self.manifest.setdefault(rec, {})
                 who = owner.setdefault(rec, {})
                 for field, value in meta.items():
+                    if field == "calib_group" and "calib_group" in merged and merged[field] != value:
+                        # NAMES differ -- the generic equality check above would
+                        # raise here; compare CONTENT instead (module docstring).
+                        prev_name, prev_root = who["calib_group"]
+                        prev_group = merged["calib_group"]
+                        prev_dir = os.path.join(prev_root, "calibrations", str(prev_group))
+                        this_dir = os.path.join(d.root, "calibrations", str(value))
+                        max_diff = _max_calib_diff(prev_dir, this_dir)
+                        if max_diff <= 1e-6:
+                            alias = self.calib_alias.setdefault(rec, {})
+                            alias[prev_name] = prev_group
+                            alias[nm] = value
+                        elif rec not in _calib_warned:
+                            _calib_warned.add(rec)
+                            msg = (f"recording {rec!r}: manifest field 'calib_group' is "
+                                  f"{prev_group!r} in root {prev_name} ({prev_root}) and {value!r} "
+                                  f"in root {nm} ({d.root}). The calibration CONTENT differs by max "
+                                  f"|diff| {max_diff:.6g} (not a serialisation rounding difference) "
+                                  f"-- which one is right is undetermined here, so this refuses to "
+                                  f"silently pick one. Pass allow_calib_mismatch=True to proceed "
+                                  f"with each root using its OWN calibration per sample.")
+                            if not self.allow_calib_mismatch:
+                                raise ValueError(msg)
+                            print(f"WARNING: {msg}", flush=True)
+                            self.calib_mismatches.append({
+                                "recording": rec,
+                                "roots": [{"name": prev_name, "root": prev_root,
+                                          "calib_group": prev_group},
+                                         {"name": nm, "root": d.root, "calib_group": value}],
+                                "max_diff": max_diff,
+                            })
+                        # canonical merged value/owner stays the first-seen one --
+                        # every later root is compared against the SAME baseline.
+                        continue
                     if field in _MERGE_CHECKED and field in merged and merged[field] != value:
                         pn, pr = who[field]
                         raise ValueError(

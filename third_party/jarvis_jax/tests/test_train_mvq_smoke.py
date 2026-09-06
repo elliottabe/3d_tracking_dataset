@@ -674,7 +674,8 @@ def test_t2_run_trains_and_mixes_roots(tmp_path, capsys):
                           log_every=1, num_workers=1, pretrained=False, window_lengths=(1, 2),
                           pair_deltas=(1, 4), pseudo_root=pseudo, pseudo_weight=0.3,
                           singlefly_root=single, negatives_root=negs, negatives_frac=0.05,
-                          wing_kp_mult=2.0, female_host_target=0.5, smoke=True)
+                          wing_kp_mult=2.0, female_host_target=0.5, smoke=True,
+                          allow_calib_mismatch=True)
     run = tmp_path / "run"
     res = run_training(real, out_dir=str(run / "final"), ckpt_dir=str(run / "ckpt"), mcfg=_v2_mcfg(),
                        tcfg=tcfg, aug=MVAugParams(enabled=False), weights=LossWeights(persist=0.5))
@@ -684,6 +685,11 @@ def test_t2_run_trains_and_mixes_roots(tmp_path, capsys):
     assert meta["train"]["singlefly_root"] == single and meta["train"]["negatives_root"] == negs
     assert meta["train"]["negatives_frac"] == 0.05 and meta["train"]["wing_kp_mult"] == 2.0
     assert meta["val"]["unprompted"]["mpjpe3d_mm"] == meta["val"]["unprompted"]["mpjpe3d_mm"]   # not NaN
+    # allow_calib_mismatch reaches the run.json config, and on this fixture (every
+    # root names the ONE recording's calib_group identically -- no witness-test
+    # aliasing/mismatch scenario built here) it records an empty list, not absence.
+    assert meta["train"]["allow_calib_mismatch"] is True
+    assert meta["train_data"]["calib_mismatches"] == []
     # the OBJECTIVE is recorded too, not just the schedule: a run.json that cannot
     # say what `persist` or `other_fly_repulsion` were is not a reproducible record
     # (Task 6/7 read this block for the scorecard header).

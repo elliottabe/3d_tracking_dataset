@@ -68,6 +68,17 @@ negatives_frac: 0.05      # §3.5: 5 % of the SAMPLED MASS (pinned, not proporti
                           # the existence target is all an empty window carries.
 wing_kp_mult: 2.0         # §4: wing keypoint AND wing visibility weight x2, applied
                           # BY NAME (losses_mvq.wing_kp_weight)
+allow_calib_mismatch: true  # 2025_10_20_13_20_04 and 2026_04_02_12_11_50 share NAMES between
+                          # this pseudo/negatives root and the real root (calib_group letter
+                          # vs recording id) but IDENTICAL calibration content (max |diff|
+                          # 1e-15, a serialisation difference) -- ConcatWindowDataset accepts
+                          # those silently either way. 2026_04_02_15_25_51 and
+                          # 2026_04_02_17_28_34 genuinely DIFFER (~3-4 px reprojection) between
+                          # the two roots; which one is right is under investigation --
+                          # see notes "Calibration witness test (2026-09-06)". True here lets
+                          # the run proceed with each root using its own calibration per
+                          # sample, and mvq_run.json["train_data"]["calib_mismatches"] records
+                          # exactly which recordings it let through.
 # loss weights -- mvq.yaml's, with the three v2/P3b changes called out
 loss:
   reproj: 1.0
