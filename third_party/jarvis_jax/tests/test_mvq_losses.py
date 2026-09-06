@@ -81,6 +81,28 @@ def test_repulsion_fires_only_near_other_fly_same_part():
     assert float(m_same["rep"]) > 0.0 and float(m_diff["rep"]) == 0.0
 
 
+def test_repulsion_term_respects_sample_weight():
+    """Term 7 (`rep`) must fold `sample_weight` into its per-pair reduction the
+    same way `_mmean` does: a zero-weighted sample contributes nothing, and an
+    all-ones weight (explicit or absent) leaves it unchanged."""
+    from jarvis_jax.train.losses_mvq import mvq_loss, LossWeights
+    part_of_k = np.arange(5, dtype=np.int32)
+    out, batch = _perfect_batch(B=2)
+    # inject the same-part collision (slot 1 predicts fly-1's keypoint 1) on
+    # batch element 0 ONLY; element 1 stays perfect (rep == 0 there).
+    o = dict(out)
+    o["xyz"] = out["xyz"].at[0, 1, :, 1].set(batch["kp3d_local"][0, 1, :, 1])
+    o["uv"] = out["uv"].at[0, 1, :, :, 1].set(batch["kp2d"][0, 1, :, :, 1])
+    _, m_full = mvq_loss(o, batch, LossWeights(), part_of_k)
+    assert float(m_full["rep"]) > 0.0
+    b_ones = dict(batch); b_ones["sample_weight"] = jnp.ones((2,), jnp.float32)
+    _, m_ones = mvq_loss(o, b_ones, LossWeights(), part_of_k)
+    assert abs(float(m_ones["rep"]) - float(m_full["rep"])) < 1e-6      # all-ones: unchanged
+    b_zero = dict(batch); b_zero["sample_weight"] = jnp.asarray([0.0, 1.0], jnp.float32)
+    _, m_zero = mvq_loss(o, b_zero, LossWeights(), part_of_k)
+    assert float(m_zero["rep"]) < 1e-6                                  # the offending sample is weighted out
+
+
 def test_confidence_term_prefers_low_c_on_bad_points():
     from jarvis_jax.train.losses_mvq import mvq_loss, LossWeights
     out, batch = _perfect_batch()
@@ -298,9 +320,16 @@ def test_other_fly_repulsion_needs_two_labelled_flies():
 
 
 def test_new_batch_keys_absent_reproduces_todays_loss_exactly():
-    """Regression: a batch with neither `sample_weight` nor `is_negative` (what
-    today's loader still produces) and default LossWeights (persist=0, no
-    kp_weight) must give the BYTE-IDENTICAL total/metrics as before this change."""
+    """Regression, checked as an ANALYTIC identity rather than a diff against a
+    stored baseline run: with `sample_weight`/`is_negative` absent from the
+    batch (what today's loader still produces) and T=1 (today's loader never
+    emits T=2 pairs), every new code path is provably inert -- `sw` defaults to
+    1 so `_mmean`'s extra factor is 1, `kp_weight` defaults to None so no term
+    is reweighted, and `persist`'s `T > 1` guard never fires regardless of its
+    now-nonzero default weight -- so the metrics must equal exactly what the
+    pre-this-change formulas gave, i.e. the same bounds
+    `test_loss_near_zero_at_ground_truth_and_metrics` asserts, plus persist==0
+    and n_negative==0."""
     from jarvis_jax.train.losses_mvq import mvq_loss, LossWeights
     pk = np.arange(5, dtype=np.int32)
     out, batch = _perfect_batch()
@@ -364,17 +393,55 @@ def test_identity_persistence_penalises_a_slot_that_teleports():
 
 
 def test_assignment_uses_frame_0_only():
-    """With T=2 the two flies swap sides between frames; the slot a fly gets
-    must be decided by frame 0, not by a centroid averaged over both."""
+    """The slot a fly gets must be decided by frame 0 only, never by a
+    centroid averaged over the whole T=2 window.
+
+    Two flies alone can't discriminate this: `assign_slots`' host-first rule
+    (fly index 0 always processed first) makes the assignment invariant to
+    `dist` whenever there is only one non-host fly (verified directly against
+    `matching.assign_slots` -- same-sex F=2 pairs give an identical slot for
+    dist=[10,2], [2,10] AND [1e6,1e-6]). Discriminating requires a HOST plus
+    TWO same-sex flies contesting one typed slot, so the order between them
+    (decided by `dist`) actually matters:
+
+    fly0 = host (male, far away, irrelevant to the contest); fly1, fly2 =
+    both female. Frame 0: fly1 sits at x=5 (nearer), fly2 at x=50 -- the
+    frame-0-only centroid says fly1 < fly2, so fly1 wins the female slot (1)
+    and fly2 falls to OTHER (3). Frame 1: they swap hard (fly1 -> x=200, fly2
+    -> x=5) -- the ALL-FRAME average would say the OPPOSITE (fly1's avg 102.5
+    > fly2's avg 27.5), handing fly2 the female slot instead.
+
+    `out["xyz"]` is built for the FRAME-0-correct assignment (fly1's own GT
+    in slot 1, fly2's own GT in slot 3). If the code reverts to the all-frame
+    centroid, slots 1 and 3 gather the WRONG fly's ground truth against each
+    other and `l3d` explodes; `exist_acc` can't tell the two assignments
+    apart (both occupy the same slot SET, {1,2,3}), so this checks l3d."""
     from jarvis_jax.train.losses_mvq import LossWeights, mvq_loss
-    pk = np.arange(5, dtype=np.int32)
-    out, batch = _perfect_batch(B=1, T=2)
-    b = dict(batch)
-    x = np.asarray(batch["kp3d_local"]).copy()
-    x[0, 0, 1] += 80.0; x[0, 1, 1] -= 80.0                # frame 1 swaps who is nearer the origin
-    b["kp3d_local"] = jnp.asarray(x)
-    _, m = mvq_loss(out, b, LossWeights(), pk)
-    assert float(m["exist_acc"]) == 1.0                   # slots unchanged: female 1, male 2
+    B, I, T, C, K = 1, 4, 2, 3, 1
+    M = np.stack([np.array([[8.0, 0.1 * c, 0.0], [0.0, -8.0, 0.2 * c]]) for c in range(C)]).astype(np.float32)
+    M = np.broadcast_to(M, (B, C, 2, 3)).copy()
+    tl = np.broadcast_to(np.array([[224.0, 224.0]] * C, np.float32), (B, T, C, 2)).copy()
+    X = np.zeros((B, 3, T, K, 3), np.float32)
+    X[:, 0, :, 0] = [1000.0, 1000.0, 0.0]                                  # host: doesn't move, far away
+    X[:, 1, 0, 0] = [5.0, 0.0, 0.0]; X[:, 1, 1, 0] = [200.0, 0.0, 0.0]     # fly1: near at frame 0, far at frame 1
+    X[:, 2, 0, 0] = [50.0, 0.0, 0.0]; X[:, 2, 1, 0] = [5.0, 0.0, 0.0]      # fly2: far at frame 0, near at frame 1
+    batch = {"M": jnp.asarray(M), "t_local": jnp.asarray(tl), "kp3d_local": jnp.asarray(X),
+             "has3d": jnp.ones((B, 3, T, K), bool), "kp2d": jnp.zeros((B, 3, T, C, K, 2), jnp.float32),
+             "vis2d": jnp.ones((B, 3, T, C, K), bool), "fly_valid": jnp.ones((B, 3), bool),
+             "px_scale": jnp.full((B,), 8.0, jnp.float32), "cam_valid": jnp.ones((B, T, C), bool),
+             "prompt_on": jnp.zeros((B,), bool), "fly_sex": jnp.asarray([[1, 0, 0]], jnp.int8),
+             "unlabelled_sex": jnp.full((B,), -1, jnp.int8)}
+    # frame-0-correct assignment: host(male) -> slot 2, fly1 (nearer at frame 0) -> slot 1, fly2 -> slot 3
+    xyz = jnp.zeros((B, I, T, K, 3), jnp.float32)
+    xyz = xyz.at[:, 2].set(jnp.asarray(X[:, 0])).at[:, 1].set(jnp.asarray(X[:, 1])).at[:, 3].set(jnp.asarray(X[:, 2]))
+    out = {"xyz": xyz, "uv": jnp.zeros((B, I, T, C, K, 2), jnp.float32),
+           "conf_logit": jnp.full((B, I, T, K), 6.0, jnp.float32),
+           "vis_logit": jnp.full((B, I, T, C, K), 6.0, jnp.float32),
+           "exist_logit": jnp.asarray([[-6.0, 6.0, 6.0, 6.0]], jnp.float32),
+           "sex_logit": jnp.zeros((B, I), jnp.float32), "aux_pass1": None, "aux_layers": []}
+    pk = np.arange(K, dtype=np.int32)
+    _, m = mvq_loss(out, batch, LossWeights(), pk)
+    assert float(m["l3d"]) < 1e-3                          # frame 0 decided the slot -- right fly in each slot
 
 
 def test_wing_keypoints_carry_double_weight():

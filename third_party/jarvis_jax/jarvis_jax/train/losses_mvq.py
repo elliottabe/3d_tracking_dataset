@@ -171,7 +171,10 @@ def mvq_loss(out, batch, w: LossWeights, part_of_k, kp_weight=None):
             for o in range(F):
                 if o == f:
                     continue
-                ok = fv_eff[:, f] & fv_eff[:, o]
+                # per-sample weight folded into the pair mask, same as `_mmean`: the
+                # numerator is weighted by `ok` and the denominator by its weighted
+                # count, so a zero-weight sample contributes nothing to `rep`.
+                ok = (fv_eff[:, f] & fv_eff[:, o]).astype(jnp.float32) * sw
                 d2 = jnp.linalg.norm(pf["uv"][:, f][..., :, None, :] - batch["kp2d"][:, o][..., None, :, :], axis=-1)  # (B,T,C,K,K')
                 h2 = jax.nn.relu(w.rep_px - d2) * same_part * batch["vis2d"][:, o][..., None, :]
                 d3 = jnp.linalg.norm(pf["xyz"][:, f][..., :, None, :] - batch["kp3d_local"][:, o][..., None, :, :], axis=-1)  # (B,T,K,K')
@@ -224,6 +227,8 @@ def mvq_loss(out, batch, w: LossWeights, part_of_k, kp_weight=None):
         r1, l1, u1, _, _ = _geo_terms(g(out["aux_pass1"]), batch, w, fv_eff, sw, kp_weight)
         total = total + w.pass1 * (w.reproj * r1 + w.l3d * l1 + w.uv2d * u1)
     for a in out.get("aux_layers", []):                 # intermediate 3D-only readouts: terms 1-2
+        # (intentionally no `kp_weight` here -- these are coarse intermediate-layer
+        # readouts, not the wing-sensitive final head, so they stay unweighted by kp)
         xyz_f = _gather_inst(a["xyz"], assign)
         uv_re = _reproject(xyz_f, batch["M"], batch["t_local"])
         r_ = _mmean(_huber(uv_re - batch["kp2d"], w.huber_px).mean(-1), batch["vis2d"] & fv_eff[:, :, None, None, None], sw)
