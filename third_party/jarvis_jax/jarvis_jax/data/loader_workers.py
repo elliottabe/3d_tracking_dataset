@@ -38,6 +38,7 @@ import contextlib
 import dataclasses
 import multiprocessing
 import os
+import threading
 
 
 # --------------------------------------------------------------------- specs
@@ -242,20 +243,57 @@ class ProcessSampleLoader:
                 _get_item, [(key, int(epoch), i) for i in nxt], chunksize=1)))
             return True
 
-        for _ in range(self.inflight):
-            if not submit():
-                break
-        while pending:
-            bidx, res = pending.popleft()
-            samples = res.get()
-            submit()
-            yield bidx, samples
+        try:
+            for _ in range(self.inflight):
+                if not submit():
+                    break
+            while pending:
+                bidx, res = pending.popleft()
+                samples = res.get()
+                submit()
+                yield bidx, samples
+        finally:
+            # Abandoned mid-epoch (the consumer stopped, or `close()` is coming):
+            # drop the parent's references to the in-flight results so their
+            # batches -- inflight x batch_size x ~8 MB of uint8 crops -- are freed
+            # as soon as the workers hand them over, instead of being held by a
+            # generator frame nobody will resume.
+            pending.clear()
 
-    def close(self):
-        if not self._closed:
-            self._closed = True
-            self._pool.terminate()
-            self._pool.join()
+    def close(self, timeout=30.0):
+        """Shut the pool down, and NEVER block the caller indefinitely.
+
+        `run_training` calls this after the last training step, so a hang here
+        would strand a finished run just before its final eval and checkpoint.
+        `Pool.terminate()` joins the pool's own handler threads while workers may
+        still be pushing multi-MB results through their pipes; the benchmark
+        driver was seen sitting in shutdown for 30 minutes after its last timed
+        batch (root cause not established -- a 4-worker fixture-scale repro does
+        NOT reproduce it, and a 24-worker close on the same real data in the same
+        process DID return). Rather than rely on knowing why, bound it: ask
+        politely, then force, then give up. Pool workers are daemonic, so any
+        survivor dies with the parent process.
+
+        Returns True if the workers were reaped, False if they were abandoned.
+        """
+        if self._closed:
+            return True
+        self._closed = True
+        for stage, stop in (("close", self._pool.close), ("terminate", self._pool.terminate)):
+            try:
+                stop()
+            except Exception:
+                pass
+            joiner = threading.Thread(target=self._pool.join, daemon=True)
+            joiner.start()
+            joiner.join(timeout)
+            if not joiner.is_alive():
+                return True
+            print(f"[loader] pool {stage}() did not finish in {timeout:.0f}s; "
+                  f"{'forcing' if stage == 'close' else 'abandoning'} "
+                  f"{self.num_workers} worker processes (they are daemonic and exit "
+                  f"with this process)", flush=True)
+        return False
 
     def __enter__(self):
         return self

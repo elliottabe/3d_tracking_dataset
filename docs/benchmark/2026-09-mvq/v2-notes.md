@@ -860,6 +860,19 @@ died inside `Thread.join` (`TypeError: 'NoneType' object is not callable`).
 abandonment; two tests count `/proc/self/status` Threads across 20 epochs and
 across 10 explicitly closed mid-epoch generators.
 
+**Unexplained shutdown hang (open).** The benchmark driver printed all three
+timings and then sat in shutdown until its 40-minute `timeout` killed it. The
+last thing it does is `ProcessSampleLoader.close()` on the 32-worker pool with
+~2 batches still in flight. Root cause NOT established: a 4-worker
+fixture-scale repro does not reproduce it, and the 24-worker `close()` earlier
+in the very same process, on the same real data, returned fine. Since
+`run_training` calls the same `close()` after the last training step -- ahead of
+the final checkpoint and eval -- `close()` is now bounded rather than trusted:
+`Pool.close()` + a 30 s join, then `terminate()` + a 30 s join, then give up and
+return False (workers are daemonic and die with the parent). It prints which
+stage it had to force. Watch for that line at the end of a run; if it appears,
+the hang is real and worth chasing properly.
+
 **Regenerate.** The loader table: build the four-root T=2 concat exactly as
 `run_training` does (the `pseudo_root`/`singlefly_root`/`negatives_root` of
 `configs/train/mvq_v2.yaml`, `train=True`, `copy_paste_p=0.8`,

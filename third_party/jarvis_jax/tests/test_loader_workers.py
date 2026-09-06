@@ -170,3 +170,22 @@ def test_an_abandoned_epoch_releases_its_pool_without_waiting_for_gc(tmp_path):
     for g in gens:
         g.close()                       # explicit close, NOT `del` + gc.collect()
     assert _settle(base) <= base, f"threads stuck at {_threads()} (base {base}) after close()"
+
+
+def test_close_returns_promptly_with_batches_still_in_flight(tmp_path):
+    """`run_training` closes the pool after the last training step, with up to
+    `inflight` batches per stream still being produced. A shutdown that blocks
+    there would strand a finished 40 000-step run just before its final eval and
+    checkpoint, so `close()` is bounded by construction: it must return, and it
+    must report that it reaped the workers."""
+    root = str(_root(tmp_path / "a"))
+    ds = V12WindowDataset(root, "train", T=1, train=False, seed=0)
+    n = len(ds)
+    pool = ProcessSampleLoader({None: ds.worker_spec()}, 2, inflight=3)
+    it = pool.map_batches([[i % n for i in range(b * 2, b * 2 + 2)] for b in range(12)], epoch=0)
+    next(it)                                     # one batch out, the rest in flight
+    t0 = time.time()
+    reaped = pool.close(timeout=30.0)
+    assert reaped, "close() had to abandon its workers"
+    assert time.time() - t0 < 30, "close() blocked on the in-flight batches"
+    assert pool.close() is True                  # idempotent
