@@ -22,6 +22,186 @@ The two assays differ only in:
 
 ---
 
+## Install and run on a new cluster
+
+Everything below was verified against the working `3d_tracking` env on Hyak,
+2026-09-06. For the full list of what is Hyak-specific and needs adapting
+(Slurm partitions, absolute `/gscratch` paths, GPU sizing, …), see
+`docs/portability-checklist.md` — this section only covers what to install
+and how.
+
+### 1. Clone and submodules
+
+```bash
+git clone --recurse-submodules <repository-url>
+cd 3d_tracking_dataset
+# if already cloned without --recurse-submodules:
+git submodule update --init --recursive
+```
+
+This checks out **two** submodules (`.gitmodules`): `stac-mjx` (STAC IK
+solver) and `third_party/JARVIS-HybridNet` (loaded only so `ProjectManager`
+can hand a cfg to `get_repro_tool`; your session's own `calibration/` dir is
+still the actual geometry source). `git submodule status` should show both
+initialized (a leading `-` means uninitialized, `+` means checked out at a
+commit different from what's pinned).
+
+### 2. Sibling body-model clone
+
+The fly body model is **not** in this repo (`models/` is intentionally
+empty). Clone it next to this checkout:
+
+```bash
+cd ..
+git clone -b elliottabe/3d_tracking_paper <fruitfly_body_models-url> fruitfly_body_models
+cd 3d_tracking_dataset
+```
+
+`paths.body_model_dir` (in both `configs/paths/<cluster>.yaml` and
+`third_party/jarvis_jax/configs/paths/<cluster>.yaml`) must point at it —
+the existing `paths=hyak` value is `${paths.project_dir}/fruitfly_body_models/`,
+i.e. a sibling of this repo, not a path inside it.
+
+If you will use `anatomy=v2_3`, also build its derived model once per fresh
+checkout (it's gitignored in `fruitfly_body_models`, so this doesn't persist
+across clones):
+
+```bash
+python scripts/models/build_v2_3_ik_model.py
+```
+Skipping this makes `anatomy=v2_3` die at `ParseXML` — it is not optional for
+that anatomy.
+
+### 3. Conda environment
+
+```bash
+conda env create -f environment.yml   # python, numpy, mesa/glfw/egl, ffmpeg, rapids, uv
+conda activate 3d_tracking
+uv pip install -r requirements.txt    # jax/flax/mujoco/torch/... (unpinned in requirements.txt)
+uv pip install -e third_party/jarvis_jax   # NOT in requirements.txt; required separately
+```
+
+`requirements.txt` installs `stac-mjx` editable itself (`-e ./stac-mjx`), but
+**not** `third_party/jarvis_jax` — that install is a separate step this repo
+had never documented before this pass. Skipping it makes every
+`python -m jarvis_jax....` / `-m jarvis_jax.scripts.train_mvq` invocation
+fail at import.
+
+Nothing in this repo pins exact versions of the packages that actually
+matter (`environment.yml` only pins `python`/`numpy`/`rapids`;
+`requirements.txt` leaves `jax`, `flax`, `mujoco`, `torch`, etc. unpinned).
+`environment-3d_tracking.yml` (repo root) records the exact versions verified
+working together on Hyak 2026-09-06 — **most importantly, jax 0.11.x requires
+flax>=0.12.8; an older flax breaks every import in this repo, not just
+mvq/jaxls code.** If your fresh install lands on an incompatible flax, pin to
+the versions in that file. Verify with:
+
+```bash
+python -c "import jax, flax; print(jax.__version__, flax.__version__)"
+```
+
+### 4. SAM3 (separate repo, not vendored here)
+
+SAM3 masking is a **third clone**, entirely outside this repo, and was not
+documented anywhere before this pass:
+
+```bash
+git clone https://github.com/facebookresearch/sam3 <sam3-clone>
+cd <sam3-clone> && uv pip install -e . && cd -
+```
+`third_party/jarvis_jax/scripts/sam3_masks.py` imports `sam3` — this install
+is what satisfies that import; there is no `sam3.jarvis_root`-style config
+key pointing at the SAM3 clone itself (only at the JARVIS project dir it
+loads for calibration plumbing). Pass `--no-sam3-compile` if the target
+machine doesn't support the compile path (see `jax-flax-env-pairing`-style
+notes in project memory for the hf_hub/tqdm import-order fix already applied
+in `sam3_masks.py`/`sam3_driver.py`).
+
+### 5. Runtime environment (every GPU job)
+
+```bash
+module load <your-cluster's-CUDA-module>   # see WHY below; name/version is Hyak's, will differ
+export LD_PRELOAD=$CONDA_PREFIX/lib/libstdc++.so.6
+unset LD_LIBRARY_PATH
+unset JAX_PLATFORMS
+export XLA_PYTHON_CLIENT_MEM_FRACTION=0.9
+export TF_GPU_ALLOCATOR=cuda_malloc_async
+```
+
+Why each line, so you can adapt it rather than copy it blind:
+- **`module load cuda/12.9.1` (Hyak name)** — batch/non-interactive compute
+  nodes here do not expose `libcuda.so` to JAX without an explicit CUDA
+  module load; an interactive node or a cluster whose default environment
+  already has the driver on the loader path may not need this at all. Verify
+  with `python -c "import jax; print(jax.devices())"` — pipeline jobs log
+  `[gpu-check] jax sees N GPU(s)` at startup and fail fast if N=0, which is
+  the symptom of this being needed and missing.
+- **`LD_PRELOAD=.../libstdc++.so.6`** — a libstdc++ ABI mismatch between the
+  conda env's bundled copy and the system/CUDA-module one otherwise breaks
+  native extensions (mujoco-warp, torch) at import; preloading the conda
+  copy forces the compatible ABI.
+- **`unset LD_LIBRARY_PATH`** — the pose stage wants JAX's own bundled CUDA
+  wheels; a stale `LD_LIBRARY_PATH` (e.g. left over from the SAM3 stage,
+  which sets one to reach `nvidia/cu13/lib`) shadows them. The SAM3 stage is
+  the one exception that WANTS `LD_LIBRARY_PATH` set — see
+  `docs/transferring_the_pipeline.md` §1.4.
+- **`unset JAX_PLATFORMS`** — some shells/launchers (here, `sbatch
+  --export=ALL`) inherit a stray `JAX_PLATFORMS=cpu` from the login
+  environment, which silently forces JAX onto CPU with no error — just a
+  very slow, very quiet failure to use the GPU at all.
+- **`XLA_PYTHON_CLIENT_MEM_FRACTION` / `TF_GPU_ALLOCATOR`** — tuned against
+  Hyak's L40S (48 GB) / A40 / A100 / H200 memory sizes; re-check for OOM or
+  wasted headroom on a different GPU's VRAM.
+
+### 6. Model weights and checkpoints
+
+None of these are in git. See `docs/portability-checklist.md` §5 for the
+full table (paths + which config key points at each); in short you need to
+copy, per fresh cluster:
+- SAM3 weights (~6.5 GB) into a directory you'll set as `$HF_HOME`.
+- A Hugging Face token with **DINOv3 access requested and granted**
+  (`facebook/dinov3-vitb16-pretrain-lvd1689m` is gated) saved at
+  `$HF_HOME/token`. `huggingface_hub` reads that file automatically as long
+  as `HF_TOKEN` is unset or empty in the environment — do not print the
+  token's contents, just confirm the file exists:
+  `test -f "$HF_HOME/token" && echo present`.
+- The ViTPose 2D detector checkpoint (326 MB,
+  `jax_vitpose_runs/v4_8gpu_20260808/final` on Hyak) and, for the mvq route,
+  the `jax_mvq_runs/...` checkpoints named in `configs/mvq/p3a.yaml` /
+  `p3b.yaml` and `third_party/jarvis_jax/configs/train/mvq_v2.yaml`.
+
+### 7. Add a `paths=` group for the new cluster (both trees)
+
+There are **two separate** Hydra `paths` groups: `configs/paths/` in this
+repo, and `third_party/jarvis_jax/configs/paths/` in the vendored package —
+a new cluster needs a new YAML in **both**, following the shape of
+`configs/paths/workstation.yaml` (main repo) and
+`third_party/jarvis_jax/configs/paths/workstation.yaml` (jarvis_jax) — those
+are the non-Hyak templates, not verified end-to-end, but structurally
+correct. Point `base_dir` (main repo) / `data_root` + friends (jarvis_jax) at
+wherever the new cluster's `Video_recordings/` and `processed/` data root
+will live (see `docs/portability-checklist.md` §7 for the exact directory
+layout expected under it), and `body_model_dir` / `project_dir` at the
+sibling `fruitfly_body_models` clone from step 2. Then pass `paths=<name>`
+instead of `paths=hyak` on every command below.
+
+### 8. Sanity checks before running anything real
+
+```bash
+python -c "import jax, flax; print(jax.__version__, flax.__version__)"   # expect 0.11.x / 0.12.8+
+git submodule status                                                     # both submodules initialized
+ls ../fruitfly_body_models                                                # sibling clone present
+test -f "$HF_HOME/token" && echo "HF token present"                       # do not print it
+```
+
+Once these pass, continue with "Prerequisites (per recording)" below for the
+SAM3→pose pipeline, or see `docs/benchmark/2026-09-mvq/v2-notes.md` for the
+exact mvq v2 training launch command (same runtime env as step 5, plus
+`HF_HOME`/`HF_TOKEN=` and `cd third_party/jarvis_jax && python -u -m
+jarvis_jax.scripts.train_mvq model=mvq train=mvq_v2 paths=<name> ...`).
+
+---
+
 ## Which partition the jobs go to
 
 Every launcher defaults to `--slurm ckpt_all` (`configs/slurm/ckpt_all.yaml`).

@@ -15,7 +15,18 @@ git submodule update --init --recursive
 # Setup environment
 conda env create -f environment.yml
 conda activate 3d_tracking
+uv pip install -r requirements.txt
+uv pip install -e third_party/jarvis_jax
 ```
+
+This is the minimal env setup for the batch (`v1`/`v2_3`) pipeline below. The
+full SAM3 → ViTPose → triangulation → STAC/IK courtship/free-running
+pipeline and mvq training need a sibling body-model clone, SAM3 weights, and
+cluster-specific paths/Slurm config — see **"Install and run on a new
+cluster"** in [docs/running_the_pipeline.md](docs/running_the_pipeline.md)
+for the full sequence and exact commands, and
+[docs/portability-checklist.md](docs/portability-checklist.md) for what is
+Hyak-specific if you're moving to a different cluster.
 
 ## Repository Structure
 
@@ -80,5 +91,10 @@ See `environment.yml` for complete dependency list.
 
 This repository uses git submodules for dependencies:
 - **stac-mjx** - STAC inverse kinematics solver
+- **third_party/JARVIS-HybridNet** - calibration/project-config plumbing for the SAM3/pose pipeline
+
+`third_party/jarvis_jax` (the SAM3/ViTPose/mvq courtship pipeline) is vendored
+in-tree, not a submodule — it travels with a normal clone but needs its own
+`pip install -e third_party/jarvis_jax` (see Quick Start above).
 
 See [SUBMODULES.md](SUBMODULES.md) for working with submodules.

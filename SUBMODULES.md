@@ -6,7 +6,12 @@ This repository uses git submodules to manage dependencies.
 
 - **stac-mjx** (`stac-mjx/`) - STAC inverse kinematics solver
   - Repository: `git@github.com:elliottabe/stac-mjx.git`
-  - Branch: main
+  - Branch: `elliottabe/paper_update_062026`
+- **third_party/JARVIS-HybridNet** (`third_party/JARVIS-HybridNet/`) - calibration/project-config plumbing used by the SAM3/pose pipeline's `get_repro_tool`
+  - Repository: `git@github.com:elliottabe/JARVIS-HybridNet.git`
+  - Branch: `elliottabe/paper_update_062026`
+
+(`third_party/jarvis_jax` is vendored in-tree, NOT a submodule -- see README.md.)
 
 ## Initial Setup
 
